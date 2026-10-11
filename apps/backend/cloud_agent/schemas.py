@@ -1315,12 +1315,17 @@ class AgentOperationProfilingFragment(BaseModel):
 
 
 class AgentWorkspaceResponse(BaseModel):
-    """A directory listing or bounded text-file preview from a job workspace."""
+    """A directory listing or bounded file payload from a job workspace."""
 
     path: str
     kind: Literal["file", "directory", "symlink"]
     entries: list[AgentWorkspaceEntry] | None = None
     content: str | None = None
+    # Preserve directory/text response shapes when there are no binary bytes.
+    content_base64: str | None = Field(None, exclude_if=lambda value: value is None)
+    media_type: Literal["image/png", "image/jpeg", "image/gif", "image/webp"] | None = Field(
+        None, exclude_if=lambda value: value is None
+    )
     size: int | None = None
     binary: bool = False
     truncated: bool = False

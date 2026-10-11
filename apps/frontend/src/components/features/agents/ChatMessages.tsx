@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useId, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useId, useState, type ReactNode } from 'react';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
@@ -15,7 +15,11 @@ import {
 } from './conversationTurnNavigation';
 import type { AgentEvent, AgentThreadMessage, GoalTurn } from './types';
 import { ToolActivityDetails } from './ToolActivityDetails';
-import { parseToolActivity } from './toolActivity';
+import { parseToolActivity, recordedAgentStates, recordedTasks } from './toolActivity';
+import { toolNeedsAttention, toolSummary } from './toolSummary';
+import type { TranscriptPresentation } from './transcriptPresentation';
+
+export type InspectTranscriptEvent = (event: AgentEvent, jobId: string) => void;
 
 function Chevron({ className = '' }: { className?: string }) {
   return (
@@ -81,6 +85,7 @@ function LifecycleRow({
 }) {
   const t = useT();
   const { text: label, milestone } = lifecyclePhaseLabel(text);
+  const attention = lifecycleNeedsAttention(text);
 
   // A phase this build does not recognise is a diagnostic, not an achievement:
   // no tick, muted, and clearly a passthrough of what the runtime said.
@@ -111,7 +116,11 @@ function LifecycleRow({
           stroke="currentColor"
           strokeWidth={2.5}
         >
-          <path strokeLinecap="round" strokeLinejoin="round" d="m6 12 4 4 8-9" />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d={attention ? 'm7 7 10 10M7 17 17 7' : 'm6 12 4 4 8-9'}
+          />
         </svg>
       </span>
       <span className="capitalize">{label}</span>
@@ -133,46 +142,68 @@ type ToolActivityItem = {
   blockKey?: string;
 };
 
-function toolResultLabel(event: ToolActivityItem['event']): string {
-  return event.resultState === 'unknown'
-    ? 'Pairing unknown'
-    : event.resultState === 'cancelled'
-      ? 'Call interrupted'
-      : event.outputIsError || event.resultState === 'failed'
-        ? 'Call failed'
-        : event.resultState === 'received' || event.output !== undefined
-          ? 'Result received'
-          : event.resultState === 'waiting'
-            ? 'Waiting for result'
-            : 'Result not recorded';
+function toolResultLabel(event: ToolActivityItem['event'], t: ReturnType<typeof useT>): string {
+  return t(
+    event.resultState === 'unknown'
+      ? 'transcript.callUnknown'
+      : event.resultState === 'cancelled'
+        ? 'transcript.callInterrupted'
+        : event.outputIsError || event.resultState === 'failed'
+          ? 'transcript.callFailed'
+          : event.resultState === 'not_recorded'
+            ? 'transcript.callNotRecorded'
+            : event.resultState === 'waiting'
+              ? 'transcript.callWaiting'
+              : event.resultState === 'received' || event.output !== undefined
+                ? 'transcript.callReceived'
+                : 'transcript.callNotRecorded',
+  );
 }
 
 function RichToolActivity({
   event,
   blockKey,
+  presentation,
+  jobId,
+  onInspectEvent,
 }: {
   event: Extract<AgentEvent, { kind: 'tool_use' }>;
   blockKey?: string;
+  presentation?: TranscriptPresentation;
+  jobId?: string;
+  onInspectEvent?: InspectTranscriptEvent;
 }) {
+  const t = useT();
   const activity = parseToolActivity(event.tool, event.input);
-  const resultLabel = toolResultLabel(event);
-  if (activity) {
+  const resultLabel = toolResultLabel(event, t);
+  if (activity && presentation !== 'compact') {
     return (
       <section
         data-block-key={blockKey}
         aria-label={activity.kind === 'tasks' ? 'Task activity' : 'Subagent activity'}
-        className={`my-2 min-w-0 rounded-lg border border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900 ${event.parentToolUseId ? 'ml-4 border-l-2' : ''}`}
+        className={`ui-card my-2 min-w-0 ${event.parentToolUseId ? 'ml-4 border-l-2' : ''}`}
       >
         <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-white/5">
           <ToolIcon tool={event.tool} />
           <span className="text-[13px] font-medium text-gray-700 dark:text-gray-300">
             {activity.kind === 'tasks' ? 'Tasks' : 'Subagent'}
           </span>
-          <span className="break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
-            {event.tool}
-          </span>
+          {onInspectEvent && jobId ? (
+            <button
+              type="button"
+              onClick={() => onInspectEvent(event, jobId)}
+              aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
+              className="ui-focus-ring min-w-0 truncate rounded text-left text-xs text-gray-600 hover:text-crimson dark:text-gray-300"
+            >
+              {toolSummary(event)}
+            </button>
+          ) : (
+            <span className="break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+              {toolSummary(event)}
+            </span>
+          )}
           <span
-            className={`ml-auto text-[11px] ${event.outputIsError ? 'text-red-700 dark:text-red-300' : 'text-gray-500 dark:text-gray-400'}`}
+            className={`ml-auto text-[11px] ${event.outputIsError || event.resultState === 'failed' ? 'text-red-700 dark:text-red-300' : 'text-gray-500 dark:text-gray-400'}`}
           >
             {resultLabel}
           </span>
@@ -183,7 +214,7 @@ function RichToolActivity({
             output={event.output?.join('\n')}
             isError={event.outputIsError}
           />
-          <details className="group">
+          <details className="group" open={presentation === 'detailed' || undefined}>
             <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
               Call details
             </summary>
@@ -202,11 +233,27 @@ function RichToolActivity({
       </section>
     );
   }
-  return <ToolActivity tools={[{ event, blockKey }]} />;
+  return (
+    <ToolActivity tools={[{ event, blockKey }]} {...{ presentation, jobId, onInspectEvent }} />
+  );
 }
 
-function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
-  const [expanded, setExpanded] = useState(false);
+function ToolActivity({
+  tools,
+  presentation,
+  jobId,
+  onInspectEvent,
+}: {
+  tools: ToolActivityItem[];
+  presentation?: TranscriptPresentation;
+  jobId?: string;
+  onInspectEvent?: InspectTranscriptEvent;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(presentation === 'detailed');
+  useEffect(() => {
+    setExpanded(presentation === 'detailed');
+  }, [presentation]);
   const detailsId = useId();
   const label = tools.length === 1 ? 'tool call' : 'tool calls';
 
@@ -223,7 +270,7 @@ function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
             <li
               key={blockKey ?? index}
               data-block-key={blockKey}
-              title={`${event.tool}: ${event.detail}`}
+              title={`${toolSummary(event)} · ${toolResultLabel(event, t)}`}
               className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-white/5"
             >
               <ToolIcon tool={event.tool} />
@@ -235,19 +282,34 @@ function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
                   Subagent tool
                 </span>
               ) : null}
-              <span className="max-w-40 truncate font-medium text-gray-700 dark:text-gray-300">
-                {event.tool}
-              </span>
+              {onInspectEvent && jobId ? (
+                <button
+                  type="button"
+                  onClick={() => onInspectEvent(event, jobId)}
+                  aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
+                  className="ui-focus-ring max-w-80 truncate rounded text-left font-medium text-gray-700 hover:text-crimson dark:text-gray-300"
+                >
+                  {toolSummary(event)}
+                </button>
+              ) : (
+                <span className="max-w-80 truncate font-medium text-gray-700 dark:text-gray-300">
+                  {toolSummary(event)}
+                </span>
+              )}
               {event.diffStat ? (
                 <span className="max-w-20 truncate font-mono" title={event.diffStat}>
                   {event.diffStat}
                 </span>
               ) : null}
-              {event.resultState === 'unknown' || event.resultState === 'cancelled' ? (
-                <span className="text-gray-500 dark:text-gray-400">{toolResultLabel(event)}</span>
-              ) : event.outputIsError || event.resultState === 'failed' ? (
-                <span className="text-rose-600 dark:text-rose-400">Failed</span>
-              ) : null}
+              <span
+                className={
+                  event.outputIsError || event.resultState === 'failed'
+                    ? 'text-rose-600 dark:text-rose-400'
+                    : 'text-gray-500 dark:text-gray-400'
+                }
+              >
+                {toolResultLabel(event, t)}
+              </span>
             </li>
           ))}
         </ul>
@@ -293,12 +355,12 @@ function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
                     event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
                   }`}
                 >
-                  {event.output.join('\n') || 'Command completed with no output.'}
+                  {event.output.join('\n') || 'No output text recorded.'}
                 </pre>
               ) : (
                 <p className="text-xs text-gray-400 dark:text-gray-500">
                   {event.resultState && event.resultState !== 'waiting'
-                    ? toolResultLabel(event)
+                    ? toolResultLabel(event, t)
                     : 'Waiting for the tool result…'}
                 </p>
               )}
@@ -316,22 +378,51 @@ export function EventList({
   jobId,
   renderEvent,
   showActivityDetails = true,
+  presentation,
+  completed = false,
+  onInspectEvent,
 }: {
   events: AgentEvent[];
   jobId: string;
   renderEvent: (event: AgentEvent, index: number, blockKey: string) => ReactNode;
   /** Keep task/delegation calls compact when their overview is shown elsewhere. */
   showActivityDetails?: boolean;
+  presentation?: TranscriptPresentation;
+  /** Only a recorded completed turn may fold. Failed/interrupted/unknown turns stay open. */
+  completed?: boolean;
+  onInspectEvent?: InspectTranscriptEvent;
 }) {
-  const rows: ReactNode[] = [];
+  const rows: {
+    key: string;
+    node: ReactNode;
+    foldable: boolean;
+    process: boolean;
+    count: number;
+    attemptNo?: number;
+  }[] = [];
+  const richActivity =
+    presentation === 'detailed' || (presentation !== 'compact' && showActivityDetails);
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     const blockKey = eventBlockKey(jobId, event, index);
-    if (
-      event.kind !== 'tool_use' ||
-      (showActivityDetails && parseToolActivity(event.tool, event.input))
-    ) {
-      rows.push(<Fragment key={blockKey}>{renderEvent(event, index, blockKey)}</Fragment>);
+    if (event.kind !== 'tool_use' || (richActivity && parseToolActivity(event.tool, event.input))) {
+      rows.push({
+        key: blockKey,
+        node:
+          event.kind === 'tool_use' && presentation !== undefined ? (
+            <RichToolActivity
+              event={event}
+              blockKey={blockKey}
+              {...{ presentation, jobId, onInspectEvent }}
+            />
+          ) : (
+            renderEvent(event, index, blockKey)
+          ),
+        foldable: processMayFold(event),
+        process: isProcessEvent(event),
+        count: 1,
+        attemptNo: event.attemptNo,
+      });
       continue;
     }
     const tools: ToolActivityItem[] = [{ event, blockKey }];
@@ -341,15 +432,124 @@ export function EventList({
         next.kind !== 'tool_use' ||
         next.attemptNo !== event.attemptNo ||
         next.parentToolUseId !== event.parentToolUseId ||
-        (showActivityDetails && parseToolActivity(next.tool, next.input))
+        (richActivity && parseToolActivity(next.tool, next.input))
       )
         break;
       index += 1;
       tools.push({ event: next, blockKey: eventBlockKey(jobId, next, index) });
     }
-    rows.push(<ToolActivity key={blockKey} tools={tools} />);
+    rows.push({
+      key: blockKey,
+      node: <ToolActivity tools={tools} {...{ presentation, jobId, onInspectEvent }} />,
+      foldable: tools.every(({ event: tool }) => processMayFold(tool)),
+      process: true,
+      count: tools.length,
+      attemptNo: event.attemptNo,
+    });
   }
-  return <>{rows}</>;
+  const content: ReactNode[] = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (!row.process) {
+      content.push(<Fragment key={row.key}>{row.node}</Fragment>);
+      continue;
+    }
+    const process = [row];
+    while (
+      index + 1 < rows.length &&
+      rows[index + 1].process &&
+      rows[index + 1].attemptNo === row.attemptNo
+    ) {
+      process.push(rows[++index]);
+    }
+    content.push(
+      <ProcessDisclosure
+        key={row.key}
+        enabled={completed && presentation === 'compact' && process.every((item) => item.foldable)}
+        count={process.reduce((count, item) => count + item.count, 0)}
+      >
+        {process.map((item) => (
+          <Fragment key={item.key}>{item.node}</Fragment>
+        ))}
+      </ProcessDisclosure>,
+    );
+  }
+  return <>{content}</>;
+}
+
+/** Fold classified process rows; input, replies and incomplete/error records stay readable. */
+function processMayFold(event: AgentEvent): boolean {
+  if (event.kind === 'tool_use') {
+    if (toolNeedsAttention(event)) return false;
+    const activity = parseToolActivity(event.tool, event.input);
+    if (activity) {
+      const output = event.output?.join('\n');
+      const states =
+        activity.kind === 'tasks'
+          ? [...activity.tasks, ...recordedTasks(output)]
+          : [...activity.states, ...recordedAgentStates(output)];
+      // A successful tool response does not establish that its delegated work succeeded.
+      if (states.some(({ status }) => !['completed', 'deleted', 'shutdown'].includes(status ?? '')))
+        return false;
+    }
+    return true;
+  }
+  if (event.kind === 'thinking' || event.kind === 'usage') return true;
+  if (event.kind === 'terminal') return event.isError === false;
+  if (event.kind === 'lifecycle')
+    return lifecyclePhaseLabel(event.text).milestone && !lifecycleNeedsAttention(event.text);
+  return false;
+}
+
+function isProcessEvent(event: AgentEvent): boolean {
+  return (
+    event.kind === 'tool_use' ||
+    event.kind === 'thinking' ||
+    event.kind === 'usage' ||
+    event.kind === 'terminal' ||
+    (event.kind === 'lifecycle' &&
+      lifecyclePhaseLabel(event.text).milestone &&
+      !lifecycleNeedsAttention(event.text))
+  );
+}
+
+function lifecycleNeedsAttention(text: string): boolean {
+  const phase = text.trim().toLowerCase();
+  return phase === 'cancelled_by_owner' || phase.includes('superseded');
+}
+
+function ProcessDisclosure({
+  enabled,
+  count,
+  children,
+}: {
+  enabled: boolean;
+  count: number;
+  children: ReactNode;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const bodyId = useId();
+  const collapsed = enabled && !expanded;
+  return (
+    <section data-transcript-process data-transcript-process-collapsed={collapsed || undefined}>
+      {enabled ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded((value) => !value)}
+          className="my-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 focus-visible:outline-crimson dark:text-gray-400 dark:hover:bg-white/5"
+        >
+          <Chevron className={expanded ? 'rotate-90' : ''} />
+          {t(expanded ? 'transcript.hideProcess' : 'transcript.showProcess', { count })}
+        </button>
+      ) : null}
+      <div id={bodyId} hidden={collapsed} aria-label={t('transcript.process')}>
+        {children}
+      </div>
+    </section>
+  );
 }
 
 export function CopyIcon() {
@@ -629,6 +829,9 @@ export function EventRow({
   footer,
   blockKey,
   firstRun,
+  presentation,
+  jobId,
+  onInspectEvent,
 }: {
   event: AgentEvent;
   onFork?: () => void;
@@ -638,7 +841,11 @@ export function EventRow({
   blockKey?: string;
   /** The first turn of the owner's first conversation: milestones say what they mean. */
   firstRun?: boolean;
+  presentation?: TranscriptPresentation;
+  jobId?: string;
+  onInspectEvent?: InspectTranscriptEvent;
 }) {
+  const t = useT();
   if (event.kind === 'lifecycle')
     return <LifecycleRow text={event.text} blockKey={blockKey} firstRun={firstRun} />;
   if (event.kind === 'thinking') {
@@ -671,15 +878,29 @@ export function EventRow({
     );
   }
   if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
-  if (event.kind === 'tool_use') return <RichToolActivity event={event} blockKey={blockKey} />;
+  if (event.kind === 'tool_use')
+    return (
+      <RichToolActivity
+        event={event}
+        blockKey={blockKey}
+        {...{ presentation, jobId, onInspectEvent }}
+      />
+    );
   if (event.kind === 'tool_result') {
     return (
       <details
         data-block-key={blockKey}
         className="my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
       >
-        <summary className="cursor-pointer px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+        <summary
+          className={`cursor-pointer px-3 py-2 text-[13px] ${event.isError ? 'text-rose-600 dark:text-rose-400' : 'text-gray-500 dark:text-gray-400'}`}
+        >
           Unmatched tool result
+          {event.cancelled
+            ? ` · ${t('transcript.callInterrupted')}`
+            : event.isError
+              ? ` · ${t('transcript.callFailed')}`
+              : ''}
         </summary>
         <pre className="m-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200">
           {event.text || 'Command completed with no output.'}
@@ -712,6 +933,9 @@ export function HistoryTurn({
   onRewind,
   onOpenRun,
   showActivityDetails = true,
+  presentation,
+  onInspectEvent,
+  results,
 }: {
   turn: ConversationTurnDescription;
   rewindAnchorJobId?: string;
@@ -720,6 +944,10 @@ export function HistoryTurn({
   onRewind?: (jobId: string, prompt: string) => void;
   onOpenRun?: (jobId: string, turnNo: number) => void;
   showActivityDetails?: boolean;
+  presentation?: TranscriptPresentation;
+  onInspectEvent?: InspectTranscriptEvent;
+  /** Recorded artifacts stay within this turn's navigation boundary. */
+  results?: ReactNode;
 }) {
   // What the transcript renders is decided once, by the turn description the
   // navigation rail also reads.
@@ -757,11 +985,17 @@ export function HistoryTurn({
           events={turn.events}
           jobId={jobId}
           showActivityDetails={showActivityDetails}
+          presentation={presentation}
+          completed={turn.state === 'done' || turn.state === 'needs_review'}
+          onInspectEvent={onInspectEvent}
           renderEvent={(event, index, blockKey) => (
             <EventRow
               event={event}
               blockKey={blockKey}
               busy={busy}
+              presentation={presentation}
+              jobId={jobId}
+              onInspectEvent={onInspectEvent}
               onFork={
                 event.kind === 'message' && index === lastEventMessageIndex && onFork
                   ? () => onFork(turn.jobId)
@@ -782,6 +1016,7 @@ export function HistoryTurn({
           />
         ))}
       </div>
+      {results}
       {onOpenRun ? (
         <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
           <button

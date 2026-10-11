@@ -546,6 +546,9 @@ export interface AgentJobFileApi {
   path: string;
   kind: 'file';
   content: string | null;
+  /** Complete bounded bytes for binary downloads and passive raster previews. */
+  content_base64?: string | null;
+  media_type?: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | null;
   size: number | null;
   binary: boolean;
   truncated: boolean;

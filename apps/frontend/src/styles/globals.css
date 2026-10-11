@@ -25,7 +25,145 @@
 }
 
 @layer base {
+  :root {
+    --ui-surface: 255 255 255;
+    --ui-surface-raised: 255 255 255;
+    --ui-surface-muted: 249 250 251;
+    --ui-surface-hover: 243 244 246;
+    --ui-foreground: 17 24 39;
+    --ui-muted: 107 114 128;
+    --ui-border: 229 231 235;
+    --ui-border-strong: 156 163 175;
+    --ui-accent: 165 28 48;
+    --ui-accent-hover: 139 23 41;
+    --ui-accent-subtle: 252 236 239;
+    --ui-accent-foreground: 255 255 255;
+    --ui-focus: 165 28 48;
+    --ui-status-success: 4 120 87;
+    --ui-status-error: 185 28 28;
+    --ui-status-warning: 146 64 14;
+    --ui-status-info: 29 78 216;
+  }
+
+  .dark {
+    --ui-surface: 17 24 39;
+    --ui-surface-raised: 31 41 55;
+    --ui-surface-muted: 15 23 42;
+    --ui-surface-hover: 55 65 81;
+    --ui-foreground: 243 244 246;
+    --ui-muted: 156 163 175;
+    --ui-border: 55 65 81;
+    --ui-border-strong: 107 114 128;
+    --ui-accent: 241 139 155;
+    --ui-accent-hover: 245 172 183;
+    --ui-accent-subtle: 57 36 45;
+    --ui-accent-foreground: 17 24 39;
+    --ui-focus: 241 139 155;
+    --ui-status-success: 110 231 183;
+    --ui-status-error: 248 113 113;
+    --ui-status-warning: 252 211 77;
+    --ui-status-info: 147 197 253;
+  }
+
   html {
     @apply min-h-full;
+  }
+}
+
+@layer components {
+  /* These classes provide shared interaction states; consumers choose layout. */
+  .ui-focus-ring:focus-visible,
+  .ui-button:focus-visible,
+  .ui-icon-button:focus-visible,
+  .ui-tab:focus-visible,
+  .ui-tool-row:focus-visible,
+  .ui-input:focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-focus;
+  }
+
+  .ui-button,
+  .ui-icon-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors duration-150;
+  }
+
+  .ui-button {
+    @apply px-3 py-2;
+  }
+
+  .ui-icon-button {
+    @apply p-2;
+  }
+
+  .ui-button:disabled,
+  .ui-icon-button:disabled,
+  .ui-tool-row:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  .ui-button-primary {
+    @apply bg-accent text-accent-foreground;
+  }
+
+  .ui-button-primary:hover:not(:disabled) {
+    @apply bg-accent-hover;
+  }
+
+  .ui-button-secondary {
+    @apply border border-border-strong bg-surface text-foreground;
+  }
+
+  .ui-button-ghost {
+    @apply text-muted;
+  }
+
+  .ui-button-secondary:hover:not(:disabled),
+  .ui-button-ghost:hover:not(:disabled) {
+    @apply bg-surface-hover text-foreground;
+  }
+
+  .ui-card {
+    @apply rounded-xl border border-border bg-surface-raised text-foreground shadow-subtle;
+  }
+
+  .ui-tab {
+    @apply border-b-2 border-transparent text-muted transition-colors duration-150;
+  }
+
+  .ui-tab:hover {
+    @apply bg-surface-hover text-foreground;
+  }
+
+  .ui-tab[aria-selected='true'] {
+    @apply border-accent text-foreground;
+  }
+
+  /* Tabs sit in a scrolling strip; keep their focus indicator inside it. */
+  .ui-tab:focus-visible {
+    @apply -outline-offset-2;
+  }
+
+  .ui-tool-row {
+    @apply flex items-center gap-2 rounded-lg border border-border bg-surface-muted text-muted transition-colors duration-150;
+  }
+
+  .ui-tool-row:hover:not(:disabled) {
+    @apply border-border-strong bg-surface-hover text-foreground;
+  }
+
+  .ui-input {
+    @apply rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-foreground;
+  }
+
+  .ui-input:focus-visible {
+    @apply border-accent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ui-button,
+    .ui-icon-button,
+    .ui-tab,
+    .ui-tool-row {
+      transition: none;
+    }
   }
 }

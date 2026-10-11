@@ -80,3 +80,53 @@ export function ComposerSendButton({
     </button>
   );
 }
+
+/** Visible send modes; the parent offers steering only when this draft can use it. */
+export function ComposerMessageActions({
+  label,
+  title,
+  busy,
+  disabled,
+  steerLabel,
+  steerTitle,
+  onSteer,
+}: {
+  label: string;
+  title: string;
+  busy: boolean;
+  disabled: boolean;
+  steerLabel?: string;
+  steerTitle?: string;
+  onSteer?: () => void;
+}) {
+  return (
+    <div className="ml-auto flex shrink-0 items-center gap-2">
+      {onSteer && steerLabel ? (
+        <button
+          type="button"
+          onClick={onSteer}
+          disabled={disabled || busy}
+          aria-keyshortcuts="Meta+Enter Control+Enter"
+          title={steerTitle}
+          className="inline-flex h-8 items-center rounded-lg border border-gray-200 px-3 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-100 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-gray-200 dark:hover:bg-white/10"
+        >
+          {steerLabel}
+        </button>
+      ) : null}
+      <button
+        type="submit"
+        disabled={disabled || busy}
+        title={title}
+        className="inline-flex h-8 items-center gap-2 rounded-lg bg-crimson px-3 text-xs font-medium text-white shadow-sm transition-colors hover:bg-crimson-dark focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        {busy ? (
+          <span
+            aria-hidden="true"
+            className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white"
+          />
+        ) : null}
+        {label}
+      </button>
+    </div>
+  );
+}

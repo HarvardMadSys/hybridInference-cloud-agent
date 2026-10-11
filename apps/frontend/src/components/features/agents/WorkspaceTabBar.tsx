@@ -42,7 +42,7 @@ export function WorkspaceTabBar({
     setFocusTab(null);
   }, [focusTab]);
   return (
-    <div className="relative z-10 flex shrink-0 border-b border-gray-200 bg-white px-4 text-[13px] font-medium dark:border-white/10 dark:bg-gray-900">
+    <div className="relative z-10 flex shrink-0 border-b border-border bg-surface px-4 text-[13px] font-medium">
       <nav
         aria-label="Workspace views"
         role="tablist"
@@ -52,11 +52,7 @@ export function WorkspaceTabBar({
           <div
             key={tab.key}
             data-side-chat-id={tab.chat?.id}
-            className={`flex shrink-0 items-center border-b-2 ${
-              selected === tab.key
-                ? 'border-gray-900 text-gray-900 dark:border-gray-100 dark:text-gray-50'
-                : 'border-transparent text-gray-500 dark:text-gray-400'
-            }`}
+            className="flex shrink-0 items-center"
           >
             <button
               id={`workspace-tab-${tab.key}`}
@@ -83,11 +79,11 @@ export function WorkspaceTabBar({
                   setFocusTab(tabs[target].key);
                 }
               }}
-              className={`py-3 pl-3 ${tab.chat ? 'pr-1' : 'pr-3'} hover:text-gray-900 focus-visible:outline-crimson dark:hover:text-gray-100`}
+              className={`ui-tab py-3 pl-3 ${tab.chat ? 'pr-1' : 'pr-3'}`}
             >
               {tab.label}
               {tab.key === 'git' && diffCount ? (
-                <span className="ml-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-white/5 dark:text-gray-400">
+                <span className="ml-1.5 rounded bg-surface-muted px-1.5 py-0.5 text-[10px] text-muted">
                   {diffCount}
                 </span>
               ) : null}
@@ -98,7 +94,7 @@ export function WorkspaceTabBar({
                 aria-label={t('sideChat.close', { name: tab.label })}
                 title={t('sideChat.close', { name: tab.label })}
                 onClick={() => setFocusTab(onClose(tab.chat!.id))}
-                className="mr-1 rounded p-1 text-gray-400 dark:text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-crimson dark:hover:bg-white/10 dark:hover:text-gray-100"
+                className="ui-icon-button ui-button-ghost mr-1 p-1"
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path
@@ -119,7 +115,7 @@ export function WorkspaceTabBar({
           aria-label={t('sideChat.new')}
           title={t('sideChat.new')}
           onClick={() => setFocusTab(onAdd())}
-          className="rounded p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-crimson dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          className="ui-icon-button ui-button-ghost"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path

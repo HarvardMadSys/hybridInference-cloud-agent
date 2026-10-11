@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { AgentJobFileEntryApi } from '@/lib/api/agents';
+import { useT } from '@/components/providers';
+import type { AgentJobFileApi, AgentJobFileEntryApi } from '@/lib/api/agents';
 
 import { highlightCode, TOKEN_CLASS, type CodeToken } from '@/lib/codeHighlight';
 import type { AgentJob } from './types';
@@ -435,6 +436,76 @@ function PaneMessage({ children }: { children: React.ReactNode }) {
   );
 }
 
+const PREVIEW_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Keep authorized bytes local to this pane, and release them on navigation. */
+function useFileAssets(file: AgentJobFileApi | null) {
+  const [assets, setAssets] = useState<{
+    file: AgentJobFileApi;
+    download: string;
+    preview: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (
+      !file ||
+      file.truncated ||
+      file.status === 'deleted' ||
+      typeof URL.createObjectURL !== 'function'
+    ) {
+      setAssets(null);
+      return;
+    }
+    let body: BlobPart;
+    if (file.content_base64 != null) {
+      try {
+        body = Uint8Array.from(atob(file.content_base64), (char) => char.charCodeAt(0));
+      } catch {
+        setAssets(null);
+        return;
+      }
+    } else if (!file.binary && file.content != null) {
+      body = file.content;
+    } else {
+      setAssets(null);
+      return;
+    }
+    // Downloads deliberately carry no active document media type: an HTML
+    // or SVG file is useful to save, but must not execute in this UI's origin.
+    const download = URL.createObjectURL(new Blob([body], { type: 'application/octet-stream' }));
+    const preview =
+      file.content_base64 != null && file.media_type && PREVIEW_IMAGE_TYPES.has(file.media_type)
+        ? URL.createObjectURL(new Blob([body], { type: file.media_type }))
+        : null;
+    setAssets({ file, download, preview });
+    return () => {
+      URL.revokeObjectURL(download);
+      if (preview) URL.revokeObjectURL(preview);
+    };
+  }, [file]);
+
+  return assets?.file === file ? assets : null;
+}
+
+function ImagePreview({ path, url }: { path: string; url: string }) {
+  const t = useT();
+  const [failed, setFailed] = useState(false);
+  return failed ? (
+    <PaneMessage>{t('workspaceFiles.imageFailed')}</PaneMessage>
+  ) : (
+    <div className="flex min-h-0 items-center justify-center p-4">
+      {/* The source is a bounded authorized Blob, not a remote image to optimize. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={url}
+        alt={t('workspaceFiles.previewAlt', { name: basename(path) })}
+        onError={() => setFailed(true)}
+        className="max-h-[28rem] max-w-full rounded object-contain"
+      />
+    </div>
+  );
+}
+
 /**
  * Two-pane workspace browser: a lazily expanded tree beside a file viewer.
  *
@@ -468,7 +539,19 @@ export function useSettledCount(value: number, delayMs: number = DIFF_SETTLE_MS)
   return settled;
 }
 
-export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean }) {
+export function WorkspaceFiles({
+  job,
+  active,
+  requestedPath,
+  requestToken,
+}: {
+  job: AgentJob;
+  active: boolean;
+  requestedPath?: string | null;
+  /** Increment to reopen the same path after a new conversation action. */
+  requestToken?: number;
+}) {
+  const t = useT();
   const settledDiffCount = useSettledCount(job.diffFiles.length);
   const {
     directories,
@@ -483,6 +566,30 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
     closeFile,
     reload,
   } = useWorkspaceFiles(job.id, active, `${job.state}:${settledDiffCount}`);
+  const assets = useFileAssets(file?.kind === 'file' ? file : null);
+  const processedRequest = useRef<{
+    jobId: string;
+    path: string;
+    token: number | undefined;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!requestedPath) {
+      processedRequest.current = null;
+      return;
+    }
+    if (!active) return;
+    const previous = processedRequest.current;
+    if (
+      previous?.jobId === job.id &&
+      previous.path === requestedPath &&
+      previous.token === requestToken
+    ) {
+      return;
+    }
+    processedRequest.current = { jobId: job.id, path: requestedPath, token: requestToken };
+    openFile(requestedPath);
+  }, [active, job.id, requestedPath, requestToken, openFile]);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [paneWidth, setPaneWidth] = useState(0);
@@ -692,8 +799,6 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
             <PaneMessage>Symlinks are not previewed.</PaneMessage>
           ) : file.status === 'deleted' ? (
             <PaneMessage>This file was deleted by the run.</PaneMessage>
-          ) : file.binary ? (
-            <PaneMessage>Binary files cannot be previewed.</PaneMessage>
           ) : (
             <>
               <div className="flex items-center gap-2 border-b border-gray-100 dark:border-white/5 px-4 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
@@ -702,8 +807,29 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
                   <span className={`font-medium ${statusClass(file.status)}`}>{file.status}</span>
                 ) : null}
                 {file.truncated ? <span>Preview truncated</span> : null}
+                {assets?.download ? (
+                  <a
+                    href={assets.download}
+                    download={basename(file.path)}
+                    className="ml-auto rounded px-2 py-1 font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 dark:text-gray-300 dark:hover:bg-white/10"
+                  >
+                    {t('workspaceFiles.download')}
+                  </a>
+                ) : null}
               </div>
-              <CodeView path={file.path} content={file.content ?? ''} />
+              {file.truncated && file.content == null ? (
+                <PaneMessage>{t('workspaceFiles.tooLarge')}</PaneMessage>
+              ) : assets?.preview ? (
+                <ImagePreview key={assets.preview} path={file.path} url={assets.preview} />
+              ) : file.binary ? (
+                <PaneMessage>
+                  {assets?.download
+                    ? t('workspaceFiles.binaryPreview')
+                    : t('workspaceFiles.binaryMissing')}
+                </PaneMessage>
+              ) : (
+                <CodeView path={file.path} content={file.content ?? ''} />
+              )}
             </>
           )}
         </div>

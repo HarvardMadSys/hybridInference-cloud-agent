@@ -13,7 +13,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 
-import { Markdown } from '@/components/ui/Markdown';
+import { Markdown, WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
@@ -86,8 +86,13 @@ import {
   composerModels,
   composerOverrides,
   ComposerTextarea,
-  ComposerSendButton,
+  ComposerMessageActions,
 } from './ConversationComposer';
+import { useComposerDraft } from './useComposerDraft';
+import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
+import { TurnDeliverables } from './TurnDeliverables';
+import { recordedTurnOutputs, type RecordedFileSelection } from './turnDeliverables';
+import { RecordedDiffPanel } from './RecordedDiffPanel';
 import { hasLostContext, latestJob, ownerRunNote } from './conversationJob';
 import { useFirstRun } from './firstRun';
 import { SideChat } from './SideChat';
@@ -666,12 +671,24 @@ export function JobDetail({
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const workspaceTriggerRef = useRef<HTMLElement | null>(null);
+  const focusWorkspaceRef = useRef(false);
   const [activityOpen, setActivityOpen] = useState(true);
+  const [wideLayout, setWideLayout] = useState(false);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(min-width: 1024px)');
+    const sync = () => setWideLayout(query.matches);
+    sync();
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
+  }, []);
   const activityToggleRef = useRef<HTMLButtonElement>(null);
   const workspaceTabs = useWorkspaceTabs(userId, job, threadJobs);
   const workspaceTab = workspaceTabs.selected;
   // The workspace and the step inspector take turns in the same right region.
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
+  const focusInspectorRef = useRef(false);
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
@@ -693,7 +710,35 @@ export function JobDetail({
     }
     return buildTrajectorySteps(events, context);
   }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
-  const [followUp, setFollowUp] = useState('');
+  const threadId = job.threadId ?? job.id;
+  const draft = useComposerDraft({ userId, threadId });
+  const { value: followUp, setValue: setFollowUp } = draft;
+  const currentDraftScope = useRef(draft.capture().scope);
+  currentDraftScope.current = draft.capture().scope;
+  const composerMounted = useRef(true);
+  useEffect(() => {
+    composerMounted.current = true;
+    return () => {
+      composerMounted.current = false;
+    };
+  }, []);
+  const [presentation, setPresentation] = useTranscriptPresentation(userId, threadId);
+  const workspaceScope = JSON.stringify([userId, threadId]);
+  const [requestedFile, setRequestedFile] = useState<{
+    scope: string;
+    path: string;
+    token: number;
+  } | null>(null);
+  const [recordedSelection, setRecordedFile] = useState<{
+    scope: string;
+    selection: RecordedFileSelection;
+  } | null>(null);
+  const recordedFile =
+    recordedSelection?.scope === workspaceScope ? recordedSelection.selection : null;
+  const recordedOutputs = useMemo(
+    () => new Map(threadJobs.map((turn) => [turn.id, recordedTurnOutputs(turn, events)])),
+    [threadJobs, events],
+  );
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
@@ -728,6 +773,7 @@ export function JobDetail({
   const [effort, setEffort] = useState(job.reasoningEffort ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
+  const sendRequestedRef = useRef(false);
   const [stopping, setStopping] = useState(false);
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -736,7 +782,6 @@ export function JobDetail({
   // goal write travels with this revision, so an edit made in another tab is
   // refused rather than silently overwritten.
   const currentGoal = job.goal ?? null;
-  const threadId = job.threadId ?? job.id;
   // The first turn of the owner's first conversation explains itself as it
   // goes, and says where its draft PR is when it has one.
   const { onlyThreadId } = useFirstRun();
@@ -843,7 +888,7 @@ export function JobDetail({
       return;
     }
     if (draft) setFollowUp(draft);
-  }, [job.id]);
+  }, [job.id, setFollowUp]);
 
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
   const runNote = ownerRunNote(job);
@@ -905,34 +950,86 @@ export function JobDetail({
   }, [isActive]);
 
   function openWorkspace(tab: WorkspaceTab) {
+    if (!workspaceOpen) {
+      const active = document.activeElement;
+      workspaceTriggerRef.current = active instanceof HTMLElement ? active : null;
+    }
+    focusWorkspaceRef.current = true;
+    setRecordedFile(null);
     workspaceTabs.select(tab);
     setWorkspaceOpen(true);
     setInspector(null);
   }
 
+  function openWorkspaceFile(path: string) {
+    setRequestedFile((current) => ({
+      scope: workspaceScope,
+      path,
+      token: (current?.token ?? 0) + 1,
+    }));
+    openWorkspace('files');
+  }
+
+  function openRecordedFile(selection: RecordedFileSelection) {
+    openWorkspace('git');
+    setRecordedFile({ scope: workspaceScope, selection });
+  }
+
   const toggleWorkspace = useCallback(() => {
-    setWorkspaceOpen((current) => {
-      if (!current) setInspector(null);
-      return !current;
-    });
-  }, []);
+    if (workspaceOpen) {
+      setWorkspaceOpen(false);
+      const trigger = workspaceTriggerRef.current;
+      workspaceTriggerRef.current = null;
+      window.requestAnimationFrame(() => {
+        if (trigger && document.contains(trigger) && !trigger.closest('[hidden]')) trigger.focus();
+        else
+          document
+            .querySelector<HTMLButtonElement>('button[aria-controls="job-workspace-pane"]')
+            ?.focus();
+      });
+    } else {
+      const active = document.activeElement;
+      workspaceTriggerRef.current = active instanceof HTMLElement ? active : null;
+      focusWorkspaceRef.current = true;
+      setInspector(null);
+      setWorkspaceOpen(true);
+    }
+  }, [workspaceOpen]);
+
+  useEffect(() => {
+    if (!workspaceOpen || !focusWorkspaceRef.current) return;
+    focusWorkspaceRef.current = false;
+    document.getElementById(`workspace-tab-${workspaceTab}`)?.focus();
+  }, [workspaceOpen, workspaceTab, requestedFile?.token, recordedFile]);
 
   const closeInspector = useCallback(() => {
     setInspector(null);
-    // Cleared so reopening the same turn scrolls back to it.
     setFocusJobId(null);
     const trigger = inspectorTriggerRef.current;
     inspectorTriggerRef.current = null;
-    // Escape closes the panel, not the reader's place in it.
-    if (trigger && document.contains(trigger)) trigger.focus();
-    else if (trigger) activityToggleRef.current?.focus();
+    // The transcript becomes visible in the next commit on narrow screens.
+    window.requestAnimationFrame(() => {
+      if (trigger && document.contains(trigger)) trigger.focus();
+      else if (trigger) activityToggleRef.current?.focus();
+    });
   }, []);
 
   // Remember what opened the panel so closing it can hand focus back.
   const rememberInspectorTrigger = useCallback(() => {
     const active = document.activeElement;
-    inspectorTriggerRef.current = active instanceof HTMLElement ? active : null;
+    if (!(active instanceof HTMLElement && active.closest('#job-inspector-pane'))) {
+      inspectorTriggerRef.current = active instanceof HTMLElement ? active : null;
+    }
+    focusInspectorRef.current = true;
   }, []);
+
+  useEffect(() => {
+    if (!inspector || !focusInspectorRef.current) return;
+    focusInspectorRef.current = false;
+    document
+      .querySelector<HTMLButtonElement>('#job-inspector-pane button[aria-label="Close details"]')
+      ?.focus();
+  }, [inspector]);
 
   const selectStep = useCallback(
     (stepKey: string) => {
@@ -946,6 +1043,23 @@ export function JobDetail({
       });
     },
     [rememberInspectorTrigger, trajectorySteps],
+  );
+
+  const inspectTranscriptEvent = useCallback(
+    (event: AgentEvent, eventJobId: string) => {
+      const step = trajectorySteps.find(
+        (candidate) =>
+          candidate.jobId === eventJobId &&
+          (candidate.sourceEvents.some((source) => source.id === event.sourceEventId) ||
+            (event.kind === 'tool_use' &&
+              event.id &&
+              candidate.callId === event.id &&
+              candidate.attemptId ===
+                threadJobs.find((turn) => turn.id === eventJobId)?.current_attempt_id)),
+      );
+      if (step) selectStep(step.key);
+    },
+    [selectStep, trajectorySteps, threadJobs],
   );
 
   const openRun = useCallback(
@@ -968,7 +1082,7 @@ export function JobDetail({
     });
   }, []);
 
-  // Step and run details explain the trajectory; Chat has no place to keep them.
+  // Returning to Chat closes details selected from the trajectory.
   useEffect(() => {
     if (tab !== 'chat') return;
     setInspector(null);
@@ -1114,7 +1228,7 @@ export function JobDetail({
   /** Send what the composer holds; the result, or `null` if nothing went. */
   async function sendDraft(): Promise<ThreadMessageResultApi | null> {
     if (
-      submitting ||
+      sendRequestedRef.current ||
       rewriting ||
       contextLost ||
       isArchived ||
@@ -1123,14 +1237,15 @@ export function JobDetail({
       mcp.saving
     )
       return null;
-    // A command is not a message. It runs the thing it names and leaves
-    // nothing behind for the model to read as a prompt.
-    if (await goalCommand.submit()) return null;
-    const prompt = followUp.trim();
+    const snapshot = draft.capture();
+    const prompt = snapshot.value.trim();
     if (!prompt) return null;
+    sendRequestedRef.current = true;
     setSubmitting(true);
     setActionError(null);
     try {
+      // Commands use their own operation and are never queued as messages.
+      if (await goalCommand.submit()) return null;
       // One request whatever the conversation is doing: idle, the message is
       // the next turn when this returns; busy, it waits in the queue above the
       // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
@@ -1141,18 +1256,19 @@ export function JobDetail({
         // Omitted controls inherit the parent's validated model and effort.
         ...composerOverrides(job, model, effort),
       });
+      draft.acknowledge(snapshot);
+      if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return result;
       queue.apply(result);
-      // Without this the composer stayed disabled with the sent text still in
-      // it, because nothing else ever cleared either. A queued message keeps
-      // its uploads: they are pinned to it, not discarded with the draft.
-      setFollowUp('');
+      // The queued message retains its uploads; the next draft starts without them.
       attachments.reset();
-      setSubmitting(false);
       return result;
     } catch (cause: unknown) {
+      if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return null;
       setActionError(cause instanceof Error ? cause.message : 'Could not send the message');
-      setSubmitting(false);
       return null;
+    } finally {
+      sendRequestedRef.current = false;
+      if (composerMounted.current) setSubmitting(false);
     }
   }
 
@@ -1163,10 +1279,13 @@ export function JobDetail({
    * own ↑ for changing that.
    */
   async function steerNow() {
+    const scope = draft.capture().scope;
     const drafted = followUp.trim() ? await sendDraft() : null;
+    if (!composerMounted.current || currentDraftScope.current !== scope) return;
     // Nothing to add, or nothing running: the draft simply became the next turn.
     if (!drafted?.pending || (drafted.pending.attachments ?? []).length) return;
     const sent = await queue.sendNow(drafted.pending);
+    if (!composerMounted.current || currentDraftScope.current !== scope) return;
     if (!sent.ok) {
       setActionError(sent.error);
       return;
@@ -1324,7 +1443,7 @@ export function JobDetail({
   const scroll = useConversationScroll({
     turnKeys,
     conversationKey,
-    active: tab === 'chat',
+    active: tab === 'chat' && (wideLayout || !(workspaceOpen || inspector !== null)),
   });
   // The conversation's waiting messages. A message becomes a turn on the
   // server, when the turn in front of it ends; the page follows it there when
@@ -1408,10 +1527,9 @@ export function JobDetail({
     (last, event, index) => (event.kind === 'message' ? index : last),
     -1,
   );
-  // The workspace and the inspector share one right-hand region, so either of
-  // them narrows the transcript in exactly the same way.
+  // The workspace and inspector share the right-hand region.
   const panelOpen = workspaceOpen || inspector !== null;
-  return (
+  const content = (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
         {isArchived ? (
@@ -1474,6 +1592,15 @@ export function JobDetail({
               </button>
             ))}
           </nav>
+          {tab === 'chat' ? (
+            <TranscriptPresentationControl
+              value={presentation}
+              onChange={(mode) => {
+                scroll.holdReading();
+                setPresentation(mode);
+              }}
+            />
+          ) : null}
           {hasActivity ? (
             <button
               ref={activityToggleRef}
@@ -1609,6 +1736,15 @@ export function JobDetail({
                       <HistoryTurn
                         key={turn.key}
                         turn={turn}
+                        presentation={presentation}
+                        onInspectEvent={events.length ? inspectTranscriptEvent : undefined}
+                        results={
+                          <TurnDeliverables
+                            job={{ id: turn.jobId, state: turn.state }}
+                            outputs={recordedOutputs.get(turn.jobId)}
+                            onOpenFile={openRecordedFile}
+                          />
+                        }
                         showActivityDetails={false}
                         rewindAnchorJobId={rewindAnchorJobId}
                         busy={forking}
@@ -1752,11 +1888,17 @@ export function JobDetail({
                     <div aria-label="Agent activity" className="mt-2">
                       <EventList
                         events={visibleEvents}
+                        presentation={presentation}
+                        completed={job.state === 'done' || job.state === 'needs_review'}
+                        onInspectEvent={events.length ? inspectTranscriptEvent : undefined}
                         showActivityDetails={false}
                         jobId={job.id}
                         renderEvent={(event, index, blockKey) => (
                           <EventRow
                             event={event}
+                            presentation={presentation}
+                            jobId={job.id}
+                            onInspectEvent={events.length ? inspectTranscriptEvent : undefined}
                             blockKey={blockKey}
                             busy={forking}
                             firstRun={firstRun}
@@ -1782,6 +1924,13 @@ export function JobDetail({
                     </div>
 
                     <AttemptTurnFooter job={job} attemptNo={attemptNo} />
+                    {selectedAttemptIsCurrent ? (
+                      <TurnDeliverables
+                        job={job}
+                        outputs={recordedOutputs.get(job.id)}
+                        onOpenFile={openRecordedFile}
+                      />
+                    ) : null}
 
                     {/* The inspector's Run details open on the turn the reader
                         is looking at, which is this one. */}
@@ -2053,9 +2202,16 @@ export function JobDetail({
                             {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
                           </span>
                         )}
-                        <ComposerSendButton
-                          label="Send follow-up"
-                          title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
+                        <ComposerMessageActions
+                          label={t(isActive ? 'composer.queue' : 'composer.send')}
+                          title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
+                          steerLabel={t('composer.steer')}
+                          steerTitle={t('composer.steerHint')}
+                          onSteer={
+                            queue.canSendNow && attachments.entries.length === 0
+                              ? () => void steerNow()
+                              : undefined
+                          }
                           disabled={
                             contextLost ||
                             !followUp.trim() ||
@@ -2224,11 +2380,23 @@ export function JobDetail({
             hidden={workspaceTab !== 'git'}
             className="min-h-0 flex-1 overflow-y-auto p-5"
           >
-            <GitPanel
-              job={job}
-              active={workspaceOpen && workspaceTab === 'git'}
-              onReview={canReview ? openReview : undefined}
-            />
+            {recordedFile ? (
+              <RecordedDiffPanel
+                selection={recordedFile}
+                turnNo={
+                  threadJobs.find((turn) => turn.id === recordedFile.jobId)?.turn_no ??
+                  job.turnNo ??
+                  1
+                }
+                onClose={() => setRecordedFile(null)}
+              />
+            ) : (
+              <GitPanel
+                job={job}
+                active={workspaceOpen && workspaceTab === 'git'}
+                onReview={canReview ? openReview : undefined}
+              />
+            )}
           </div>
           <div
             id="workspace-panel-terminal"
@@ -2260,7 +2428,16 @@ export function JobDetail({
             hidden={workspaceTab !== 'files'}
             className="min-h-0 flex-1 overflow-y-auto p-5"
           >
-            <WorkspaceFiles job={job} active={workspaceOpen && workspaceTab === 'files'} />
+            <WorkspaceFiles
+              job={job}
+              active={workspaceOpen && workspaceTab === 'files'}
+              requestedPath={
+                requestedFile?.scope === workspaceScope ? requestedFile.path : undefined
+              }
+              requestToken={
+                requestedFile?.scope === workspaceScope ? requestedFile.token : undefined
+              }
+            />
           </div>
           {workspaceTabs.chats.map((chat) => (
             <div
@@ -2322,4 +2499,5 @@ export function JobDetail({
       </div>
     </section>
   );
+  return <WorkspaceLinkProvider onOpenFile={openWorkspaceFile}>{content}</WorkspaceLinkProvider>;
 }

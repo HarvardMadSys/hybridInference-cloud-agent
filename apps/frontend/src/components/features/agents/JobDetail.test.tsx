@@ -1143,7 +1143,7 @@ describe('JobDetail', () => {
     fireEvent.change(input, { target: { files: [file] } });
     expect(uploadAttachment).toHaveBeenCalledWith(file, 'spec.txt');
     expect(screen.getByText('spec.txt')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(submitThreadMessage).not.toHaveBeenCalled();
     await act(async () =>
@@ -1153,7 +1153,7 @@ describe('JobDetail', () => {
     expect(await screen.findByText('Try sending again')).toBeInTheDocument();
     expect(screen.getByText('spec.txt')).toBeInTheDocument();
     expect(box).toHaveValue('Use this spec');
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
     await waitFor(() => expect(box).toHaveValue(''));
     expect(submitThreadMessage).toHaveBeenLastCalledWith('ajob_1', {
       prompt: 'Use this spec',
@@ -1239,10 +1239,10 @@ describe('JobDetail', () => {
       resources: {},
       prompts: {},
     });
-    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
     await act(async () => finishSave({ bindings: [{ ...binding, enabled: false }] }));
     expect(toggle).toHaveAttribute('aria-checked', 'false');
-    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled();
   });
 
   it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {
@@ -1508,7 +1508,7 @@ describe('JobDetail', () => {
     const turn = screen.getByLabelText('Turn 1');
     const showCall = within(turn).getByRole('button', { name: 'Show tool call' });
     expect(showCall).toHaveAttribute('aria-expanded', 'false');
-    expect(within(turn).getByText('Read')).toBeVisible();
+    expect(within(turn).getByText('Read: src/router.py')).toBeVisible();
     expect(within(turn).getByText('src/router.py', { selector: 'pre' })).not.toBeVisible();
     expect(within(turn).getByText('router source')).not.toBeVisible();
     fireEvent.click(showCall);
@@ -1614,8 +1614,8 @@ describe('JobDetail', () => {
 
     const showCall = screen.getByRole('button', { name: 'Show tool call' });
     expect(showCall).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.getByText('Bash')).toBeVisible();
-    expect(screen.getByTitle('Bash: pytest -q')).toBeVisible();
+    expect(screen.getByText('Bash: pytest -q')).toBeVisible();
+    expect(screen.getByTitle('Bash: pytest -q · Result received')).toBeVisible();
     const call = document.getElementById(showCall.getAttribute('aria-controls')!);
     expect(call).toHaveTextContent('"cwd": "/workspace"');
     expect(call).toHaveTextContent('"timeout": 0');
@@ -1706,7 +1706,7 @@ describe('JobDetail', () => {
     expect(screen.getByText(/sent after this turn/i)).toBeInTheDocument();
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Now add a regression test' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
@@ -1777,7 +1777,7 @@ describe('JobDetail', () => {
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Now add a regression test' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() => expect(window.location.pathname).toBe('/ajob_child'));
     expect(navigation.push).not.toHaveBeenCalled();
@@ -1860,7 +1860,7 @@ describe('JobDetail', () => {
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Now try it on the other model' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
@@ -1894,7 +1894,7 @@ describe('JobDetail', () => {
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Carry on' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'Carry on' }),
@@ -2324,6 +2324,207 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob({ state: 'failed', stateNote })} />);
 
     expect(screen.getByText(stateNote)).toHaveClass('[overflow-wrap:anywhere]');
+  });
+
+  describe('the transcript tool inspector', () => {
+    function viewport() {
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((query: string) => ({
+          matches: false,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })),
+      );
+    }
+
+    afterEach(() => vi.unstubAllGlobals());
+
+    function transcriptInspectorFixture() {
+      vi.mocked(getAgentAttemptTelemetry).mockResolvedValue({
+        attempt_id: 1,
+        attempt_no: 1,
+        continuity_mode: null,
+        context_status: null,
+        duration_ms: null,
+        resources: null,
+      });
+      return {
+        job: makeJob({
+          state: 'done',
+          events: [
+            {
+              kind: 'tool_use',
+              tool: 'Bash',
+              id: 't1',
+              detail: 'pytest -q',
+              input: { command: 'pytest -q' },
+              output: ['2 passed'],
+              resultState: 'received',
+              attemptNo: 1,
+              sourceEventId: 42,
+            },
+            {
+              kind: 'message',
+              text: 'The fix is ready.',
+              attemptNo: 1,
+              sourceEventId: 44,
+            },
+          ],
+        }),
+        stored: [
+          {
+            id: 42,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: 1,
+            seq: 1,
+            event_type: 'tool_use',
+            payload: { id: 't1', name: 'Bash', input: { command: 'pytest -q' } },
+            created_at: null,
+          },
+          {
+            id: 43,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: 1,
+            seq: 2,
+            event_type: 'tool_result',
+            payload: { tool_use_id: 't1', content: '2 passed', is_error: false },
+            created_at: null,
+          },
+        ],
+      };
+    }
+
+    it('moves keyboard focus into the transcript tool inspector and restores the original chip', async () => {
+      viewport();
+      const { job, stored } = transcriptInspectorFixture();
+      render(<JobDetail job={job} events={stored} />);
+      const chip = screen.getByRole('button', { name: 'Inspect Bash: pytest -q' });
+      chip.focus();
+      // A focused control's keyboard activation produces a click with detail 0.
+      fireEvent.click(chip, { detail: 0 });
+
+      const inspector = await screen.findByRole('region', { name: 'Step details' });
+      const close = within(inspector).getByRole('button', { name: 'Close details' });
+      expect(close).toHaveFocus();
+      expect(inspector).toHaveTextContent('pytest -q');
+      expect(screen.queryByLabelText('Search steps')).not.toBeInTheDocument();
+
+      fireEvent.keyDown(close, { key: 'Escape' });
+      await waitFor(() => expect(chip).toHaveFocus());
+      expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+    });
+
+    it('preserves the reading row while a narrow transcript tool inspector hides the chat', async () => {
+      viewport();
+      const observers: Array<{
+        targets: Set<Element>;
+        trigger: () => void;
+        connected: boolean;
+      }> = [];
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          targets = new Set<Element>();
+          connected = true;
+          constructor(private callback: ResizeObserverCallback) {
+            observers.push(this);
+          }
+          observe(target: Element) {
+            this.targets.add(target);
+          }
+          unobserve(target: Element) {
+            this.targets.delete(target);
+          }
+          disconnect() {
+            this.connected = false;
+          }
+          trigger = () => this.callback([], this as unknown as ResizeObserver);
+        },
+      );
+      const { job, stored } = transcriptInspectorFixture();
+      render(<JobDetail job={job} events={stored} />);
+      const region = screen.getByRole('region', { name: 'Task progress' });
+      const hidden = () => region.classList.contains('hidden');
+      const rect = (top: number, height: number) => ({
+        top,
+        bottom: top + height,
+        height,
+        left: 0,
+        right: hidden() ? 0 : 800,
+        width: hidden() ? 0 : 800,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      });
+      Object.defineProperties(region, {
+        clientWidth: { configurable: true, get: () => (hidden() ? 0 : 800) },
+        clientHeight: { configurable: true, get: () => (hidden() ? 0 : 600) },
+        scrollHeight: { configurable: true, get: () => (hidden() ? 0 : 2000) },
+        getBoundingClientRect: {
+          configurable: true,
+          value: () => rect(0, hidden() ? 0 : 600),
+        },
+      });
+      const rowTops: Record<string, number> = {
+        'ajob_1:prompt': 0,
+        'ajob_1:e42': 600,
+        'ajob_1:e44': 900,
+      };
+      for (const anchor of region.querySelectorAll<HTMLElement>(
+        '[data-turn-key], [data-block-key]',
+      )) {
+        Object.defineProperty(anchor, 'getBoundingClientRect', {
+          configurable: true,
+          value: () =>
+            hidden()
+              ? rect(0, 0)
+              : rect((rowTops[anchor.dataset.blockKey ?? ''] ?? 0) - region.scrollTop, 80),
+        });
+      }
+      const settle = () =>
+        act(async () => {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        });
+      const resizeTranscript = () =>
+        act(() => {
+          for (const observer of observers) {
+            if (observer.connected && observer.targets.has(region)) observer.trigger();
+          }
+        });
+      resizeTranscript();
+      await settle();
+      expect(region.scrollTop).toBe(1400);
+
+      fireEvent.wheel(region, { deltaY: -850 });
+      region.scrollTop = 550;
+      fireEvent.scroll(region);
+      await settle();
+      const chip = screen.getByRole('button', { name: 'Inspect Bash: pytest -q' });
+      chip.focus();
+      fireEvent.click(chip, { detail: 0 });
+      const inspector = await screen.findByRole('region', { name: 'Step details' });
+      expect(hidden()).toBe(true);
+      // A display:none viewport reports zero dimensions and may reset scrollTop.
+      region.scrollTop = 0;
+      resizeTranscript();
+      await settle();
+      fireEvent.click(within(inspector).getByRole('button', { name: 'Close details' }));
+      await settle();
+      await waitFor(() => expect(chip).toHaveFocus());
+      expect(hidden()).toBe(false);
+      expect(region.scrollTop).toBe(550);
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
   });
 
   describe('the floating tasks and subagents window', () => {
@@ -3136,7 +3337,7 @@ describe('JobDetail', () => {
 
     expect(screen.getByText(/We couldn’t reconnect this chat/i)).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
     expect(screen.queryByText(/restores any saved changes/i)).toBeNull();
   });
 
@@ -3838,7 +4039,7 @@ describe('JobDetail reasoning effort', () => {
 
     // Untouched: the field is absent, which the backend reads as "inherit".
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
     );
@@ -3850,7 +4051,7 @@ describe('JobDetail reasoning effort', () => {
       target: { value: 'low' },
     });
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'easy one' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
@@ -3867,7 +4068,7 @@ describe('JobDetail reasoning effort', () => {
     await screen.findByLabelText('Reasoning for this turn');
 
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'go' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
@@ -3890,7 +4091,7 @@ describe('JobDetail reasoning effort', () => {
     );
 
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'switch' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {

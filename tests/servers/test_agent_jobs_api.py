@@ -3467,6 +3467,65 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monk
     ]
 
 
+async def test_binary_workspace_payload_preserves_owner_and_path_checks(
+    store: FakeStorage, monkeypatch
+):
+    """Binary bytes use the same owned, normalized route as text previews."""
+
+    class Broker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
+            return None
+
+        async def files(self, workspace_id: str, path: str, *, profiling=None):
+            self.calls.append((workspace_id, path))
+            return {
+                "path": path,
+                "kind": "file",
+                "content": None,
+                "content_base64": "iVBORw0KGgoAaW1hZ2U=",
+                "media_type": "image/png",
+                "size": 14,
+                "binary": True,
+                "truncated": False,
+                "source": "workspace",
+            }
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        workspace_id = _attach_shared_workspace(store, job_id)
+        foreign = await store.conversation_commands.create_job(
+            user_id=_OTHER,
+            repo="owner/other",
+            task_prompt="not yours",
+            runtime="claude-code",
+            model="glm-5.1",
+        )
+        _attach_shared_workspace(store, foreign["id"])
+        fetched = await client.get(
+            f"/v1/agent/jobs/{job_id}/files", params={"path": "artifact.png"}
+        )
+        refused = await client.get(
+            f"/v1/agent/jobs/{foreign['id']}/files", params={"path": "artifact.png"}
+        )
+        traversal = await client.get(
+            f"/v1/agent/jobs/{job_id}/files", params={"path": "../artifact.png"}
+        )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["content_base64"] == "iVBORw0KGgoAaW1hZ2U="
+    assert fetched.json()["media_type"] == "image/png"
+    assert fetched.json()["binary"] is True
+    assert refused.status_code == 404
+    assert traversal.status_code == 400
+    assert broker.calls == [(workspace_id, "artifact.png")]
+
+
 async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     store: FakeStorage, monkeypatch
 ):

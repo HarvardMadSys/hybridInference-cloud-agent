@@ -593,3 +593,255 @@ describe('grouped tool calls', () => {
     expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
   });
 });
+
+describe('transcript work details', () => {
+  const call: AgentEvent = {
+    kind: 'tool_use',
+    tool: 'Bash',
+    detail: 'Run checks',
+    input: { command: 'npm test' },
+    resultState: 'received',
+    output: ['Checks passed'],
+    sourceEventId: 1,
+  };
+  const answer: AgentEvent = { kind: 'message', text: 'The change is ready.', sourceEventId: 2 };
+  const renderEvent = (event: AgentEvent, _index: number, blockKey: string) => (
+    <EventRow event={event} blockKey={blockKey} />
+  );
+
+  it('folds recorded completed process without hiding the answer or changing its anchors', () => {
+    const { rerender } = render(
+      <EventList
+        events={[call, answer]}
+        jobId="done"
+        completed
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    const toolAnchor = document.querySelector('[data-block-key="done:e1"]');
+    const answerAnchor = document.querySelector('[data-block-key="done:e2"]');
+    expect(toolAnchor).not.toBeVisible();
+    expect(screen.getByText('The change is ready.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Show process (1)' }));
+    expect(toolAnchor).toBeVisible();
+    rerender(
+      <EventList
+        events={[call, answer]}
+        jobId="done"
+        completed
+        presentation="detailed"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(document.querySelector('[data-block-key="done:e1"]')).toBe(toolAnchor);
+    expect(document.querySelector('[data-block-key="done:e2"]')).toBe(answerAnchor);
+    expect(screen.getByText('Checks passed')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps interrupted, failed, unresolved, and diagnostic states visible in compact completed turns', () => {
+    const events: AgentEvent[] = [
+      { ...call, resultState: 'failed', outputIsError: true },
+      { ...call, resultState: 'cancelled', sourceEventId: 3 },
+      { ...call, resultState: 'unknown', sourceEventId: 4 },
+      { ...call, resultState: 'not_recorded', sourceEventId: 5 },
+      {
+        kind: 'tool_result',
+        text: 'An unmatched recorded result',
+        isError: false,
+        sourceEventId: 6,
+      },
+      { kind: 'lifecycle', text: 'unexpected_runtime_phase', sourceEventId: 7 },
+      { kind: 'user_message', text: 'Please also check accessibility.', sourceEventId: 8 },
+      { kind: 'lifecycle', text: 'cancelled_by_owner', sourceEventId: 9 },
+      { kind: 'lifecycle', text: 'attempt_superseded', sourceEventId: 10 },
+      answer,
+    ];
+    render(
+      <EventList
+        events={events}
+        jobId="partial"
+        completed
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByText('Call failed')).toBeVisible();
+    expect(screen.getByText('Call interrupted')).toBeVisible();
+    expect(screen.getByText('Pairing unknown')).toBeVisible();
+    expect(screen.getByText('Result not recorded')).toBeVisible();
+    expect(screen.getByText('Unmatched tool result')).toBeVisible();
+    expect(document.querySelector('[data-block-key="partial:e7"]')).toBeVisible();
+    expect(screen.getByText('Please also check accessibility.')).toBeVisible();
+    expect(screen.getByText('Stopped by you')).toBeVisible();
+    expect(screen.getByText('Run interrupted')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+    expect(document.querySelectorAll('[data-block-key]')).toHaveLength(events.length);
+  });
+
+  it('does not fold a running turn merely because one tool returned', () => {
+    render(
+      <EventList
+        events={[call, answer]}
+        jobId="running"
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByText('Bash: npm test')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps semantic chips visible in Standard while Compact folds completed process', () => {
+    const { rerender } = render(
+      <EventList
+        events={[call, answer]}
+        jobId="done"
+        completed
+        presentation="standard"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByText('Bash: npm test')).toBeVisible();
+    expect(screen.getByText('Checks passed')).not.toBeVisible();
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+    rerender(
+      <EventList
+        events={[call, answer]}
+        jobId="done"
+        completed
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByText('Bash: npm test')).not.toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
+    expect(screen.getByText('The change is ready.')).toBeVisible();
+  });
+
+  it('opens the existing inspector from a descriptive summary with its original event and job', () => {
+    const inspect = vi.fn();
+    render(
+      <EventList
+        events={[call]}
+        jobId="historical"
+        presentation="standard"
+        onInspectEvent={inspect}
+        renderEvent={renderEvent}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect Bash: npm test' }));
+    expect(inspect).toHaveBeenCalledWith(call, 'historical');
+    expect(screen.getByText('Result received')).toBeVisible();
+  });
+
+  it('expands task cards and their recorded details with detailed mode even when overview cards are elsewhere', () => {
+    const task: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'update_plan',
+      detail: 'Review',
+      sourceEventId: 3,
+      input: { plan: [{ step: 'Inspect coverage', status: 'completed' }] },
+      output: ['Plan recorded.'],
+      resultState: 'received',
+    };
+    render(
+      <EventList
+        events={[task]}
+        jobId="task"
+        presentation="detailed"
+        showActivityDetails={false}
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByRole('region', { name: 'Task activity' })).toBeVisible();
+    expect(screen.getByText('Inspect coverage')).toBeVisible();
+    expect(screen.getByText('Plan recorded.')).toBeVisible();
+  });
+
+  it('keeps a recorded subagent failure visible even when its tool returned normally', () => {
+    const task: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'wait',
+      detail: 'Wait for reviewer',
+      sourceEventId: 3,
+      input: { ids: ['reviewer'] },
+      output: [JSON.stringify({ status: { reviewer: { errored: 'Could not review' } } })],
+      resultState: 'received',
+    };
+    render(
+      <EventList
+        events={[task, answer]}
+        jobId="task"
+        completed
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+    expect(screen.getByText('wait: Wait for reviewer')).toBeVisible();
+  });
+
+  it.each(['pending', undefined, 'unexpected_runtime_status'])(
+    'retains a task whose recorded state is %s',
+    (status) => {
+      const task: AgentEvent = {
+        kind: 'tool_use',
+        tool: 'update_plan',
+        detail: 'Plan',
+        sourceEventId: 3,
+        input: { plan: [{ step: 'Review changes', status }] },
+        resultState: 'received',
+        output: ['Plan recorded.'],
+      };
+      render(
+        <EventList
+          events={[task]}
+          jobId="task"
+          completed
+          presentation="compact"
+          renderEvent={renderEvent}
+        />,
+      );
+      expect(screen.getByText('update_plan: Plan')).toBeVisible();
+      expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+    },
+  );
+
+  it('keeps historical outputs within their turn boundary and outside folded process', () => {
+    render(
+      <HistoryTurn
+        busy={false}
+        presentation="compact"
+        results={<div>Recorded changed files</div>}
+        onOpenRun={() => undefined}
+        turn={{
+          key: 'history',
+          jobId: 'history',
+          displayNo: 1,
+          state: 'done',
+          messages: [],
+          fallbackResponses: [],
+          promptCard: 'Check the tests.',
+          forkable: true,
+          toolCalls: 1,
+          prompt: 'Check the tests.',
+          lastResponse: 'The change is ready.',
+          isCurrent: false,
+          events: [call, answer],
+        }}
+      />,
+    );
+    const turn = document.querySelector('[data-turn-key="history"]')!;
+    expect(within(turn as HTMLElement).getByText('Check the tests.')).toBeVisible();
+    expect(within(turn as HTMLElement).getByText('The change is ready.')).toBeVisible();
+    const outputs = within(turn as HTMLElement).getByText('Recorded changed files');
+    expect(outputs).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
+    expect(
+      outputs.compareDocumentPosition(screen.getByRole('button', { name: 'View execution' })) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});

@@ -76,14 +76,27 @@ function stubRect(element: HTMLElement, rect: () => { top: number; height: numbe
   });
 }
 
-function Harness({ turnKeys }: { turnKeys: string[] }) {
+function Harness({ turnKeys, withProcess = false }: { turnKeys: string[]; withProcess?: boolean }) {
   const scroll = useConversationScroll({ turnKeys, conversationKey: 'conversation' });
   return (
     <div>
       <div ref={scroll.containerRef} data-testid="container">
         <div>
           {turnKeys.map((key) => (
-            <section key={key} data-testid={`turn-${key}`} data-turn-key={key} />
+            <section key={key} data-testid={`turn-${key}`} data-turn-key={key}>
+              {withProcess && key === 't3' ? (
+                <>
+                  <div data-testid="answer" data-block-key="t3:answer">
+                    Final answer
+                  </div>
+                  <div data-testid="process" hidden>
+                    <div data-testid="process-row" data-block-key="t3:process">
+                      Recorded usage
+                    </div>
+                  </div>
+                </>
+              ) : null}
+            </section>
           ))}
         </div>
         <div ref={scroll.composerRef} data-testid="composer" />
@@ -136,8 +149,8 @@ afterEach(() => {
 });
 
 /** Render the rail's host, then give it the layout above. */
-function renderConversation(turnKeys = ['t1', 't2', 't3']) {
-  render(<Harness turnKeys={turnKeys} />);
+function renderConversation(turnKeys = ['t1', 't2', 't3'], withProcess = false) {
+  render(<Harness turnKeys={turnKeys} withProcess={withProcess} />);
   const region = container();
   Object.defineProperty(region, 'clientHeight', {
     configurable: true,
@@ -160,6 +173,17 @@ function renderConversation(turnKeys = ['t1', 't2', 't3']) {
       top: layout.turnTops[key] - region.scrollTop,
       height: 200,
     }));
+  }
+  if (withProcess) {
+    stubRect(screen.getByTestId('answer'), () => ({
+      top: layout.turnTops.t3 + 40 - region.scrollTop,
+      height: 60,
+    }));
+    stubRect(screen.getByTestId('process-row'), () =>
+      screen.getByTestId('process').hidden
+        ? { top: 0, height: 0 }
+        : { top: layout.turnTops.t3 + 100 - region.scrollTop, height: 100 },
+    );
   }
   return region;
 }
@@ -217,6 +241,37 @@ describe('jumping to a turn', () => {
 });
 
 describe('reading while the conversation grows', () => {
+  it('anchors the visible answer rather than a folded process row during reflow and disclosure', async () => {
+    const region = renderConversation(['t1', 't2', 't3'], true);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'jump-last' }));
+    await settle();
+    const answerOffset = screen.getByTestId('answer').getBoundingClientRect().top;
+    // A retained hidden row has a zero browser rect; it must not replace the
+    // visible answer as the reading anchor simply because it is later in the DOM.
+    expect(screen.getByTestId('process-row').getBoundingClientRect().top).toBe(0);
+    layout = {
+      ...layout,
+      contentHeight: layout.contentHeight + 120,
+      turnTops: { ...layout.turnTops, t3: layout.turnTops.t3 + 120 },
+    };
+    FakeResizeObserver.instances.forEach((observer) => observer.trigger());
+    await settle();
+    expect(screen.getByTestId('answer').getBoundingClientRect().top).toBe(answerOffset);
+
+    const heldAt = region.scrollTop;
+    screen.getByTestId('process').hidden = false;
+    layout = { ...layout, contentHeight: layout.contentHeight + 100 };
+    FakeResizeObserver.instances.forEach((observer) => observer.trigger());
+    await settle();
+    expect(region.scrollTop).toBe(heldAt);
+    screen.getByTestId('process').hidden = true;
+    layout = { ...layout, contentHeight: layout.contentHeight - 100 };
+    FakeResizeObserver.instances.forEach((observer) => observer.trigger());
+    await settle();
+    expect(screen.getByTestId('answer').getBoundingClientRect().top).toBe(answerOffset);
+    expect(screen.getByTestId('mode')).toHaveTextContent('reading');
+  });
   it('holds the reader place and reports the new content', async () => {
     const region = renderConversation();
     await settle();

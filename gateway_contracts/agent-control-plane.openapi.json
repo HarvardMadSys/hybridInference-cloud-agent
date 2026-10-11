@@ -6764,7 +6764,7 @@
         "type": "object"
       },
       "AgentWorkspaceResponse": {
-        "description": "A directory listing or bounded text-file preview from a job workspace.",
+        "description": "A directory listing or bounded file payload from a job workspace.",
         "properties": {
           "binary": {
             "default": false,
@@ -6781,6 +6781,17 @@
               }
             ],
             "title": "Content"
+          },
+          "content_base64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Base64"
           },
           "entries": {
             "anyOf": [
@@ -6804,6 +6815,23 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "media_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/gif",
+                  "image/webp"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Type"
           },
           "omitted_reason": {
             "anyOf": [

@@ -1,10 +1,52 @@
 'use client';
 
 import { createContext, Fragment, useContext, type ReactNode } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { highlightFence, TOKEN_CLASS } from '@/lib/codeHighlight';
+import { workspaceLinkPath } from '@/lib/workspaceLink';
+
+const WorkspaceLinkContext = createContext<((path: string) => void) | null>(null);
+
+export function WorkspaceLinkProvider({
+  onOpenFile,
+  children,
+}: {
+  onOpenFile: (path: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <WorkspaceLinkContext.Provider value={onOpenFile}>{children}</WorkspaceLinkContext.Provider>
+  );
+}
+
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const onOpenFile = useContext(WorkspaceLinkContext);
+  const path = href && onOpenFile ? workspaceLinkPath(href) : null;
+  if (path && onOpenFile) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenFile(path)}
+        className="ui-focus-ring rounded-sm text-accent underline underline-offset-2 hover:opacity-80"
+        title={path}
+      >
+        {children}
+      </button>
+    );
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-crimson dark:text-crimson-light underline underline-offset-2 hover:opacity-80"
+    >
+      {children}
+    </a>
+  );
+}
 
 // react-markdown gives `code` no way to tell a fenced block from inline code
 // (the `inline` prop went away in v9), so `pre` marks its subtree and `code`
@@ -54,16 +96,7 @@ function Code({ className, children }: { className?: string; children?: ReactNod
 // would otherwise be stripped by the CSS reset (flat lists, unsized headings).
 const components: Components = {
   p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-crimson dark:text-crimson-light underline underline-offset-2 hover:opacity-80"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
   ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>,
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,
@@ -102,9 +135,16 @@ const components: Components = {
 
 /** Render a Markdown string (GitHub-flavored) as styled HTML. */
 export function Markdown({ text }: { text: string }) {
+  const onOpenFile = useContext(WorkspaceLinkContext);
   return (
     <div className="break-words text-sm leading-relaxed [&>*:last-child]:mb-0">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={components}
+        urlTransform={(url, key) =>
+          key === 'href' && onOpenFile && workspaceLinkPath(url) ? url : defaultUrlTransform(url)
+        }
+      >
         {text}
       </ReactMarkdown>
     </div>

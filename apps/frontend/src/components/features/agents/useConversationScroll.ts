@@ -384,6 +384,7 @@ export function useConversationScroll({
     }
     const blocks: BlockBox[] = [];
     for (const element of target.querySelectorAll<HTMLElement>('[data-block-key]')) {
+      if (element.closest('[hidden]')) continue;
       const key = element.dataset.blockKey;
       if (key) blocks.push({ key, top: contentTop(element, target) });
     }
