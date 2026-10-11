@@ -195,8 +195,10 @@ class PostgresPendingMessageRepository:
         ``conversation_changed``.
 
         An idle-only action is checked under the same lock as every queue
-        write. It can replay its original receipt after the chat changes, but
-        cannot newly queue behind or resume another waiting message.
+        write. It requires the expected newest turn, no live turn or waiting
+        message, and the shared workspace's latest snapshot to be published.
+        It replays its original receipt after the chat changes, but cannot
+        newly queue behind or resume another waiting message.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as

@@ -42,9 +42,11 @@ class PendingMessageRepository(Protocol):
         ``client_request_conflict``, ``attachments_unavailable`` or
         ``conversation_changed``.
 
-        ``require_idle`` refuses a fresh submission unless the expected newest
-        turn is still newest, no turn or message is waiting, and the shared
-        workspace's latest snapshot is published. Idempotent replay comes first.
+        An idle-only action is checked under the same lock as every queue
+        write. It requires the expected newest turn, no live turn or waiting
+        message, and the shared workspace's latest snapshot to be published.
+        It replays its original receipt after the chat changes, but cannot
+        newly queue behind or resume another waiting message.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as

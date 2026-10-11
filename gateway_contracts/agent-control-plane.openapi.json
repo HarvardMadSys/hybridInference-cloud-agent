@@ -6174,6 +6174,20 @@
             "description": "Uploads for this message's turn. While the message waits they are pinned to it, so they are neither swept nor deletable from the composer.",
             "title": "Attachment Ids"
           },
+          "expected_latest_job_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The newest turn read by an idle-only action; checked atomically on submit.",
+            "title": "Expected Latest Job Id"
+          },
           "model": {
             "anyOf": [
               {
@@ -6204,6 +6218,12 @@
             ],
             "description": "Optional reasoning-effort override for this turn. Omitted inherits the previous turn's; the literal 'auto' resets to Auto.",
             "title": "Reasoning Effort"
+          },
+          "require_idle": {
+            "default": false,
+            "description": "Accept only on an idle chat with an empty queue and published workspace.",
+            "title": "Require Idle",
+            "type": "boolean"
           },
           "skill_ids": {
             "anyOf": [
@@ -26967,7 +26987,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if a turn, waiting message or\nunpublished workspace appeared before the locked write.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {
