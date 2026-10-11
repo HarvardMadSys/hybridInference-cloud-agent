@@ -26,12 +26,13 @@ on:
   pull_request:
     branches: [main, dev]
 
-# Pull requests execute unreviewed repository code, including install hooks and
-# Dockerfiles. Every PR job uses a disposable GitHub-hosted VM, even for a PR
-# from this repository or a collaborator. Persistent pools are reserved for
-# pushes/manual dispatches; changing repository visibility needs no CI edit.
-# PRs receive only a read token and never log in to a registry. See the runner
-# group restrictions in docs/development.md before enabling public fork PRs.
+# TEMPORARY PRIVATE-REPOSITORY POLICY (#464): same-repository pull requests are
+# trusted to the repository's existing persistent pools; fork pull requests
+# stay on disposable GitHub-hosted VMs. This saves hosted-runner minutes, but it
+# is not safe for public contribution. Before this repository is open-sourced,
+# #464 must restore disposable, isolated runners for every pull request and the
+# runner-group restrictions in docs/development.md must be verified. PRs keep a
+# read-only token, checkout never persists it, and no PR job receives secrets.
 permissions:
   contents: read
 
@@ -48,7 +49,7 @@ env:
 jobs:
   changes:
     name: Classify Changes
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     outputs:
       backend: ${{ steps.classify.outputs.backend }}
       web: ${{ steps.classify.outputs.web }}
@@ -163,7 +164,7 @@ jobs:
     name: Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -261,7 +262,7 @@ jobs:
     name: Tests
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -363,7 +364,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # This pool can start service containers; postgres:15 supports ARM64.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
 
     services:
       postgres:
@@ -565,7 +566,7 @@ jobs:
     name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -671,7 +672,7 @@ jobs:
   # ------------------------------------------------------------------ secret
   gitleaks:
     name: Gitleaks
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -743,7 +744,7 @@ jobs:
     name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
     needs: changes
     if: needs.changes.outputs.docker == 'true'
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && (matrix.artifact.arch == 'arm64' && '["ubuntu-24.04-arm"]' || '["ubuntu-24.04"]') || matrix.artifact.runner) }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && (matrix.artifact.arch == 'arm64' && '["ubuntu-24.04-arm"]' || '["ubuntu-24.04"]') || matrix.artifact.runner) }}
     # The builder lives in a config directory belonging to the *runner*, not to
     # this job, because its layer cache is the only thing between a cell and
     # re-downloading hundreds of megabytes. With a builder per job the cache
@@ -894,8 +895,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            builder_scope="$(
+              printf '%s-%s' "${GITHUB_REPOSITORY}" "${RUNNER_NAME}" \
+                | tr '[:upper:]' '[:lower:]' \
+                | tr -c '[:alnum:]_.-' '-'
+            )"
+            builder_prefix="ci-pr-${builder_scope}-"
             buildx_config="${RUNNER_TEMP}/buildx"
-            builder="ci-pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
+            builder="${builder_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
           else
             buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
             builder="ci-${RUNNER_NAME}"
@@ -903,13 +910,31 @@ jobs:
           mkdir -p "${buildx_config}"
           export BUILDX_CONFIG="${buildx_config}"
           echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
+          echo "BUILDER=${builder}" >> "${GITHUB_ENV}"
+          # A cancelled PR cannot run its final cleanup. On the next job for this
+          # repository and runner, remove only that runner's orphaned builders.
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            stale_prefix="buildx_buildkit_${builder_prefix}"
+            while IFS= read -r container; do
+              [ -n "${container}" ] || continue
+              [ "${container}" = "buildx_buildkit_${builder}0" ] && continue
+              case "${container}" in
+                "${stale_prefix}"*)
+                  docker rm -fv "${container}" >/dev/null 2>&1 || true
+                  docker volume rm "${container}_state" >/dev/null 2>&1 || true
+                  ;;
+              esac
+            done < <(
+              docker ps -a --filter "name=${stale_prefix}" --format '{{.Names}}' \
+                2>/dev/null || true
+            )
+          fi
           if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
             docker buildx rm "${builder}" >/dev/null 2>&1 || true
             docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
             docker buildx inspect "${builder}" --bootstrap >/dev/null
           fi
           docker buildx use "${builder}" >/dev/null
-          echo "BUILDER=${builder}" >> "${GITHUB_ENV}"
           echo "builder ${builder} ready in ${buildx_config}"
 
       # `push: false` still: nothing here publishes, and these images carry no
@@ -1064,6 +1089,15 @@ jobs:
           # delete containers — the removals above are what did that.)
           docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
 
+      # Pull requests use job-local builders even on persistent runners. Remove
+      # the buildkit container as well as its temporary configuration.
+      - name: Drop this pull request's builder
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          if [ -n "${BUILDER:-}" ]; then
+            docker buildx rm "${BUILDER}" >/dev/null 2>&1 || true
+          fi
+
   compose:
     name: Compose resolves
     needs: changes
@@ -1071,8 +1105,8 @@ jobs:
     # The one docker job with no architecture to match: `docker compose config`
     # parses and interpolates, it does not build or start anything. Use the
     # ARM64 pool for trusted events so this does not queue behind x64 builds;
-    # pull requests can parse these files on a disposable x64 hosted VM.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ARM64","image-verify-arm64"]') }}
+    # fork pull requests can parse these files on a disposable x64 hosted VM.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ARM64","image-verify-arm64"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1305,7 +1339,7 @@ jobs:
     name: Candidate on real Kata
     needs: changes
     # This is the real sandbox machine. Only reviewed dev commits may execute
-    # here; pull requests remain covered by the hosted/static test suites.
+    # here; pull requests remain excluded regardless of their runner routing.
     if: >-
       github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.docker == 'true')
@@ -1347,7 +1381,7 @@ jobs:
     # on this workflow's conclusion, so this is what stands between a merge to
     # dev and a consumable release.
     if: always()
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     needs:
       - changes
       - lint

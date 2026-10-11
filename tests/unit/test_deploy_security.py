@@ -40,8 +40,8 @@ def _mounts(service: dict) -> list[str]:
     return out
 
 
-def test_ci_runner_routing_keeps_trusted_pools_and_isolates_pull_requests() -> None:
-    """PRs select hosted runners; the existing native pools remain for releases."""
+def test_ci_runner_routing_keeps_local_pools_and_isolates_fork_pull_requests() -> None:
+    """Repository PRs stay local while forks select disposable hosted runners."""
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     assert workflow["permissions"] == {"contents": "read"}
     jobs = workflow["jobs"]
@@ -58,6 +58,7 @@ def test_ci_runner_routing_keeps_trusted_pools_and_isolates_pull_requests() -> N
             continue
         routing = job["runs-on"]
         assert "github.event_name == 'pull_request'" in routing, name
+        assert "github.event.pull_request.head.repo.full_name != github.repository" in routing, name
         assert "ubuntu-24.04" in routing, name
         if isinstance(expected, list):
             assert json.dumps(expected, separators=(",", ":")) in routing, name

@@ -1,8 +1,9 @@
-"""Unreviewed PR code never shares a runner or credential with publication.
+"""Temporary private-repository runner routing policy.
 
-Exercise the workflow's runner expressions for every cell rather than accepting
-an expression merely because it contains a hosted runner somewhere. Runner-group
-restrictions are also required in GitHub: a fork can propose workflow edits.
+Same-repository PRs use persistent pools; fork PRs select hosted runners. Exercise
+every cell rather than trusting an expression that merely mentions both. GitHub
+runner-group restrictions remain required because a fork can propose workflow
+edits.
 """
 
 from __future__ import annotations
@@ -26,7 +27,12 @@ def _document() -> dict:
 
 
 def _expression(
-    value: str, event: str, cell: dict, *, runner_environment: str = "github-hosted"
+    value: str,
+    event: str,
+    cell: dict,
+    *,
+    fork: bool = False,
+    runner_environment: str = "github-hosted",
 ) -> Any:
     """Evaluate the small Actions expression subset used for runner routing.
 
@@ -34,7 +40,11 @@ def _expression(
     on new syntax until the routing test understands it.
     """
     source = value.removeprefix("${{").removesuffix("}}").strip()
+    repository = "freeinference/cloud-agent"
+    head_repository = "contributor/cloud-agent" if fork else repository
     for name, replacement in {
+        "github.event.pull_request.head.repo.full_name": head_repository,
+        "github.repository": repository,
         "github.event_name": event,
         "runner.environment": runner_environment,
         "matrix.artifact.name": cell.get("name"),
@@ -75,38 +85,57 @@ def _expression(
     return evaluate(ast.parse(source, mode="eval").body)
 
 
-def _runner_labels(job: dict, event: str, cell: dict) -> list[str]:
+def _runner_labels(job: dict, event: str, cell: dict, *, fork: bool = False) -> list[str]:
     runs_on = job["runs-on"]
-    return runs_on if isinstance(runs_on, list) else _expression(runs_on, event, cell)
+    return runs_on if isinstance(runs_on, list) else _expression(runs_on, event, cell, fork=fork)
 
 
 def _cells(job: dict) -> list[dict]:
     return job.get("strategy", {}).get("matrix", {}).get("artifact", [{}])
 
 
-def test_pull_requests_run_every_check_on_disposable_native_hosted_runners() -> None:
-    """Forks, collaborators and same-repository PRs all take the hosted path."""
+def _self_hosted_labels(name: str, cell: dict) -> list[str]:
+    special = {
+        "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
+        "kata": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+    }
+    return (
+        json.loads(cell["runner"])
+        if name == "artifacts"
+        else special.get(name, ["self-hosted", "Linux", "ci-general"])
+    )
+
+
+def test_fork_pull_requests_run_every_check_on_native_hosted_runners() -> None:
+    """The checked-in routing keeps ordinary fork jobs on hosted runners."""
     for name, job in _document()["jobs"].items():
         if name == "kata":
             continue  # Its explicit PR exclusion is checked below.
         for cell in _cells(job):
             expected = "ubuntu-24.04-arm" if cell.get("arch") == "arm64" else "ubuntu-24.04"
-            assert _runner_labels(job, "pull_request", cell) == [expected], (name, cell)
+            assert _runner_labels(job, "pull_request", cell, fork=True) == [expected], (
+                name,
+                cell,
+            )
+
+
+def test_same_repository_pull_requests_use_the_existing_self_hosted_pools() -> None:
+    """Trusted repository branches conserve hosted minutes without changing pools."""
+    for name, job in _document()["jobs"].items():
+        if name == "kata":
+            continue  # It remains excluded from every pull request below.
+        for cell in _cells(job):
+            assert _runner_labels(job, "pull_request", cell) == _self_hosted_labels(name, cell), (
+                name,
+                cell,
+            )
 
 
 @pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
 def test_trusted_events_keep_the_existing_self_hosted_pools(event: str) -> None:
-    special = {
-        "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
-        "kata": ["self-hosted", "Linux", "X64", "image-verify-x64"],
-    }
     for name, job in _document()["jobs"].items():
         for cell in _cells(job):
-            expected = (
-                json.loads(cell["runner"])
-                if name == "artifacts"
-                else special.get(name, ["self-hosted", "Linux", "ci-general"])
-            )
+            expected = _self_hosted_labels(name, cell)
             assert _runner_labels(job, event, cell) == expected, (name, cell)
 
 
@@ -143,6 +172,9 @@ def test_builder_configuration_is_disposable_for_prs_and_persistent_for_pushes(
         for step in steps
         if step.get("name") == "Reuse this runner's builder, or make one"
     ).replace("${{ matrix.artifact.name }}", "sandbox")
+    assert 'docker ps -a --filter "name=${stale_prefix}"' in script
+    assert 'docker rm -fv "${container}"' in script
+    assert 'docker volume rm "${container}_state"' in script
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
@@ -155,6 +187,7 @@ def test_builder_configuration_is_disposable_for_prs_and_persistent_for_pushes(
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "GITHUB_EVENT_NAME": event,
+        "GITHUB_REPOSITORY": "HarvardMadSys/hybridInference-cloud-agent",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_ENV": str(github_env),
@@ -166,13 +199,24 @@ def test_builder_configuration_is_disposable_for_prs_and_persistent_for_pushes(
     outputs = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
     if event == "pull_request":
         assert outputs["BUILDX_CONFIG"] == str(runner_temp / "buildx")
-        assert outputs["BUILDER"] == "ci-pr-123-2-sandbox"
+        assert (
+            outputs["BUILDER"]
+            == "ci-pr-harvardmadsys-hybridinference-cloud-agent-trusted-runner-123-2-sandbox"
+        )
         assert not runner_workspace.parent.exists()
     else:
         assert outputs["BUILDX_CONFIG"] == str(
             runner_workspace.parent / "buildx" / "trusted-runner"
         )
         assert outputs["BUILDER"] == "ci-trusted-runner"
+
+
+def test_pull_request_builder_is_always_removed_after_the_artifact_job() -> None:
+    steps = _document()["jobs"]["artifacts"]["steps"]
+    cleanup = [step for step in steps if 'docker buildx rm "${BUILDER}"' in step.get("run", "")]
+    assert len(cleanup) == 1
+    assert cleanup[0]["if"] == "always() && github.event_name == 'pull_request'"
+    assert steps[-1] is cleanup[0]
 
 
 @pytest.mark.parametrize("event", ["pull_request", "push", "workflow_dispatch"])

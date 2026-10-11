@@ -128,16 +128,25 @@ make check
 | `make test-db` | The PostgreSQL-backed `dbtest` tier. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
 
-Every pull request runs on disposable GitHub-hosted VMs, including PRs from
-collaborators and branches in this repository. Backend, web, database, Compose,
-secret scans, and image build/start checks run there with a read-only token;
-checkout does not persist it, and image jobs use anonymous registry pulls.
-ARM64 artifacts use `ubuntu-24.04-arm`, and AMD64 artifacts use `ubuntu-24.04`.
-Hosted runner availability, billing, disk capacity, and anonymous pull limits can
-fail these checks; they must not fall back to persistent pools. Pushes to `dev`
-and `main`, and authorized manual dispatches, keep the existing self-hosted
-pools. Real Kata host qualification runs only on trusted `dev` events and is
-explicitly reported as skipped on PRs.
+While this repository remains private, pull requests from branches in this same
+repository temporarily run on the existing self-hosted pools. This explicitly
+trusts everyone who can push such a branch with persistent-runner access; it is
+a hosted-minute workaround, not an isolation boundary. Fork pull requests stay
+on disposable GitHub-hosted VMs: ARM64 artifacts use `ubuntu-24.04-arm`, and
+AMD64 artifacts use `ubuntu-24.04`. Pushes to `dev` and `main`, and authorized
+manual dispatches, keep the same self-hosted routing as before. Every PR still
+has only a read token, checkout does not persist it, image jobs use anonymous
+registry pulls, and the per-PR buildx directory and builder name remain isolated
+from the persistent builders used by trusted push and dispatch jobs. Real Kata
+host qualification remains excluded from every PR and runs only on trusted
+`dev` events.
+
+This temporary policy must be removed before the repository is open-sourced.
+GitHub issue [#464](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/464)
+tracks the release-blocking work: route every PR back to a disposable isolated
+runner, then validate the runner-group controls below against an untrusted fork.
+Repository visibility must not change until that issue is closed and its
+acceptance check has passed.
 
 Before enabling public fork workflows, configure GitHub's runner groups to allow
 persistent pools only for the trusted workflow references on `refs/heads/dev`
