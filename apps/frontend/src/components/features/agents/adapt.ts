@@ -184,6 +184,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       ...(event.created_at ? { at: event.created_at } : {}),
       detail: asText(payload, 'detail', 'text') || commandText(payload.input) || 'Running tool',
       ...(output ? { output } : {}),
+      ...(Object.hasOwn(payload, 'structured_output')
+        ? { structuredOutput: payload.structured_output }
+        : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
       sourceEventId,
     };
@@ -198,6 +201,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         readableValue(payload.aggregated_output) ||
         asText(payload, 'text', 'detail'),
       toolUseId: asText(payload, 'tool_use_id') || undefined,
+      ...(Object.hasOwn(payload, 'structured_output')
+        ? { structuredOutput: payload.structured_output }
+        : {}),
       ...(asText(payload, 'parent_tool_use_id')
         ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
         : {}),
@@ -582,6 +588,7 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
           ...target,
           output: row.text ? row.text.split('\n') : ['Command completed with no output.'],
           outputIsError: row.isError,
+          ...(row.structuredOutput !== undefined ? { structuredOutput: row.structuredOutput } : {}),
           resultState: row.cancelled ? 'cancelled' : row.isError ? 'failed' : 'received',
           // Folding is where the pair still exists. Downstream only sees the
           // surviving tool_use row, so a consumer that wanted to time the

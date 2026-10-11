@@ -838,6 +838,14 @@ class ClaudeCodeRuntime(AgentRuntime):
             if isinstance(parent_tool_use_id, str) and parent_tool_use_id
             else {}
         )
+        # Native tools carry their structured result outside the content block.
+        # TaskCreate's assigned task ID is here rather than in its input.
+        structured_output = event.get("tool_use_result")
+        result_fields = (
+            {"structured_output": structured_output}
+            if isinstance(structured_output, (dict, list))
+            else {}
+        )
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 content = block.get("content")
@@ -848,6 +856,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                         "is_error": bool(block.get("is_error")),
                         "content": _payload_text(content),
                         **parent_fields,
+                        **result_fields,
                     },
                 )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})

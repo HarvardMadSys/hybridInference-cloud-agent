@@ -66,6 +66,15 @@ function taskRows(value: unknown): Record<string, unknown>[] {
   return recordedTasks({ tasks: [task] }).length ? [task] : [];
 }
 
+function taskResultText(value: string): string {
+  const blocks = parsed(value);
+  if (Array.isArray(blocks) && blocks.length === 1) {
+    const block = record(blocks[0]);
+    if (block?.type === 'text' && typeof block.text === 'string') return block.text;
+  }
+  return value;
+}
+
 function taskKey(task: ActivityTask, event: ToolUseEvent, index: number): string {
   return JSON.stringify([event.attemptNo ?? null, task.id ?? null, task.id ? null : index]);
 }
@@ -121,6 +130,10 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
       event.resultState === 'waiting' || event.resultState === 'not_recorded'
         ? undefined
         : event.output?.join('\n');
+    const structuredOutput =
+      event.resultState === 'waiting' || event.resultState === 'not_recorded'
+        ? undefined
+        : event.structuredOutput;
     const key = toolKey(event);
 
     if (activity.kind === 'tasks') {
@@ -128,7 +141,8 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
       if (event.parentToolUseId) continue;
       const full = !['taskcreate', 'taskupdate', 'taskget'].includes(key);
       if (full) {
-        const snapshot = taskSnapshot(output) ?? taskSnapshot(event.input);
+        const snapshot =
+          taskSnapshot(structuredOutput) ?? taskSnapshot(output) ?? taskSnapshot(event.input);
         if (!snapshot) continue;
         tasks.clear();
         for (const [rowIndex, task] of recordedTasks(snapshot).entries()) {
@@ -147,8 +161,20 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
       }
 
       const inputRows = taskRows(event.input);
-      const outputRows = taskRows(output);
-      // A create request can lack an ID that its structured result supplies.
+      const outputRows = taskRows(structuredOutput);
+      if (!outputRows.length) outputRows.push(...taskRows(output));
+      // Claude's native TaskCreate returns a text acknowledgement, not JSON.
+      // Use its explicit ID only when it acknowledges this request's subject.
+      if (key === 'taskcreate' && inputRows.length === 1 && !outputRows.length && output) {
+        const created = /^Task #([1-9]\d*) created successfully: ([\s\S]+)$/.exec(
+          taskResultText(output).trim(),
+        );
+        const requested = recordedTasks({ tasks: inputRows })[0];
+        if (created && !requested.id && created[2].trim() === requested.subject.trim()) {
+          outputRows.push({ id: created[1] });
+        }
+      }
+      // Link the create request's details to the ID supplied by its result.
       if (
         key === 'taskcreate' &&
         inputRows.length === 1 &&
