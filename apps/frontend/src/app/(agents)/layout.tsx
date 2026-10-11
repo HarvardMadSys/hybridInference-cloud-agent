@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
+import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -223,6 +224,7 @@ function AgentsShell({
   return (
     <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
       <AgentChangeStream userId={state.user?.id} />
+      <AgentNotifications />
       <div className="flex min-h-0 flex-1">
         <div
           className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}

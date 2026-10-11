@@ -192,6 +192,27 @@ export const en = {
   'settings.title': 'Settings',
   'settings.close': 'Close settings',
   'settings.done': 'Done',
+  'settings.notifications.title': 'Notifications',
+  'settings.notifications.description':
+    'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
+  'settings.notifications.enable': 'Enable notifications',
+  'settings.notifications.enabling': 'Enabling…',
+  'settings.notifications.disable': 'Disable notifications',
+  'settings.notifications.events': 'Notify me about',
+  'settings.notifications.questions': 'Agent questions',
+  'settings.notifications.turns': 'Turn completions',
+  'settings.notifications.enabled': 'Browser notifications are enabled for this account.',
+  'settings.notifications.off': 'Browser notifications are off.',
+  'settings.notifications.unsupported':
+    'This browser cannot send notifications. Try a supported browser over HTTPS.',
+  'settings.notifications.denied':
+    'Notifications are blocked. Allow notifications for this site in your browser settings, then return here.',
+  'settings.notifications.error':
+    'Could not enable notifications. Check your browser settings and try again.',
+  'notifications.question': 'Agent needs your answer',
+  'notifications.succeeded': 'Agent turn finished',
+  'notifications.failed': 'Agent turn failed',
+  'notifications.cancelled': 'Agent turn cancelled',
 
   'sessionArchive.badge': 'Archived',
   'sessionArchive.back': 'Archived sessions',
