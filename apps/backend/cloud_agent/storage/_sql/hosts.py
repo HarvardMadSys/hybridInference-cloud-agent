@@ -34,6 +34,7 @@ HOST_COLUMN_NAMES = (
     "drain_fence_token",
     "drain_fence_status_before",
     "drain_fence_active",
+    "drain_fence_epoch",
     "sandbox_runtime",
     "sandbox_image_digest",
     "runtime_versions",

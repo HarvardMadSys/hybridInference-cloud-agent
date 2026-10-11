@@ -216,20 +216,26 @@ class HostPoolRepository(Protocol):
         *,
         host: str,
         expected_fence_token: UUID | None,
+        expected_fence_epoch: UUID | None,
         fence_token: UUID,
-    ) -> tuple[str, str | None]:
-        """CAS an expected deployment-drain owner to ``fence_token``.
+    ) -> tuple[str, str | None, UUID | None]:
+        """CAS an expected deployment-drain owner and epoch to ``fence_token``.
 
-        The row lock covers observation and mutation. ``status_before`` is
-        returned only for ``"ok"``; other outcomes are ``"unknown"``,
-        ``"invalid"``, ``"manual"``, ``"stale"`` and ``"released"``.
+        Exact requested-token retries are resolved before the expected owner
+        and epoch are compared. The row lock covers observation and mutation.
+        ``status_before`` is returned only for ``"ok"``; other outcomes
+        are ``"unknown"``, ``"invalid"``, ``"manual"``, ``"stale"``
+        and ``"released"``. The epoch is absent only for an unknown host.
         """
         ...
 
-    async def release_host_drain_fence(self, *, host: str, fence_token: UUID) -> str:
+    async def release_host_drain_fence(
+        self, *, host: str, fence_token: UUID
+    ) -> tuple[str, UUID | None]:
         """Put the exact active drain owner online, retaining its receipt.
 
-        Returns ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"stale"``.
+        Returns the outcome and current post-update epoch. Outcomes are
+        ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"stale"``.
         """
         ...
 

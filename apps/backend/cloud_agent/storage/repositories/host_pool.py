@@ -512,72 +512,80 @@ class PostgresHostPoolRepository:
         *,
         host: str,
         expected_fence_token: Any | None,
+        expected_fence_epoch: Any | None,
         fence_token: Any,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, Any | None]:
         """CAS one deployment drain under the host row lock."""
-        expected = None if expected_fence_token is None else str(expected_fence_token)
+        expected_token = None if expected_fence_token is None else str(expected_fence_token)
+        expected_epoch = None if expected_fence_epoch is None else str(expected_fence_epoch)
         requested = str(fence_token)
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 "SELECT status, drain_fence_token, drain_fence_status_before, "
-                "drain_fence_active FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                "drain_fence_active, drain_fence_epoch "
+                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
             )
             if row is None:
-                return "unknown", None
+                return "unknown", None, None
             current_token = (
                 None if row["drain_fence_token"] is None else str(row["drain_fence_token"])
             )
+            current_epoch = row["drain_fence_epoch"]
             if current_token == requested:
                 if row["drain_fence_active"] and row["status"] == HOST_DRAINING:
-                    return "ok", row["drain_fence_status_before"]
-                if not row["drain_fence_active"] and row["status"] == HOST_ONLINE:
-                    return "released", None
-                return "invalid", None
-            if current_token != expected:
-                return "stale", None
+                    return "ok", row["drain_fence_status_before"], current_epoch
+                if not row["drain_fence_active"]:
+                    return "released", None, current_epoch
+                return "invalid", None, current_epoch
+            if current_token != expected_token or str(current_epoch) != expected_epoch:
+                return "stale", None, current_epoch
             if row["status"] == HOST_DRAINING and current_token is None:
-                return "manual", None
+                return "manual", None, current_epoch
             if row["status"] not in (HOST_ONLINE, HOST_DRAINING):
-                return "invalid", None
+                return "invalid", None, current_epoch
             status_before = row["status"]
-            await conn.execute(
+            next_epoch = await conn.fetchval(
                 "UPDATE agent_runner_hosts SET status = $2, drain_fence_token = $3::uuid, "
-                "drain_fence_status_before = $4, drain_fence_active = TRUE WHERE host = $1",
+                "drain_fence_status_before = $4, drain_fence_active = TRUE WHERE host = $1 "
+                "RETURNING drain_fence_epoch",
                 host,
                 HOST_DRAINING,
                 requested,
                 status_before,
             )
-        return "ok", status_before
+        return "ok", status_before, next_epoch
 
-    async def release_host_drain_fence(self, *, host: str, fence_token: Any) -> str:
+    async def release_host_drain_fence(
+        self, *, host: str, fence_token: Any
+    ) -> tuple[str, Any | None]:
         """Release only the exact active owner, retaining its idempotency receipt."""
         requested = str(fence_token)
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                "SELECT status, drain_fence_token, drain_fence_active "
+                "SELECT status, drain_fence_token, drain_fence_active, drain_fence_epoch "
                 "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
             )
             if row is None:
-                return "unknown"
+                return "unknown", None
+            current_epoch = row["drain_fence_epoch"]
             current_token = (
                 None if row["drain_fence_token"] is None else str(row["drain_fence_token"])
             )
             if current_token != requested:
-                return "stale"
+                return "stale", current_epoch
             if row["drain_fence_active"]:
                 if row["status"] != HOST_DRAINING:
-                    return "invalid"
-                await conn.execute(
+                    return "invalid", current_epoch
+                next_epoch = await conn.fetchval(
                     "UPDATE agent_runner_hosts SET status = $2, drain_fence_active = FALSE "
-                    "WHERE host = $1",
+                    "WHERE host = $1 RETURNING drain_fence_epoch",
                     host,
                     HOST_ONLINE,
                 )
-                return "ok"
-            return "ok" if row["status"] == HOST_ONLINE else "invalid"
+                return "ok", next_epoch
+            return "ok", current_epoch
 
     async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
         """Ask a host to run ``slots`` turns at once, or with ``None`` its default.

@@ -409,44 +409,99 @@ async def test_an_unknown_host_cannot_be_transitioned(store, hosts: PostgresHost
     assert await hosts.set_host_status(host="nope", status=HOST_DRAINING) == "unknown"
 
 
+async def _drain_epoch(hosts: PostgresHostPoolRepository, host: str = "runner-a"):
+    row = await hosts.get_host(host=host)
+    assert row is not None
+    return row["drain_fence_epoch"]
+
+
 async def test_drain_fence_acquire_and_release_are_response_loss_idempotent(
     store, hosts: PostgresHostPoolRepository
 ):
     await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
     token = uuid4()
 
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    active_epoch = acquired[2]
+    assert active_epoch != initial_epoch
     assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
-    ) == ("ok", HOST_ONLINE)
-    assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
-    ) == ("ok", HOST_ONLINE)
-    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=token) == "ok"
-    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=token) == "ok"
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("ok", HOST_ONLINE, active_epoch)
+
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert released[0] == "ok"
+    released_epoch = released[1]
+    assert released_epoch != active_epoch
+    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=token) == (
+        "ok",
+        released_epoch,
+    )
 
     row = await hosts.get_host(host="runner-a")
     assert row["status"] == HOST_ONLINE
     assert row["drain_fence_token"] == token
     assert row["drain_fence_status_before"] == HOST_ONLINE
     assert row["drain_fence_active"] is False
+    assert row["drain_fence_epoch"] == released_epoch
     assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
-    ) == ("released", None)
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("released", None, released_epoch)
 
 
-async def test_drain_fence_transfer_fences_stale_release_and_records_inheritance(
+async def test_drain_fence_requires_expected_token_and_epoch_for_transfer(
     store, hosts: PostgresHostPoolRepository
 ):
     await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
     first, second = uuid4(), uuid4()
-    assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=first
-    ) == ("ok", HOST_ONLINE)
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=first,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    first_epoch = acquired[2]
 
     assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=first, fence_token=second
-    ) == ("ok", HOST_DRAINING)
-    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=first) == "stale"
+        host="runner-a",
+        expected_fence_token=uuid4(),
+        expected_fence_epoch=first_epoch,
+        fence_token=second,
+    ) == ("stale", None, first_epoch)
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=first,
+        expected_fence_epoch=initial_epoch,
+        fence_token=second,
+    ) == ("stale", None, first_epoch)
+    transferred = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=first,
+        expected_fence_epoch=first_epoch,
+        fence_token=second,
+    )
+    assert transferred[:2] == ("ok", HOST_DRAINING)
+    second_epoch = transferred[2]
+    assert second_epoch != first_epoch
+    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=first) == (
+        "stale",
+        second_epoch,
+    )
+
     row = await hosts.get_host(host="runner-a")
     assert row["status"] == HOST_DRAINING
     assert row["drain_fence_token"] == second
@@ -459,15 +514,23 @@ async def test_drain_fence_refuses_manual_drain_and_legacy_undrain_without_force
 ):
     await _enrol(store, "runner-a", hosts=hosts)
     assert await hosts.set_host_status(host="runner-a", status=HOST_DRAINING) == "ok"
+    manual_epoch = await _drain_epoch(hosts)
     assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=uuid4()
-    ) == ("manual", None)
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=manual_epoch,
+        fence_token=uuid4(),
+    ) == ("manual", None, manual_epoch)
     assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE) == "ok"
 
     token = uuid4()
-    assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
-    ) == ("ok", HOST_ONLINE)
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
     assert await hosts.set_host_status(host="runner-a", status=HOST_DRAINING) == "ok"
     assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE) == "fenced"
     assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE, force=True) == "ok"
@@ -477,16 +540,20 @@ async def test_drain_fence_refuses_manual_drain_and_legacy_undrain_without_force
     assert row["drain_fence_active"] is False
 
 
-async def test_database_constraint_rejects_old_binary_writes_and_partial_receipts(
+async def test_database_constraint_rejects_active_old_writes_and_partial_receipts(
     db, store, hosts: PostgresHostPoolRepository
 ):
     import asyncpg
 
     await _enrol(store, "runner-a", hosts=hosts)
     token = uuid4()
-    assert await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
-    ) == ("ok", HOST_ONLINE)
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
     with pytest.raises(asyncpg.CheckViolationError):
         async with db.acquire() as conn:
             await conn.execute(
@@ -512,7 +579,10 @@ async def test_reenrollment_cannot_clear_an_active_drain_fence(
     await _enrol(store, "runner-a", hosts=hosts)
     token = uuid4()
     await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
     )
 
     with pytest.raises(ValueError, match="host_drain_fenced"):
@@ -532,18 +602,119 @@ async def test_reenrollment_cannot_clear_an_active_drain_fence(
     )
 
 
-async def test_an_active_drain_fence_cannot_be_forgotten(store, hosts: PostgresHostPoolRepository):
+async def test_database_prevents_active_delete_and_epoch_fences_delete_recreate_replay(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    import asyncpg
+
     await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
     token = uuid4()
     await hosts.acquire_host_drain_fence(
-        host="runner-a", expected_fence_token=None, fence_token=token
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
     )
 
     assert await hosts.forget_runner_host(host="runner-a") == "fenced"
-    row = await hosts.get_host(host="runner-a")
-    assert row["status"] == HOST_DRAINING
-    assert row["drain_fence_token"] == token
-    assert row["drain_fence_active"] is True
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM agent_runner_hosts WHERE host=$1", "runner-a")
+
+    assert (await hosts.release_host_drain_fence(host="runner-a", fence_token=token))[0] == "ok"
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "DELETE FROM agent_runner_hosts WHERE host=$1 RETURNING host", "runner-a"
+            )
+            == "runner-a"
+        )
+    await _enrol(store, "runner-a", hosts=hosts)
+    recreated_epoch = await _drain_epoch(hosts)
+    assert recreated_epoch != initial_epoch
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("stale", None, recreated_epoch)
+
+
+async def test_old_writer_clear_and_heartbeat_fence_an_acquire_replay(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
+    token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    )
+    assert acquired[0] == "ok"
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert released[0] == "ok"
+
+    async with db.acquire() as conn:
+        cleared_epoch = await conn.fetchval(
+            """
+            UPDATE agent_runner_hosts
+            SET status=$2, drain_fence_token=NULL,
+                drain_fence_status_before=NULL, drain_fence_active=FALSE
+            WHERE host=$1
+            RETURNING drain_fence_epoch
+            """,
+            "runner-a",
+            HOST_OFFLINE,
+        )
+        heartbeat_epoch = await conn.fetchval(
+            "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1 RETURNING drain_fence_epoch",
+            "runner-a",
+            HOST_ONLINE,
+        )
+    assert cleared_epoch not in (acquired[2], released[1])
+    assert heartbeat_epoch != cleared_epoch
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("stale", None, heartbeat_epoch)
+
+
+async def test_released_receipt_survives_old_writer_status_change(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert acquired[0] == released[0] == "ok"
+
+    async with db.acquire() as conn:
+        offline_epoch = await conn.fetchval(
+            "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1 RETURNING drain_fence_epoch",
+            "runner-a",
+            HOST_OFFLINE,
+        )
+    assert offline_epoch != released[1]
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=uuid4(),
+        expected_fence_epoch=uuid4(),
+        fence_token=token,
+    ) == ("released", None, offline_epoch)
+    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=token) == (
+        "ok",
+        offline_epoch,
+    )
 
 
 async def test_the_reaper_marks_a_silent_enrolled_host_offline(
