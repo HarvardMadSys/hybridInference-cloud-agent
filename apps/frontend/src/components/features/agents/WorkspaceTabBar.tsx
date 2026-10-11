@@ -44,7 +44,7 @@ export function WorkspaceTabBar({
     setFocusTab(null);
   }, [focusTab]);
   return (
-    <div className="relative z-10 flex shrink-0 flex-col border-b border-border bg-surface text-[13px] font-medium">
+    <div className="relative z-10 flex shrink-0 flex-col border-b border-border bg-surface-muted text-[13px] font-medium">
       {onBack ? (
         <div className="border-b border-border px-3 py-1.5 lg:hidden">
           <button
@@ -67,11 +67,11 @@ export function WorkspaceTabBar({
           </button>
         </div>
       ) : null}
-      <div className="flex min-w-0 px-3">
+      <div className="flex min-w-0 px-2 sm:px-3">
         <nav
           aria-label="Workspace views"
           role="tablist"
-          className="flex min-w-0 gap-1 overflow-x-auto"
+          className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
         >
           {tabs.map((tab, index) => (
             <div
@@ -104,7 +104,7 @@ export function WorkspaceTabBar({
                     setFocusTab(tabs[target].key);
                   }
                 }}
-                className={`ui-tab py-3 pl-3 ${tab.chat ? 'pr-1' : 'pr-3'}`}
+                className={`ui-tab min-h-11 rounded-t-lg py-3 pl-3 aria-selected:bg-surface aria-selected:font-semibold aria-selected:text-accent ${tab.chat ? 'pr-1' : 'pr-3'}`}
               >
                 {tab.label}
                 {tab.key === 'git' && diffCount ? (
@@ -119,7 +119,7 @@ export function WorkspaceTabBar({
                   aria-label={t('sideChat.close', { name: tab.label })}
                   title={t('sideChat.close', { name: tab.label })}
                   onClick={() => setFocusTab(onClose(tab.chat!.id))}
-                  className="ui-icon-button ui-button-ghost mr-1 p-1"
+                  className="ui-icon-button ui-button-ghost mr-1 h-9 w-9 shrink-0 p-2"
                 >
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path
@@ -140,7 +140,7 @@ export function WorkspaceTabBar({
             aria-label={t('sideChat.new')}
             title={t('sideChat.new')}
             onClick={() => setFocusTab(onAdd())}
-            className="ui-icon-button ui-button-ghost"
+            className="ui-icon-button ui-button-ghost h-9 w-9 shrink-0"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path

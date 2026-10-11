@@ -27,12 +27,12 @@ export function SettingsLauncher() {
         aria-haspopup="dialog"
         aria-expanded={open}
         title={t('sidebar.openSettings')}
-        className="group flex w-full shrink-0 items-center gap-2.5 border-t border-gray-200/80 bg-white/50 px-4 py-3 text-left transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/25 dark:border-white/10 dark:bg-white/[0.02] dark:hover:bg-white/[0.06]"
+        className="ui-focus-ring group flex min-h-14 w-full shrink-0 items-center gap-3 border-t border-border bg-surface/60 px-4 py-3 text-left transition-colors hover:bg-surface-hover focus-visible:-outline-offset-2"
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-crimson/[0.08] text-[11px] font-semibold text-crimson ring-1 ring-inset ring-crimson/10 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-subtle text-accent">
           <GearIcon />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-gray-800 dark:text-gray-200">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {t('settings.title')}
         </span>
         <span className="sr-only">{t('sidebar.openSettings')}</span>

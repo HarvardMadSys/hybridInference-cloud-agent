@@ -13,6 +13,7 @@ import { conversationLink } from '../../conversations/filters';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../../AdminPageHeader';
 import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
 import { SessionStatistics } from '../SessionStatistics';
@@ -169,20 +170,21 @@ function RunDetails({ jobId }: { jobId: string }) {
   const startup = useStartupSample(jobId, latest?.attempt_id ?? null, revision);
   if (denied) return <AdminRequired />;
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-6xl px-6 py-12 lg:px-12 lg:py-16">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Turn details"
+          description="Inspect execution results, inference requests, and resource usage for this turn."
+        />
         <AdminNavigation current="runs" />
-        <div className="mt-6 flex items-center justify-between gap-4">
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
           <Link
             href={
               detail?.run.thread_id
                 ? conversationHref(detail.run.thread_id, linked.filters ?? {})
                 : '/admin/activity'
             }
-            className="text-sm text-crimson hover:underline dark:text-crimson-light"
+            className="ui-focus-ring inline-flex min-h-11 items-center rounded-lg text-sm text-accent hover:underline"
           >
             {detail?.run.thread_id ? '← Back to session' : '← All sessions'}
           </Link>

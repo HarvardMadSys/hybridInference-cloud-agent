@@ -109,8 +109,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
   if (denied) return <AccessDenied />;
 
   const changed = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
-  const inputClass =
-    'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/20 dark:bg-gray-900 dark:text-gray-100';
+  const inputClass = 'ui-input min-h-11 w-full';
 
   return (
     <div className="max-w-4xl">
@@ -157,15 +156,15 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
           }}
         >
           <fieldset disabled={busy} className="space-y-8">
-            <section className="space-y-4" aria-labelledby="cloud-resource-heading">
+            <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
               <h3
                 id="cloud-resource-heading"
-                className="border-b border-gray-200 pb-2 text-sm font-semibold dark:border-white/10"
+                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
               >
                 Cloud resource
               </h3>
               <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-1 text-sm">
+                <label className="space-y-2 text-sm">
                   <span className="font-medium">CloudLab project</span>
                   <input
                     aria-label="CloudLab project"
@@ -178,7 +177,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                     Project that will own new experiments.
                   </span>
                 </label>
-                <label className="space-y-1 text-sm">
+                <label className="space-y-2 text-sm">
                   <span className="font-medium">Initial duration (hours)</span>
                   <input
                     aria-label="Initial duration (hours)"
@@ -197,15 +196,15 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
               </div>
             </section>
 
-            <section className="space-y-4" aria-labelledby="machine-template-heading">
+            <section className="ui-card space-y-4 p-5" aria-labelledby="machine-template-heading">
               <h3
                 id="machine-template-heading"
-                className="border-b border-gray-200 pb-2 text-sm font-semibold dark:border-white/10"
+                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
               >
                 Machine template
               </h3>
               <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-1 text-sm">
+                <label className="space-y-2 text-sm">
                   <span className="font-medium">Template project</span>
                   <input
                     aria-label="Template project"
@@ -220,7 +219,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                     Project that publishes the CloudLab profile.
                   </span>
                 </label>
-                <label className="space-y-1 text-sm">
+                <label className="space-y-2 text-sm">
                   <span className="font-medium">Template name</span>
                   <input
                     aria-label="Template name"
@@ -236,14 +235,14 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
               </div>
             </section>
 
-            <section className="space-y-4" aria-labelledby="ssh-access-heading">
+            <section className="ui-card space-y-4 p-5" aria-labelledby="ssh-access-heading">
               <h3
                 id="ssh-access-heading"
-                className="border-b border-gray-200 pb-2 text-sm font-semibold dark:border-white/10"
+                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
               >
                 SSH access
               </h3>
-              <label className="block max-w-xl space-y-1 text-sm">
+              <label className="block max-w-xl space-y-2 text-sm">
                 <span className="font-medium">CloudLab SSH user</span>
                 <input
                   aria-label="CloudLab SSH user"
@@ -256,11 +255,11 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
               </label>
             </section>
 
-            <div className="flex items-center justify-end border-t border-gray-200 pt-4 dark:border-white/10">
+            <div className="flex items-center justify-end">
               <button
                 type="submit"
                 disabled={!changed || busy}
-                className="rounded-lg border border-gray-300 bg-crimson px-4 py-2 text-sm font-medium text-white hover:bg-crimson/90 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/20"
+                className="ui-button ui-button-primary min-h-11 px-5"
               >
                 {busy ? 'Saving…' : 'Save defaults'}
               </button>

@@ -161,7 +161,7 @@ export function PromptRewrite({
           type="button"
           disabled={disabled || active || !value.trim() || !model}
           onClick={() => void rewrite()}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          className="ui-focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:min-h-11"
         >
           <svg
             viewBox="0 0 20 20"
@@ -179,7 +179,7 @@ export function PromptRewrite({
           </svg>
           {t('rewrite.button')}
         </button>
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+        <label className="flex min-h-9 cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400 [@media(pointer:coarse)]:min-h-11">
           <input
             type="checkbox"
             checked={clarify}
@@ -195,11 +195,7 @@ export function PromptRewrite({
           </span>
         ) : null}
         {pending && !questions.length ? (
-          <button
-            type="button"
-            onClick={cancel}
-            className="text-xs text-gray-500 hover:underline dark:text-gray-400"
-          >
+          <button type="button" onClick={cancel} className="ui-button ui-button-ghost text-xs">
             {t('rewrite.cancel')}
           </button>
         ) : null}
@@ -247,16 +243,12 @@ export function PromptRewrite({
                     previous.map((answer, at) => (at === index ? event.target.value : answer)),
                   )
                 }
-                className="mt-1.5 block w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-normal text-gray-900 focus:border-crimson/40 focus:outline-none focus:ring-2 focus:ring-crimson/20 disabled:opacity-50 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+                className="mt-1.5 block w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-normal text-gray-900 focus:border-crimson/40 focus:outline-none focus:ring-2 focus:ring-crimson/20 disabled:opacity-50 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 [@media(pointer:coarse)]:text-base"
               />
             </label>
           ))}
           <div className="flex items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={cancel}
-              className="text-xs text-gray-500 hover:underline dark:text-gray-400"
-            >
+            <button type="button" onClick={cancel} className="ui-button ui-button-ghost text-xs">
               {t('rewrite.cancel')}
             </button>
             <button

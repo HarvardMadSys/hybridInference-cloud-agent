@@ -51,7 +51,7 @@ function emptyProvider(provider: AgentIntegrationProvider): AgentIntegrationProv
 
 function ProviderIcon({ provider }: { provider: AgentIntegrationProvider }) {
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
+    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-border bg-surface-muted text-foreground">
       {provider === 'github' ? (
         <svg className="h-5 w-5" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
           <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
@@ -113,7 +113,7 @@ function ProviderActions({
     // and "Admin setup required" reads as "ask someone and you can have it".
     if (COMING_SOON.includes(integration.provider)) {
       return (
-        <span className="rounded-full bg-gray-100 dark:bg-white/5 px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
+        <span className="rounded-full border border-border bg-surface-muted px-3 py-1.5 text-xs font-medium text-muted">
           Coming soon
         </span>
       );
@@ -130,10 +130,7 @@ function ProviderActions({
       return <span className="text-sm text-gray-500 dark:text-gray-400">Admin setup required</span>;
     }
     return integration.connect_url ? (
-      <a
-        href={integration.connect_url}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5"
-      >
+      <a href={integration.connect_url} className="ui-button ui-button-primary min-h-11">
         Connect
         <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
           <path
@@ -151,21 +148,18 @@ function ProviderActions({
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {/* Out of the menu. It is the one way to add repositories — installing
           the App on a personal account or another organization — and a member
           of an organization that already had the App never saw it: connecting
           found that installation, so GitHub's install page was skipped. */}
       {integration.manage_url ? (
-        <a
-          href={integration.manage_url}
-          className="inline-flex items-center gap-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5"
-        >
+        <a href={integration.manage_url} className="ui-button ui-button-secondary min-h-11">
           Configure repositories
         </a>
       ) : null}
-      <details className="group relative">
-        <summary className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden">
+      <details className="group relative w-full lg:w-auto">
+        <summary className="ui-button ui-button-secondary min-h-11 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
           Manage
           <svg
             className="h-4 w-4 transition-transform group-open:rotate-180"
@@ -182,7 +176,7 @@ function ProviderActions({
             />
           </svg>
         </summary>
-        <div className="absolute right-0 z-10 mt-1 w-56 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-1.5 shadow-lg">
+        <div className="ui-card absolute left-0 z-10 mt-2 w-56 max-w-[calc(100vw-3rem)] bg-surface p-1.5 shadow-lg lg:left-auto lg:right-0">
           {/* GitHub has one way out and nothing else here. Reauthorizing only
               mattered for an installation made outside this page, which
               disconnecting and connecting again also picks up; removing one
@@ -192,7 +186,7 @@ function ProviderActions({
           {integration.provider !== 'github' && integration.connect_url ? (
             <a
               href={integration.connect_url}
-              className="block rounded-lg px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
+              className="ui-focus-ring flex min-h-11 items-center rounded-lg px-3 py-2 text-sm text-foreground hover:bg-surface-hover"
             >
               Reauthorize {copy.name}
             </a>
@@ -203,7 +197,7 @@ function ProviderActions({
               type="button"
               disabled={disconnecting === account.id}
               onClick={() => onDisconnect(account.id, account.label)}
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+              className="ui-focus-ring block min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm text-status-error hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-500/10"
             >
               {disconnecting === account.id
                 ? `Disconnecting ${account.label}…`
@@ -215,7 +209,7 @@ function ProviderActions({
               type="button"
               disabled={disconnecting === GITHUB_ACCOUNT}
               onClick={onDisconnectAll}
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+              className="ui-focus-ring block min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm text-status-error hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-500/10"
             >
               {disconnecting === GITHUB_ACCOUNT ? 'Disconnecting GitHub…' : 'Disconnect GitHub'}
             </button>
@@ -334,13 +328,15 @@ export function IntegrationsView({
   const providersByName = new Map(providers.map((provider) => [provider.provider, provider]));
 
   return (
-    <section className="mx-auto w-full max-w-5xl px-6 py-12 lg:px-12 lg:py-16">
-      <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-        Integrations
-      </h1>
-      <p className="mt-2 text-base text-gray-500 dark:text-gray-400">
-        Connect your tools and give your agents reusable skills.
-      </p>
+    <section className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-10 lg:py-10">
+      <header className="border-b border-border pb-6">
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+          Integrations
+        </h1>
+        <p className="mt-2 max-w-xl text-sm leading-6 text-muted sm:text-base">
+          Connect your tools and give your agents reusable skills.
+        </p>
+      </header>
 
       {notice ? (
         <div
@@ -352,23 +348,31 @@ export function IntegrationsView({
       ) : null}
       {error ? (
         <div
-          className="mt-6 flex items-center justify-between gap-4 rounded-xl border border-red-200 dark:border-red-500/25 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400"
+          className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 dark:border-red-500/25 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400"
           role="alert"
         >
-          <span>{error}</span>
+          <span className="min-w-0 break-words">{error}</span>
           <button
             type="button"
             onClick={() => void load()}
-            className="shrink-0 font-medium hover:underline"
+            className="ui-button ui-focus-ring min-h-11 shrink-0 hover:bg-red-100 dark:hover:bg-red-500/10"
           >
             Try again
           </button>
         </div>
       ) : null}
 
-      <div className="mt-10">
-        <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Source Control</h2>
-        <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 shadow-sm">
+      <section
+        aria-labelledby="source-control-heading"
+        className="ui-card mt-6 rounded-2xl bg-surface px-4 sm:px-6"
+      >
+        <h2
+          id="source-control-heading"
+          className="border-b border-border py-5 text-base font-semibold text-foreground"
+        >
+          Source Control
+        </h2>
+        <div>
           {PROVIDERS.map((provider, index) => {
             const foundIntegration = providersByName.get(provider);
             const integration = foundIntegration ?? emptyProvider(provider);
@@ -377,15 +381,15 @@ export function IntegrationsView({
             return (
               <div
                 key={provider}
-                className={`flex min-h-24 flex-col justify-center gap-4 py-5 sm:flex-row sm:items-center ${
-                  index > 0 ? 'border-t border-gray-100 dark:border-white/5' : ''
+                className={`flex min-h-24 flex-col justify-center gap-4 py-5 lg:flex-row lg:items-center ${
+                  index > 0 ? 'border-t border-border' : ''
                 }`}
               >
-                <div className="flex min-w-0 flex-1 items-center gap-4">
+                <div className="flex min-w-0 flex-1 items-start gap-3 sm:gap-4">
                   <ProviderIcon provider={provider} />
                   <div className="min-w-0">
-                    <h3 className="font-medium text-gray-900 dark:text-gray-50">{copy.name}</h3>
-                    <p className="mt-0.5 text-sm leading-5 text-gray-500 dark:text-gray-400">
+                    <h3 className="text-sm font-semibold text-foreground">{copy.name}</h3>
+                    <p className="mt-1 break-words text-sm leading-6 text-muted">
                       {loading
                         ? 'Loading connection status…'
                         : statusUnavailable
@@ -398,10 +402,10 @@ export function IntegrationsView({
                     </p>
                   </div>
                 </div>
-                <div className="flex shrink-0 justify-end pl-14 sm:pl-0">
+                <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 lg:justify-end">
                   {loading ? (
                     <span
-                      className="h-8 w-24 animate-pulse rounded-lg bg-gray-100 dark:bg-white/5"
+                      className="h-11 w-24 animate-pulse rounded-lg bg-surface-muted"
                       aria-label={`Loading ${copy.name}`}
                     />
                   ) : statusUnavailable ? (
@@ -421,9 +425,9 @@ export function IntegrationsView({
             );
           })}
         </div>
-      </div>
+      </section>
 
-      <div className="mt-10 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-6 shadow-sm">
+      <div className="ui-card mt-6 rounded-2xl bg-surface p-4 sm:p-6">
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
       <SkillsSection />

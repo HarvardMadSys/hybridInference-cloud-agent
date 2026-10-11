@@ -15,6 +15,7 @@ export function composerOverrides(job: AgentJob, model: string, effort: string) 
 export function ComposerTextarea({
   onKeyDown,
   textareaRef,
+  className,
   ...props
 }: TextareaHTMLAttributes<HTMLTextAreaElement> & {
   /**
@@ -31,6 +32,7 @@ export function ComposerTextarea({
     <textarea
       {...props}
       ref={textareaRef}
+      className={`${className ?? ''} [@media(pointer:coarse)]:text-base`}
       onKeyDown={(event) => {
         // A caller's handler runs first and has the last word: the command menu
         // consumes the keys it owns — including the Enter that would otherwise
@@ -59,12 +61,15 @@ export function ComposerSendButton({
     <button
       type="submit"
       disabled={disabled}
-      className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
+      className="ui-focus-ring ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
       aria-label={label}
       title={title}
     >
       {busy ? (
-        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+        <span
+          aria-hidden="true"
+          className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"
+        />
       ) : (
         <svg
           aria-hidden="true"
@@ -108,7 +113,7 @@ export function ComposerMessageActions({
           disabled={disabled || busy}
           aria-keyshortcuts="Meta+Enter Control+Enter"
           title={steerTitle}
-          className="inline-flex h-8 items-center rounded-lg border border-gray-200 px-3 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-100 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-gray-200 dark:hover:bg-white/10"
+          className="ui-focus-ring inline-flex min-h-10 items-center rounded-xl border border-gray-200 px-3 text-[13px] font-medium text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-gray-200 dark:hover:bg-white/10 [@media(pointer:coarse)]:min-h-11"
         >
           {steerLabel}
         </button>
@@ -117,12 +122,12 @@ export function ComposerMessageActions({
         type="submit"
         disabled={disabled || busy}
         title={title}
-        className="inline-flex h-8 items-center gap-2 rounded-lg bg-crimson px-3 text-xs font-medium text-white shadow-sm transition-colors hover:bg-crimson-dark focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40"
+        className="ui-focus-ring inline-flex min-h-10 items-center gap-2 rounded-xl bg-crimson px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:min-h-11"
       >
         {busy ? (
           <span
             aria-hidden="true"
-            className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white"
+            className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"
           />
         ) : null}
         {label}

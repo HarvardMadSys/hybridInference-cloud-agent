@@ -154,6 +154,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'taskActions.pinFailed': '无法更新置顶状态',
   // ── Shell chrome ────────────────────────────────────────────────────────
   'nav.aria': '产品导航',
+  'nav.skipToWorkspace': '跳转到工作区',
   'nav.status': '服务状态',
   'nav.docsAssistant': '文档助手',
   'nav.agents': 'Agents',

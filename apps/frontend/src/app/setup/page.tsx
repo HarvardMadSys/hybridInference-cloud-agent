@@ -17,7 +17,7 @@ export default function SetupPage() {
   };
 
   return (
-    <main className="mx-auto w-full max-w-5xl px-6 py-12">
+    <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
       <h1 className="text-2xl font-semibold text-gray-900 dark:text-gray-50">
         Administrator setup
       </h1>
@@ -30,11 +30,11 @@ export default function SetupPage() {
       </p>
       {token ? (
         <>
-          <div className="mt-5 flex items-center gap-5 text-sm">
-            <button type="button" className="underline" onClick={lock}>
+          <div className="mt-5 flex flex-wrap items-center gap-3 text-sm">
+            <button type="button" className="ui-button ui-button-secondary" onClick={lock}>
               Lock setup
             </button>
-            <Link href="/login" className="underline">
+            <Link href="/login" className="ui-button ui-button-ghost">
               Go to sign-in
             </Link>
           </div>
@@ -49,7 +49,7 @@ export default function SetupPage() {
         </>
       ) : (
         <form
-          className="mt-6 max-w-lg rounded-xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-gray-900"
+          className="ui-card mt-6 max-w-lg p-5 sm:p-6"
           onSubmit={(event) => {
             event.preventDefault();
             if (!draft.trim()) return;
@@ -69,12 +69,9 @@ export default function SetupPage() {
             autoComplete="off"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            className="mt-2 w-full rounded-md border border-gray-200 bg-transparent px-3 py-2 dark:border-white/15"
+            className="ui-input mt-2 w-full"
           />
-          <button
-            type="submit"
-            className="mt-4 rounded-md bg-crimson px-4 py-2 text-sm font-medium text-white"
-          >
+          <button type="submit" className="ui-button ui-button-primary mt-4 w-full sm:w-auto">
             Unlock setup
           </button>
           {denied && (

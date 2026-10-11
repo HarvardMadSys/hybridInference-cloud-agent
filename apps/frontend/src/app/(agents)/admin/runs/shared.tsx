@@ -5,23 +5,14 @@ export function accessDenied(error: unknown): boolean {
   return error instanceof APIError && (error.statusCode === 401 || error.statusCode === 403);
 }
 
-export const CARD =
-  'rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-gray-900';
-// Focus rings replace the native outline, so they have to clear WCAG 1.4.11's
-// 3:1 non-text contrast on their own. Solid crimson is 7.2:1 against the light
-// surface and crimson-light is 3.4:1 against gray-900; the 40%-alpha variants
-// this replaced measured 2.1:1 and 1.3:1. The 2px offset keeps the ring off the
-// control's own border, which is too light in dark mode to sit against.
-export const BUTTON =
-  'rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5 dark:focus-visible:ring-crimson-light dark:focus-visible:ring-offset-gray-900';
+export const CARD = 'ui-card rounded-2xl';
+// Shared semantic controls retain a solid, offset theme-aware focus indicator.
+export const BUTTON = 'ui-button ui-button-secondary min-h-11';
 //: A compact select for a toolbar, sized to sit beside a segmented control.
-export const TOOLBAR_SELECT =
-  'h-8 rounded-md border border-gray-200 bg-white pl-2.5 pr-8 text-sm text-gray-700 transition-colors hover:border-gray-300 focus:border-crimson focus:outline-none focus:ring-2 focus:ring-crimson focus:ring-offset-1 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-white/20 dark:focus:border-crimson-light dark:focus:ring-crimson-light';
+export const TOOLBAR_SELECT = 'ui-input min-h-11 pl-3 pr-8 transition-colors hover:border-accent';
 //: An icon-only toolbar button; its label lives in aria-label and the tooltip.
-export const ICON_BUTTON =
-  'inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100 dark:focus-visible:ring-crimson-light';
-export const INPUT =
-  'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm transition-colors placeholder:text-gray-400 focus:border-crimson focus:outline-none focus:ring-2 focus:ring-crimson focus:ring-offset-2 focus:ring-offset-white dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500 dark:focus:border-crimson-light dark:focus:ring-crimson-light dark:focus:ring-offset-gray-900';
+export const ICON_BUTTON = 'ui-icon-button ui-button-ghost h-11 w-11 shrink-0';
+export const INPUT = 'ui-input min-h-11 w-full placeholder:text-muted';
 
 export function AdminRequired() {
   return (

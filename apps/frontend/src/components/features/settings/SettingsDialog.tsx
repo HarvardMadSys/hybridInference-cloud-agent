@@ -5,7 +5,7 @@ import { useFirstRun } from '@/components/features/agents/firstRun';
 import { useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
-import { CheckIcon, CloseIcon, HelpIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
+import { CheckIcon, CloseIcon, GearIcon, HelpIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 import { NotificationSettings } from './NotificationSettings';
 
 const THEME_ICONS: Record<ThemePreference, typeof SunIcon> = {
@@ -20,9 +20,8 @@ const THEME_LABEL_KEYS = {
   system: 'settings.appearance.system',
 } as const;
 
-const SECTION_TITLE =
-  'text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500';
-const FIELD_LABEL = 'text-[13px] font-medium text-gray-800 dark:text-gray-200';
+const SECTION_TITLE = 'text-xs font-semibold uppercase tracking-[0.08em] text-muted';
+const FIELD_LABEL = 'text-sm font-medium text-foreground';
 
 /** Elements that can hold focus, for the tab cycle below. */
 const FOCUSABLE =
@@ -86,7 +85,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-6"
       onKeyDown={onKeyDown}
       role="presentation"
     >
@@ -98,7 +97,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         type="button"
         aria-label={t('settings.close')}
         onClick={onClose}
-        className="absolute inset-0 cursor-default bg-gray-900/25 backdrop-blur-[2px] dark:bg-black/50"
+        className="absolute inset-0 cursor-default bg-gray-900/35 backdrop-blur-sm dark:bg-black/60"
       />
 
       <div
@@ -106,26 +105,28 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative flex max-h-full w-full max-w-md flex-col overflow-hidden rounded-xl border border-gray-200/80 bg-white shadow-card dark:border-white/10 dark:bg-gray-900"
+        className="ui-card relative flex max-h-[calc(100dvh-1.5rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-surface shadow-xl sm:max-h-[calc(100dvh-3rem)]"
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-gray-200/80 px-5 py-3.5 dark:border-white/10">
-          <h2
-            id={titleId}
-            className="text-[15px] font-semibold tracking-[-0.01em] text-gray-900 dark:text-gray-100"
-          >
-            {t('settings.title')}
-          </h2>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-4 sm:px-6">
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-subtle text-accent">
+              <GearIcon className="h-5 w-5" />
+            </span>
+            <h2 id={titleId} className="text-lg font-semibold tracking-tight text-foreground">
+              {t('settings.title')}
+            </h2>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label={t('settings.close')}
-            className="-mr-1.5 rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-200"
+            className="ui-icon-button ui-button-ghost -mr-2 h-11 w-11"
           >
             <CloseIcon />
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-6">
           <section aria-labelledby="settings-appearance">
             <h3 id="settings-appearance" className={SECTION_TITLE}>
               {t('settings.appearance.title')}
@@ -137,17 +138,17 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     hand-rolled segmented control would have to reimplement
                     arrow-key movement and the grouped announcement; these come
                     with the element. */}
-                <div className="mt-2 grid grid-cols-3 gap-1.5 rounded-lg bg-gray-100/80 p-1 dark:bg-white/5">
+                <div className="mt-3 grid grid-cols-3 gap-2 sm:gap-3">
                   {THEME_PREFERENCES.map((option) => {
                     const Icon = THEME_ICONS[option];
                     const checked = preference === option;
                     return (
                       <label
                         key={option}
-                        className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors focus-within:ring-2 focus-within:ring-crimson/30 ${
+                        className={`min-w-0 cursor-pointer rounded-xl border p-2 text-sm font-medium transition-colors focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-focus sm:p-3 ${
                           checked
-                            ? 'bg-white text-gray-900 shadow-subtle dark:bg-gray-700 dark:text-gray-50'
-                            : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+                            ? 'border-accent bg-accent-subtle text-accent shadow-subtle'
+                            : 'border-border bg-surface text-muted hover:border-border-strong hover:bg-surface-muted hover:text-foreground'
                         }`}
                       >
                         <input
@@ -158,8 +159,40 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                           onChange={() => setPreference(option)}
                           className="sr-only"
                         />
-                        <Icon className="h-3.5 w-3.5 shrink-0" />
-                        {t(THEME_LABEL_KEYS[option])}
+                        {/* Light and Dark previews keep their demonstrated palette
+                            regardless of the currently selected application theme. */}
+                        <div
+                          aria-hidden="true"
+                          className={`flex h-14 overflow-hidden rounded-md border shadow-subtle sm:h-16 ${
+                            option === 'light'
+                              ? 'border-gray-200 bg-white dark:border-gray-200 dark:bg-white'
+                              : option === 'dark'
+                                ? 'border-gray-700 bg-gray-900 dark:border-gray-700 dark:bg-gray-900'
+                                : 'border-border bg-surface'
+                          }`}
+                        >
+                          <div
+                            className={`w-1/4 border-r p-1.5 ${
+                              option === 'light'
+                                ? 'border-gray-200 bg-gray-50 dark:border-gray-200 dark:bg-gray-50'
+                                : option === 'dark'
+                                  ? 'border-gray-700 bg-gray-800 dark:border-gray-700 dark:bg-gray-800'
+                                  : 'border-border bg-surface-muted'
+                            }`}
+                          >
+                            <div className="h-1.5 rounded-full bg-crimson/70" />
+                            <div className="mt-2 h-1 rounded-full bg-muted/40" />
+                            <div className="mt-1 h-1 rounded-full bg-muted/40" />
+                          </div>
+                          <div className="flex flex-1 flex-col justify-between p-2">
+                            <div className="h-1 w-2/3 rounded-full bg-muted/40" />
+                            <div className="h-3 rounded border border-muted/25 bg-muted/10" />
+                          </div>
+                        </div>
+                        <span className="mt-2 flex min-h-8 items-center justify-center gap-1.5">
+                          <Icon className="h-4 w-4 shrink-0" />
+                          <span className="break-words">{t(THEME_LABEL_KEYS[option])}</span>
+                        </span>
                       </label>
                     );
                   })}
@@ -168,7 +201,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </div>
           </section>
 
-          <section aria-labelledby="settings-language" className="mt-6">
+          <section aria-labelledby="settings-language" className="mt-6 border-t border-border pt-6">
             <h3 id="settings-language" className={SECTION_TITLE}>
               {t('settings.language.title')}
             </h3>
@@ -180,7 +213,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   onChange={(event) => {
                     if (isLocale(event.target.value)) setLocale(event.target.value);
                   }}
-                  className="mt-2 w-full cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-2 text-[13px] font-medium text-gray-800 transition-colors hover:border-gray-300 focus:border-crimson/40 focus:outline-none focus:ring-2 focus:ring-crimson/20 dark:border-white/10 dark:bg-gray-800 dark:text-gray-100 dark:hover:border-white/20"
+                  className="ui-input mt-2 min-h-11 w-full cursor-pointer font-medium transition-colors hover:border-accent"
                 >
                   {LOCALES.map((option) => (
                     <option key={option} value={option}>
@@ -199,9 +232,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           {firstRun.hidden || gettingStartedShown ? (
             <section
               aria-labelledby="settings-getting-started"
-              className="mt-5 border-t border-gray-100 pt-4 dark:border-white/5"
+              className="mt-6 border-t border-border pt-5"
             >
-              <div className="flex items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1">
                 <h3 id="settings-getting-started" className={FIELD_LABEL}>
                   {t('gettingStarted.title')}
                 </h3>
@@ -212,7 +245,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     aria-label={t('settings.gettingStarted.about')}
                     aria-describedby={helpId}
                     aria-expanded={helpOpen}
-                    className="rounded-full p-0.5 text-gray-400 transition-colors hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-500 dark:hover:text-gray-300"
+                    className="ui-icon-button ui-button-ghost h-11 w-11 rounded-full"
                   >
                     <HelpIcon />
                   </button>
@@ -221,7 +254,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   <span
                     id={helpId}
                     role="tooltip"
-                    className={`pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-max max-w-64 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] leading-relaxed text-gray-600 shadow-lg transition-opacity group-hover/help:opacity-100 group-focus-within/help:opacity-100 dark:border-white/10 dark:bg-gray-800 dark:text-gray-300 ${
+                    className={`pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 w-56 max-w-[calc(100vw-4rem)] -translate-x-1/2 rounded-lg border border-border bg-surface-raised px-3 py-2 text-xs leading-relaxed text-muted shadow-lg transition-opacity group-hover/help:opacity-100 group-focus-within/help:opacity-100 ${
                       helpOpen ? 'opacity-100' : 'opacity-0'
                     }`}
                   >
@@ -233,7 +266,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     ref={shownNote}
                     role="status"
                     tabIndex={-1}
-                    className="ml-auto inline-flex h-8 shrink-0 items-center gap-1 text-[12px] text-gray-500 outline-none dark:text-gray-400"
+                    className="ml-auto inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-status-success outline-none"
                   >
                     <CheckIcon className="h-3.5 w-3.5 shrink-0" />
                     {t('settings.gettingStarted.shown')}
@@ -245,7 +278,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                       firstRun.show();
                       setGettingStartedShown(true);
                     }}
-                    className="ml-auto inline-flex h-8 shrink-0 items-center rounded-lg border border-gray-200 bg-white px-3 text-[13px] font-medium text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:border-white/10 dark:bg-gray-800 dark:text-gray-200 dark:hover:border-white/20 dark:hover:bg-gray-700"
+                    className="ui-button ui-button-secondary ml-auto min-h-11 shrink-0"
                   >
                     {t('settings.gettingStarted.show')}
                   </button>
@@ -255,14 +288,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           ) : null}
         </div>
 
-        <div className="flex shrink-0 justify-end border-t border-gray-200/80 px-5 py-3 dark:border-white/10">
+        <div className="flex shrink-0 justify-end border-t border-border bg-surface-muted/50 px-5 py-4 sm:px-6">
           {/* Every control here applies on change, so this closes rather than
               saves. It is named Done, not Save, so it does not promise a
               commit step that does not exist. */}
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg bg-crimson px-3.5 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-crimson-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30"
+            className="ui-button ui-button-primary min-h-11 min-w-24 shadow-subtle"
           >
             {t('settings.done')}
           </button>

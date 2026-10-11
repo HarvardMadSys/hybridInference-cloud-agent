@@ -710,9 +710,9 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
               </>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-1 rounded-b-2xl border-t border-gray-100 bg-gray-50/70 px-3 py-2.5 sm:px-4 dark:border-white/5 dark:bg-white/[0.02]">
+          <div className="flex flex-col gap-3 rounded-b-2xl border-t border-gray-100 bg-gray-50/70 px-3 py-3 sm:flex-row sm:items-center sm:px-4 dark:border-white/5 dark:bg-white/[0.02]">
             {!disconnected && (
-              <>
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
                 <Picker
                   label={t('composer.agent')}
                   value={runtime}
@@ -731,7 +731,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                   options={efforts}
                   onChange={setEffort}
                 />
-              </>
+              </div>
             )}
 
             <button
@@ -739,7 +739,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
               disabled={!canRun}
               onClick={() => void run()}
               title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
-              className={`ml-auto inline-flex min-h-10 items-center gap-2 rounded-xl bg-crimson px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${
+              className={`ml-auto inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-crimson px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 sm:w-auto dark:focus-visible:ring-offset-gray-900 ${
                 canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
               }`}
             >

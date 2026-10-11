@@ -14,6 +14,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../../AdminPageHeader';
 import {
   accessDenied,
   AdminRequired,
@@ -111,13 +112,16 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
   const conversation = page?.conversation;
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-12 lg:px-12">
-        <h1 className="text-3xl font-semibold text-gray-900 dark:text-gray-50">Admin</h1>
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Session details"
+          description="Inspect session activity, agent turns, and resource usage."
+        />
         <AdminNavigation current="activity" />
-        <div className="mt-6 flex items-center justify-between gap-4">
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
           <Link
             href={`/admin/activity${context}`}
-            className="text-sm text-crimson hover:underline dark:text-crimson-light"
+            className="ui-focus-ring inline-flex min-h-11 items-center rounded-lg text-sm text-accent hover:underline"
           >
             ← All sessions
           </Link>

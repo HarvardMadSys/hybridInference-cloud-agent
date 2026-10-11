@@ -16,7 +16,6 @@ import {
   SkillErrorMessage,
   SkillIcon,
   SKILL_BUTTON,
-  SKILL_PRIMARY,
 } from './SkillDialog';
 import { SkillEditor } from './SkillEditor';
 import { SkillImportDialog } from './SkillImportDialog';
@@ -111,7 +110,7 @@ function SkillDetails({
         skill && !loading ? (
           removing ? (
             <>
-              <p className="w-full pb-2 text-sm text-gray-600 dark:text-gray-300">
+              <p className="w-full pb-2 text-sm leading-6 text-muted">
                 Remove this skill from your library? Existing conversations keep their saved
                 version.
               </p>
@@ -119,7 +118,7 @@ function SkillDetails({
                 type="button"
                 disabled={busy}
                 onClick={() => setRemoving(false)}
-                className={SKILL_BUTTON}
+                className={`${SKILL_BUTTON} ui-focus-ring min-h-11`}
               >
                 Cancel
               </button>
@@ -127,7 +126,7 @@ function SkillDetails({
                 type="button"
                 disabled={busy}
                 onClick={() => void remove()}
-                className="rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-red-500"
+                className="ui-button min-h-11 bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 dark:bg-red-500 dark:hover:bg-red-600"
               >
                 {busy ? 'Removing…' : 'Confirm removal'}
               </button>
@@ -138,7 +137,7 @@ function SkillDetails({
                 type="button"
                 disabled={busy}
                 onClick={() => setRemoving(true)}
-                className="mr-auto text-sm text-red-600 disabled:opacity-50 dark:text-red-400"
+                className="ui-button mr-auto min-h-11 text-status-error hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-500/10"
               >
                 Remove skill
               </button>
@@ -147,12 +146,17 @@ function SkillDetails({
                   type="button"
                   disabled={busy}
                   onClick={() => onEdit(skill)}
-                  className={SKILL_BUTTON}
+                  className={`${SKILL_BUTTON} ui-focus-ring min-h-11`}
                 >
                   Edit skill
                 </button>
               ) : null}
-              <button type="button" disabled={busy} onClick={onClose} className={SKILL_PRIMARY}>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={onClose}
+                className="ui-button ui-button-primary min-h-11"
+              >
                 Done
               </button>
             </>
@@ -161,12 +165,12 @@ function SkillDetails({
       }
     >
       {loading ? (
-        <p role="status" className="text-sm text-gray-500 dark:text-gray-400">
+        <p role="status" className="text-sm text-muted">
           Loading skill…
         </p>
       ) : skill ? (
         <>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
             <span>{SOURCE_LABELS[skill.source]}</span>
             <span>· Version {skill.content_revision ?? skill.revision}</span>
             {skill.source_revision ? <span>· {skill.source_revision.slice(0, 7)}</span> : null}
@@ -176,15 +180,13 @@ function SkillDetails({
               href={skill.source_url}
               target="_blank"
               rel="noreferrer"
-              className="mt-2 block break-all text-xs text-gray-500 underline dark:text-gray-400"
+              className="ui-focus-ring mt-2 block break-all rounded text-xs text-accent underline underline-offset-2"
             >
               {skill.source_url}
             </a>
           ) : null}
-          <h3 className="mt-5 text-xs font-medium text-gray-500 dark:text-gray-400">
-            Instructions
-          </h3>
-          <pre className="mt-2 max-h-80 overflow-y-auto whitespace-pre-wrap break-words rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs leading-relaxed text-gray-800 dark:border-white/10 dark:bg-gray-950 dark:text-gray-200">
+          <h3 className="mt-5 text-sm font-medium text-foreground">Instructions</h3>
+          <pre className="mt-2 max-h-80 overflow-y-auto whitespace-pre-wrap break-words rounded-xl border border-border bg-surface-muted p-4 text-xs leading-relaxed text-foreground">
             {skill.instructions}
           </pre>
           <SkillDefault
@@ -203,7 +205,7 @@ function SkillDetails({
             setRetry((value) => value + 1);
           }}
           disabled={busy}
-          className={`${SKILL_BUTTON} mt-3`}
+          className={`${SKILL_BUTTON} ui-focus-ring mt-3 min-h-11`}
         >
           Refresh skill
         </button>
@@ -263,14 +265,14 @@ export function SkillsSection() {
   return (
     <section
       aria-labelledby="skills-heading"
-      className="mt-10 rounded-2xl border border-gray-200 bg-white px-6 pt-6 pb-2 shadow-sm dark:border-white/10 dark:bg-gray-900"
+      className="ui-card mt-6 rounded-2xl bg-surface px-4 pb-2 pt-4 sm:px-6 sm:pt-6"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 id="skills-heading" className="font-medium text-gray-900 dark:text-gray-50">
+        <div className="min-w-0 flex-1 basis-56">
+          <h2 id="skills-heading" className="text-base font-semibold text-foreground">
             Skills
           </h2>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          <p className="mt-1 text-sm leading-6 text-muted">
             Save reusable instructions for your agents.
           </p>
         </div>
@@ -279,7 +281,7 @@ export function SkillsSection() {
             type="button"
             onClick={() => setDialog({ kind: 'import' })}
             disabled={loading}
-            className={SKILL_BUTTON}
+            className={`${SKILL_BUTTON} ui-focus-ring min-h-11`}
           >
             Import skill
           </button>
@@ -287,31 +289,46 @@ export function SkillsSection() {
             type="button"
             onClick={() => setDialog({ kind: 'create' })}
             disabled={loading}
-            className={SKILL_PRIMARY}
+            className="ui-button ui-button-primary min-h-11"
           >
             <span aria-hidden="true">+</span>Create skill
           </button>
         </div>
       </div>
       {notice ? (
-        <p role="status" className="mt-4 text-sm text-emerald-700 dark:text-emerald-400">
+        <p
+          role="status"
+          className="mt-4 break-words rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-300"
+        >
           {notice}
         </p>
       ) : null}
       <SkillErrorMessage message={mutationError ?? error} />
       {error ? (
-        <button type="button" onClick={() => void reload()} className={`${SKILL_BUTTON} mt-3 mb-5`}>
+        <button
+          type="button"
+          onClick={() => void reload()}
+          className={`${SKILL_BUTTON} ui-focus-ring mt-3 mb-5 min-h-11`}
+        >
           Try again
         </button>
       ) : null}
       {loading ? (
-        <p role="status" className="py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+        <p role="status" className="py-10 text-center text-sm text-muted">
           Loading skills…
         </p>
       ) : !error && skills.length ? (
         <>
-          <div className="mt-6 flex items-center justify-between border-b border-gray-100 pb-2 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-            <span>Your skills</span>
+          <div className="mt-6 flex items-center justify-between border-b border-border pb-3 text-xs font-medium text-muted">
+            <span className="flex items-center gap-2">
+              Your skills{' '}
+              <span
+                aria-hidden="true"
+                className="rounded-full bg-surface-muted px-2 py-0.5 text-foreground"
+              >
+                {skills.length}
+              </span>
+            </span>
             <span
               className="mr-10 w-16 text-center sm:mr-11"
               title="Automatically enable skills in new chats"
@@ -319,7 +336,7 @@ export function SkillsSection() {
               Auto-use
             </span>
           </div>
-          <div className="divide-y divide-gray-100 dark:divide-white/5">
+          <div className="divide-y divide-border">
             {skills.map((skill) => (
               <SkillRow
                 key={skill.id}
@@ -332,14 +349,12 @@ export function SkillsSection() {
           </div>
         </>
       ) : !error ? (
-        <div className="py-12 text-center">
-          <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gray-100 text-gray-400 dark:bg-white/5 dark:text-gray-500">
+        <div className="my-5 rounded-xl border border-dashed border-border bg-surface-muted/40 px-4 py-10 text-center">
+          <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-surface text-accent">
             <SkillIcon className="h-6 w-6" />
           </span>
-          <h3 className="text-sm font-medium text-gray-800 dark:text-gray-200">
-            Your workflows, ready to reuse
-          </h3>
-          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+          <h3 className="text-sm font-semibold text-foreground">Your workflows, ready to reuse</h3>
+          <p className="mt-2 text-sm leading-6 text-muted">
             Import a skill or create your own instructions.
           </p>
         </div>

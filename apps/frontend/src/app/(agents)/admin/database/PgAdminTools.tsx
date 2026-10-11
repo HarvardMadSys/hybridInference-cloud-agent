@@ -42,7 +42,7 @@ export function PgAdminTools({ trackRequest, onDenied }: DatabaseAccessProps) {
   }, [trackRequest, onDenied, reload]);
 
   return (
-    <div className="mt-8 max-w-2xl rounded-2xl border border-gray-200 bg-white p-6 dark:border-white/10 dark:bg-gray-900">
+    <div className="ui-card mt-6 max-w-2xl rounded-2xl p-4 sm:p-6">
       <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">pgAdmin</h2>
       <p className="mt-3 text-sm leading-6 text-gray-600 dark:text-gray-400">
         Open pgAdmin for SQL queries and PostgreSQL server management.
@@ -87,7 +87,7 @@ export function PgAdminTools({ trackRequest, onDenied }: DatabaseAccessProps) {
             href={tools.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="mt-6 inline-flex min-h-10 items-center gap-2 rounded-lg bg-crimson px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-crimson/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
+            className="ui-button ui-button-primary mt-6 min-h-11 px-5"
           >
             Open pgAdmin
             <span aria-hidden="true">↗</span>
@@ -102,7 +102,7 @@ export function PgAdminTools({ trackRequest, onDenied }: DatabaseAccessProps) {
         <button
           type="button"
           onClick={() => setReload((value) => value + 1)}
-          className="mt-5 rounded text-sm font-medium text-crimson underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:text-crimson-light"
+          className="ui-button ui-button-ghost mt-5 min-h-11 text-accent underline"
         >
           Check again
         </button>
@@ -170,8 +170,7 @@ function SetupForm({
     }
   }
 
-  const inputClass =
-    'mt-1 block w-full rounded-lg border border-gray-300 bg-transparent px-3 py-2 text-gray-900 focus:border-crimson focus:outline-none focus:ring-1 focus:ring-crimson dark:border-white/20 dark:text-gray-50';
+  const inputClass = 'ui-input mt-2 block min-h-11 w-full';
   return (
     <form onSubmit={(event) => void submit(event)} className="mt-6 space-y-4">
       <p className="text-sm leading-6 text-gray-600 dark:text-gray-400">
@@ -230,7 +229,7 @@ function SetupForm({
       <button
         type="submit"
         disabled={creating}
-        className="inline-flex min-h-10 items-center rounded-lg bg-crimson px-4 py-2 text-sm font-semibold text-white hover:bg-crimson/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 disabled:opacity-50 dark:focus-visible:ring-offset-gray-900"
+        className="ui-button ui-button-primary min-h-11 px-5"
       >
         {creating ? 'Setting up pgAdmin…' : 'Set up pgAdmin'}
       </button>

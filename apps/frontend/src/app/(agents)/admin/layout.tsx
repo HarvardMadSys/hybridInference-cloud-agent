@@ -13,5 +13,5 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
     return <AdminRequired />;
   }
-  return <>{children}</>;
+  return <div className="flex min-h-full min-w-0 flex-col bg-surface-muted/50">{children}</div>;
 }

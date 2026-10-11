@@ -19,9 +19,9 @@ import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsV
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 const NAV_ITEM =
-  'inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 py-2 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:hover:bg-white/10 dark:hover:text-gray-100';
+  'inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 py-2 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:min-h-11';
 const NAV_ITEM_CURRENT =
-  'inline-flex min-h-9 shrink-0 items-center rounded-lg bg-crimson/[0.06] px-3 py-2 text-crimson ring-1 ring-inset ring-crimson/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25';
+  'inline-flex min-h-9 shrink-0 items-center rounded-lg bg-crimson/[0.06] px-3 py-2 text-crimson ring-1 ring-inset ring-crimson/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25 [@media(pointer:coarse)]:min-h-11';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
@@ -168,7 +168,7 @@ function SidebarToggleButton({
       aria-controls="agents-sidebar"
       aria-keyshortcuts="Meta+B Control+B"
       title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg
         aria-hidden="true"
@@ -262,6 +262,7 @@ function AgentsShell({
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
   const { state } = useAuth();
   const pathname = usePathname();
+  const t = useT();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -373,6 +374,13 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
         enabled={hasAgentPermission(state.user?.agent_access, 'agent.use')}
       >
         <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
+          <a
+            href="#agents-workspace"
+            onClick={closeMobileSidebar}
+            className="ui-focus-ring sr-only z-[60] rounded-lg bg-surface px-4 py-3 font-medium text-accent shadow-card focus:not-sr-only focus:absolute focus:left-3 focus:top-3"
+          >
+            {t('nav.skipToWorkspace')}
+          </a>
           <AgentsHeader
             sidebarToggle={
               mobile || sidebarCollapsed ? (

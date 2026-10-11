@@ -237,6 +237,18 @@ describe('AgentsLayout mobile task list', () => {
     });
   }
 
+  it('skips the task list and focuses the workspace when the mobile list is open', async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand task list' }));
+    const workspace = document.getElementById('agents-workspace')!;
+    expect(workspace).toHaveAttribute('hidden');
+
+    fireEvent.click(screen.getByRole('link', { name: 'Skip to workspace' }));
+
+    expect(workspace).not.toHaveAttribute('hidden');
+    await waitFor(() => expect(workspace).toHaveFocus());
+  });
+
   it('starts with the composer visible and the task list closed on a narrow screen', () => {
     renderLayout();
 

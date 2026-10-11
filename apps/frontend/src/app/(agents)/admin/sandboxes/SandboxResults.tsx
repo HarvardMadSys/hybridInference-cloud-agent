@@ -199,7 +199,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
             <select
               aria-label="Sandbox state"
               value={stateFilter}
-              className="ml-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+              className="ui-input ml-2 min-h-11"
               onChange={(event) => {
                 setSnapshot(null);
                 setLoading(true);
@@ -405,11 +405,8 @@ function FleetSummary({ sandboxes, nowMs }: { sandboxes: SandboxObservation[]; n
       className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6"
     >
       {cards.map(({ label, value, coverage }) => (
-        <div
-          key={label}
-          className="rounded-xl border border-gray-200 bg-white p-3 dark:border-white/10 dark:bg-gray-900"
-        >
-          <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>
+        <div key={label} className="ui-card p-4">
+          <dt className="text-xs text-muted">{label}</dt>
           <dd className="mt-1 text-lg font-semibold tabular-nums text-gray-900 dark:text-gray-100">
             {value}
           </dd>
@@ -455,11 +452,16 @@ function SandboxesTable({
     { label: 'Stats' },
   ];
   return (
-    <div className="mt-4 overflow-x-auto">
+    <div
+      role="region"
+      aria-label="Sandboxes table"
+      tabIndex={0}
+      className="ui-card ui-focus-ring mt-4 overflow-x-auto"
+    >
       <table className="w-full min-w-[950px] text-left text-sm">
         <caption className="sr-only">Sandboxes across users and hosts</caption>
-        <thead className="text-xs text-gray-500 dark:text-gray-400">
-          <tr className="border-b border-gray-100 dark:border-white/5">
+        <thead className="bg-surface-muted text-xs text-muted">
+          <tr className="border-b border-border">
             {columns.map(({ label, key }) => (
               <th
                 key={label}
@@ -471,7 +473,7 @@ function SandboxesTable({
                       : 'descending'
                     : undefined
                 }
-                className="px-3 py-2 font-normal"
+                className="px-3 py-3 font-medium"
               >
                 {key ? (
                   <button
@@ -492,7 +494,7 @@ function SandboxesTable({
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+        <tbody className="divide-y divide-border">
           {sandboxes.map((observation) => (
             <SandboxRow
               key={observation.sandbox.id}
@@ -827,7 +829,7 @@ function SandboxDetails({
       <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map(([label, value]) => (
           <div key={label}>
-            <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>
+            <dt className="text-xs text-muted">{label}</dt>
             <dd className="mt-1 break-words text-xs tabular-nums text-gray-900 dark:text-gray-100">
               {value}
             </dd>

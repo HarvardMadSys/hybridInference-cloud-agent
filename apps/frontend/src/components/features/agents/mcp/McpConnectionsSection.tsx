@@ -48,8 +48,7 @@ function needsSignIn(connection: McpConnectionApi) {
   );
 }
 
-const BUTTON =
-  'rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5';
+const BUTTON = 'ui-button ui-button-secondary min-h-11';
 
 /** A server list with one next action, automatic discovery, and optional details. */
 export function McpConnectionsSection({
@@ -247,15 +246,17 @@ export function McpConnectionsSection({
 
   const connections = data?.connections ?? [];
   return (
-    <div>
+    <section aria-labelledby="mcp-servers-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">MCP servers</h2>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+        <div className="min-w-0 flex-1 basis-64">
+          <h2 id="mcp-servers-heading" className="text-base font-semibold text-foreground">
+            MCP servers
+          </h2>
+          <p className="mt-1 text-sm leading-6 text-muted">
             Connect once. Enabled servers are available automatically in your conversations.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             type="button"
             disabled={loading || busy.size > 0}
@@ -268,7 +269,7 @@ export function McpConnectionsSection({
             type="button"
             disabled={loading || busy.size > 0}
             onClick={() => setAdding('servers')}
-            className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+            className="ui-button ui-button-primary min-h-11"
           >
             Add server
           </button>
@@ -277,7 +278,7 @@ export function McpConnectionsSection({
       {notice ? (
         <p
           role="status"
-          className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300"
+          className="mt-4 break-words rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-300"
         >
           {notice}
         </p>
@@ -285,9 +286,9 @@ export function McpConnectionsSection({
       {error ? (
         <div
           role="alert"
-          className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-500/10 dark:text-red-400"
+          className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-400"
         >
-          {error}
+          <span className="min-w-0 break-words">{error}</span>
           <button
             type="button"
             disabled={busy.size > 0}
@@ -297,24 +298,40 @@ export function McpConnectionsSection({
                 setError(cause instanceof Error ? cause.message : 'Could not load your servers.'),
               );
             }}
-            className="ml-3 font-medium underline"
+            className="ui-button ui-focus-ring min-h-11 hover:bg-red-100 dark:hover:bg-red-500/10"
           >
             Refresh
           </button>
         </div>
       ) : null}
-      <div className="mt-5 overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
+      <div className="mt-5 overflow-hidden rounded-xl border border-border bg-surface-muted/40">
         {loading && !data ? (
-          <p role="status" className="p-5 text-sm text-gray-500 dark:text-gray-400">
+          <p role="status" className="p-5 text-sm text-muted">
             Loading servers…
           </p>
         ) : null}
         {!loading && !connections.length ? (
-          <div className="px-5 py-8 text-center">
-            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+          <div className="px-5 py-10 text-center">
+            <span
+              aria-hidden="true"
+              className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-surface text-accent"
+            >
+              <svg
+                className="h-6 w-6"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              >
+                <rect x="3" y="3" width="18" height="7" rx="2" />
+                <rect x="3" y="14" width="18" height="7" rx="2" />
+                <path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" strokeLinecap="round" />
+              </svg>
+            </span>
+            <p className="text-sm font-semibold text-foreground">
               Your tools, in every conversation
             </p>
-            <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-muted">
               Browse MCP servers or paste an MCP JSON configuration to get started.
             </p>
           </div>
@@ -338,29 +355,30 @@ export function McpConnectionsSection({
                       ? 'Ready to connect'
                       : 'Connection failed';
           return (
-            <div
-              key={connection.id}
-              className="border-t border-gray-100 p-4 first:border-t-0 dark:border-white/5 sm:p-5"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2.5">
+            <div key={connection.id} className="border-t border-border p-4 first:border-t-0 sm:p-5">
+              <div className="flex flex-col items-start justify-between gap-3 lg:flex-row">
+                <div className="min-w-0 max-w-full flex-1">
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
                     <span
                       aria-hidden="true"
-                      className={`h-2 w-2 rounded-full ${working ? 'animate-pulse bg-amber-400' : active ? 'bg-emerald-500' : signIn ? 'bg-amber-500' : 'bg-gray-400 dark:bg-gray-500'}`}
+                      className={`h-2 w-2 shrink-0 rounded-full ${working ? 'animate-pulse bg-amber-400' : active ? 'bg-emerald-500' : signIn ? 'bg-amber-500' : 'bg-gray-400 dark:bg-gray-500'}`}
                     />
-                    <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    <h3 className="min-w-0 break-words text-sm font-semibold text-foreground">
                       {connection.label}
                     </h3>
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{state}</span>
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-xs font-medium ${active ? 'bg-emerald-50 text-status-success dark:bg-emerald-500/10' : signIn || working ? 'bg-amber-50 text-status-warning dark:bg-amber-500/10' : 'bg-surface-hover text-muted'}`}
+                    >
+                      {state}
+                    </span>
                   </div>
-                  <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  <p className="mt-2 break-all text-xs leading-5 text-muted">
                     {active
                       ? capabilitySummary(connection)
                       : (connection.url ?? connection.argv.join(' '))}
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   {enabled && connection.status !== 'disabled' ? (
                     <button
                       type="button"
@@ -385,41 +403,46 @@ export function McpConnectionsSection({
                       aria-checked={enabled}
                       disabled={busy.size > 0}
                       onClick={() => void toggle(connection)}
-                      className={`relative h-6 w-11 shrink-0 self-center rounded-full transition-colors disabled:opacity-50 ${enabled ? 'bg-gray-900 dark:bg-gray-100' : 'bg-gray-200 dark:bg-white/20'}`}
+                      className="ui-focus-ring relative h-11 w-12 shrink-0 rounded-lg disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <span
-                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform dark:bg-gray-900 ${enabled ? 'translate-x-5' : ''}`}
-                      />
+                        aria-hidden="true"
+                        className={`absolute left-0.5 top-1/2 h-6 w-11 -translate-y-1/2 rounded-full transition-colors motion-reduce:transition-none ${enabled ? 'bg-accent' : 'bg-gray-200 dark:bg-white/20'}`}
+                      >
+                        <span
+                          className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none dark:bg-white ${enabled ? 'translate-x-5' : ''}`}
+                        />
+                      </span>
                     </button>
                   ) : null}
                 </div>
               </div>
               {connection.error_detail && !working ? (
-                <p className="mt-2 text-xs text-red-600 dark:text-red-400">
+                <p className="mt-2 break-words text-xs leading-5 text-status-error">
                   {connection.error_detail}
                 </p>
               ) : null}
               {clientIdFor?.id === connection.id ? (
                 <form
-                  className="mt-3 rounded-lg border border-gray-200 p-3 dark:border-white/10"
+                  className="mt-4 rounded-xl border border-border bg-surface p-4"
                   onSubmit={(event) => {
                     event.preventDefault();
                     void authorize(connection, clientId.trim());
                   }}
                 >
-                  <p className="text-sm text-gray-600 dark:text-gray-300">{clientIdFor.message}</p>
+                  <p className="break-words text-sm leading-6 text-muted">{clientIdFor.message}</p>
                   <label
-                    className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300"
+                    className="mt-3 block text-sm font-medium text-foreground"
                     htmlFor={`mcp-client-id-${connection.id}`}
                   >
                     OAuth client ID
                   </label>
-                  <div className="mt-1 flex gap-2">
+                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
                     <input
                       id={`mcp-client-id-${connection.id}`}
                       value={clientId}
                       onChange={(event) => setClientId(event.target.value)}
-                      className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-white/10 dark:text-gray-100"
+                      className="ui-input min-h-11 min-w-0 flex-1"
                     />
                     <button
                       type="submit"
@@ -431,12 +454,22 @@ export function McpConnectionsSection({
                   </div>
                 </form>
               ) : null}
-              <details className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                <summary className="w-fit cursor-pointer hover:text-gray-900 dark:hover:text-gray-100">
+              <details className="group mt-2 text-xs text-muted">
+                <summary className="ui-focus-ring flex min-h-11 w-fit cursor-pointer items-center gap-2 rounded-lg px-1 font-medium hover:text-foreground">
+                  <svg
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 transition-transform group-open:rotate-90 motion-reduce:transition-none"
+                    viewBox="0 0 20 20"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  >
+                    <path d="m7 5 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                   Server details
                 </summary>
-                <dl className="mt-3 space-y-2">
-                  <div>
+                <dl className="mt-1 grid gap-4 rounded-lg border border-border bg-surface p-4 sm:grid-cols-2">
+                  <div className="min-w-0 sm:col-span-2">
                     <dt className="font-medium">
                       {connection.transport === 'stdio' ? 'Command' : 'URL'}
                     </dt>
@@ -446,14 +479,14 @@ export function McpConnectionsSection({
                   </div>
                   <div>
                     <dt className="font-medium">Connection</dt>
-                    <dd className="mt-1">
+                    <dd className="mt-1 break-words">
                       {connection.transport} · {connection.location}
                     </dd>
                   </div>
                   {connection.server_name ? (
                     <div>
                       <dt className="font-medium">Server</dt>
-                      <dd>
+                      <dd className="mt-1 break-words">
                         {connection.server_name} {connection.server_version}
                       </dd>
                     </div>
@@ -461,18 +494,20 @@ export function McpConnectionsSection({
                   {connection.protocol_version ? (
                     <div>
                       <dt className="font-medium">Protocol</dt>
-                      <dd>{connection.protocol_version}</dd>
+                      <dd className="mt-1 break-words">{connection.protocol_version}</dd>
                     </div>
                   ) : null}
                   {connection.has_credential ? (
                     <div>
                       <dt className="font-medium">Credential stored</dt>
-                      <dd>{connection.account_label ?? connection.secret_hint}</dd>
+                      <dd className="mt-1 break-words">
+                        {connection.account_label ?? connection.secret_hint}
+                      </dd>
                     </div>
                   ) : null}
                 </dl>
                 {connection.status !== 'disabled' ? (
-                  <div className="mt-3 flex gap-3">
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
                     {connection.auth_kind === 'oauth' && connection.has_credential ? (
                       <button
                         type="button"
@@ -487,7 +522,7 @@ export function McpConnectionsSection({
                       type="button"
                       disabled={busy.size > 0}
                       onClick={() => void disconnect(connection)}
-                      className="text-red-600 disabled:opacity-50 dark:text-red-400"
+                      className="ui-button min-h-11 text-status-error hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-500/10"
                     >
                       Disconnect
                     </button>
@@ -506,6 +541,6 @@ export function McpConnectionsSection({
           onAdded={(connections) => void added(connections)}
         />
       ) : null}
-    </div>
+    </section>
   );
 }

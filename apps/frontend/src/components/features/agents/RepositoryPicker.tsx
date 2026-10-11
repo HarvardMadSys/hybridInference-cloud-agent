@@ -177,7 +177,7 @@ export function RepositoryPicker({
         aria-label={`${t('composer.repository')}: ${value || t('composer.repositoryPlaceholder')}`}
         title={value || t('composer.repositoryPlaceholder')}
         onClick={() => onOpenChange(!open)}
-        className={`inline-flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:hover:bg-white/10 ${
+        className={`inline-flex min-h-9 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:hover:bg-white/10 [@media(pointer:coarse)]:min-h-11 ${
           open ? 'bg-gray-100 dark:bg-white/10' : ''
         } ${value ? 'text-gray-700 dark:text-gray-300' : 'text-crimson-dark dark:text-crimson-light'}`}
       >

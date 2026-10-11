@@ -161,6 +161,7 @@ export const en = {
   'taskActions.pinFailed': 'Could not update this pin',
   // ── Shell chrome ────────────────────────────────────────────────────────
   'nav.aria': 'Product navigation',
+  'nav.skipToWorkspace': 'Skip to workspace',
   'nav.status': 'Status',
   'nav.docsAssistant': 'Docs Assistant',
   'nav.agents': 'Agents',

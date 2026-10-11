@@ -6,6 +6,7 @@ import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { SandboxResults } from './SandboxResults';
 
 function AdminRequired() {
@@ -33,10 +34,11 @@ function SandboxesView() {
   if (denied) return <AdminRequired />;
   return (
     <div className="min-w-0 flex-1">
-      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Sandboxes"
+          description="Inspect retained environments, workload, and resource usage across servers."
+        />
         <AdminNavigation current="sandboxes" />
         <SandboxResults onDenied={onDenied} />
       </section>

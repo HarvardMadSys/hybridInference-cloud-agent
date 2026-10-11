@@ -12,9 +12,8 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 const INPUT_CLASS =
-  'w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm disabled:opacity-40 aria-[invalid=true]:border-red-400 dark:border-white/10 dark:bg-gray-950 dark:text-gray-200';
-const BUTTON_CLASS =
-  'rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5';
+  'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
+const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
 
 function displayValue(value: AdminSettingValue): string {
   return typeof value === 'boolean' ? (value ? 'Enabled' : 'Disabled') : String(value);
@@ -101,10 +100,10 @@ function SettingField({
   };
 
   return (
-    <div className="border-t border-gray-100 py-4 first:border-t-0 dark:border-white/5">
+    <div className="border-t border-border py-5 first:border-t-0">
       <form
         noValidate
-        className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(200px,320px)]"
+        className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,360px)] lg:gap-8"
         onSubmit={(event) => {
           event.preventDefault();
           if (busy || !dirty || definition.read_only) return;
@@ -117,14 +116,14 @@ function SettingField({
           onSave(definition.key, parsed.value);
         }}
       >
-        <div>
-          <label htmlFor={id} className="text-sm font-medium text-gray-900 dark:text-gray-100">
+        <div className="min-w-0">
+          <label htmlFor={id} className="text-sm font-medium text-foreground">
             {definition.label}
           </label>
-          <p id={helpId} className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
+          <p id={helpId} className="mt-1.5 break-words text-sm leading-6 text-muted">
             {definition.description}
           </p>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          <p className="mt-2 break-words text-xs leading-5 text-muted">
             {definition.secret
               ? configured
                 ? 'Configured. Saved values are hidden.'
@@ -132,7 +131,7 @@ function SettingField({
               : `Default: ${displayValue(definition.default) || '(empty)'}`}
           </p>
         </div>
-        <div>
+        <div className="min-w-0">
           {definition.kind === 'boolean' ? (
             <select {...inputProps}>
               <option value="true">Enabled</option>
@@ -148,7 +147,13 @@ function SettingField({
               ))}
             </select>
           ) : definition.kind === 'string' && multiline ? (
-            <textarea {...inputProps} rows={4} autoComplete="off" spellCheck={false} />
+            <textarea
+              {...inputProps}
+              className={`${INPUT_CLASS} resize-y`}
+              rows={4}
+              autoComplete="off"
+              spellCheck={false}
+            />
           ) : (
             <input
               {...inputProps}
@@ -165,23 +170,25 @@ function SettingField({
             />
           )}
           {definition.kind === 'string' && !definition.choices?.length && (
-            <label className="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <label className="mt-2 flex min-h-9 cursor-pointer items-center gap-2 text-xs text-muted">
               <input
                 type="checkbox"
                 checked={multiline}
                 disabled={busy || definition.read_only}
                 onChange={(event) => setMultiline(event.target.checked)}
                 aria-label={`Use multiple lines for ${definition.label}`}
+                className="ui-focus-ring h-4 w-4 rounded accent-accent disabled:cursor-not-allowed"
               />
               Multiple lines
             </label>
           )}
-          <div className="mt-2 flex justify-end gap-2">
+          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+            {dirty && <span className="mr-auto text-xs text-muted">Unsaved changes</span>}
             <button
               type="submit"
               disabled={busy || !dirty || definition.read_only}
               aria-label={`Save ${definition.label}`}
-              className={BUTTON_CLASS}
+              className="ui-button ui-button-primary min-h-11 min-w-16"
             >
               Save
             </button>
@@ -190,13 +197,13 @@ function SettingField({
               disabled={busy || definition.read_only}
               aria-label={`Reset ${definition.label}`}
               onClick={() => onSave(definition.key, null)}
-              className={BUTTON_CLASS}
+              className="ui-button ui-button-ghost min-h-11"
             >
               Reset
             </button>
           </div>
           {error && (
-            <p id={errorId} role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
+            <p id={errorId} role="alert" className="mt-2 text-sm text-status-error">
               {error}
             </p>
           )}
@@ -309,7 +316,10 @@ export default function ApplicationSettings({
 
   if (denied) {
     return (
-      <p role="alert" className="mt-8 text-sm text-red-600 dark:text-red-400">
+      <p
+        role="alert"
+        className="mt-6 rounded-xl border border-status-error/20 bg-status-error/5 p-4 text-sm text-status-error"
+      >
         Admin access required.
       </p>
     );
@@ -321,53 +331,56 @@ export default function ApplicationSettings({
   }
 
   return (
-    <section className="mt-8 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-gray-900">
-      <div className="flex items-center justify-between gap-4">
-        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">
+    <section className="ui-card mt-6 p-4 sm:p-6" aria-label="Application settings">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h2 className="text-lg font-semibold tracking-tight text-foreground">
           Application settings
         </h2>
         <button
           type="button"
           disabled={busy || loading}
           onClick={() => void load()}
-          className={BUTTON_CLASS}
+          className={`${BUTTON_CLASS} self-start sm:self-auto`}
         >
           Refresh settings
         </button>
       </div>
-      <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">
+      <p className="mt-2 text-sm leading-6 text-muted">
         Saved settings apply across the deployment. Reset restores the built-in default.
       </p>
       {loading && (
-        <p role="status" className="mt-4 text-sm text-gray-500 dark:text-gray-400">
+        <p role="status" className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
           Loading application settings…
         </p>
       )}
       {error && (
         <div
           role="alert"
-          className="mt-4 flex items-center justify-between gap-3 text-sm text-red-600 dark:text-red-400"
+          className="mt-5 flex flex-col items-start gap-3 rounded-xl border border-status-error/20 bg-status-error/5 p-4 text-sm text-status-error sm:flex-row sm:items-center sm:justify-between"
         >
-          <span>{error}</span>
+          <span className="min-w-0 break-words">{error}</span>
           <button
             type="button"
             disabled={busy}
             onClick={() => void load()}
-            className={BUTTON_CLASS}
+            className={`${BUTTON_CLASS} shrink-0`}
           >
             Retry application settings
           </button>
         </div>
       )}
       {notice && (
-        <p role="status" className="mt-4 text-sm text-gray-600 dark:text-gray-300">
+        <p
+          role="status"
+          className="mt-5 rounded-xl border border-status-success/20 bg-status-success/5 p-4 text-sm text-status-success"
+        >
           {notice}
         </p>
       )}
       {snapshot?.setup?.required && (
         <div
           role="status"
-          className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
+          className="mt-5 rounded-xl border border-status-warning/20 bg-status-warning/5 p-4 text-sm leading-6 text-status-warning"
         >
           <h3 className="font-semibold">Administrator setup required</h3>
           <p className="mt-1">Complete the missing settings below to enable these features.</p>
@@ -379,7 +392,10 @@ export default function ApplicationSettings({
                 <ul className="mt-1 list-inside list-disc">
                   {group.missing.map((field) => (
                     <li key={field.key}>
-                      <a className="underline" href={`#application-setting-${field.key}`}>
+                      <a
+                        className="ui-focus-ring rounded underline underline-offset-4"
+                        href={`#application-setting-${field.key}`}
+                      >
                         {field.label}
                       </a>
                     </li>
@@ -395,50 +411,55 @@ export default function ApplicationSettings({
         </div>
       )}
       {recoveryToken && snapshot?.setup && !snapshot.setup.required && (
-        <p role="status" className="mt-5 text-sm text-emerald-700 dark:text-emerald-400">
+        <p
+          role="status"
+          className="mt-5 rounded-xl border border-status-success/20 bg-status-success/5 p-4 text-sm text-status-success"
+        >
           Required setup is complete. You can return to sign-in.
         </p>
       )}
       {[...groups].map(([category, definitions]) => (
-        <div key={category} className="mt-6">
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{category}</h3>
-          {definitions.map((definition) => (
-            <SettingField
-              key={`${definition.key}:${saved[definition.key] ?? 0}`}
-              definition={definition}
-              value={snapshot?.values[definition.key]}
-              configured={snapshot?.secret_configured[definition.key] ?? false}
-              busy={busy}
-              onSave={(key, value) => void save(key, value)}
-            />
-          ))}
+        <div key={category} className="mt-6 overflow-hidden rounded-xl border border-border">
+          <h3 className="border-b border-border bg-surface-muted px-4 py-3 text-sm font-semibold text-foreground sm:px-5">
+            {category}
+          </h3>
+          <div className="px-4 sm:px-5">
+            {definitions.map((definition) => (
+              <SettingField
+                key={`${definition.key}:${saved[definition.key] ?? 0}`}
+                definition={definition}
+                value={snapshot?.values[definition.key]}
+                configured={snapshot?.secret_configured[definition.key] ?? false}
+                busy={busy}
+                onSave={(key, value) => void save(key, value)}
+              />
+            ))}
+          </div>
         </div>
       ))}
       {snapshot && groups.size === 0 && (
-        <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">
+        <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
           No application settings are available.
         </p>
       )}
       {(snapshot?.bootstrap.length ?? 0) > 0 && (
-        <details className="mt-6 border-t border-gray-100 pt-4 dark:border-white/5">
-          <summary className="cursor-pointer text-sm font-medium text-gray-900 dark:text-gray-100">
+        <details className="mt-6 border-t border-border pt-4">
+          <summary className="ui-focus-ring min-h-11 cursor-pointer rounded-lg py-3 text-sm font-medium text-foreground">
             Deployment setup
           </summary>
-          <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">
+          <p className="mt-2 text-sm leading-6 text-muted">
             These settings are supplied when the service starts. Their values are hidden here.
           </p>
           <dl className="mt-3 space-y-3">
             {snapshot?.bootstrap.map((definition) => (
               <div key={definition.key}>
-                <dt className="text-xs font-medium text-gray-700 dark:text-gray-200">
+                <dt className="text-sm font-medium text-foreground">
                   {definition.label}{' '}
-                  <code className="ml-1 font-normal text-gray-500 dark:text-gray-400">
+                  <code className="ml-1 break-all rounded bg-surface-muted px-1.5 py-0.5 text-xs font-normal text-muted">
                     {definition.key}
                   </code>
                 </dt>
-                <dd className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {definition.description}
-                </dd>
+                <dd className="mt-1 text-sm leading-6 text-muted">{definition.description}</dd>
               </div>
             ))}
           </dl>
