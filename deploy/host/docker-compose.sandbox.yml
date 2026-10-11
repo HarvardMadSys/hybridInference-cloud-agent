@@ -170,10 +170,11 @@ services:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
     restart: unless-stopped
-    # sandbox_host.sh drains runner replicas before replacing this service, so
-    # no admitted agent stream should remain. Keep a bounded window for
-    # terminal/SSE cleanup and lifespan finalizers instead of Docker's short
-    # default, which can SIGKILL the supervisor mid-cleanup.
+    # sandbox_host.sh drains runner replicas and then stops this exact container
+    # without a forced deadline, so archive finalizers normally finish before
+    # Compose replaces or removes it. Keep a longer fallback than Docker's
+    # default for direct Compose operations, but do not use it as the archive
+    # lifecycle bound: multiple retained groups are finalized serially.
     stop_grace_period: ${AGENT_BROKER_STOP_GRACE:-30s}
     environment:
       # Both host processes read these, and neither was reachable from this

@@ -854,20 +854,6 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/docker-config"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"
 
-      # GitHub's hosted Ubuntu image carries an Android SDK that this
-      # repository never uses. The sandbox image carries Java, Ruby, Go, Rust
-      # and all five agent CLIs; exporting and loading those layers exhausts
-      # the hosted runner before the JDK layer is fully imported. Reclaim only
-      # the disposable PR sandbox cell. Trusted events use persistent runners,
-      # where deleting a machine-wide toolchain would be an ownership breach.
-      - name: Reclaim hosted sandbox build space
-        if: github.event_name == 'pull_request' && matrix.artifact.name == 'sandbox'
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo rm -rf -- /usr/local/lib/android
-          df -h /
-
       # Authenticated pulls. Rate limits are per *account* once logged in and
       # per *IP* when not — and this machine's egress address is shared with the
       # other repository's CI, so the anonymous allowance is spent by two

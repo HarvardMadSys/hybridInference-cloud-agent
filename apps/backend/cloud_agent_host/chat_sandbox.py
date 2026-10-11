@@ -4691,6 +4691,12 @@ finally:
             if returncode != 0:
                 stderr.seek(0)
                 detail = stderr.read(4096).decode("utf-8", "replace").strip()
+                missing = f"Could not find the file {path} in container {current.container_id}"
+                if total == 0 and detail in {
+                    missing,
+                    f"Error response from daemon: {missing}",
+                }:
+                    raise FileNotFoundError(path)
                 raise SandboxError(
                     "chat sandbox archive export failed: " + (detail[:300] or "Docker cp failed")
                 )

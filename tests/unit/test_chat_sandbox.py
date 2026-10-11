@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -859,6 +860,82 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
     assert exec_command[:2] == ["docker", "exec"]
     assert exec_command[exec_command.index("--workdir") + 1] == CHAT_WORKDIR
     assert exec_command[-4:] == ["sha256:container-one", "git", "status", "--short"]
+
+
+def _archive_export_failure(monkeypatch, detail: str) -> tuple[ChatSandboxManager, ChatSandboxSpec]:
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.STOPPED,
+        running=False,
+        image="img",
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=("agent-net",),
+    )
+    monkeypatch.setattr(manager, "_require", lambda _spec: current)
+    real_popen = subprocess.Popen
+
+    def fake_popen(_argv, **kwargs):
+        return real_popen(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.stderr.write({detail!r}); raise SystemExit(1)",
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", fake_popen)
+    return manager, spec
+
+
+def test_export_archive_normalizes_the_exact_missing_source_path(monkeypatch):
+    path = "/home/agent/.freeinference-platform"
+    detail = (
+        "Error response from daemon: Could not find the file "
+        f"{path} in container sha256:container-one"
+    )
+    manager, spec = _archive_export_failure(monkeypatch, detail)
+
+    with pytest.raises(FileNotFoundError, match="freeinference-platform"):
+        manager.export_archive(
+            spec,
+            path,
+            io.BytesIO(),
+            max_bytes=1024,
+            expected_container_id="sha256:container-one",
+        )
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Error response from daemon: No such container: sha256:container-one",
+        "Error response from daemon: permission denied",
+        (
+            "Error response from daemon: Could not find the file /workspace in container "
+            "sha256:container-one"
+        ),
+        (
+            "Error response from daemon: Could not find the file "
+            "/home/agent/.freeinference-platform in container sha256:another-container"
+        ),
+    ],
+)
+def test_export_archive_keeps_near_miss_daemon_errors_fatal(monkeypatch, detail):
+    manager, spec = _archive_export_failure(monkeypatch, detail)
+
+    with pytest.raises(SandboxError, match="archive export failed"):
+        manager.export_archive(
+            spec,
+            "/home/agent/.freeinference-platform",
+            io.BytesIO(),
+            max_bytes=1024,
+            expected_container_id="sha256:container-one",
+        )
 
 
 def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
