@@ -5336,6 +5336,18 @@
             "title": "Id",
             "type": "string"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "const": "plan_approval",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
           "multiple": {
             "default": false,
             "title": "Multiple",

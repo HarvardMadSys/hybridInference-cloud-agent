@@ -1205,6 +1205,9 @@ class AgentQuestion(BaseModel):
     multiple: bool = False
     options: list[AgentQuestionOption] = Field(default_factory=list)
     allow_custom: bool = True
+    #: ``plan_approval`` renders the question as the plan's Markdown and offers
+    #: feedback; plain questions carry no kind.
+    kind: Literal["plan_approval"] | None = None
 
 
 class AgentQuestionRequest(BaseModel):

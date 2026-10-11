@@ -2244,16 +2244,23 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
                 "options": [
                     {"label": "Approve plan", "description": "Continue with implementation."}
                 ],
-                "allow_custom": False,
+                "allow_custom": True,
+                "kind": "plan_approval",
             }
         ]
 
-        def respond(_answers: dict[str, list[str]], reject: bool) -> None:
-            response = (
-                {"behavior": "deny", "message": "The user declined this plan. Keep planning."}
-                if reject
-                else {"behavior": "allow", "updatedInput": original_input}
-            )
+        def respond(answers: dict[str, list[str]], reject: bool) -> None:
+            feedback = ", ".join(answers.get("0", [])).strip()
+            approved = not reject and feedback == "Approve plan"
+            if approved:
+                response: dict[str, Any] = {"behavior": "allow", "updatedInput": original_input}
+            else:
+                declined = (
+                    "The user declined this plan. Keep planning."
+                    if not feedback or feedback == "Approve plan"
+                    else f"The user declined this plan: {feedback}"
+                )
+                response = {"behavior": "deny", "message": declined}
             self._reply_permission(native_id, response)
 
         self._remember_question(native_id, questions, respond)

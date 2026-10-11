@@ -1,6 +1,7 @@
 'use client';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
+import { Markdown } from '@/components/ui/Markdown';
 
 import { useId, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
@@ -103,9 +104,17 @@ function QuestionDialog({
                 >
                   <legend className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                     {question.header ? <span className="mb-1 block">{question.header}</span> : null}
-                    <span className="block whitespace-pre-wrap break-words">
-                      {question.question}
-                    </span>
+                    {question.kind === 'plan_approval' ? (
+                      // The plan body is the agent's Markdown; it renders in a
+                      // scrollable panel instead of one preformatted text node.
+                      <span className="mt-3 block max-h-[50vh] overflow-y-auto rounded-lg border border-gray-200 px-4 py-3 font-normal dark:border-white/10">
+                        <Markdown text={question.question} />
+                      </span>
+                    ) : (
+                      <span className="block whitespace-pre-wrap break-words">
+                        {question.question}
+                      </span>
+                    )}
                   </legend>
                   {question.multiple && question.options.length ? (
                     <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -175,12 +184,12 @@ function QuestionDialog({
                             })
                           }
                         />
-                        Other
+                        {question.kind === 'plan_approval' ? 'Request changes' : 'Other'}
                       </label>
                     ) : null}
                     {question.allow_custom && answer.custom ? (
                       <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">
-                        Your answer
+                        {question.kind === 'plan_approval' ? 'Your feedback' : 'Your answer'}
                         <textarea
                           value={answer.text}
                           onChange={(event) => update(index, { text: event.target.value })}
