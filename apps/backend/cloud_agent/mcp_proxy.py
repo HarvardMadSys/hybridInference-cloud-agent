@@ -307,16 +307,38 @@ class SseFilter:
     Streaming rather than buffering is what makes this usable on the long-lived
     ``GET`` stream, and on a ``tools/call`` that reports progress before it
     answers: neither can be held until it completes, because neither does.
+
+    Line endings are the one thing rewritten: SSE ends a line with LF, CRLF or
+    a bare CR, servers send all three (``sse-starlette``, under the MCP Python
+    SDK, sends CRLF), and every one leaves here as LF, which a client reads the
+    same. Framing on LF alone would never see a CRLF frame end: a short stream
+    would reach the client as one unparseable, unfiltered frame, and a long one
+    would be held until the size cap released it unfiltered.
     """
 
     def __init__(self, server: McpServer) -> None:
         """Filter frames for one server."""
         self._server = server
         self._buffer = b""
+        self._after_cr = False
+
+    def _normalize(self, chunk: bytes) -> bytes:
+        """Rewrite CRLF and bare CR as LF, including a CRLF split across chunks.
+
+        A CR ending one chunk is a line ending at once, so nothing waits on the
+        next read; a LF opening the next chunk is then the rest of that CRLF,
+        not a second line ending.
+        """
+        if not chunk:
+            return chunk
+        if self._after_cr and chunk.startswith(b"\n"):
+            chunk = chunk[1:]
+        self._after_cr = chunk.endswith(b"\r")
+        return chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
     def feed(self, chunk: bytes) -> bytes:
         """Consume a chunk of upstream bytes, returning complete filtered frames."""
-        self._buffer += chunk
+        self._buffer += self._normalize(chunk)
         out: list[bytes] = []
         while (index := self._buffer.find(_FRAME_SEPARATOR)) != -1:
             frame, self._buffer = self._buffer[:index], self._buffer[index + 2 :]

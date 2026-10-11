@@ -794,6 +794,39 @@ async def test_a_denied_tool_is_never_advertised(monkeypatch, store, upstream):
     assert [tool["name"] for tool in response.json()["result"]["tools"]] == ["get_issue"]
 
 
+async def test_a_crlf_event_stream_is_filtered_event_by_event(monkeypatch, store, upstream):
+    """A server that ends SSE lines with CRLF has each event filtered, not one blob.
+
+    ``sse-starlette``, under the MCP Python SDK, frames that way. Split on LF-LF
+    alone, the stream's events never separated: they left as one frame no JSON
+    reader could parse, and so with the denied tool still advertised.
+    """
+    upstream.content_type = "text/event-stream"
+    upstream.body = b"".join(
+        b"event: message\r\ndata: " + _catalogue(*names) + b"\r\n\r\n"
+        for names in (("get_issue", "create_issue"), ("create_issue",))
+    )
+    store.snapshot = _snapshot("get_issue", "create_issue")
+    store.bindings = [
+        _binding(
+            rules={
+                "get_issue": {"policy": "allow", "fingerprint": ""},
+                "create_issue": {"policy": "deny", "fingerprint": ""},
+            }
+        )
+    ]
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth())
+
+    assert response.status_code == 200
+    events = response.content.split(b"\n\n")
+    assert events[2:] == [b""]
+    assert [
+        [tool["name"] for tool in json.loads(event.split(b"data: ", 1)[1])["result"]["tools"]]
+        for event in events[:2]
+    ] == [["get_issue"], []]
+
+
 async def test_a_confirmed_tool_is_advertised_but_held_for_its_owner(monkeypatch, store, upstream):
     """A confirmation is a question, not a refusal, so the tool stays visible.
 
