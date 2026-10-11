@@ -59,7 +59,7 @@ required fields and partially configured optional integrations produce an
 **Administrator setup required** prompt with links to the fields to complete.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0037_admin_sandbox_stop`, then start the main control-plane listener with its
+`0040_pr_merge_archive`, then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once.
 The MCP-only listener waits for initialization and reads the same settings.
 Newly migrated runtime identity, service keys, broker credentials and policy
@@ -69,6 +69,11 @@ restores an old `.env` value. Listeners synchronize saved changes every five
 seconds; web appearance uses the saved public fields on each request. Apply
 changes to subsequent operations according to the description beside each
 setting.
+
+Automatic session archiving after a verified GitHub PR merge is enabled by
+default. Configure it under **Publication**; see
+[automatic PR archiving](automatic-pr-archiving.md) for its session selection,
+retry ledger, verification, and rollout steps.
 
 For a new installation, provision the database, a stable
 `AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
