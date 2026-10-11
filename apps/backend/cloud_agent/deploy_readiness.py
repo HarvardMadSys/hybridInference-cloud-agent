@@ -331,7 +331,12 @@ async def wait_for_shared_live(
     try:
         from cloud_agent.settings import initialize_settings, setting_env
 
-        await initialize_settings(storage.settings, seed=False)
+        # deploy.sh runs this command with the control-plane service's complete
+        # legacy environment and mounts, before replacing the live API. It must
+        # therefore bootstrap missing settings itself: waiting for the new API
+        # to seed them would deadlock activation. Saved values remain
+        # authoritative; the MCP listener still never seeds its partial env.
+        await initialize_settings(storage.settings, seed=True)
         broker_token = (setting_env(ENV_BROKER_TOKEN) or "").strip()
         if not broker_token:
             print(

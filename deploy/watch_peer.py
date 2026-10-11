@@ -1,6 +1,6 @@
 """Stop a readiness container when the other deployment job has failed.
 
-Only the read-only readiness wait is supervised: never interrupt a migration
+Only the readiness wait is supervised: never interrupt a migration
 or Compose replacement. An unavailable GitHub API leaves the normal bounded
 readiness check in charge. Credentials stay on the Actions host.
 """
