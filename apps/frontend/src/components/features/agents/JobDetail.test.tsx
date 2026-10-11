@@ -502,12 +502,14 @@ describe('JobDetail', () => {
     openWorkspace();
     expect(screen.queryByRole('tab', { name: /Side Chat/ })).not.toBeInTheDocument();
     addSideChat();
-    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    // This is the first test that opens the code-split SideChat panel. Give a
+    // loaded CI worker time to import it before its session effect starts.
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
       target: { value: 'First draft' },
     });
     addSideChat();
-    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2), { timeout: 5_000 });
     expect(screen.getByRole('tab', { name: 'Side Chat 2' })).toHaveFocus();
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
     fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
