@@ -428,7 +428,8 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
     Raises:
         HTTPException: 401 if the identity token does not verify, 403 if the
             gateway says this account may not sign in, 503 if this deployment
-            cannot verify identity or could not reach the gateway.
+            cannot verify identity, could not fetch the gateway's signing keys
+            or could not reach the gateway.
     """
     try:
         # PyJWKClient performs a synchronous HTTP fetch on a cold cache or an
@@ -436,8 +437,21 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
         claims = await asyncio.to_thread(identity.verify_identity_token, identity_token)
     except identity.IdentityNotConfigured:
         raise AgentConfigurationError() from None
-    except identity.IdentityError:
-        # Deliberately not echoing the reason. "Signed by an unknown key" and
+    except identity.IdentityError as exc:
+        # The operator gets the cause's type — a key fetch, the audience, the
+        # clock — which names what failed and never carries the token.
+        cause = type(exc.__cause__ if exc.__cause__ is not None else exc).__name__
+        logger.warning(
+            "agent_identity_token_unverified cause=%s",
+            cause,
+            extra={"event": "agent_identity_token_unverified", "cause": cause},
+        )
+        if isinstance(exc, identity.IdentityUnavailable):
+            raise HTTPException(
+                status_code=503,
+                detail="Cannot verify sign-in with the gateway right now; try again shortly.",
+            ) from None
+        # Deliberately not echoing the reason. "Signed by another key" and
         # "expired" are the same answer to a browser, and the difference is
         # useful mostly to somebody probing.
         raise HTTPException(status_code=401, detail="Invalid identity token.") from None

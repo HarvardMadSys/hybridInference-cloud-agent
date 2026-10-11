@@ -29,7 +29,6 @@ import secrets
 import time
 from typing import Any
 
-import httpx
 import jwt
 from jwt import PyJWKClient
 
@@ -63,6 +62,12 @@ JWKS_CACHE_LIFESPAN_S = 5 * 60
 #: Bound the JWKS client's synchronous network operations explicitly, matching
 #: the gateway contract client's default request timeout.
 JWKS_FETCH_TIMEOUT_S = 10.0
+
+#: How far the gateway's clock may disagree with this host's. An identity
+#: token is minted and verified within a second or two, so with no allowance a
+#: gateway clock one second ahead puts ``iat`` in the future and refuses a
+#: token that is fine. The token lives ten minutes; this does not extend that.
+IDENTITY_TOKEN_LEEWAY_S = 30
 
 #: Our own identity session, with a fixed thirty-day expiry.
 #:
@@ -98,6 +103,16 @@ class IdentityError(Exception):
 
 class IdentityNotConfigured(IdentityError):
     """This deployment cannot verify identity at all."""
+
+
+class IdentityUnavailable(IdentityError):
+    """No key to check the token with could be obtained, so nothing was verified.
+
+    Still a refusal — never a pass — but one about the gateway's key set at
+    this moment rather than the token: an outage, a CDN refusing the fetch, a
+    timeout, or a set that does not publish the signing key yet. Retrying can
+    work.
+    """
 
 
 _jwk_client: PyJWKClient | None = None
@@ -171,8 +186,10 @@ def verify_identity_token(token: str) -> dict[str, Any]:
 
     Raises:
         IdentityNotConfigured: If this deployment has no JWKS URL or issuer.
+        IdentityUnavailable: If no key for the token could be obtained: the
+            key set could not be fetched, or does not contain the token's key.
         IdentityError: If the token is missing, malformed, expired, signed by
-            an unknown key, or issued by another issuer or for another audience.
+            another key, or issued by another issuer or for another audience.
     """
     if not token:
         raise IdentityError("no identity token presented")
@@ -181,10 +198,16 @@ def verify_identity_token(token: str) -> dict[str, Any]:
         signing_key = _jwks_client().get_signing_key_from_jwt(token)
     except IdentityNotConfigured:
         raise
-    except (jwt.PyJWTError, httpx.HTTPError, Exception) as exc:
-        # An unfetchable or unknown key is a refusal, never a pass. Failing
-        # open here would accept any token during a gateway outage.
-        raise IdentityError(f"cannot resolve the signing key: {exc}") from exc
+    except jwt.InvalidTokenError as exc:
+        # The token's own header is unreadable: there is no key to look for.
+        raise IdentityError(f"invalid identity token: {exc}") from exc
+    except Exception as exc:
+        # An unfetchable or unknown key is a refusal, never a pass: failing
+        # open here would accept any token during a gateway outage. It is not
+        # a verdict on the token, though — the keys could not be fetched, or
+        # did not include the one the gateway signed with — and saying so is
+        # what lets sign-in offer a retry instead of calling the token invalid.
+        raise IdentityUnavailable(f"cannot resolve the signing key: {exc}") from exc
 
     try:
         claims = jwt.decode(
@@ -193,6 +216,7 @@ def verify_identity_token(token: str) -> dict[str, Any]:
             algorithms=["RS256"],
             audience=AUDIENCE,
             issuer=issuer,
+            leeway=IDENTITY_TOKEN_LEEWAY_S,
             options={"require": ["iss", "aud", "iat", "exp", "sub"]},
         )
         if not isinstance(claims["sub"], str) or not claims["sub"]:
