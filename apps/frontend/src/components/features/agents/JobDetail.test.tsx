@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -1166,6 +1175,103 @@ describe('JobDetail', () => {
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenLastCalledWith('ajob_1', { prompt: 'Next message' }),
     );
+  });
+
+  it('pastes clipboard file images and waits for their uploads before sending a follow-up', async () => {
+    let finishUpload!: (value: Awaited<ReturnType<typeof uploadAttachment>>) => void;
+    vi.mocked(uploadAttachment).mockReturnValue(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use this screenshot' } });
+    const image = new File(['pixels'], 'image.png', { type: 'image/png' });
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [image, new File(['notes'], 'notes.txt', { type: 'text/plain' })],
+      },
+    });
+    fireEvent(box, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(uploadAttachment).toHaveBeenCalledOnce();
+    const [uploaded, path] = vi.mocked(uploadAttachment).mock.calls[0];
+    expect(uploaded).toEqual(
+      expect.objectContaining({ name: path, type: 'image/png', size: image.size }),
+    );
+    expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
+    expect(screen.getByText(path!)).toBeInTheDocument();
+    expect(box).toHaveValue('Use this screenshot');
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishUpload({ id: 43, path: path!, size_bytes: image.size, content_type: image.type });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Use this screenshot',
+        attachment_ids: [43],
+      }),
+    );
+    await waitFor(() => expect(box).toHaveValue(''));
+    expect(screen.queryByText(path!)).not.toBeInTheDocument();
+    expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('leaves plain text follow-up pastes to the browser', () => {
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Existing follow-up' } });
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        files: [],
+        getData: () => 'Pasted text',
+      },
+    });
+    fireEvent(box, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(box).toHaveValue('Existing follow-up');
+  });
+
+  it('does not upload pasted images after native context is lost', () => {
+    render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    expect(box).toBeDisabled();
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload pasted images while a follow-up is being submitted', async () => {
+    vi.mocked(submitThreadMessage).mockReturnValue(new Promise(() => {}));
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Send the follow-up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledOnce());
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
   });
 
   it('accepts dropped files and removes them before sending', async () => {

@@ -2093,6 +2093,10 @@ export function JobDetail({
                         textareaRef={followUpBox}
                         rows={2}
                         value={followUp}
+                        onPaste={(event) => {
+                          if (contextLost || submitting) return;
+                          attachments.onPaste(event);
+                        }}
                         onChange={(event) => {
                           setFollowUp(event.target.value);
                           if (goalHint) setGoalHint(null);
