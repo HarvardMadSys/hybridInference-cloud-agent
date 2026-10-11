@@ -64,6 +64,7 @@ from cloud_agent_host.sandbox import (
     SandboxProcess,
     SandboxSpec,
     TerminalProcess,
+    read_chunks,
 )
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.operation_profiling import StageObserver, substage
@@ -5054,13 +5055,17 @@ class _RetainedExecProcess(SandboxProcess):
 
     def _drain_stderr(self) -> None:
         assert self._process.stderr is not None
-        for line in self._process.stderr:
+        for line in read_chunks(self._process.stderr):
             self._stderr_chunks.append(line)
             del self._stderr_chunks[:-200]
 
     def lines(self) -> Iterator[str]:
         assert self._process.stdout is not None
         yield from self._process.stdout
+
+    def chunks(self) -> Iterator[str]:
+        assert self._process.stdout is not None
+        yield from read_chunks(self._process.stdout)
 
     def write_line(self, text: str) -> None:
         if self._process.stdin is None:

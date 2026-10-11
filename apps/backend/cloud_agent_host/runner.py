@@ -1199,6 +1199,10 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     until the enclosing ``finally``, the attempt never expires, the reaper
     never takes it, and this runner claims nothing further. One hostile
     repository would take a runner out permanently.
+
+    Read in bounded pieces rather than lines, so the byte cap holds before
+    anything is buffered: a line is only complete at a newline, and output
+    that never writes one would otherwise be held whole first.
     """
     chunks: list[str] = []
     total = 0
@@ -1206,8 +1210,8 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
 
     def _pump() -> None:
         try:
-            for line in process.lines():
-                lines.put(line)
+            for chunk in process.chunks():
+                lines.put(chunk)
         finally:
             lines.put(None)
 

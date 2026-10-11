@@ -18,7 +18,7 @@ class _Process:
         self.killed = False
         self.waited = False
 
-    def lines(self):
+    def chunks(self):
         if self._silent:
             self._killed.wait()
             return

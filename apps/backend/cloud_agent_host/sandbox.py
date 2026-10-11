@@ -34,10 +34,26 @@ from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from typing import IO
 
     from cloud_agent_host.network_guard import HostNetworkGuard
 
 logger = get_logger(__name__)
+
+#: The most characters one read of a sandbox process's output returns. A line
+#: longer than this arrives in pieces instead of being buffered whole: the
+#: output is written by code the sandbox runs, and a stream that never ends a
+#: line would otherwise grow the trusted reader until it ran out of memory.
+#: The 200 pieces a stderr tail keeps still cover the largest command output
+#: the workspace broker returns.
+OUTPUT_CHUNK_CHARS = 16 * 1024
+
+
+def read_chunks(stream: IO[str]) -> Iterator[str]:
+    """Yield ``stream`` line by line, splitting any line over :data:`OUTPUT_CHUNK_CHARS`."""
+    while chunk := stream.readline(OUTPUT_CHUNK_CHARS):
+        yield chunk
+
 
 # Run inside one ephemeral preflight probe on the relay discovery network,
 # with $1 = the URL to probe and $2 = its hostname. Prints exactly one verdict.
@@ -213,6 +229,14 @@ class SandboxProcess(ABC):
     @abstractmethod
     def lines(self) -> Iterator[str]:
         """Yield the agent's stdout, line by line, as it is produced."""
+
+    @abstractmethod
+    def chunks(self) -> Iterator[str]:
+        """Yield stdout like :meth:`lines`, splitting lines over :data:`OUTPUT_CHUNK_CHARS`.
+
+        For bounded commands whose output is only joined or tailed: output
+        with no newline is never buffered whole before a limit is checked.
+        """
 
     @abstractmethod
     def kill(self) -> None:
@@ -405,7 +429,7 @@ class _PopenProcess(SandboxProcess):
     def _drain_stderr(self) -> None:
         """Read stderr to EOF, keeping a bounded tail."""
         assert self._process.stderr is not None
-        for line in self._process.stderr:
+        for line in read_chunks(self._process.stderr):
             self._stderr_chunks.append(line)
             # Bounded: a runaway agent must not turn its own noise into an
             # out-of-memory on the runner.
@@ -434,6 +458,11 @@ class _PopenProcess(SandboxProcess):
         """Yield stdout lines from the child process."""
         assert self._process.stdout is not None
         yield from self._process.stdout
+
+    def chunks(self) -> Iterator[str]:
+        """Yield stdout from the child process in bounded pieces."""
+        assert self._process.stdout is not None
+        yield from read_chunks(self._process.stdout)
 
     def kill(self) -> None:
         """Kill the child process."""
