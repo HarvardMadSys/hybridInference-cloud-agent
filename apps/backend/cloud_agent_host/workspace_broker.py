@@ -24,6 +24,7 @@ import secrets
 import threading
 import time
 from collections import deque
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -128,6 +129,12 @@ MAX_TERMINAL_STREAMS_PER_SESSION = _DEFAULT_SETTINGS["terminal_max_streams_per_s
 DEFAULT_TERMINAL_IDLE_TTL_S = float(_DEFAULT_SETTINGS["terminal_idle_ttl_s"])
 DEFAULT_TERMINAL_HARD_TTL_S = float(_DEFAULT_SETTINGS["terminal_hard_ttl_s"])
 TERMINAL_STREAM_WAIT_S = 15.0
+#: Owner commands and Git inspection run on a pool of their own, at most this
+#: many at once on one broker and this many for one workspace. One past either
+#: limit is refused at once: queued, it would outlast its caller's timeout, and
+#: on the loop's shared pool it would hold up every turn's lifecycle calls.
+MAX_WORKSPACE_COMMANDS = 16
+MAX_WORKSPACE_COMMANDS_PER_WORKSPACE = 4
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
@@ -147,11 +154,22 @@ class _EndpointLifecycleCalls:
         **kwargs: Any,
     ) -> Any:
         """Admit one executor call, retaining ownership until it really exits."""
+        return await self.run_on(None, function, *args, **kwargs)
+
+    async def run_on(
+        self,
+        executor: Executor | None,
+        function: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Admit one call to ``executor``, or the loop's default one for ``None``."""
         loop = asyncio.get_running_loop()
         async with self._lock:
             if not self._accepting:
                 raise HTTPException(status_code=503, detail="workspace broker is shutting down")
-            future = loop.run_in_executor(None, functools.partial(function, *args, **kwargs))
+            future = loop.run_in_executor(executor, functools.partial(function, *args, **kwargs))
             self._calls.add(future)
             future.add_done_callback(self._call_finished)
         # Cancellation of an ASGI request must not detach an already-running
@@ -179,6 +197,42 @@ class _EndpointLifecycleCalls:
             )
         async with self._lock:
             self._calls.difference_update(calls)
+
+
+class _CommandSlots:
+    """Admit owner commands without waiting, per workspace and per broker."""
+
+    def __init__(self, *, total: int, per_workspace: int) -> None:
+        self._lock = threading.Lock()
+        self._total = total
+        self._per_workspace = per_workspace
+        self._running: dict[str, int] = {}
+
+    def take(self, workspace_id: str) -> Callable[[], None]:
+        """Take a slot or refuse with 429; return what gives it back, once."""
+        with self._lock:
+            held = self._running.get(workspace_id, 0)
+            if held >= self._per_workspace or sum(self._running.values()) >= self._total:
+                raise HTTPException(
+                    status_code=429,
+                    detail="too many workspace commands are running; retry when one finishes",
+                )
+            self._running[workspace_id] = held + 1
+        returned = False
+
+        def give_back() -> None:
+            nonlocal returned
+            with self._lock:
+                if returned:
+                    return
+                returned = True
+                remaining = self._running[workspace_id] - 1
+                if remaining:
+                    self._running[workspace_id] = remaining
+                else:
+                    del self._running[workspace_id]
+
+        return give_back
 
 
 def _chat_idle_timeout_from_env() -> float:
@@ -1733,6 +1787,12 @@ def create_app(
         max_sessions=max_sessions,
     )
     endpoint_calls = _EndpointLifecycleCalls()
+    command_pool = ThreadPoolExecutor(
+        max_workers=MAX_WORKSPACE_COMMANDS, thread_name_prefix="workspace-command"
+    )
+    command_slots = _CommandSlots(
+        total=MAX_WORKSPACE_COMMANDS, per_workspace=MAX_WORKSPACE_COMMANDS_PER_WORKSPACE
+    )
     supervisor_start_lock = threading.Lock()
     supervisor_ready = threading.Event()
 
@@ -1794,6 +1854,7 @@ def create_app(
             # A canceled request still owns its executor call. Drain every
             # admitted mutation before closing supervisors or archive clients.
             await endpoint_calls.seal_and_wait()
+            cleanup("command_pool", lambda: command_pool.shutdown(wait=False))
             _app.state.sandbox_resource_collector = None
             if resource_collector is not None:
                 cleanup("resource_collector", resource_collector.close)
@@ -2089,6 +2150,27 @@ def create_app(
             if token is not None:
                 with contextlib.suppress(SandboxError):
                     owner.operation_closed(workspace_id, token)
+
+    async def owner_command(
+        workspace_id: str,
+        operation: Callable[[RetainedChatBackend, BrokerCall], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run an owner's one-shot command or Git inspection on the command pool."""
+        give_back = command_slots.take(workspace_id)
+
+        def run() -> dict[str, Any]:
+            try:
+                return retained_operation(workspace_id, operation)
+            finally:
+                give_back()
+
+        try:
+            return await endpoint_calls.run_on(command_pool, run)
+        except HTTPException:
+            # Refused before the pool ran it. A command that ran gave its slot
+            # back already, and a second give-back changes nothing.
+            give_back()
+            raise
 
     def ensure_workspace(workspace_id: str) -> SharedSessionDescriptor:
         """Validate a member alias and return its shared-group descriptor."""
@@ -2923,8 +3005,7 @@ def create_app(
         body: TerminalRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        return await endpoint_calls.run(
-            retained_operation,
+        return await owner_command(
             workspace_id,
             lambda retained, _call: _run_terminal(
                 retained,
@@ -3142,8 +3223,7 @@ def create_app(
         base_sha: str | None = Query(None, max_length=64),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        return await endpoint_calls.run(
-            retained_operation,
+        return await owner_command(
             workspace_id,
             lambda retained, _call: _run_git(
                 retained,

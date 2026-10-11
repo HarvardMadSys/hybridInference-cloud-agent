@@ -1485,6 +1485,62 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
     assert killed == [True]
 
 
+@pytest.mark.asyncio
+async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(monkeypatch):
+    """A flood of slow owner commands is refused, not queued ahead of turns.
+
+    Commands and Git inspection run on a pool of their own, bounded for each
+    workspace and for the broker; every lifecycle call keeps the loop's
+    default pool, so a turn's settle or acquire never waits behind them.
+    """
+    monkeypatch.setattr(broker_mod, "MAX_WORKSPACE_COMMANDS", 2)
+    monkeypatch.setattr(broker_mod, "MAX_WORKSPACE_COMMANDS_PER_WORKSPACE", 1)
+    supervisor = _SharedSupervisor()
+    supervisor.threads.add("athr_third")
+    release = threading.Event()
+
+    def spawn(_spec):
+        release.wait(10)
+        return SimpleNamespace(
+            chunks=lambda: iter(()), kill=lambda: None, wait=lambda: 0, stderr_text=lambda: ""
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        commands = [
+            asyncio.create_task(
+                client.post(
+                    f"/workspaces/{workspace}/terminal",
+                    headers=headers,
+                    json={"command": "sleep 119"},
+                )
+            )
+            for workspace in ("athr_source", "athr_child", "athr_third")
+            for _ in range(4)
+        ]
+        try:
+            deadline = time.monotonic() + 5
+            while sum(task.done() for task in commands) < 10 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            refused = [task.result().status_code for task in commands if task.done()]
+            status = await asyncio.wait_for(
+                client.get("/shared-sandboxes/athr_source", headers=headers), 2
+            )
+        finally:
+            release.set()
+        answered = [response.status_code for response in await asyncio.gather(*commands)]
+        again = await client.post(
+            "/workspaces/athr_source/terminal", headers=headers, json={"command": "true"}
+        )
+
+    assert refused == [429] * 10
+    assert status.status_code == 200
+    assert sorted(answered) == [200, 200] + [429] * 10
+    assert again.status_code == 200, "a finished command gives its slot back"
+
+
 class _CommandReceiptManager:
     """Stands in for the Docker manager behind a bounded retained command.
 
