@@ -73,6 +73,10 @@ export interface ThreadMessageResultApi {
 
 export interface ThreadMessageRequest {
   prompt: string;
+  /** Refuse atomically unless the thread is idle, its queue is empty and its workspace is published. */
+  require_idle?: boolean;
+  /** The newest turn verified by the caller; required with require_idle. */
+  expected_latest_job_id?: string;
   /** Omitted inherits the previous turn's skills; `[]` clears them. */
   skill_ids?: number[];
   attachment_ids?: number[];

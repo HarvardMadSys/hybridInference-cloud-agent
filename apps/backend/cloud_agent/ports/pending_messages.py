@@ -32,12 +32,19 @@ class PendingMessageRepository(Protocol):
         reasoning_effort: str | None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        require_idle: bool = False,
+        expected_latest_job_id: str | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
         Answers ``{"message": row}``; ``{"job_id": id}`` when this key already
         made a turn; or ``{"error": ...}`` — ``not_found``, ``session_archived``,
-        ``client_request_conflict`` or ``attachments_unavailable``.
+        ``client_request_conflict``, ``attachments_unavailable`` or
+        ``conversation_changed``.
+
+        ``require_idle`` refuses a fresh submission unless the expected newest
+        turn is still newest, no turn or message is waiting, and the shared
+        workspace's latest snapshot is published. Idempotent replay comes first.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as

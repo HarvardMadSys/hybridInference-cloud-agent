@@ -27,6 +27,7 @@ import {
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
+import { APIError } from '@/lib/utils/errors';
 
 import { ownerFailureMessage, siteMisconfiguredReason, toDiffFileDetails } from './adapt';
 import {
@@ -1595,13 +1596,17 @@ export function JobDetail({
     !publicationPending &&
     watchPrAcceptedJobId !== job.id &&
     queue.loaded &&
+    queue.latestJobId &&
+    ['succeeded', 'failed', 'cancelled'].includes(queue.latestJobState ?? '') &&
     queue.messages.length === 0 &&
     !queue.resuming &&
     !conversationBusy,
   );
 
   async function watchPr() {
-    if (!canWatchPr || watchPrRequestedRef.current || sendRequestedRef.current) return;
+    const latestJobId = queue.latestJobId;
+    if (!canWatchPr || !latestJobId || watchPrRequestedRef.current || sendRequestedRef.current)
+      return;
     const watchScope = currentDraftScope.current;
     watchPrRequestedRef.current = true;
     setSubmitting(true);
@@ -1610,11 +1615,12 @@ export function JobDetail({
       // This action sends its own message. Unsent text, uploads and composer
       // selections belong to the owner's next message and stay in place.
       // The server replays this receipt under the thread lock, including for
-      // another tab viewing a different turn of the same published workspace.
+      // another tab viewing a different turn of the same conversation. Fresh
+      // requests refuse atomically if its queue or published boundary changes.
       const result = await submitThreadMessage(
         threadId,
-        { prompt: watchPrPrompt },
-        { requestId: watchPullRequestRequestId(job) },
+        { prompt: watchPrPrompt, require_idle: true, expected_latest_job_id: latestJobId },
+        { requestId: watchPullRequestRequestId(threadId, latestJobId) },
       );
       if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
       // Keep the completed source action closed while the next turn loads.
@@ -1623,6 +1629,7 @@ export function JobDetail({
       queue.apply(result);
     } catch (cause: unknown) {
       if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
+      if (cause instanceof APIError && cause.code === 'conversation_changed') void queue.refresh();
       setActionError(cause instanceof Error ? cause.message : t('watchPr.sendFailed'));
     } finally {
       watchPrRequestedRef.current = false;

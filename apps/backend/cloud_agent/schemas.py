@@ -1044,6 +1044,28 @@ class AgentThreadMessageCreate(BaseModel):
             f"previous turn's; the literal {RESET_REASONING_EFFORT!r} resets to Auto."
         ),
     )
+    require_idle: bool = Field(
+        False,
+        strict=True,
+        description="Accept only on an idle chat with an empty queue and published workspace.",
+    )
+    expected_latest_job_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="The newest turn read by an idle-only action; checked atomically on submit.",
+    )
+
+    @model_validator(mode="after")
+    def validate_idle_guard(self) -> AgentThreadMessageCreate:
+        """Bind an idle-only action to the newest turn its caller actually read."""
+        if self.require_idle and (
+            not self.expected_latest_job_id or not self.expected_latest_job_id.strip()
+        ):
+            raise ValueError("require_idle needs expected_latest_job_id")
+        if self.expected_latest_job_id is not None and not self.require_idle:
+            raise ValueError("expected_latest_job_id needs require_idle")
+        return self
 
     @field_validator("prompt")
     @classmethod

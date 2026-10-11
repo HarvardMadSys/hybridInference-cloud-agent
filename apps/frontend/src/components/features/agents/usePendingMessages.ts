@@ -59,6 +59,9 @@ export interface PendingQueue {
   pausedReason: QueuePausedReason | null;
   /** True once the first read has answered. */
   loaded: boolean;
+  /** The conversation's newest turn from the last successful queue read. */
+  latestJobId: string | null;
+  latestJobState: string | null;
   /** Messages with a write in flight, so their card can wait. */
   busyIds: ReadonlySet<string>;
   resuming: boolean;
@@ -127,6 +130,8 @@ export function usePendingMessages({
   const [messages, setMessages] = useState<PendingMessageApi[]>([]);
   const [pausedReason, setPausedReason] = useState<QueuePausedReason | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [latestJobId, setLatestJobId] = useState<string | null>(null);
+  const [latestJobState, setLatestJobState] = useState<string | null>(null);
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [resuming, setResuming] = useState(false);
   const [canSendNow, setCanSendNow] = useState(false);
@@ -166,6 +171,8 @@ export function usePendingMessages({
       snapshot.current = { ids, latestJobId: queue.latest_job_id };
       setMessages([...queue.pending_messages].sort((a, b) => a.position - b.position));
       setPausedReason(queue.queue_paused_reason ?? null);
+      setLatestJobId(queue.latest_job_id);
+      setLatestJobState(queue.latest_job_state);
       // A turn still waiting for a host can take one too: it is given the
       // message when it starts.
       setCanSendNow(
@@ -209,6 +216,8 @@ export function usePendingMessages({
     setPausedReason(null);
     setCanSendNow(false);
     setLoaded(false);
+    setLatestJobId(null);
+    setLatestJobState(null);
     setBusyIds(new Set<string>());
     if (threadId) void refresh();
   }, [refresh, threadId]);
@@ -219,9 +228,11 @@ export function usePendingMessages({
   // conversation (its pause), or to one of its turns is pushed and read at
   // once; the clock is then only a backstop.
   const pushLive = useAgentPushLive();
+  const latestTurnActive =
+    latestJobState === 'queued' || latestJobState === 'running' || latestJobState === 'publishing';
   const interval = !threadId
     ? null
-    : waiting || active || !loaded
+    : waiting || active || latestTurnActive || !loaded
       ? pushLive
         ? PUSH_FALLBACK_POLL_MS
         : waiting
@@ -439,6 +450,8 @@ export function usePendingMessages({
     messages,
     pausedReason,
     loaded,
+    latestJobId,
+    latestJobState,
     busyIds,
     resuming,
     canSendNow,

@@ -142,6 +142,41 @@ describe('pending messages api', () => {
     }
   });
 
+  it('sends the idle and latest-turn preconditions and surfaces a stale refusal without retrying', async () => {
+    fetchWithAuth.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          detail: {
+            error: { type: 'conversation_changed', message: 'The conversation changed' },
+          },
+        },
+        409,
+      ),
+    );
+    const body = {
+      prompt: 'Watch the PR and merge',
+      require_idle: true,
+      expected_latest_job_id: 'ajob_latest',
+    };
+    const options = { requestId: 'watch-pr:v2:athr_guarded:ajob_latest' };
+
+    await expect(submitThreadMessage('athr_guarded', body, options)).rejects.toMatchObject({
+      code: 'conversation_changed',
+      statusCode: 409,
+    });
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/athr_guarded/messages',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'Idempotency-Key': options.requestId }),
+        body: JSON.stringify(body),
+      }),
+    );
+  });
+
   it('does not rotate a caller-owned key after an idempotency conflict', async () => {
     fetchWithAuth
       .mockResolvedValueOnce(

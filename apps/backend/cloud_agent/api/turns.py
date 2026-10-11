@@ -152,6 +152,19 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
         return session_archived_error()
     if error == "client_request_conflict":
         return _idempotency_conflict()
+    if error == "conversation_changed":
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "conversation_changed",
+                    "message": (
+                        "This chat changed or is still busy. Wait for its messages and "
+                        "workspace publication to finish, then refresh and try again."
+                    ),
+                }
+            },
+        )
     if error == "attachments_unavailable":
         return HTTPException(
             status_code=400,
@@ -392,6 +405,10 @@ async def submit_thread_message(
     the first send made — the turn if it has become one, the waiting message if
     not — and the same key under different content is a 409
     ``idempotency_conflict``.
+
+    ``require_idle`` binds a fresh action to ``expected_latest_job_id`` and
+    refuses it with ``conversation_changed`` if a turn, waiting message or
+    unpublished workspace appeared before the locked write.
     """
     job_store = _require_store(store)
     latest = await _owned_latest_turn(job_store, thread_id, user)
@@ -449,6 +466,8 @@ async def submit_thread_message(
         reasoning_effort=body.reasoning_effort,
         client_request_id=idempotency_key,
         client_request_fingerprint=fingerprint,
+        require_idle=body.require_idle,
+        expected_latest_job_id=body.expected_latest_job_id,
     )
     if submitted.get("error") is not None:
         if submitted["error"] == "not_found":

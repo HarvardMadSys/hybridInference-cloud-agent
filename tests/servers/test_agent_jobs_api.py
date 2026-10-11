@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
@@ -843,6 +844,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         reasoning_effort: str | None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        require_idle: bool = False,
+        expected_latest_job_id: str | None = None,
     ) -> dict[str, Any]:
         turns = self._thread_turns(thread_id)
         if not turns or turns[-1]["user_id"] != user_id:
@@ -864,6 +867,15 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 return waiting
         if thread_id in self.archived_threads:
             return {"error": "session_archived"}
+        if require_idle:
+            sandbox = turns[-1].get("thread_sandbox") or {}
+            if (
+                turns[-1]["id"] != expected_latest_job_id
+                or any(turn["state"] not in ("succeeded", "failed", "cancelled") for turn in turns)
+                or self._waiting(thread_id)
+                or sandbox.get("workspace_publication_state") != "published"
+            ):
+                return {"error": "conversation_changed"}
         self._continue_if_idle(thread_id)
         message_id = f"apmsg_{self._next_pending:04d}"
         self._next_pending += 1
@@ -7871,6 +7883,91 @@ async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
     assert response.json()["detail"]["error"]["type"] == "session_archived"
 
 
+async def test_an_idle_only_message_passes_its_guard_to_the_atomic_store(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """A stale action is refused before any queue settlement can send owner work."""
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    submitted = AsyncMock(return_value={"error": "conversation_changed"})
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "submit_message", submitted)
+    monkeypatch.setattr(store, "settle_queue", settlement)
+
+    response = await _send(
+        client,
+        store,
+        job_id,
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error"]["type"] == "conversation_changed"
+    submitted.assert_awaited_once()
+    assert submitted.await_args.kwargs["require_idle"] is True
+    assert submitted.await_args.kwargs["expected_latest_job_id"] == job_id
+    settlement.assert_not_awaited()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        {"require_idle": True},
+        {"require_idle": True, "expected_latest_job_id": ""},
+        {"expected_latest_job_id": "ajob_0001"},
+        {"require_idle": "true", "expected_latest_job_id": "ajob_0001"},
+    ],
+)
+async def test_an_idle_only_message_requires_a_complete_strict_guard(
+    client: AsyncClient, store: FakeStorage, monkeypatch, guard: dict[str, Any]
+):
+    job_id = await _create_job(client)
+    submitted = AsyncMock()
+    monkeypatch.setattr(store, "submit_message", submitted)
+
+    response = await _send(client, store, job_id, {"prompt": "watch the PR", **guard})
+
+    assert response.status_code == 422, response.text
+    submitted.assert_not_awaited()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+
+
+async def test_an_idle_only_message_replays_after_its_turn_has_started(
+    client: AsyncClient, store: FakeStorage
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    _attach_shared_workspace(store, job_id)
+    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    body = {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id}
+    headers = {"Idempotency-Key": "watch-pr-once"}
+
+    first = await _send(client, store, job_id, body, headers=headers)
+    assert first.status_code == 201, first.text
+    watch_id = first.json()["job"]["id"]
+    store.jobs[watch_id]["state"] = "running"
+    again = await _send(client, store, job_id, body, headers=headers)
+
+    assert again.status_code == 201, again.text
+    assert again.json()["job"]["id"] == watch_id
+    assert len(store.jobs) == 2
+    assert store.pending == {}
+    changed_guard = await _send(
+        client,
+        store,
+        job_id,
+        {**body, "expected_latest_job_id": watch_id},
+        headers=headers,
+    )
+    assert changed_guard.status_code == 409, changed_guard.text
+    assert changed_guard.json()["detail"]["error"]["type"] == "idempotency_conflict"
+    assert len(store.jobs) == 2
+    assert store.pending == {}
+
+
 async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(
     client: AsyncClient, store: FakeStorage
 ):
@@ -7938,6 +8035,44 @@ async def test_a_submission_without_a_key_carries_none(client: AsyncClient, stor
     job_id = await _create_job(client)
     assert store.jobs[job_id]["client_request_id"] is None
     assert store.jobs[job_id]["client_request_fingerprint"] is None
+
+
+async def test_idle_guards_preserve_ordinary_message_fingerprints_and_bind_the_newest_turn(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    submitted = AsyncMock(return_value={"error": "conversation_changed"})
+    monkeypatch.setattr(store, "submit_message", submitted)
+    bodies = [
+        {"prompt": "watch the PR"},
+        {"prompt": "watch the PR", "require_idle": False},
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": "ajob_newer"},
+    ]
+    for index, body in enumerate(bodies):
+        response = await _send(
+            client, store, job_id, body, headers={"Idempotency-Key": f"fingerprint-{index}"}
+        )
+        assert response.status_code == 409, response.text
+    fingerprints = [call.kwargs["client_request_fingerprint"] for call in submitted.await_args_list]
+    legacy_payload = {
+        "kind": "thread_message",
+        "thread_id": _thread_of(store, job_id),
+        "prompt": "watch the PR",
+        "attachment_ids": None,
+        "model": None,
+        "reasoning_effort": None,
+    }
+    legacy_hash = hashlib.sha256(
+        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    assert fingerprints[0] == fingerprints[1] == legacy_hash
+    assert fingerprints[2] != fingerprints[0]
+    assert fingerprints[3] != fingerprints[2]
+    assert store.pending == {}
+    assert len(store.jobs) == 1
 
 
 async def test_a_reused_key_under_different_content_is_a_409(

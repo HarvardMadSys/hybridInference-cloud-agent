@@ -114,14 +114,18 @@ vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
 }));
 
 /** The queue a conversation with nothing waiting reads back. */
-function emptyQueue(threadId: string) {
+function emptyQueue(
+  threadId: string,
+  latestJobId: string | null = null,
+  latestJobState: string | null = latestJobId ? 'succeeded' : null,
+) {
   return {
     thread_id: threadId,
     pending_messages: [],
     queue_paused_reason: null,
-    latest_job_id: null,
+    latest_job_id: latestJobId,
     latest_turn_no: null,
-    latest_job_state: null,
+    latest_job_state: latestJobState,
   };
 }
 
@@ -698,8 +702,12 @@ describe('JobDetail', () => {
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
     const [threadId, body, options] = vi.mocked(submitThreadMessage).mock.calls[0];
     expect(threadId).toBe('original-thread');
-    expect(body).toEqual({ prompt: expect.any(String) });
-    expect(options).toEqual({ requestId: 'watch-pr:v1:original-thread:job:ajob_1' });
+    expect(body).toEqual({
+      prompt: expect.any(String),
+      require_idle: true,
+      expected_latest_job_id: 'ajob_1',
+    });
+    expect(options).toEqual({ requestId: 'watch-pr:v2:original-thread:ajob_1' });
     expect(body.prompt).toContain(prUrl);
     expect(body.prompt).toContain('owner/repository');
     expect(body.prompt).toContain('agent/ajob_1');
@@ -747,8 +755,12 @@ describe('JobDetail', () => {
     expect(submitThreadMessage).toHaveBeenCalledTimes(1);
     expect(submitThreadMessage).toHaveBeenCalledWith(
       'original-thread',
-      { prompt: expect.stringContaining(prUrl) },
-      { requestId: 'watch-pr:v1:original-thread:job:ajob_1' },
+      {
+        prompt: expect.stringContaining(prUrl),
+        require_idle: true,
+        expected_latest_job_id: 'ajob_1',
+      },
+      { requestId: 'watch-pr:v2:original-thread:ajob_1' },
     );
     const prompt = vi.mocked(submitThreadMessage).mock.calls[0][1].prompt;
     await act(async () =>
@@ -824,15 +836,18 @@ describe('JobDetail', () => {
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
   });
 
-  it('reuses a published workspace request across mounts and historical turns, then uses a new key after publication', async () => {
+  it('reuses the queue latest turn across historical mounts without epochs and uses a new key after the latest turn changes', async () => {
     const job = makeJob({
       state: 'done',
       threadId: 'original-thread',
       conversationState: 'idle',
       workspacePublicationState: 'published',
-      workspaceEpoch: 7,
       prUrl: 'https://github.com/owner/repository/pull/7',
     });
+    let latestJobId = 'ajob_latest';
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+      emptyQueue(threadId, latestJobId),
+    );
     const existingReceipt = { pending: null, job: { id: 'ajob_watch_shared' } } as never;
     vi.mocked(submitThreadMessage)
       .mockResolvedValueOnce(existingReceipt)
@@ -844,7 +859,11 @@ describe('JobDetail', () => {
     fireEvent.click(watch);
     await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
     const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
-    expect(firstRequestId).toBe('watch-pr:v1:original-thread:epoch:7');
+    expect(firstRequestId).toBe('watch-pr:v2:original-thread:ajob_latest');
+    expect(vi.mocked(submitThreadMessage).mock.calls[0][1]).toMatchObject({
+      require_idle: true,
+      expected_latest_job_id: 'ajob_latest',
+    });
     first.unmount();
 
     window.history.pushState(null, '', '/ajob_older');
@@ -860,11 +879,14 @@ describe('JobDetail', () => {
     expect(historicalOptions?.requestId).toBe(firstRequestId);
     expect(historicalBody).toEqual(vi.mocked(submitThreadMessage).mock.calls[0][1]);
 
+    latestJobId = 'ajob_published_next';
     second.rerender(
-      <JobDetail
-        job={{ ...job, id: 'ajob_published_next', turnNo: 3, workspaceEpoch: 8 }}
-        userId="alice"
-      />,
+      <JobDetail job={{ ...job, id: 'ajob_published_next', turnNo: 3 }} userId="alice" />,
+    );
+    const priorReads = vi.mocked(getThreadQueue).mock.calls.length;
+    receiveHint('queue', 'original-thread');
+    await waitFor(() =>
+      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(priorReads),
     );
     const nextWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
     await waitFor(() => expect(nextWatch).toBeEnabled());
@@ -872,8 +894,12 @@ describe('JobDetail', () => {
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_next'));
     const nextRequestId = vi.mocked(submitThreadMessage).mock.calls[2][2]?.requestId;
-    expect(nextRequestId).toBe('watch-pr:v1:original-thread:epoch:8');
+    expect(nextRequestId).toBe('watch-pr:v2:original-thread:ajob_published_next');
     expect(nextRequestId).not.toBe(firstRequestId);
+    expect(vi.mocked(submitThreadMessage).mock.calls[2][1]).toMatchObject({
+      require_idle: true,
+      expected_latest_job_id: 'ajob_published_next',
+    });
   });
 
   it.each([
@@ -980,8 +1006,106 @@ describe('JobDetail', () => {
     expect(watch).toBeDisabled();
     fireEvent.click(watch);
     expect(submitThreadMessage).not.toHaveBeenCalled();
-    await act(async () => finishRead(emptyQueue('original-thread')));
+    await act(async () => finishRead(emptyQueue('original-thread', 'ajob_1')));
     await waitFor(() => expect(watch).toBeEnabled());
+  });
+
+  it('keeps PR watching disabled when a successful queue read has no latest turn', async () => {
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) => emptyQueue(threadId));
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'original-thread',
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        })}
+        userId="alice"
+      />,
+    );
+    await act(async () => undefined);
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 'queued', 'running', 'publishing'])(
+    'keeps PR watching disabled when the latest queue turn state is %s',
+    async (latestJobState) => {
+      vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+        emptyQueue(threadId, 'ajob_1', latestJobState),
+      );
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            conversationState: 'idle',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+          })}
+          userId="alice"
+        />,
+      );
+      await act(async () => undefined);
+
+      const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refreshes a changed conversation after refusing the watch without retrying or disturbing the draft', async () => {
+    let latestJobId = 'ajob_1';
+    let latestJobState = 'succeeded';
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+      emptyQueue(threadId, latestJobId, latestJobState),
+    );
+    vi.mocked(submitThreadMessage).mockImplementation(async () => {
+      latestJobId = 'ajob_newest';
+      latestJobState = 'running';
+      throw new APIError('conversation_changed', 'The conversation changed before watching', 409);
+    });
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          conversationState: 'idle',
+          threadId: 'original-thread',
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        })}
+        userId="alice"
+      />,
+    );
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Keep this draft for later' } });
+    const model = await screen.findByLabelText('Model for this turn');
+    fireEvent.change(model, { target: { value: 'glm-test' } });
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
+    fireEvent.click(watch);
+
+    expect(await screen.findByText('The conversation changed before watching')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(initialReads),
+    );
+    expect(watch).toBeDisabled();
+    expect(box).toHaveValue('Keep this draft for later');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.queryByRole('region', { name: 'Queued messages' })).not.toBeInTheDocument();
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(submitThreadMessage).toHaveBeenCalledWith(
+      'original-thread',
+      {
+        prompt: expect.stringContaining('https://github.com/owner/repository/pull/7'),
+        require_idle: true,
+        expected_latest_job_id: 'ajob_1',
+      },
+      { requestId: 'watch-pr:v2:original-thread:ajob_1' },
+    );
+    expect(forkAgentJob).not.toHaveBeenCalled();
   });
 
   it('retries an idle conversation queue after initial read failures before enabling PR watching', async () => {
@@ -990,7 +1114,7 @@ describe('JobDetail', () => {
       let recovered = false;
       vi.mocked(getThreadQueue).mockImplementation(async (threadId) => {
         if (!recovered) throw new Error('Temporary queue outage');
-        return emptyQueue(threadId);
+        return emptyQueue(threadId, 'ajob_1');
       });
       render(
         <JobDetail
@@ -1025,6 +1149,47 @@ describe('JobDetail', () => {
     }
   });
 
+  it.each(['queued', 'running', 'publishing'] as const)(
+    'polls a historical conversation while the latest queue turn is %s until it settles',
+    async (initialState) => {
+      vi.useFakeTimers();
+      try {
+        let latestJobState: string = initialState;
+        vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+          emptyQueue(threadId, 'ajob_latest', latestJobState),
+        );
+        render(
+          <JobDetail
+            job={makeJob({
+              state: 'done',
+              conversationState: 'idle',
+              threadId: 'original-thread',
+              prUrl: 'https://github.com/owner/repository/pull/7',
+            })}
+            userId="alice"
+          />,
+        );
+        await act(async () => undefined);
+
+        const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+        expect(watch).toBeDisabled();
+        const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
+        latestJobState = 'succeeded';
+        await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+
+        expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(initialReads);
+        expect(watch).toBeEnabled();
+        expect(submitThreadMessage).not.toHaveBeenCalled();
+        const verifiedReads = vi.mocked(getThreadQueue).mock.calls.length;
+        await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+        expect(getThreadQueue).toHaveBeenCalledTimes(verifiedReads);
+      } finally {
+        cleanup();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it.each(['queued', 'held'] as const)(
     'keeps PR watching disabled while an unrelated %s message waits in a paused queue',
     async (state) => {
@@ -1039,7 +1204,7 @@ describe('JobDetail', () => {
         },
       ];
       vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
-        ...emptyQueue(threadId),
+        ...emptyQueue(threadId, 'ajob_1'),
         pending_messages: messages,
         queue_paused_reason: messages.length ? 'stopped' : null,
       }));
@@ -1073,8 +1238,12 @@ describe('JobDetail', () => {
       await waitFor(() =>
         expect(submitThreadMessage).toHaveBeenCalledWith(
           'original-thread',
-          { prompt: expect.stringContaining('https://github.com/owner/repository/pull/7') },
-          { requestId: 'watch-pr:v1:original-thread:job:ajob_1' },
+          {
+            prompt: expect.stringContaining('https://github.com/owner/repository/pull/7'),
+            require_idle: true,
+            expected_latest_job_id: 'ajob_1',
+          },
+          { requestId: 'watch-pr:v2:original-thread:ajob_1' },
         ),
       );
     },
@@ -1087,7 +1256,7 @@ describe('JobDetail', () => {
       prUrl: 'https://github.com/owner/repository/pull/7',
     });
     vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
-      ...emptyQueue(threadId),
+      ...emptyQueue(threadId, 'ajob_1'),
       pending_messages: [
         {
           id: 'apmsg_existing_watch',
@@ -1172,10 +1341,14 @@ describe('JobDetail', () => {
     expect(model).toHaveValue('glm-test');
     expect(screen.getByText('spec.txt')).toBeInTheDocument();
     for (const [, body] of vi.mocked(submitThreadMessage).mock.calls) {
-      expect(body).toEqual({ prompt: expect.stringContaining(prUrl) });
+      expect(body).toEqual({
+        prompt: expect.stringContaining(prUrl),
+        require_idle: true,
+        expected_latest_job_id: 'ajob_1',
+      });
     }
     const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
-    expect(firstRequestId).toBe('watch-pr:v1:original-thread:job:ajob_1');
+    expect(firstRequestId).toBe('watch-pr:v2:original-thread:ajob_1');
     expect(vi.mocked(submitThreadMessage).mock.calls[1][2]?.requestId).toBe(firstRequestId);
     expect(deleteAttachment).not.toHaveBeenCalled();
     expect(forkAgentJob).not.toHaveBeenCalled();
@@ -1454,7 +1627,7 @@ describe('JobDetail', () => {
     vi.mocked(sendPendingMessageNow).mockReset();
     vi.mocked(getThreadQueue)
       .mockReset()
-      .mockImplementation(async (threadId) => emptyQueue(threadId));
+      .mockImplementation(async (threadId) => emptyQueue(threadId, 'ajob_1'));
     vi.mocked(forkAgentJob).mockReset();
     vi.mocked(restoreAgentJob).mockReset();
     vi.mocked(renameAgentJob).mockReset();

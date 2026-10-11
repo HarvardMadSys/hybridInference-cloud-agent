@@ -184,12 +184,19 @@ class PostgresPendingMessageRepository:
         reasoning_effort: str | None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        require_idle: bool = False,
+        expected_latest_job_id: str | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
         Answers ``{"message": row}``; ``{"job_id": id}`` when this key already
         made a turn; or ``{"error": ...}`` — ``not_found``, ``session_archived``,
-        ``client_request_conflict`` or ``attachments_unavailable``.
+        ``client_request_conflict``, ``attachments_unavailable`` or
+        ``conversation_changed``.
+
+        An idle-only action is checked under the same lock as every queue
+        write. It can replay its original receipt after the chat changes, but
+        cannot newly queue behind or resume another waiting message.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as
@@ -216,6 +223,34 @@ class PostgresPendingMessageRepository:
                         return replayed
                 if thread["archived_at"] is not None:
                     return {"error": "session_archived"}
+                if require_idle:
+                    current = await conn.fetchrow(
+                        f"""
+                        SELECT
+                            (SELECT id FROM agent_jobs WHERE thread_id = $1
+                             ORDER BY turn_no DESC LIMIT 1) AS latest_job_id,
+                            EXISTS (SELECT 1 FROM agent_jobs WHERE thread_id = $1
+                                    AND {LIVE_TURN_SQL}) AS has_live_turn,
+                            EXISTS (SELECT 1 FROM agent_pending_messages
+                                    WHERE thread_id = $1) AS has_pending_message,
+                            (SELECT snapshot.state
+                             FROM agent_thread_sandbox_memberships membership
+                             JOIN agent_sandbox_snapshots snapshot
+                               ON snapshot.sandbox_id = membership.sandbox_id
+                             WHERE membership.thread_id = $1
+                             ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+                             LIMIT 1) AS workspace_publication_state
+                        """,
+                        thread_id,
+                    )
+                    if (
+                        expected_latest_job_id is None
+                        or current["latest_job_id"] != expected_latest_job_id
+                        or current["has_live_turn"]
+                        or current["has_pending_message"]
+                        or current["workspace_publication_state"] != "published"
+                    ):
+                        return {"error": "conversation_changed"}
                 await _continue_if_idle(conn, thread_id=thread_id)
                 await conn.execute(
                     """
