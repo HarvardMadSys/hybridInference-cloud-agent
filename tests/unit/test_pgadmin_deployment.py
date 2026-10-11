@@ -21,10 +21,17 @@ def test_pgadmin_has_no_direct_public_port_or_database_password():
     assert pgadmin["networks"] == ["control-plane"]
     assert "agent-pgadmin:/var/lib/pgadmin" in pgadmin["volumes"]
     assert "PGADMIN_DEFAULT_PASSWORD" not in pgadmin["environment"]
+    assert "PGADMIN_DEFAULT_EMAIL" not in pgadmin["environment"]
+    assert "PGADMIN_DEFAULT_PASSWORD_FILE" not in pgadmin["environment"]
+    assert "secrets" not in pgadmin
+    assert "agent-pgadmin-bootstrap:/run/cloud-agent/pgadmin-bootstrap:ro" in pgadmin["volumes"]
+    assert pgadmin["entrypoint"] == ["/venv/bin/python3", "/pgadmin-entrypoint.py"]
+    assert pgadmin["group_add"] == ["10001"]
+    assert pgadmin["depends_on"]["control-plane"]["condition"] == "service_started"
     assert (
-        pgadmin["environment"]["PGADMIN_DEFAULT_PASSWORD_FILE"] == "/run/secrets/pgadmin-password"
+        "agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap"
+        in compose["services"]["control-plane"]["volumes"]
     )
-    assert pgadmin["secrets"] == ["pgadmin-password"]
     assert pgadmin["environment"]["PGADMIN_CONFIG_SERVER_MODE"] == "True"
     assert pgadmin["environment"]["PGADMIN_CONFIG_SESSION_COOKIE_SECURE"].endswith(":-True}")
     assert "@sha256:" in pgadmin["image"]
@@ -42,3 +49,6 @@ def test_release_recipe_preserves_pgadmin_and_its_server_definitions():
         service = yaml.safe_load(compose)["services"]["pgadmin"]
         assert service["profiles"] == ["pgadmin"]
         assert "build" not in service and "ports" not in service
+        entrypoint = archive.extractfile("recipe/deploy/control-plane/pgadmin-entrypoint.py")
+        assert entrypoint is not None
+        assert b"/entrypoint.sh" in entrypoint.read()

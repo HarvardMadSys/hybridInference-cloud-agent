@@ -53,6 +53,9 @@ services:
       # Optional pgAdmin service, reached only through the admin-checked API.
       AGENT_PGADMIN_URL: ${AGENT_PGADMIN_URL:-}
       AGENT_PGADMIN_PUBLIC_URL: ${AGENT_PGADMIN_PUBLIC_URL:-}
+      AGENT_PGADMIN_BOOTSTRAP_DIR: ${AGENT_PGADMIN_BOOTSTRAP_DIR:-}
+      AGENT_PGADMIN_BOOTSTRAP_URL: ${AGENT_PGADMIN_BOOTSTRAP_URL:-}
+      AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL: ${AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL:-}
       # --- Database ---------------------------------------------------------
       # A database this service owns outright. Sharing the gateway's would
       # reintroduce exactly the coupling the split removes.
@@ -216,6 +219,7 @@ services:
       # check existed — a multi-host pool should name its machines here.
       AGENT_BROKER_URL_ALLOWED_HOSTS: ${AGENT_BROKER_URL_ALLOWED_HOSTS:-}
     volumes:
+      - agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap
       # The GitHub App key, read-only, as a file. `AGENT_GITHUB_APP_PRIVATE_KEY_PATH`
       # names a path *inside* this container, so setting it without mounting
       # anything produces a service that starts, offers Integrations, and fails
@@ -368,24 +372,27 @@ services:
     profiles: [pgadmin]
     image: dpage/pgadmin4:9.18@sha256:c332c5f6dfba995d9ebc4af261d93506d6876085d712eaaa3defc8dd1a3f26de
     restart: unless-stopped
+    entrypoint: ["/venv/bin/python3", "/pgadmin-entrypoint.py"]
+    group_add: ["10001"]
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${AGENT_PGADMIN_EMAIL:-}
-      PGADMIN_DEFAULT_PASSWORD_FILE: /run/secrets/pgadmin-password
       PGADMIN_DISABLE_POSTFIX: "1"
       PGADMIN_LISTEN_PORT: "5050"
       PGADMIN_CONFIG_SERVER_MODE: "True"
       PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: "1"
       PGADMIN_CONFIG_SESSION_COOKIE_SECURE: ${AGENT_PGADMIN_COOKIE_SECURE:-True}
-    secrets: [pgadmin-password]
     volumes:
       - agent-pgadmin:/var/lib/pgadmin
+      - agent-pgadmin-bootstrap:/run/cloud-agent/pgadmin-bootstrap:ro
+      - ${AGENT_PGADMIN_ENTRYPOINT_FILE:-./pgadmin-entrypoint.py}:/pgadmin-entrypoint.py:ro
       - ${AGENT_PGADMIN_SERVERS_FILE:-./pgadmin-servers.json}:/pgadmin4/servers.json:ro
     depends_on:
+      control-plane:
+        condition: service_started
       postgres:
         condition: service_healthy
     networks: [control-plane]
     healthcheck:
-      test: ["CMD", "/venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5050/misc/ping', timeout=3)"]
+      test: ["CMD", "/venv/bin/python3", "-c", "from pathlib import Path; import urllib.request; (Path('/var/lib/pgadmin/pgadmin4.db').exists() or Path('/run/cloud-agent/pgadmin-bootstrap/email').exists()) and urllib.request.urlopen('http://127.0.0.1:5050/misc/ping', timeout=3)"]
       interval: 10s
       timeout: 5s
       start_period: 60s
@@ -428,7 +435,4 @@ networks:
 volumes:
   agent-postgres:
   agent-pgadmin:
-
-secrets:
-  pgadmin-password:
-    file: ${AGENT_PGADMIN_PASSWORD_FILE:-./pgadmin-password}
+  agent-pgadmin-bootstrap:

@@ -88,6 +88,7 @@ with log.open("a") as f:
                        "sandbox": os.getenv("AGENT_SANDBOX_IMAGE"),
                        "edge": os.getenv("AGENT_EDGE_CONFIG_FILE"),
                        "pgadmin_servers": os.getenv("AGENT_PGADMIN_SERVERS_FILE"),
+                       "pgadmin_entrypoint": os.getenv("AGENT_PGADMIN_ENTRYPOINT_FILE"),
                        "physical_host": os.getenv("AGENT_PHYSICAL_HOST"),
                        "runner_host": os.getenv("AGENT_RUNNER_HOST")}) + "\n")
 if "config" in a and "--environment" in a:
@@ -279,16 +280,23 @@ def test_pgadmin_definitions_resolve_from_recipe_or_operator_override(
     """The generated Compose file runs outside the extracted recipe directory."""
     script, env = deployment(tmp_path, "control-plane")
     definitions = script.parent / "pgadmin-servers.json"
+    entrypoint = script.parent / "pgadmin-entrypoint.py"
     if custom_definitions:
         definitions = tmp_path / "custom-servers.json"
         definitions.write_text('{"Servers": {}}\n')
         with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
             config.write(f"AGENT_PGADMIN_SERVERS_FILE={definitions}\n")
+        entrypoint = tmp_path / "custom-pgadmin-entrypoint.py"
+        entrypoint.write_text("# custom pgAdmin entrypoint\n")
+        with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
+            config.write(f"AGENT_PGADMIN_ENTRYPOINT_FILE={entrypoint}\n")
     result, calls = run(script, env)
     assert result.returncode == 0, result.stdout + result.stderr
     activation = next(call for call in calls if "--remove-orphans" in call["args"])
     assert activation["pgadmin_servers"] == str(definitions)
     assert definitions.is_file()
+    assert activation["pgadmin_entrypoint"] == str(entrypoint)
+    assert entrypoint.is_file()
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])

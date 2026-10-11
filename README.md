@@ -80,7 +80,8 @@ deployment infrastructure remain bootstrap configuration. See the
 [Settings runbook](docs/operations.md#admin-settings) for migration and key setup.
 
 **Admin → Database** opens the optional pgAdmin website for PostgreSQL
-administration. Enable the private service and its separate login using the
+administration. The first administrator chooses pgAdmin's login in the dashboard.
+Enable the private service using the
 [pgAdmin runbook](docs/operations.md#pgadmin).
 
 ## Architecture

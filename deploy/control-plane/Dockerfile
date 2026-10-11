@@ -54,7 +54,8 @@ COPY migrations/ migrations/
 
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 cloudagent \
-    && chown -R cloudagent:cloudagent /app
+    && chown -R cloudagent:cloudagent /app \
+    && install -d -m 0750 -o cloudagent -g cloudagent /var/lib/cloud-agent/pgadmin-bootstrap
 
 # Never root. This process holds a git credential and a database; a container
 # escape that starts as root is a materially worse day than one that does not.

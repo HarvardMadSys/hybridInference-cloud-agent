@@ -92,6 +92,9 @@ prepare_artifact_deployment() {
       AGENT_PGADMIN_SERVERS_FILE="$(artifact_env_value AGENT_PGADMIN_SERVERS_FILE)"
       AGENT_PGADMIN_SERVERS_FILE="${AGENT_PGADMIN_SERVERS_FILE:-$ARTIFACT_RECIPE_ROOT/deploy/control-plane/pgadmin-servers.json}"
       export AGENT_PGADMIN_SERVERS_FILE
+      AGENT_PGADMIN_ENTRYPOINT_FILE="$(artifact_env_value AGENT_PGADMIN_ENTRYPOINT_FILE)"
+      AGENT_PGADMIN_ENTRYPOINT_FILE="${AGENT_PGADMIN_ENTRYPOINT_FILE:-$ARTIFACT_RECIPE_ROOT/deploy/control-plane/pgadmin-entrypoint.py}"
+      export AGENT_PGADMIN_ENTRYPOINT_FILE
       ;;
     host)
       COMPOSE_FILE="$PWD/deploy/host/.release-${SHA}.yml"

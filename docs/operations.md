@@ -119,13 +119,11 @@ Enable the optional service in the control-plane deployment's `.env`:
 
 ```dotenv
 COMPOSE_PROFILES=pgadmin
-AGENT_PGADMIN_EMAIL=database-admin@example.org
-AGENT_PGADMIN_PASSWORD_FILE=/srv/cloud-agent-secrets/pgadmin-password
+AGENT_PGADMIN_BOOTSTRAP_URL=http://pgadmin:5050
+AGENT_PGADMIN_BOOTSTRAP_DIR=/var/lib/cloud-agent/pgadmin-bootstrap
 ```
 
 Retain any existing profiles, for example `COMPOSE_PROFILES=edge,pgadmin`.
-Provision the password file privately outside the checkout and make it readable
-by pgAdmin's UID 5050; Compose mounts it as `/run/secrets/pgadmin-password`.
 Run the normal control-plane deployment workflow. An existing stack can start
 the service and apply its new control-plane environment with:
 
@@ -134,27 +132,39 @@ docker compose --env-file .env -f <selected-compose-file> up -d pgadmin control-
 ```
 
 Use the release-generated Compose file for an artifact deployment. Its bundled
-server definitions are resolved from the selected recipe. In **Admin → Settings
-→ Database tools**, set **Private pgAdmin URL** to `http://pgadmin:5050` for the
-bundled service. The default public URL is the saved web base URL followed by
-`/api/admin/agent/pgadmin/`; set **Public pgAdmin proxy URL** if the API has a
-different public prefix. Existing `AGENT_PGADMIN_URL` and
+server definitions are resolved from the selected recipe. First-time setup also
+saves the connection in **Admin → Settings → Database tools** if no private
+pgAdmin URL has been saved. The default public URL is the saved web base URL
+followed by `/api/admin/agent/pgadmin/`; set `AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL`
+before setup if the API has a different public prefix. Later changes use
+**Private pgAdmin URL** and **Public pgAdmin proxy URL** in Admin Settings.
+Existing `AGENT_PGADMIN_URL` and
 `AGENT_PGADMIN_PUBLIC_URL` values are imported once along with other runtime settings.
 
-Sign in with the configured pgAdmin email and password. The initial server
+Open **Admin → Database** and choose an administrator email and a password of
+at least 12 characters. Only a current Agent administrator can complete setup.
+The service waits for that first setup; the page then checks readiness and
+offers **Open pgAdmin**. No administrator account or default password is shipped.
+Concurrent setup attempts cannot replace the first credentials. The private
+`agent-pgadmin-bootstrap` volume holds the initial credentials; preserve it and
+`agent-pgadmin` during deployments. pgAdmin mounts the bootstrap volume read-only.
+
+Sign in with the pgAdmin email and password you chose. The initial server
 definition points to `postgres:5432`, database/user `cloudagent`. Enter the
 deployment's PostgreSQL password when connecting. If the database name or user
 differs, supply a custom `AGENT_PGADMIN_SERVERS_FILE` before initialization, or
 edit the connection in pgAdmin. Database passwords are not preloaded or exposed
 in the dashboard. Saved accounts and connections persist in the separate
-`agent-pgadmin` volume; changing initial credentials does not reset an existing
-account. Manage that account in pgAdmin.
+`agent-pgadmin` volume. Setup does not reset an existing account, including on a
+container restart. Manage later accounts and password changes in pgAdmin.
 
 For the HTTP-only local stack, use `AGENT_PGADMIN_COOKIE_SECURE=False` alongside
 the existing local Agent-cookie setting. Keep the default `True` for HTTPS.
 If the dashboard reports unavailable, inspect `docker compose logs pgadmin`
-and its health state. Missing account settings, an unreadable password file,
-or unavailable PostgreSQL prevent startup. Opening pgAdmin records
+and its health state. Before setup, a waiting container is healthy and logs
+`Waiting for first-time setup in Admin -> Database.` After setup, unreadable
+bootstrap storage or unavailable PostgreSQL prevent startup. Setup records
+`agent.database.pgadmin.setup`; opening pgAdmin records
 `agent.database.pgadmin.open` in the Agent audit log; pgAdmin manages SQL
 activity itself. Resetting **Private pgAdmin URL** in Admin Settings disables
 access after the listeners synchronize; removing the profile and stopping

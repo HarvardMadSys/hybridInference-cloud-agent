@@ -67,9 +67,12 @@ def install_admin_no_store(
     async def with_no_store(request: Request, exc: Exception) -> Response:
         response: Response
         if isinstance(exc, RequestValidationError):
-            if request.url.path.rstrip("/") == "/admin/agent/settings":
-                # Validation errors normally echo invalid input. Settings can
-                # contain credentials, including in a malformed request body.
+            if request.url.path.rstrip("/") in {
+                "/admin/agent/settings",
+                "/admin/agent/database-tools/setup",
+            }:
+                # Validation errors normally echo invalid input. Settings and
+                # pgAdmin setup can contain credentials, even in a malformed body.
                 response = JSONResponse(
                     status_code=422,
                     content={

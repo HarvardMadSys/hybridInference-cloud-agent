@@ -65,6 +65,7 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/control-plane/edge.nginx.conf",
     "deploy/control-plane/.env.example",
     "deploy/control-plane/pgadmin-servers.json",
+    "deploy/control-plane/pgadmin-entrypoint.py",
     "deploy/host/deploy.sh",
     "deploy/host/sandbox_host.sh",
     "deploy/host/docker-compose.sandbox.yml",

@@ -789,6 +789,11 @@ BOOTSTRAP = (
         "description": "Trusted deployment bundles and mounted secret file references remain operator configuration.",
     },
     {
+        "key": "AGENT_PGADMIN_BOOTSTRAP_URL / AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL / AGENT_PGADMIN_BOOTSTRAP_DIR",
+        "label": "pgAdmin first-time setup",
+        "description": "Deployment routing and the private setup volume let the first administrator choose the account in Admin → Database. Setup saves the connection; later changes use the Database tools settings.",
+    },
+    {
         "key": "Host networking, isolation, listener and build configuration",
         "label": "Deployment infrastructure",
         "description": "Machine addresses, credentials, sandbox isolation, egress, proxy trust and build routing are configured when deploying.",

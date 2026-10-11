@@ -8064,6 +8064,11 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "setup_required": {
+            "default": false,
+            "title": "Setup Required",
+            "type": "boolean"
+          },
           "url": {
             "anyOf": [
               {
@@ -10666,6 +10671,31 @@
           "state"
         ],
         "title": "OAuthConnectRequest",
+        "type": "object"
+      },
+      "PgAdminSetup": {
+        "description": "The first administrator chooses credentials for pgAdmin's own login.",
+        "properties": {
+          "email": {
+            "format": "email",
+            "maxLength": 254,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "format": "password",
+            "maxLength": 256,
+            "minLength": 12,
+            "title": "Password",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "PgAdminSetup",
         "type": "object"
       },
       "ProcessObservation": {
@@ -17058,6 +17088,66 @@
           }
         },
         "summary": "Database Tools",
+        "tags": [
+          "admin-database"
+        ]
+      }
+    },
+    "/admin/agent/database-tools/setup": {
+      "post": {
+        "description": "Initialize once; existing accounts and password changes remain in pgAdmin.",
+        "operationId": "setup_pgadmin_admin_agent_database_tools_setup_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PgAdminSetup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseTools"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Setup Pgadmin",
         "tags": [
           "admin-database"
         ]
