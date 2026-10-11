@@ -1195,9 +1195,16 @@ disconnect.
 
 GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
-tokens. New draft PR titles use a short excerpt from the included turns' closing
-summaries, with Markdown removed, and fall back to the changed files when no
-usable closing summary exists. The original task remains in the PR body.
+tokens. Draft PR titles summarize the captured user and assistant messages across
+the shared session through a bounded inference request under a separate,
+owner-scoped grant. Generic completion text is rejected and retried. If inference
+is unavailable, the publisher uses the first concrete line from each included
+turn's closing summary, skipping headings and generic completion preambles. It
+falls back to the changed files when no usable summary exists. The
+`agent_pr_title_generation_failed` log records the snapshot ID and fallback
+reason as structured fields, plus the exception type and HTTP status when
+available, without logging conversation text or credentials. Enable JSON logging
+in Admin Settings to see these fields. The original task remains in the PR body.
 A conversation keeps one draft PR across its turns while that PR is open; once
 someone closes or merges it, the next published snapshot opens a new draft PR
 from the same `agent/…` branch.

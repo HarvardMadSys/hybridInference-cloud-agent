@@ -41,7 +41,7 @@ import httpx
 
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.pr_titles import generate_pr_title
+from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent.settings import number_setting, setting_env
@@ -302,8 +302,7 @@ def _summary_line(value: Any) -> str | None:
         if (
             not any(char.isalnum() for char in line)
             or line.endswith(":")
-            or line.casefold().rstrip(".!")
-            in {"summary", "changes", "what changed", "done", "completed"}
+            or is_generic_pr_summary(line)
             or line == "(the agent finished without a closing message)"
         ):
             continue

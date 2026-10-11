@@ -205,6 +205,21 @@ async def test_default_publish_branch_uses_current_saved_setting(monkeypatch):
         (["\x1bmalformed\u202e title", None, {"title": "bad"}], "Update x"),
         (["(the agent finished without a closing message)"], "Update x"),
         (["Done."], "Update x"),
+        (
+            [
+                "I've implemented the feature. Here's a summary of what I did.\n\n"
+                "- Add a button to restart failed runs in a new session"
+            ],
+            "Add a button to restart failed runs in a new session",
+        ),
+        (["I've implemented the feature. Here's a summary of what I did."], "Update x"),
+        (
+            ["I've implemented the feature.\n\nAdded exponential retry backoff."],
+            "Added exponential retry backoff.",
+        ),
+        (["Implemented exponential retry backoff"], "Implemented exponential retry backoff"),
+        (["Changes.ts: add restart navigation"], "Changes.ts: add restart navigation"),
+        (["summary.py now preserves earlier turns"], "summary.py now preserves earlier turns"),
         (["⏳ The model is starting up — please wait"], "Update x"),
         ([], "Update x"),
         (None, "Update x"),
@@ -224,6 +239,26 @@ async def test_pr_title_uses_readable_closing_summaries(monkeypatch, summaries, 
     assert captured["title"] == f"[agent] {expected}"
     assert len(captured["title"]) <= 78
     assert "Please fix" not in captured["title"]
+
+
+async def test_title_generation_failure_publishes_a_meaningful_fallback(monkeypatch):
+    closing = (
+        "I've implemented the feature. Here's a summary of what I did.\n\n"
+        "- Add a button to restart failed runs in a new session"
+    )
+    store = FakeStore({**_JOB, "session_summaries": [closing]})
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    captured = _patch_pr(monkeypatch)
+    generated = AsyncMock(return_value=None)
+    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
+
+    url = await publish_one(store, credential=GitHubCredential("t"))
+
+    assert captured["title"] == "[agent] Add a button to restart failed runs in a new session"
+    assert store.snapshot_recorded == (9, url, "s")
+    generated.assert_awaited_once()
 
 
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
