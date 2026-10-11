@@ -213,13 +213,19 @@ function SettingField({
   );
 }
 
-export default function ApplicationSettings({
-  onAccessDenied,
-  recoveryToken,
-}: {
+export interface ApplicationSettingsOptions {
   onAccessDenied?: (cause: unknown) => void;
   recoveryToken?: string;
-}) {
+  onRevealCategory?: (category: string) => void;
+  enabled?: boolean;
+}
+
+export function useApplicationSettings({
+  onAccessDenied,
+  recoveryToken,
+  onRevealCategory,
+  enabled = true,
+}: ApplicationSettingsOptions = {}) {
   const [snapshot, setSnapshot] = useState<AgentAdminSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -227,6 +233,9 @@ export default function ApplicationSettings({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saved, setSaved] = useState<Record<string, number>>({});
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [focusField, setFocusField] = useState<string | null>(null);
+  const previousHash = useRef<string | null>(null);
   const mounted = useRef(false);
   const writing = useRef(false);
   const revoked = useRef(false);
@@ -252,7 +261,7 @@ export default function ApplicationSettings({
   );
 
   const load = useCallback(async () => {
-    if (writing.current || revoked.current) return;
+    if (!enabled || writing.current || revoked.current) return;
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
@@ -270,9 +279,20 @@ export default function ApplicationSettings({
     } finally {
       if (mounted.current && current === sequence.current) setLoading(false);
     }
-  }, [fail, recoveryToken]);
+  }, [enabled, fail, recoveryToken]);
 
   useEffect(() => {
+    if (!enabled) {
+      revoked.current = true;
+      request.current?.abort();
+      sequence.current += 1;
+      setSnapshot(null);
+      setNotice(null);
+      setError(null);
+      setFocusField(null);
+      setDenied(true);
+      return;
+    }
     mounted.current = true;
     void load();
     const timer = setInterval(() => {
@@ -283,10 +303,39 @@ export default function ApplicationSettings({
       request.current?.abort();
       clearInterval(timer);
     };
-  }, [load]);
+  }, [enabled, load]);
+
+  useEffect(() => {
+    const revealHash = () => {
+      const hash = window.location.hash;
+      if (hash === previousHash.current) return;
+      const prefix = '#application-setting-';
+      if (!hash.startsWith(prefix)) {
+        previousHash.current = hash;
+        return;
+      }
+      if (!snapshot) return;
+      previousHash.current = hash;
+      let key: string;
+      try {
+        key = decodeURIComponent(hash.slice(prefix.length));
+      } catch {
+        return;
+      }
+      const definition = snapshot.definitions.find((field) => field.key === key);
+      if (!definition) return;
+      const category = definition.category || 'General';
+      setSelectedCategory(category);
+      onRevealCategory?.(category);
+      setFocusField(key);
+    };
+    revealHash();
+    window.addEventListener('hashchange', revealHash);
+    return () => window.removeEventListener('hashchange', revealHash);
+  }, [snapshot, onRevealCategory]);
 
   const save = async (key: string, value: AdminSettingValue | null) => {
-    if (writing.current || revoked.current) return;
+    if (!enabled || writing.current || revoked.current) return;
     writing.current = true;
     setBusy(true);
     setError(null);
@@ -314,28 +363,65 @@ export default function ApplicationSettings({
     }
   };
 
-  if (denied) {
-    return (
-      <p
-        role="alert"
-        className="mt-6 rounded-xl border border-status-error/20 bg-status-error/5 p-4 text-sm text-status-error"
-      >
-        Admin access required.
-      </p>
-    );
-  }
   const groups = new Map<string, AdminSettingDefinition[]>();
   for (const definition of snapshot?.definitions ?? []) {
     const category = definition.category || 'General';
     groups.set(category, [...(groups.get(category) ?? []), definition]);
   }
+  const currentCategory =
+    selectedCategory && groups.has(selectedCategory)
+      ? selectedCategory
+      : groups.keys().next().value;
 
+  const revealSetting = (key: string) => {
+    const definition = snapshot?.definitions.find((field) => field.key === key);
+    if (!definition) return;
+    const category = definition.category || 'General';
+    setSelectedCategory(category);
+    onRevealCategory?.(category);
+    setFocusField(key);
+  };
+
+  const clearFocusField = useCallback(() => setFocusField(null), []);
+
+  return {
+    snapshot,
+    loading,
+    busy,
+    denied,
+    error,
+    notice,
+    saved,
+    groups,
+    currentCategory,
+    selectCategory: setSelectedCategory,
+    focusField,
+    clearFocusField,
+    load,
+    save,
+    revealSetting,
+    recoveryToken,
+  };
+}
+
+export type ApplicationSettingsState = ReturnType<typeof useApplicationSettings>;
+
+export function categoryTabId(category: string): string {
+  return `application-${encodeURIComponent(category)}`;
+}
+
+export function ApplicationSettingsHeader({
+  settings,
+  title = 'Application settings',
+}: {
+  settings: ApplicationSettingsState;
+  title?: string;
+}) {
+  const { busy, loading, load } = settings;
   return (
-    <section className="ui-card mt-6 p-4 sm:p-6" aria-label="Application settings">
+    <>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h2 className="text-lg font-semibold tracking-tight text-foreground">
-          Application settings
-        </h2>
+        <h2 className="text-lg font-semibold tracking-tight text-foreground">{title}</h2>
         <button
           type="button"
           disabled={busy || loading}
@@ -348,6 +434,14 @@ export default function ApplicationSettings({
       <p className="mt-2 text-sm leading-6 text-muted">
         Saved settings apply across the deployment. Reset restores the built-in default.
       </p>
+    </>
+  );
+}
+
+export function ApplicationSettingsFeedback({ settings }: { settings: ApplicationSettingsState }) {
+  const { loading, error, busy, load, notice, snapshot, recoveryToken, revealSetting } = settings;
+  return (
+    <>
       {loading && (
         <p role="status" className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
           Loading application settings…
@@ -395,6 +489,7 @@ export default function ApplicationSettings({
                       <a
                         className="ui-focus-ring rounded underline underline-offset-4"
                         href={`#application-setting-${field.key}`}
+                        onClick={() => revealSetting(field.key)}
                       >
                         {field.label}
                       </a>
@@ -418,30 +513,68 @@ export default function ApplicationSettings({
           Required setup is complete. You can return to sign-in.
         </p>
       )}
-      {[...groups].map(([category, definitions]) => (
-        <div key={category} className="mt-6 overflow-hidden rounded-xl border border-border">
-          <h3 className="border-b border-border bg-surface-muted px-4 py-3 text-sm font-semibold text-foreground sm:px-5">
-            {category}
-          </h3>
-          <div className="px-4 sm:px-5">
-            {definitions.map((definition) => (
-              <SettingField
-                key={`${definition.key}:${saved[definition.key] ?? 0}`}
-                definition={definition}
-                value={snapshot?.values[definition.key]}
-                configured={snapshot?.secret_configured[definition.key] ?? false}
-                busy={busy}
-                onSave={(key, value) => void save(key, value)}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-      {snapshot && groups.size === 0 && (
-        <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
-          No application settings are available.
-        </p>
+    </>
+  );
+}
+
+export function ApplicationSettingsCategory({
+  settings,
+  category,
+  active,
+  showHeading = true,
+}: {
+  settings: ApplicationSettingsState;
+  category: string;
+  active: boolean;
+  showHeading?: boolean;
+}) {
+  const { groups, snapshot, saved, busy, save, focusField, clearFocusField } = settings;
+  const definitions = groups.get(category);
+  const id = `application-settings-category-${encodeURIComponent(category)}`;
+
+  useEffect(() => {
+    if (!active || !focusField || !definitions?.some((field) => field.key === focusField)) return;
+    const input = document.getElementById(`application-setting-${focusField}`);
+    input?.focus();
+    input?.scrollIntoView?.({ block: 'center' });
+    clearFocusField();
+  }, [active, focusField, definitions, clearFocusField]);
+
+  return (
+    <section
+      id={id}
+      aria-labelledby={showHeading ? `${id}-heading` : undefined}
+      className={showHeading ? 'overflow-hidden rounded-xl border border-border' : undefined}
+      hidden={!active}
+    >
+      {showHeading && (
+        <h3
+          id={`${id}-heading`}
+          className="border-b border-border bg-surface-muted px-4 py-3 text-sm font-semibold text-foreground sm:px-5"
+        >
+          {category}
+        </h3>
       )}
+      <div className={showHeading ? 'px-4 sm:px-5' : undefined}>
+        {definitions?.map((definition) => (
+          <SettingField
+            key={`${definition.key}:${saved[definition.key] ?? 0}`}
+            definition={definition}
+            value={snapshot?.values[definition.key]}
+            configured={snapshot?.secret_configured[definition.key] ?? false}
+            busy={busy}
+            onSave={(key, value) => void save(key, value)}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export function ApplicationDeploymentSetup({ settings }: { settings: ApplicationSettingsState }) {
+  const { snapshot } = settings;
+  return (
+    <>
       {(snapshot?.bootstrap.length ?? 0) > 0 && (
         <details className="mt-6 border-t border-border pt-4">
           <summary className="ui-focus-ring min-h-11 cursor-pointer rounded-lg py-3 text-sm font-medium text-foreground">
@@ -465,6 +598,76 @@ export default function ApplicationSettings({
           </dl>
         </details>
       )}
+    </>
+  );
+}
+
+export default function ApplicationSettings(options: ApplicationSettingsOptions) {
+  const settings = useApplicationSettings(options);
+  const { denied, snapshot, groups, currentCategory } = settings;
+  if (denied) {
+    return (
+      <p
+        role="alert"
+        className="mt-6 rounded-xl border border-status-error/20 bg-status-error/5 p-4 text-sm text-status-error"
+      >
+        Admin access required.
+      </p>
+    );
+  }
+
+  return (
+    <section className="ui-card mt-6 p-4 sm:p-6" aria-label="Application settings">
+      <ApplicationSettingsHeader settings={settings} />
+      <ApplicationSettingsFeedback settings={settings} />
+      {groups.size > 0 && (
+        <div className="mt-6 grid gap-6 lg:grid-cols-[180px_minmax(0,1fr)]">
+          <nav
+            aria-label="Application setting categories"
+            className="flex gap-1 overflow-x-auto rounded-lg bg-surface-muted p-1 lg:flex-col lg:self-start"
+          >
+            {[...groups].map(([category, definitions]) => (
+              <button
+                key={category}
+                type="button"
+                aria-pressed={currentCategory === category}
+                aria-controls={`application-settings-category-${encodeURIComponent(category)}`}
+                onClick={() => settings.selectCategory(category)}
+                className={`ui-focus-ring flex min-h-11 shrink-0 items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors ${
+                  currentCategory === category
+                    ? 'bg-surface text-foreground shadow-sm'
+                    : 'text-muted hover:text-foreground'
+                }`}
+              >
+                <span>{category}</span>
+                <span
+                  aria-hidden="true"
+                  className="rounded bg-surface-muted px-1.5 py-0.5 text-xs text-muted"
+                >
+                  {definitions.length}
+                </span>
+              </button>
+            ))}
+          </nav>
+          <div className="min-w-0">
+            {/* Keep fields mounted so switching categories preserves unsaved edits. */}
+            {[...groups.keys()].map((category) => (
+              <ApplicationSettingsCategory
+                key={category}
+                settings={settings}
+                category={category}
+                active={currentCategory === category}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {snapshot && groups.size === 0 && (
+        <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
+          No application settings are available.
+        </p>
+      )}
+      <ApplicationDeploymentSetup settings={settings} />
     </section>
   );
 }

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -16,7 +16,14 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
-import ApplicationSettings from './ApplicationSettings';
+import {
+  ApplicationDeploymentSetup,
+  ApplicationSettingsCategory,
+  ApplicationSettingsFeedback,
+  ApplicationSettingsHeader,
+  categoryTabId,
+  useApplicationSettings,
+} from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { AdminNavigation } from '../AdminNavigation';
@@ -24,14 +31,11 @@ import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
 
-const SETTINGS_TABS = [
-  { id: 'application', label: 'Application' },
+const OTHER_SETTINGS_TABS = [
   { id: 'versions', label: 'Agent versions' },
   { id: 'sandbox', label: 'Sandbox' },
   { id: 'cloudlab', label: 'CloudLab' },
 ] as const;
-
-type SettingsTab = (typeof SETTINGS_TABS)[number]['id'];
 
 export default function AdminSettingsPage() {
   const { state } = useAuth();
@@ -60,10 +64,9 @@ function AccessDenied() {
 
 function SettingsView() {
   const queryTab = useSearchParams().get('tab');
-  const selectedTab: SettingsTab =
-    SETTINGS_TABS.find(({ id }) => id === queryTab)?.id ?? 'application';
-  const [cloudLabVisited, setCloudLabVisited] = useState(selectedTab === 'cloudlab');
+  const [cloudLabVisited, setCloudLabVisited] = useState(queryTab === 'cloudlab');
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
+  const focusedTab = useRef<HTMLButtonElement | null>(null);
   const [pool, setPool] = useState<AgentRunnerHostPool | null>(null);
   const [archiveSettings, setArchiveSettings] = useState<SandboxArchiveSettings | null>(null);
   const [archiveEditorReset, setArchiveEditorReset] = useState(0);
@@ -78,18 +81,16 @@ function SettingsView() {
   const request = useRef<AbortController | null>(null);
   const sequence = useRef(0);
 
-  useEffect(() => {
-    const index = SETTINGS_TABS.findIndex(({ id }) => id === selectedTab);
-    tabButtons.current[index]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-    if (selectedTab === 'cloudlab') setCloudLabVisited(true);
-  }, [selectedTab]);
-
-  const selectTab = (tab: SettingsTab) => {
+  const selectUrlTab = useCallback((tab: string) => {
     const url = new URL(window.location.href);
     if (tab === 'application') url.searchParams.delete('tab');
     else url.searchParams.set('tab', tab);
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-  };
+  }, []);
+  const revealCategory = useCallback(
+    (category: string) => selectUrlTab(categoryTabId(category)),
+    [selectUrlTab],
+  );
 
   const fail = useCallback((cause: unknown) => {
     if (cause instanceof APIError && (cause.statusCode === 401 || cause.statusCode === 403)) {
@@ -105,6 +106,53 @@ function SettingsView() {
       setError(getErrorMessage(cause));
     }
   }, []);
+
+  const applicationSettings = useApplicationSettings({
+    onAccessDenied: fail,
+    onRevealCategory: revealCategory,
+    enabled: !denied,
+  });
+  const applicationCategories = [...applicationSettings.groups.keys()];
+  const settingsTabs = [
+    ...(applicationCategories.length
+      ? applicationCategories.map((category) => ({ id: categoryTabId(category), label: category }))
+      : [{ id: 'application', label: 'Application' }]),
+    ...OTHER_SETTINGS_TABS,
+  ];
+  // Preserve a requested category in the URL while its definitions are loading.
+  // Missing, legacy, or unknown tabs display the first available category.
+  const selectedTab = settingsTabs.find(({ id }) => id === queryTab)?.id ?? settingsTabs[0].id;
+  const activeCategory = applicationCategories.find(
+    (category) => categoryTabId(category) === selectedTab,
+  );
+  const showApplication = selectedTab === 'application' || activeCategory !== undefined;
+  const selectedTabIndex = settingsTabs.findIndex(({ id }) => id === selectedTab);
+
+  useLayoutEffect(() => {
+    if (focusedTab.current && !focusedTab.current.isConnected) {
+      tabButtons.current[selectedTabIndex]?.focus();
+    }
+  });
+
+  useEffect(() => {
+    const button = tabButtons.current[selectedTabIndex];
+    const navigation = button?.parentElement;
+    if (button && navigation) {
+      const bounds = button.getBoundingClientRect();
+      const viewport = navigation.getBoundingClientRect();
+      // Reveal horizontally clipped tabs without undoing a field link's vertical scroll.
+      if (bounds.left < viewport.left) navigation.scrollLeft += bounds.left - viewport.left;
+      else if (bounds.right > viewport.right)
+        navigation.scrollLeft += bounds.right - viewport.right;
+    }
+    if (selectedTab === 'cloudlab') setCloudLabVisited(true);
+  }, [selectedTab, selectedTabIndex]);
+
+  const selectTab = (tab: string) => {
+    const category = applicationCategories.find((name) => categoryTabId(name) === tab);
+    if (category) applicationSettings.selectCategory(category);
+    selectUrlTab(tab);
+  };
 
   const load = useCallback(async () => {
     if (writing.current || revoked.current) return;
@@ -200,9 +248,9 @@ function SettingsView() {
           <div
             role="tablist"
             aria-label="Settings sections"
-            className="mt-6 flex gap-1 overflow-x-auto rounded-xl border border-border bg-surface-muted p-1"
+            className="mt-6 flex gap-1 overflow-x-auto rounded-xl border border-border bg-surface-muted p-1 sm:flex-wrap sm:overflow-x-visible"
           >
-            {SETTINGS_TABS.map(({ id, label }, index) => (
+            {settingsTabs.map(({ id, label }, index) => (
               <button
                 key={id}
                 ref={(element) => {
@@ -214,18 +262,24 @@ function SettingsView() {
                 aria-controls={`admin-settings-panel-${id}`}
                 aria-selected={selectedTab === id}
                 tabIndex={selectedTab === id ? 0 : -1}
+                onFocus={(event) => {
+                  focusedTab.current = event.currentTarget;
+                }}
+                onBlur={() => {
+                  focusedTab.current = null;
+                }}
                 onClick={() => selectTab(id)}
                 onKeyDown={(event) => {
                   const nextTabs: Partial<Record<string, number>> = {
-                    ArrowRight: (index + 1) % SETTINGS_TABS.length,
-                    ArrowLeft: (index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length,
+                    ArrowRight: (index + 1) % settingsTabs.length,
+                    ArrowLeft: (index - 1 + settingsTabs.length) % settingsTabs.length,
                     Home: 0,
-                    End: SETTINGS_TABS.length - 1,
+                    End: settingsTabs.length - 1,
                   };
                   const nextIndex = nextTabs[event.key];
                   if (nextIndex === undefined) return;
                   event.preventDefault();
-                  selectTab(SETTINGS_TABS[nextIndex].id);
+                  selectTab(settingsTabs[nextIndex].id);
                   tabButtons.current[nextIndex]?.focus();
                 }}
                 className={`min-h-11 shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:focus-visible:ring-crimson-light ${
@@ -265,15 +319,47 @@ function SettingsView() {
             </p>
           )}
           {/* Keep inactive panels mounted so switching tabs preserves unsaved edits. */}
-          <div
-            role="tabpanel"
-            id="admin-settings-panel-application"
-            aria-labelledby="admin-settings-tab-application"
-            hidden={selectedTab !== 'application'}
-            tabIndex={0}
+          <section
+            role={applicationCategories.length ? undefined : 'tabpanel'}
+            id={applicationCategories.length ? undefined : 'admin-settings-panel-application'}
+            aria-labelledby={
+              applicationCategories.length ? undefined : 'admin-settings-tab-application'
+            }
+            hidden={!showApplication}
+            tabIndex={applicationCategories.length ? undefined : 0}
+            className="ui-card mt-6 p-4 sm:p-6"
+            aria-label="Application settings"
           >
-            <ApplicationSettings onAccessDenied={fail} />
-          </div>
+            <ApplicationSettingsHeader settings={applicationSettings} title={activeCategory} />
+            <ApplicationSettingsFeedback settings={applicationSettings} />
+            {applicationCategories.map((category) => {
+              const id = categoryTabId(category);
+              return (
+                <div
+                  key={category}
+                  role="tabpanel"
+                  id={`admin-settings-panel-${id}`}
+                  aria-labelledby={`admin-settings-tab-${id}`}
+                  hidden={selectedTab !== id}
+                  tabIndex={0}
+                  className="mt-6"
+                >
+                  <ApplicationSettingsCategory
+                    settings={applicationSettings}
+                    category={category}
+                    active={selectedTab === id}
+                    showHeading={false}
+                  />
+                </div>
+              );
+            })}
+            {applicationSettings.snapshot && applicationCategories.length === 0 && (
+              <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
+                No application settings are available.
+              </p>
+            )}
+            <ApplicationDeploymentSetup settings={applicationSettings} />
+          </section>
           <div
             role="tabpanel"
             id="admin-settings-panel-versions"

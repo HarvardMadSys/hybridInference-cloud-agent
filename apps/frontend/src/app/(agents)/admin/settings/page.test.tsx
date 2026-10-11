@@ -7,6 +7,7 @@ import { useSyncExternalStore } from 'react';
 
 import type { AgentRunnerHost, AgentRunnerHostPool, HostSettingDefinition } from '@/lib/api/admin';
 import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
+import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
@@ -66,6 +67,7 @@ import {
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
+import { categoryTabId } from './ApplicationSettings';
 import AdminSettingsPage from './page';
 
 const list = vi.mocked(getAgentRunnerHosts);
@@ -94,6 +96,61 @@ const archiveSettings: SandboxArchiveSettings = {
   revision: 1,
   updated_at: null,
 };
+
+function applicationSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSettings {
+  return {
+    revision: 1,
+    definitions: [
+      {
+        key: 'site.app_name',
+        label: 'Application name',
+        description: 'Name shown in the application.',
+        category: 'Appearance',
+        kind: 'string',
+        default: 'Cloud Agent',
+        secret: false,
+      },
+      {
+        key: 'identity.registration_enabled',
+        label: 'Registration enabled',
+        description: 'Allow new users to register.',
+        category: 'Identity & access',
+        kind: 'boolean',
+        default: true,
+        secret: false,
+      },
+      {
+        key: 'future.maximum',
+        label: 'Future limit',
+        description: 'A setting introduced by the server.',
+        category: 'Future / category ✓',
+        kind: 'integer',
+        default: 10,
+        minimum: 1,
+        maximum: 100,
+        secret: false,
+      },
+    ],
+    values: {
+      'site.app_name': 'Cloud Agent',
+      'identity.registration_enabled': true,
+      'future.maximum': 10,
+    },
+    secret_configured: {},
+    bootstrap: [],
+    ...over,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
 
 const definitions: HostSettingDefinition[] = [
   {
@@ -247,7 +304,7 @@ function submit(control: HTMLElement) {
   fireEvent.submit(control.closest('form')!);
 }
 
-type SettingsTab = 'Application' | 'Agent versions' | 'Sandbox' | 'CloudLab';
+type SettingsTab = string;
 
 function selectSettingsTab(name: SettingsTab) {
   fireEvent.click(screen.getByRole('tab', { name }));
@@ -284,6 +341,7 @@ beforeEach(() => {
     secret_configured: {},
     bootstrap: [],
   });
+  vi.mocked(setAgentAdminSettings).mockReset();
   vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
 });
 
@@ -467,7 +525,7 @@ describe('admin Settings', () => {
       target: { value: '2' },
     });
 
-    selectSettingsTab('Application');
+    selectSettingsTab('Appearance');
     expect(screen.getByLabelText('Application name')).toHaveValue('My agent');
     expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
     selectSettingsTab('Agent versions');
@@ -506,6 +564,443 @@ describe('admin Settings', () => {
     await screen.findByLabelText('Future limit for all servers');
     const card = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
     expect(within(card).getByLabelText('Future limit for all servers')).toBeInTheDocument();
+  });
+});
+
+describe('application category tabs', () => {
+  beforeEach(() => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(applicationSnapshot());
+  });
+
+  it('places every API category beside the other settings tabs with one visible panel', async () => {
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Appearance' });
+    const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
+    const names = [
+      'Appearance',
+      'Identity & access',
+      'Future / category ✓',
+      'Agent versions',
+      'Sandbox',
+      'CloudLab',
+    ];
+    expect(
+      within(tablist)
+        .getAllByRole('tab')
+        .map((tab) => tab.textContent),
+    ).toEqual(names);
+    expect(screen.getAllByRole('tablist')).toEqual([tablist]);
+    expect(screen.queryByRole('tab', { name: 'Application' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('navigation', { name: 'Application setting categories' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(names.length);
+    expect(screen.getAllByRole('button', { name: 'Refresh settings', hidden: true })).toHaveLength(
+      1,
+    );
+    expect(screen.getByRole('heading', { name: 'Appearance', level: 2 })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Appearance', level: 3 })).not.toBeInTheDocument();
+
+    for (const name of names) {
+      selectSettingsTab(name);
+      const tab = within(tablist).getByRole('tab', { name });
+      const panel = screen.getByRole('tabpanel', { name });
+      expect(screen.getAllByRole('tabpanel')).toEqual([panel]);
+      expect(tab).toHaveAttribute('aria-selected', 'true');
+      expect(tab).toHaveAttribute('tabindex', '0');
+      expect(tab).toHaveAttribute('aria-controls', panel.id);
+      expect(panel).toHaveAttribute('aria-labelledby', tab.id);
+      expect(panel).toBeVisible();
+      for (const otherName of names.filter((other) => other !== name)) {
+        const otherTab = within(tablist).getByRole('tab', { name: otherName });
+        expect(otherTab).toHaveAttribute('aria-selected', 'false');
+        expect(otherTab).toHaveAttribute('tabindex', '-1');
+        expect(document.getElementById(otherTab.getAttribute('aria-controls')!)).not.toBeVisible();
+      }
+    }
+    expect(screen.getByLabelText('Application name')).toBeInTheDocument();
+    expect(screen.getByLabelText('Registration enabled')).toBeInTheDocument();
+    expect(screen.getByLabelText('Future limit')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Refresh settings', hidden: true }),
+    ).not.toBeVisible();
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('navigates across the dynamic categories and fixed tabs with Arrow, Home, and End keys', async () => {
+    renderSettings();
+    const first = await screen.findByRole('tab', { name: 'Appearance' });
+    first.focus();
+    const move = (key: string, name: string) => {
+      fireEvent.keyDown(document.activeElement!, { key });
+      const tab = screen.getByRole('tab', { name });
+      expect(tab).toHaveFocus();
+      expect(tab).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tabpanel', { name })).toBeVisible();
+    };
+    move('ArrowRight', 'Identity & access');
+    move('ArrowRight', 'Future / category ✓');
+    move('ArrowRight', 'Agent versions');
+    move('End', 'CloudLab');
+    move('ArrowRight', 'Appearance');
+    move('ArrowLeft', 'CloudLab');
+    move('Home', 'Appearance');
+  });
+
+  it('retains a direct category URL while loading and resolves it after definitions arrive', async () => {
+    const pending = deferred<AgentAdminSettings>();
+    vi.mocked(getAgentAdminSettings).mockReturnValueOnce(pending.promise);
+    const tab = categoryTabId('Future / category ✓');
+    window.history.replaceState(
+      null,
+      '',
+      `/admin/settings?context=keep&tab=${encodeURIComponent(tab)}`,
+    );
+    const query = window.location.search;
+    renderSettings();
+    expect(screen.getByRole('tab', { name: 'Application' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(window.location.search).toBe(query);
+    await act(async () => pending.resolve(applicationSnapshot()));
+    expect(screen.getByRole('tab', { name: 'Future / category ✓' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toBeVisible();
+    expect(screen.getAllByRole('tabpanel')).toHaveLength(1);
+    expect(window.location.search).toBe(query);
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps keyboard focus on the selected category when the loading Application tab is replaced', async () => {
+    const pending = deferred<AgentAdminSettings>();
+    vi.mocked(getAgentAdminSettings).mockReturnValueOnce(pending.promise);
+    window.history.replaceState(
+      null,
+      '',
+      `/admin/settings?tab=${encodeURIComponent(categoryTabId('Future / category ✓'))}`,
+    );
+    renderSettings();
+    const loadingTab = screen.getByRole('tab', { name: 'Application' });
+    loadingTab.focus();
+    expect(loadingTab).toHaveFocus();
+    await act(async () => pending.resolve(applicationSnapshot()));
+    const category = screen.getByRole('tab', { name: 'Future / category ✓' });
+    expect(loadingTab).not.toBeInTheDocument();
+    expect(category).toHaveAttribute('aria-selected', 'true');
+    expect(category).toHaveFocus();
+    fireEvent.keyDown(category, { key: 'ArrowRight' });
+    expect(screen.getByRole('tab', { name: 'Agent versions' })).toHaveFocus();
+  });
+
+  it('keeps focus outside the tabs when the application categories finish loading', async () => {
+    const pending = deferred<AgentAdminSettings>();
+    vi.mocked(getAgentAdminSettings).mockReturnValueOnce(pending.promise);
+    renderSettings();
+    screen.getByRole('tab', { name: 'Application' }).focus();
+    const settingsLink = screen.getByRole('link', { name: 'Settings' });
+    settingsLink.focus();
+    await act(async () => pending.resolve(applicationSnapshot()));
+    expect(screen.getByRole('tab', { name: 'Appearance' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(settingsLink).toHaveFocus();
+  });
+
+  it('moves focus to the first remaining category when polling removes the focused tab', async () => {
+    vi.useFakeTimers();
+    renderSettings();
+    await vi.waitFor(() => expect(screen.getByRole('tab', { name: 'Appearance' })).toBeVisible());
+    selectSettingsTab('Future / category ✓');
+    const removedTab = screen.getByRole('tab', { name: 'Future / category ✓' });
+    removedTab.focus();
+    const current = applicationSnapshot();
+    vi.mocked(getAgentAdminSettings).mockResolvedValueOnce({
+      ...current,
+      revision: 2,
+      definitions: current.definitions.filter((definition) => definition.key !== 'future.maximum'),
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(removedTab).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Appearance' })).toHaveFocus();
+    expect(screen.getByRole('tabpanel', { name: 'Appearance' })).toBeVisible();
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['', '?tab=application', '?tab=unknown', '?tab=application-missing'])(
+    'opens the first API category for the default or legacy URL %s',
+    async (query) => {
+      window.history.replaceState(null, '', `/admin/settings${query}`);
+      renderSettings();
+      expect(await screen.findByRole('tab', { name: 'Appearance' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      expect(screen.getByRole('tabpanel', { name: 'Appearance' })).toBeVisible();
+      expect(getCloudLabDefaults).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses stable category IDs in the URL and follows navigation without refetching or losing drafts', async () => {
+    window.history.replaceState(null, '', '/admin/settings?context=keep#details');
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Future / category ✓' });
+    selectSettingsTab('Future / category ✓');
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe(
+      categoryTabId('Future / category ✓'),
+    );
+    expect(new URLSearchParams(window.location.search).get('context')).toBe('keep');
+    expect(window.location.hash).toBe('#details');
+    fireEvent.change(screen.getByLabelText('Future limit'), { target: { value: '25' } });
+    act(() =>
+      window.history.replaceState(
+        null,
+        '',
+        `/admin/settings?tab=${encodeURIComponent(categoryTabId('Identity & access'))}`,
+      ),
+    );
+    expect(screen.getByRole('tabpanel', { name: 'Identity & access' })).toBeVisible();
+    act(() =>
+      window.history.replaceState(
+        null,
+        '',
+        `/admin/settings?tab=${encodeURIComponent(categoryTabId('Future / category ✓'))}`,
+      ),
+    );
+    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toHaveValue(25);
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('groups settings without a category under a top-level General tab', async () => {
+    const current = applicationSnapshot();
+    vi.mocked(getAgentAdminSettings).mockResolvedValue({
+      ...current,
+      definitions: current.definitions.map((definition, index) => ({
+        ...definition,
+        category: index === 0 ? '' : definition.category,
+      })),
+    });
+    renderSettings();
+    expect(await screen.findByRole('tab', { name: 'General' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('tabpanel', { name: 'General' })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Application name' })).toBeVisible();
+  });
+
+  it('reveals and focuses the category of an initial field hash after its definitions load', async () => {
+    const pending = deferred<AgentAdminSettings>();
+    vi.mocked(getAgentAdminSettings).mockReturnValueOnce(pending.promise);
+    window.history.replaceState(null, '', '/admin/settings#application-setting-future.maximum');
+    renderSettings();
+    await act(async () => pending.resolve(applicationSnapshot()));
+    const field = await screen.findByRole('spinbutton', { name: 'Future limit' });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Future / category ✓' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe(
+      categoryTabId('Future / category ✓'),
+    );
+  });
+
+  it('opens the corresponding top-level category from a missing setup field link', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(
+      applicationSnapshot({
+        setup: {
+          required: true,
+          groups: [
+            {
+              key: 'future',
+              label: 'Future feature',
+              required: true,
+              configured: false,
+              needs_setup: true,
+              missing: [{ key: 'future.maximum', label: 'Future limit' }],
+            },
+          ],
+          bootstrap_missing: [],
+        },
+      }),
+    );
+    renderSettings();
+    const link = await screen.findByRole('link', { name: 'Future limit' });
+    expect(link).toHaveAttribute('href', '#application-setting-future.maximum');
+    fireEvent.click(link);
+    const field = screen.getByRole('spinbutton', { name: 'Future limit' });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
+    expect(screen.getAllByRole('heading', { name: 'Administrator setup required' })).toHaveLength(
+      1,
+    );
+    expect(screen.getByRole('heading', { name: 'Future / category ✓', level: 2 })).toBeVisible();
+  });
+
+  it('keeps drafts in other categories when a setting is saved or reset', async () => {
+    renderSettings();
+    fireEvent.change(await screen.findByLabelText('Application name'), {
+      target: { value: 'Draft application' },
+    });
+    selectSettingsTab('Future / category ✓');
+    fireEvent.change(screen.getByLabelText('Future limit'), { target: { value: '25' } });
+    selectSettingsTab('Identity & access');
+    const registration = screen.getByLabelText('Registration enabled');
+    fireEvent.change(registration, { target: { value: 'false' } });
+    const current = applicationSnapshot();
+    vi.mocked(setAgentAdminSettings).mockResolvedValueOnce({
+      ...current,
+      revision: 2,
+      values: { ...current.values, 'identity.registration_enabled': false },
+    });
+    submit(registration);
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent('Registration enabled saved.'),
+    );
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(setAgentAdminSettings).toHaveBeenNthCalledWith(
+      1,
+      { 'identity.registration_enabled': false },
+      expect.any(AbortSignal),
+    );
+    selectSettingsTab('Appearance');
+    expect(screen.getByRole('textbox', { name: 'Application name' })).toHaveValue(
+      'Draft application',
+    );
+    expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
+    selectSettingsTab('Future / category ✓');
+    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toHaveValue(25);
+    selectSettingsTab('Identity & access');
+    vi.mocked(setAgentAdminSettings).mockResolvedValueOnce({ ...current, revision: 3 });
+    fireEvent.click(screen.getByRole('button', { name: 'Reset Registration enabled' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'Registration enabled reset to its default.',
+      ),
+    );
+    expect(setAgentAdminSettings).toHaveBeenNthCalledWith(
+      2,
+      { 'identity.registration_enabled': null },
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveValue('true');
+    selectSettingsTab('Appearance');
+    expect(screen.getByRole('textbox', { name: 'Application name' })).toHaveValue(
+      'Draft application',
+    );
+    selectSettingsTab('Future / category ✓');
+    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toHaveValue(25);
+    expect(screen.getByRole('button', { name: 'Save Future limit' })).toBeEnabled();
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one write lock across category tabs', async () => {
+    const pending = deferred<AgentAdminSettings>();
+    vi.mocked(setAgentAdminSettings).mockReturnValueOnce(pending.promise);
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Appearance' });
+    selectSettingsTab('Identity & access');
+    fireEvent.change(screen.getByLabelText('Registration enabled'), {
+      target: { value: 'false' },
+    });
+    selectSettingsTab('Appearance');
+    const name = screen.getByLabelText('Application name');
+    fireEvent.change(name, { target: { value: 'Saved application' } });
+    submit(name);
+    selectSettingsTab('Identity & access');
+    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save Registration enabled' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reset Registration enabled' })).toBeDisabled();
+    submit(screen.getByLabelText('Registration enabled'));
+    expect(setAgentAdminSettings).toHaveBeenCalledTimes(1);
+    const current = applicationSnapshot();
+    await act(async () =>
+      pending.resolve({
+        ...current,
+        revision: 2,
+        values: { ...current.values, 'site.app_name': 'Saved application' },
+      }),
+    );
+    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveValue('false');
+    expect(screen.getByRole('button', { name: 'Save Registration enabled' })).toBeEnabled();
+  });
+
+  it('removes every settings panel when the application API revokes access', async () => {
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Appearance' });
+    vi.mocked(getAgentAdminSettings).mockRejectedValueOnce(
+      new APIError('FORBIDDEN', 'Forbidden', 403),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh settings' }));
+    await screen.findByRole('heading', { name: 'Admin access required' });
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tabpanel', { hidden: true })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Application name')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Registration enabled')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Future limit')).not.toBeInTheDocument();
+  });
+
+  it.each(['hosts', 'archives', 'CloudLab'])(
+    'aborts the application read and stops polling when %s revokes access',
+    async (source) => {
+      vi.useFakeTimers();
+      const applicationRead = deferred<AgentAdminSettings>();
+      const protectedRead = deferred<never>();
+      vi.mocked(getAgentAdminSettings).mockReturnValueOnce(applicationRead.promise);
+      if (source === 'hosts') list.mockReturnValueOnce(protectedRead.promise);
+      if (source === 'archives') getArchiveSettings.mockReturnValueOnce(protectedRead.promise);
+      if (source === 'CloudLab')
+        vi.mocked(getCloudLabDefaults).mockReturnValueOnce(protectedRead.promise);
+      renderSettings(source === 'CloudLab' ? 'CloudLab' : 'Application');
+      await vi.waitFor(() => expect(getAgentAdminSettings).toHaveBeenCalledTimes(1));
+      const signal = vi.mocked(getAgentAdminSettings).mock.calls[0][0]!;
+      expect(signal.aborted).toBe(false);
+      await act(async () => protectedRead.reject(new APIError('FORBIDDEN', 'Forbidden', 403)));
+      expect(screen.getByRole('heading', { name: 'Admin access required' })).toBeVisible();
+      expect(signal.aborted).toBe(true);
+      await act(async () => applicationRead.resolve(applicationSnapshot()));
+      await act(async () => vi.advanceTimersByTimeAsync(90_000));
+      expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Application name')).not.toBeInTheDocument();
+    },
+  );
+
+  it('aborts an application save when another settings API revokes access', async () => {
+    vi.useFakeTimers();
+    const pendingSave = deferred<AgentAdminSettings>();
+    const protectedRead = deferred<never>();
+    vi.mocked(setAgentAdminSettings).mockReturnValueOnce(pendingSave.promise);
+    vi.mocked(getCloudLabDefaults).mockReturnValueOnce(protectedRead.promise);
+    renderSettings();
+    await vi.waitFor(() => expect(screen.getByLabelText('Application name')).toBeVisible());
+    const name = screen.getByLabelText('Application name');
+    fireEvent.change(name, { target: { value: 'Saved application' } });
+    submit(name);
+    const signal = vi.mocked(setAgentAdminSettings).mock.calls[0][1]!;
+    expect(signal.aborted).toBe(false);
+    selectSettingsTab('CloudLab');
+    await act(async () => protectedRead.reject(new APIError('FORBIDDEN', 'Forbidden', 403)));
+    expect(screen.getByRole('heading', { name: 'Admin access required' })).toBeVisible();
+    expect(signal.aborted).toBe(true);
+    const current = applicationSnapshot();
+    await act(async () =>
+      pendingSave.resolve({
+        ...current,
+        revision: 2,
+        values: { ...current.values, 'site.app_name': 'Saved application' },
+      }),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(90_000));
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+    expect(setAgentAdminSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Application name')).not.toBeInTheDocument();
   });
 });
 
