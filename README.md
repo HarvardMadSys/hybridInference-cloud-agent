@@ -1,33 +1,33 @@
 # Cloud Agent
 
-Cloud Agent runs coding agents against a user's repository in retained sandbox
-containers. Users work through a web interface; enrolled hosts run Claude Code,
-Codex, pi, OpenCode, or Kilo; the control plane manages jobs, sessions, and
-publication to source control.
+Cloud Agent runs coding agents against a user's repository inside retained
+sandbox containers. Users work from a web interface, while enrolled hosts run
+Claude Code, Codex, pi, OpenCode, or Kilo. The control plane coordinates jobs,
+sessions, and publication to source control.
 
-Model access and account identity come from a
+Cloud Agent gets model access and account identity from a
 [HybridInference gateway](https://github.com/HarvardMadSys/hybridInference).
-FreeInference is a hosted deployment of that gateway. Cloud Agent is a separate
-service with its own database and credentials.
+FreeInference is a hosted deployment of that gateway. Cloud Agent remains a
+separate service, with its own database and credentials.
 
-Use **Rewrite prompt** below a new task or follow-up to expand a draft with the
-selected model. Check **Ask clarification questions first** to answer a few
-questions before generating the comprehensive prompt. The result stays in the
-editor for review and can be edited before sending. Cancel or an unsuccessful
-rewrite preserves the original draft. Rewriting uses the account's normal model
-permissions and inference quota.
+When writing a new task or follow-up, select **Rewrite prompt** to expand your
+draft with the selected model. If you select **Ask clarification questions
+first**, the model asks a few questions before rewriting your prompt. The result
+stays in the editor, where you can review and edit it before sending. Canceling
+the rewrite, or an unsuccessful rewrite, leaves the original draft unchanged.
+Rewrites use the account's normal model permissions and inference quota.
 
 To receive desktop alerts when an agent asks a question or a turn finishes,
 open **Settings → Notifications**, select **Enable notifications**, and allow
-the browser permission prompt. Questions and turn completions can be toggled
-separately. Alerts follow all your chats while the app remains open, including
-chats you are not viewing; clicking an alert opens its turn. These browser
-preferences are saved separately for each account. A closed browser does not
-receive alerts.
+the browser permission prompt. You can toggle question and turn-completion
+alerts separately. While the app is open, alerts cover all your chats,
+including chats you are not currently viewing. Clicking an alert opens the
+relevant turn. Notification preferences are stored separately for each
+account. Alerts are not delivered while the browser is closed.
 
 ## Getting started
 
-Choose a path based on what you want to do:
+Choose the path that matches what you want to do:
 
 | Goal | Start here |
 |---|---|
@@ -39,18 +39,18 @@ Choose a path based on what you want to do:
 
 ### Backend development
 
-Install Python 3.12 and [uv](https://github.com/astral-sh/uv), then run these
-commands from the repository root:
+Install Python 3.12 and [uv](https://github.com/astral-sh/uv), then run the
+following commands from the repository root:
 
 ```bash
 make setup-dev
 make check
 ```
 
-The package supports Python 3.12 and 3.13; setup and CI use 3.12 by default.
-`make check` formats the backend, checks lint and types, and runs tests that
-require neither an external deployment nor a test database. Frontend development
-uses Node.js 22 and npm, with separate checks described in the
+The package supports Python 3.12 and 3.13. Setup and CI use Python 3.12 by
+default. `make check` formats the backend, checks lint and types, and runs tests
+not marked `external` or `dbtest`. Frontend development uses Node.js 22 and
+npm; its checks are documented separately in the
 [developer guide](docs/development.md#run-the-relevant-checks).
 
 | Command | Purpose |
@@ -63,34 +63,38 @@ uses Node.js 22 and npm, with separate checks described in the
 
 ### Complete local Docker run
 
-Install Docker 28+, Docker Compose, `openssl`, `curl`, and Python 3, then run:
+To run the complete local stack, install Docker 28+, Docker Compose, `openssl`,
+`curl`, and Python 3. Then run:
 
 ```bash
 ./deploy/local/dev.sh up
 ./deploy/local/dev.sh smoke
 ```
 
-Open <http://127.0.0.1:13002>. This stack includes the web app, OAuth flow,
-control plane, database, enrolled host, and all five pinned Agent CLIs. A local
-gateway fixture provides deterministic inference responses, so no staging
-gateway or provider key is needed. This verifies integration and session
-lifecycle; it does not measure model quality or qualify production isolation.
+Open <http://127.0.0.1:13002>. The stack includes the web app, OAuth flow,
+control plane, database, an enrolled host, and all five pinned Agent CLIs. A
+local gateway fixture supplies deterministic inference responses, so you do not
+need a staging gateway or provider key. This setup verifies integration and
+session lifecycle. It does not measure model quality or qualify production
+isolation.
 
-`./deploy/local/dev.sh stop` preserves database and sandbox state for later
-startup. Read the [local guide](deploy/local/README.md) for prerequisites,
-configuration, logs, and running multiple stacks.
+Run `./deploy/local/dev.sh stop` to stop the stack while preserving its database
+and sandbox state for the next startup. See the
+[local guide](deploy/local/README.md) for prerequisites, configuration, logs,
+and instructions for running multiple stacks.
 
-Administrators manage application behavior, integrations and credentials, web
-appearance, and sandbox/workspace limits in **Admin → Settings**. Saved values
-survive restarts; existing environment values are imported once, and Reset
-restores built-in defaults. Database access, identity, encryption, security and
-deployment infrastructure remain bootstrap configuration. See the
-[Settings runbook](docs/operations.md#admin-settings) for migration and key setup.
+Administrators can manage application behavior, integrations and credentials,
+web appearance, and sandbox/workspace limits from **Admin → Settings**. Saved
+values survive restarts. Existing environment values are imported once, and
+Reset restores the built-in defaults. Database access, identity, encryption,
+security, and deployment infrastructure remain bootstrap configuration. The
+[Settings runbook](docs/operations.md#admin-settings) explains migration and key
+setup.
 
 **Admin → Database** opens the optional pgAdmin website for PostgreSQL
-administration. The first administrator chooses pgAdmin's login in the dashboard.
-Enable the private service using the
-[pgAdmin runbook](docs/operations.md#pgadmin).
+administration. The first administrator chooses the pgAdmin login from the
+dashboard. Follow the [pgAdmin runbook](docs/operations.md#pgadmin) to enable
+the private service.
 
 ## Architecture
 
@@ -107,43 +111,49 @@ flowchart TD
     Sandbox -->|TCP 80 and 443 under host rules| Public[Public IPv4 destinations]
 ```
 
-The web app, control plane, and host pool deploy separately. Each host runs the
-runner, workspace broker, group supervisor, and the tunnels needed to reach the
-control plane and relays. Hosts enroll once, then advertise their capacity and
-capabilities through heartbeats.
+The web app, control plane, and host pool are deployed separately. Each host
+runs the runner, workspace broker, group supervisor, and the tunnels needed to
+reach the control plane and relays. A host enrolls once, then reports its
+capacity and capabilities through heartbeats.
 
-A **job** records a task; an **attempt** records one execution on a host. Attempts
-carry leases and fencing generations. The store rejects writes from a
-superseded attempt, including stale publication results.
+A **job** records a user task. An **attempt** records one execution of that task
+on one host. Every attempt carries a lease and fencing generation. If an attempt
+is superseded, the store rejects its writes, including stale publication
+results.
 
 ### Threads use retained native sessions
 
-A new chat creates a one-member sandbox group with a retained container. Its
-writable layer holds the workspace and native CLI state. Compatible follow-ups
-send the new message to the member's live CLI process. When that process needs
-replacement, the CLI resumes its native session in the same container.
+Starting a new chat creates a retained container and a sandbox group with one
+member. The container's writable layer holds both the workspace and native CLI
+state. Compatible follow-ups go to that member's live CLI process. If the
+process must be replaced, the CLI resumes its native session inside the same
+container.
 
-Fork creates another chat and native session in the same group. Parent and child
-share the workspace and can run concurrently, with separate member UIDs,
-credentials, and process control.
+Fork adds another chat and native session to the same sandbox group. The parent
+and child share the workspace and can run at the same time, but each has its own
+member UID, credentials, and process control.
 
-For a completed chat with a draft PR, **Review** beside **Open draft PR** starts
-an independent code-review subagent in a workspace tab. It reviews all changes
-from the conversation's original base, including current workspace changes,
-and is instructed to return findings without editing files. Clicking Review
-again reopens that chat's review. Review requires an available native Fork;
-archived chats and chats with lost context cannot start one.
+After a chat with a draft PR finishes, select **Review** beside **Open draft
+PR** to start an independent code-review subagent in a workspace tab. The
+review covers every change since the conversation's original base, including
+current workspace changes. The reviewer is instructed to report findings
+without editing files. Selecting Review again reopens that chat's existing
+review. Review needs an available native Fork; it cannot start from an archived
+chat or a chat whose context has been lost.
 
-**Watch PR and merge** beside the published PR starts a follow-up in the same
-chat to monitor tests and reviews, address failures and feedback, and merge
-when the current PR head passes required checks and review requirements. It
-preserves unsent composer text and attachments. Chats sharing the workspace
-must have no active work or waiting messages before watching starts. Enable
-source-control tools that can read checks and reviews, mark drafts ready, and
-merge; the supplied GitHub MCP template is read-only, so merging needs a
-writable connection. The agent reports missing access or other blockers. Watching runs within the
-agent turn's timeout. If it makes fixes, the turn ends so the platform can
-publish them; click the button again after publication to resume watching.
+Select **Watch PR and merge** beside a published PR to start a follow-up in the
+same chat. The follow-up monitors tests and reviews, addresses failures and
+feedback, and merges once the current PR head satisfies its required checks and
+review requirements. Starting it preserves unsent composer text and
+attachments. Before watching can begin, every chat that shares the workspace
+must have no active work or waiting messages.
+
+The agent needs source-control tools that can read checks and reviews, mark
+drafts ready, and merge. The supplied GitHub MCP template is read-only, so
+merging requires a writable connection. The agent reports missing access and
+other blockers. Watching is limited by the agent turn's timeout. If the agent
+makes fixes, the turn ends so the platform can publish them. After publication,
+select the button again to continue watching.
 
 | Context status | Meaning |
 |---|---|
@@ -152,16 +162,18 @@ publish them; click the button again after publication to resume watching.
 | `RESTORED` | A replacement process resumes the retained native session |
 | `LOST` | Required native state or container integrity cannot be established; execution is refused |
 
-Stopping a container preserves its writable layer. Losing the container or
-Docker data root loses the required native state; transcript replay and
+Stopping a container preserves its writable layer. Losing the container or the
+Docker data root also loses the required native state. Transcript replay and
 cross-host restoration are not recovery paths. See
-[native conversation recall](docs/context-recall.md) for verification and limits.
+[native conversation recall](docs/context-recall.md) for verification details
+and limits.
 
 ## Powered by a HybridInference gateway
 
-The services communicate over HTTP. Cloud Agent does not share the gateway's
-database, Python modules, or signing secrets. The consumed contracts are
-documented in [gateway_contracts/](gateway_contracts/README.md):
+Cloud Agent and the gateway communicate only over HTTP. Cloud Agent does not
+share the gateway's database, Python modules, or signing secrets. The contracts
+it consumes are documented in
+[gateway_contracts/](gateway_contracts/README.md):
 
 | Contract | Responsibility |
 |---|---|
@@ -169,39 +181,43 @@ documented in [gateway_contracts/](gateway_contracts/README.md):
 | Inference grants | Mint, renew, revoke, and read usage for scoped inference grants |
 | Internal lookups | Read the user's model catalog and deployment-owned Agent access decision |
 
-The gateway owns account permissions and inference quotas. A grant limits the
-models an attempt may call; there is no per-task dollar budget. The control
-plane renews grants while their attempt or retained member remains eligible.
-Revocation ends access sooner; expiry is the backstop if revocation fails.
+The gateway owns account permissions and inference quotas. An inference grant
+limits which models an attempt can call; there is no per-task dollar budget. The
+control plane renews grants while their attempt or retained member remains
+eligible. Revocation can end access sooner, while expiry remains the backstop if
+revocation fails.
 
 Protected owner and admin requests check the gateway's current Agent access
-decision. Unavailable or invalid gateway responses do not grant access. Each
-Agent database is bound to one gateway identity issuer; see
+decision. An unavailable or invalid gateway response never grants access. Each
+Agent database is bound to a single gateway identity issuer. See the
 [admission policy](docs/agent-access-policy.md) and
-[identity configuration](docs/minimal-identity.md).
+[identity configuration](docs/minimal-identity.md) for details.
 
-MCP connections belong to users and are resolved by the control plane. Sandboxes
-call tools through the MCP-only listener with a separate scoped credential;
-inference grants grant no MCP or platform-management authority.
+MCP connections belong to individual users and are resolved by the control
+plane. Sandboxes call tools through the MCP-only listener with a separate,
+scoped credential. Inference grants provide no MCP or platform-management
+authority.
 
 ## Sandbox isolation
 
-The host deployment defaults to `kata`, with a separate guest kernel per sandbox
-group. Public multi-tenant use requires Kata isolation, non-root execution,
-dropped capabilities, seccomp, and resource limits. The `container` backend is
-for trusted internal repositories; `process` is a unit-test seam.
+The host deployment defaults to `kata`, which gives each sandbox group a
+separate guest kernel. Public multi-tenant use requires Kata isolation,
+non-root execution, dropped capabilities, seccomp, and resource limits. The
+`container` backend is only for trusted internal repositories, and `process`
+is a unit-test seam.
 
-Every group has one network for setup and agent execution. Host nftables rules
-allow public IPv4 on TCP 80/443, one configured DNS resolver, and the group's
-inference and MCP relays. They block host addresses, private and special-purpose
-ranges, other groups, other ports, and IPv6. Failed network verification prevents
-the group from starting.
+Each group uses one network for both setup and agent execution. Host nftables
+rules allow public IPv4 on TCP 80/443, one configured DNS resolver, and that
+group's inference and MCP relays. The rules block host addresses, private and
+special-purpose ranges, other groups, other ports, and IPv6. If network
+verification fails, the group does not start.
 
-Long-lived account and service credentials stay outside the sandbox. Short-lived
-inference grants can still be exfiltrated and replayed through the gateway's
-public inference API until expiry or revocation, subject to the owner's model
-permissions and quota. Read the [security guidance](SECURITY.md) and
-[operations runbook](docs/operations.md#the-sandbox-network) before deployment.
+Long-lived account and service credentials stay outside the sandbox. However,
+short-lived inference grants can still be exfiltrated and replayed through the
+gateway's public inference API until they expire or are revoked. Those calls
+remain subject to the owner's model permissions and quota. Before deployment,
+read the [security guidance](SECURITY.md) and the
+[operations runbook](docs/operations.md#the-sandbox-network).
 
 ## Repository layout
 
@@ -219,17 +235,17 @@ docs/                             Feature guides, runbooks, designs, and accepta
 
 ## Contributing
 
-Read the [developer guide](docs/development.md),
+Start with the [developer guide](docs/development.md),
 [contribution workflow](CONTRIBUTING.md), and [repository rules](AGENTS.md).
-Branch from `dev` as `<user>/<scope>/<name>`; pull requests target `dev`.
-Run `make check` before opening a PR, plus the relevant frontend or database
-checks for the change.
+Create branches from `dev` using `<user>/<scope>/<name>`, and target pull
+requests at `dev`. Before opening a PR, run `make check` along with any frontend
+or database checks relevant to your change.
 
-The extraction from HybridInference completed in August 2026.
-[MIGRATION.md](MIGRATION.md) preserves its decisions and deferred work. Current
+The extraction from HybridInference was completed in August 2026.
+[MIGRATION.md](MIGRATION.md) records its decisions and deferred work. Current
 work is tracked in this repository's issues and pull requests.
 
 ## License
 
 [MIT](LICENSE). The code retains the HybridInference project's copyright and
-license; see [licence and provenance](MIGRATION.md#licence-and-provenance).
+license. See [license and provenance](MIGRATION.md#licence-and-provenance).

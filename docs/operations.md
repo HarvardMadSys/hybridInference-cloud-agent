@@ -10,10 +10,11 @@ control plane.
 
 # Cloud agent sandbox — operations
 
-Use this runbook to provision hosts, deploy Cloud Agent, protect retained
-workspaces, and diagnose job or network failures. The control plane owns the job
-API, database, publisher, MCP relay, and admin settings. The gateway provides
-inference and identity over HTTP.
+This is a task-based runbook; you do not need to read it from beginning to end.
+Use it to provision hosts, deploy Cloud Agent, protect retained workspaces, and
+diagnose job or network failures. The control plane owns the job API, database,
+publisher, MCP relay, and admin settings. The gateway provides inference and
+identity over HTTP.
 
 Start with the task you need:
 
@@ -40,35 +41,39 @@ Start with the task you need:
 [compute-resource runbook](operations-compute.md) covers administrator-managed
 SSH and CloudLab hosts. For pre-drain checks, migration regression, failed peers,
 and queue alerts, use [deployment reliability](deployment-reliability.md).
-Historical measurements below describe the runs that were recorded; consult the
-deployment's own records for its current readiness. Replace `<...>` placeholders
-with deployment values before running commands.
+The historical measurements below describe the recorded runs, not the current
+state of your deployment. Check the deployment's own records for current
+readiness, and replace every `<...>` placeholder before running a command.
 
 ## Admin Settings
 
-Open **Admin → Settings** to manage application and integration configuration,
+Use **Admin → Settings** to manage application and integration configuration,
 publication, web appearance, operational intervals, upload and skill limits,
-task-title generation, sandbox/workspace limits, and sandbox archives. Application settings are
-persisted in the Agent database. The application API is
-`GET /admin/agent/settings` and `PUT /admin/agent/settings` with a partial body
-such as `{"settings": {"max_attempts": 3}}`; omitted keys retain their values.
-Writes use the existing administrator guard and record changes in the Audit
-log. Credential fields show only whether a value is configured. Enter and save
-a replacement to change one; **Reset** restores its built-in default. Missing
-required fields and partially configured optional integrations produce an
-**Administrator setup required** prompt with links to the fields to complete.
+task-title generation, sandbox/workspace limits, and sandbox archives. These
+settings are stored in the Agent database.
+
+The application API uses `GET /admin/agent/settings` and
+`PUT /admin/agent/settings`. Send a partial body such as
+`{"settings": {"max_attempts": 3}}`; omitted keys keep their current values.
+Writes use the existing administrator guard and appear in the Audit log.
+Credential fields show only whether a value is configured. To change one, enter
+and save a replacement. **Reset** restores the built-in default. If a required
+field is missing or an optional integration is only partly configured, the
+**Administrator setup required** prompt links to the fields that still need
+attention.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0046_job_claim_retry`, then start the main control-plane listener with its
-existing complete environment. It imports registered environment settings once.
-The MCP-only listener waits for initialization and reads the same settings.
-Newly migrated runtime identity, service keys, broker credentials and policy
-fields are imported only when absent, under the same atomic preservation rule.
-Subsequent deployments preserve admin values, and resetting a field never
+`0046_job_claim_retry`. Then start the main control-plane listener with its
+existing complete environment. It imports registered environment settings once,
+while the MCP-only listener waits for initialization and then reads the same
+settings. Newly migrated runtime identity, service keys, broker credentials,
+and policy fields are imported only when absent, under the same atomic
+preservation rule.
+
+Later deployments keep the saved admin values, and resetting a field never
 restores an old `.env` value. Listeners synchronize saved changes every five
-seconds; web appearance uses the saved public fields on each request. Apply
-changes to subsequent operations according to the description beside each
-setting.
+seconds. The web server reads saved public appearance fields on every request.
+Apply changes to subsequent operations as described beside each setting.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by
 default. Configure it under **Publication**; see
@@ -1761,18 +1766,18 @@ broker and tunnels remain available until those turns settle. Only then does
 activation replace the broker and runner. After the isolation, tunnel, runtime
 and retained Docker-root checks pass, it records `.deployed-sha` and only then
 publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
-the control-plane
-deployment prepares its artifacts and migrates, then waits for a heartbeat newer than the start of that
-check and reverse-probes every new-chat placement broker before `compose up`
-can replace a running API. The claim route enforces that same exact deployment
+the control-plane deployment prepares its artifacts and runs migrations. Before
+`compose up` can replace a running API, the deployment waits for a heartbeat
+newer than the start of its readiness check and reverse-probes every broker
+eligible for new-chat placement. The claim route enforces that same exact deployment
 capability. A pending runner registers and heartbeats its base protocol so the
 host checks can inspect them, but does not poll; this also prevents the previous
 API from assigning work before it knows the new claim field. A runner with a
 pending/failed marker therefore cannot take work even during a cold-start API
-bootstrap. When placement was moved between hosts,
-it also probes every online host that still owns a retained group; changing the
-pin must not make old chats disappear from rollout safety. `SHARED_READY_TIMEOUT`
-controls that wait and defaults to 900 seconds.
+bootstrap. When placement has moved between hosts, the check also probes every
+online host that still owns a retained group; changing the pin must not make old
+chats disappear from rollout safety. `SHARED_READY_TIMEOUT` controls that wait
+and defaults to 900 seconds.
 
 The deploy user writes `.shared-live-ready` in the deployment checkout, separate
 from the container-owned enrollment directory. Runners mount only that file
@@ -1783,9 +1788,9 @@ No credential ownership or permission changes are needed for a rollout.
 
 #### Rollback compatibility
 
-The deployment orchestrator runs separately from the target checkout. In an
-Actions deployment, it comes from the workflow commit. Online rollback cannot execute a
-pre-fence target's old scripts; commits without the current
+The deployment orchestrator runs separately from the target checkout. In a
+GitHub Actions deployment, it comes from the workflow commit. An online rollback
+cannot execute a pre-fence target's old scripts; commits without the current
 `deploy/DEPLOY_PROTOCOL`, or with an incompatible protocol value, are refused
 before changing Docker state. The current protocol,
 `shared-live-exact-sha-v4`, marks the one sandbox network: a v3 deployer cannot

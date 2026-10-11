@@ -1,36 +1,40 @@
 # Developer guide
 
-Use this guide to set up a checkout, find the code that owns a change, and
-choose the checks it needs. Read [AGENTS.md](../AGENTS.md) for repository rules
-and [CONTRIBUTING.md](../CONTRIBUTING.md) for the pull-request workflow. The
-[README](../README.md) describes the product and deployment topology.
+This guide will help you get a checkout running, find the code that owns your
+change, and choose the right checks for it. Start with
+[AGENTS.md](../AGENTS.md) for the repository rules and
+[CONTRIBUTING.md](../CONTRIBUTING.md) for the pull-request workflow. For an
+overview of the product and its deployment topology, see the
+[README](../README.md).
 
 ## Set up a checkout
 
-Backend commands run from the repository root. Install Python 3.12 and
-[`uv`](https://docs.astral.sh/uv/), then create the environment:
+Run backend commands from the repository root. Make sure you have Python 3.12
+and [`uv`](https://docs.astral.sh/uv/) installed, then create the environment:
 
 ```bash
 make setup-dev
 make check
 ```
 
-`make setup-dev` creates `.venv` and installs the project and development
-dependencies with `uv sync`. It defaults to Python 3.12, the version used in
-CI. The project supports Python 3.12 and 3.13. Run Python tools with `uv run`
-from this checkout; package discovery already includes `apps/backend/`, so
-you do not need to set `PYTHONPATH` for each package.
+`make setup-dev` creates `.venv`, then uses `uv sync` to install the project and
+its development dependencies. It defaults to Python 3.12, which is also the
+version used in CI; the project supports both Python 3.12 and 3.13. When you
+run Python tools from this checkout, use `uv run`. Package discovery already
+includes `apps/backend/`, so you do not need to set `PYTHONPATH` for each
+package.
 
-For frontend work, use Node.js 22, matching CI, and install the locked
-dependencies:
+If you are working on the frontend, use Node.js 22 to match CI and install the
+locked dependencies:
 
 ```bash
 cd apps/frontend
 npm ci
 ```
 
-To exercise sign-in, migrations, host enrollment, and real Agent CLIs together,
-use the [complete local Docker stack](../deploy/local/README.md). From the
+When you need to exercise sign-in, migrations, host enrollment, and real Agent
+CLIs together, use the
+[complete local Docker stack](../deploy/local/README.md). Run it from the
 repository root:
 
 ```bash
@@ -43,7 +47,8 @@ and running multiple isolated checkouts.
 
 ## Find the code that owns a change
 
-The backend is installed as three packages under `apps/backend/`:
+The backend is split into three installed packages under `apps/backend/`.
+Choose the package based on who should own the behavior you are changing:
 
 | Package | Owns |
 |---|---|
@@ -51,14 +56,15 @@ The backend is installed as three packages under `apps/backend/`:
 | [`cloud_agent_host/`](../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session broker, and Agent CLI adapters. |
 | [`cloud_agent_shared/`](../apps/backend/cloud_agent_shared/) | Protocol versions, capability names, shared payloads and errors, profiling collection, and shared Git/archive algorithms. |
 
-Within the control plane, HTTP handlers live in `api/`, reusable flows in
-`application/`, persistence interfaces in `ports/`, and database implementations
-in `storage/`. `workers/` owns background maintenance and reconciliation;
-`bootstrap/` constructs resources and starts and stops them. `app.py` assembles
-the main API and the separate MCP-only listener.
+Inside the control plane, look in `api/` for HTTP handlers, `application/` for
+reusable flows, `ports/` for persistence interfaces, and `storage/` for their
+database implementations. Background maintenance and reconciliation belong in
+`workers/`. Resource construction and lifecycle behavior belong in
+`bootstrap/`. Finally, `app.py` assembles the main API and the separate MCP-only
+listener.
 
-Use these starting points for common changes. Backend paths below are relative
-to `apps/backend/`.
+For common changes, start with the files below. Backend paths in this table are
+relative to `apps/backend/`.
 
 | Change | Start here |
 |---|---|
@@ -70,8 +76,9 @@ to `apps/backend/`.
 | CLI behavior or version compatibility | `cloud_agent_host/runtimes.py` and `drivers.py`; shared pins are in `cloud_agent_shared/shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
 | Browser UI or a BFF route | `apps/frontend/src/`; browser API clients are in `src/lib/api/`. |
 
-Keep changes with their owning module. Extract a flow when it needs an
-independent test boundary, or a rule when multiple entry points share it.
+Keep your change in the module that owns the behavior. Extract a flow when it
+needs an independent test boundary, or extract a rule when multiple entry
+points share it.
 
 ## Keep the dependency boundaries
 
@@ -110,8 +117,9 @@ no per-task dollar budget.
 
 ## Run the relevant checks
 
-During backend development, run the tests that exercise the changed behavior.
-Before opening a pull request, run the complete required backend gate:
+While developing the backend, start with the focused tests that exercise the
+behavior you changed. Before you open a pull request, run the complete required
+backend gate:
 
 ```bash
 uv run pytest -q tests/servers/test_agent_jobs_api.py
@@ -171,28 +179,29 @@ zero disables parallel execution for debugging:
 make check PYTEST_WORKERS=0
 ```
 
-Markers select the test tier. For example, `tests/servers/` contains HTTP-level
-tests that can run without a deployed server. Tests marked `external` state
-their prerequisites in the test module; these may include Docker, a real CLI,
-or a configured Gateway. CI runs selected external checks in addition to the
-default tier.
+Use markers to select the test tier you need. For example, `tests/servers/`
+contains HTTP-level tests that do not require a deployed server. Tests marked
+`external` list their prerequisites in the test module; these may include
+Docker, a real CLI, or a configured Gateway. CI runs selected external checks
+in addition to the default tier.
 
-Database changes need `make test-db` against a dedicated test database. Fixtures
-read `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, `TEST_DB_USER`, and
-`TEST_DB_PASSWORD`; `TEST_DB_NAME` must contain `_test_`. Check the result for
-skipped tests: an unavailable database can cause fixtures to skip rather than
-fail. Parallel workers need separate pre-created databases. See
-[ENVIRONMENT.md](../ENVIRONMENT.md#database) for defaults and worker naming.
+If you change the database, run `make test-db` against a dedicated test
+database. Fixtures read `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`,
+`TEST_DB_USER`, and `TEST_DB_PASSWORD`; `TEST_DB_NAME` must contain `_test_`.
+Check the result for skipped tests, because an unavailable database can cause
+fixtures to skip rather than fail. Parallel workers need separate pre-created
+databases. See [ENVIRONMENT.md](../ENVIRONMENT.md#database) for defaults and
+worker naming.
 
-Deployment tests read sandbox CLI version settings. If your surrounding
-development tool exports a different `CODEX_VERSION`, remove that inherited
-value for the check:
+Deployment tests read the sandbox CLI version settings. If your development
+tool exports a different `CODEX_VERSION`, remove that inherited value for the
+check:
 
 ```bash
 env -u CODEX_VERSION make check
 ```
 
-For frontend changes, run the following from the repository root:
+For a frontend change, run these checks from the repository root:
 
 ```bash
 cd apps/frontend
@@ -203,8 +212,8 @@ npm run type-check
 npm run test
 ```
 
-CI also runs these build guards. Run the relevant one locally when changing
-server-only imports or runtime site configuration:
+CI also runs the following build guards. Run the relevant one locally when you
+change server-only imports or runtime site configuration:
 
 ```bash
 node scripts/check-server-only-guard.mjs

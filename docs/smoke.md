@@ -1,8 +1,10 @@
 # Staging end-to-end smoke
 
-Use this runbook to verify a staging Gateway, a Cloud Agent control plane and one
-runner host through a real pull request on a disposable GitHub repository.
-For a provider-key-free local product check, start with the
+Use this runbook on a disposable staging deployment to verify the full path from
+Gateway sign-in to a real pull request. The check covers a Cloud Agent control
+plane, one runner host, and a disposable GitHub repository.
+
+If you only need a local product check without provider keys, start with the
 [complete local Docker stack](../deploy/local/README.md):
 
 ```bash
@@ -11,32 +13,33 @@ For a provider-key-free local product check, start with the
 ```
 
 The local stack exercises browser login, control-plane/host wiring, all five
-pinned CLIs and retained native sessions with deterministic external-service
-substitutes. It does not establish live provider behavior or GitHub publication.
-This staging runbook checks those external boundaries separately.
+pinned CLIs, and retained native sessions with deterministic substitutes for
+external services. It does not test live provider behavior or GitHub
+publication; this staging runbook checks those boundaries separately.
 
-**Recorded staging status:** on 2026-08-06, job `ajob_8b0be5f9e7ff9ad5` verified
-enrollment, job creation/remote claim, broker workspace access, tool-calling
-execution, success, four grant renewals and revocation after settlement. The
-record did not verify real PR publication, mid-run cancellation or the full
-fail-closed sequence. See [MIGRATION.md](../MIGRATION.md),
+**Recorded staging status:** On 2026-08-06, job `ajob_8b0be5f9e7ff9ad5`
+verified enrollment, job creation and remote claim, broker workspace access,
+tool-calling execution, success, four grant renewals, and revocation after
+settlement. That record did not verify real PR publication, mid-run
+cancellation, or the full fail-closed sequence. See
+[MIGRATION.md](../MIGRATION.md),
 [cutover.md](cutover.md) and the dated baseline below. Newer local lifecycle
 checks do not fill those staging acceptance gaps.
 
-## What this proves, and what it does not
+## What a passing run proves
 
-A completed passing run proves identity sign-in, explicit Agent access,
-enrollment, inference grants, sandbox execution and GitHub publication for the
-recorded revision/environment. A successful job alone does not prove publication:
-the publisher processes an immutable workspace snapshot asynchronously.
+A completed, passing run proves identity sign-in, explicit Agent access, enrollment,
+inference grants, sandbox execution, and GitHub publication for the recorded
+revision and environment. A successful job alone does not prove publication,
+because the publisher processes an immutable workspace snapshot asynchronously.
 
-This check does not cover migrated ownership/data, concurrency, host loss or
-all isolation boundaries. Use [cutover](cutover.md),
+The run does not cover migrated ownership/data, concurrency, host loss, or every
+isolation boundary. Use [cutover](cutover.md),
 [deployment reliability](deployment-reliability.md) and
 [native context recall](context-recall.md) for those separate checks. The Gateway
 contracts belong to the Gateway; verify its deployed routes before starting.
 
-## 0. Preconditions
+## 0. Before you start
 
 - [ ] Use a disposable staging deployment with Docker/Compose, a checkout and
       enough memory for the selected CLI. The local all-five-CLI smoke recommends

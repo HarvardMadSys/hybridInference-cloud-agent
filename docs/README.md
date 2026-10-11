@@ -1,8 +1,9 @@
 # Documentation
 
-Start with the [project README](../README.md) for a product overview and local
-quickstart. This index groups the maintained guides by task. Commands in linked
-guides run from the repository root unless the guide says otherwise.
+Use this index to find the maintained guide for your task. If you are new to
+Cloud Agent, start with the [project README](../README.md) for a product overview
+and local quickstart. Run commands from the repository root unless a guide says
+otherwise.
 
 ## Develop and test
 
@@ -19,8 +20,8 @@ guides run from the repository root unless the guide says otherwise.
 
 | Guide | Use it to |
 |---|---|
-| [Environment inventory](../ENVIRONMENT.md) | Find configuration names, defaults, ownership, and provisioning requirements |
-| [Admin Settings](operations.md#admin-settings) | Manage saved application settings, integrations, appearance and runtime limits; initialize settings and preserve encryption keys |
+| [Environment inventory](../ENVIRONMENT.md) | Look up configuration names, defaults, owning components, and provisioning requirements |
+| [Admin Settings](operations.md#admin-settings) | Manage saved settings, integrations, appearance, and runtime limits; initialize settings and preserve encryption keys |
 | [Operations runbook](operations.md) | Configure credentials, enroll hosts, qualify Kata, deploy, migrate databases, and manage storage and networking |
 | [Release guide](../deploy/release/README.md) | Build immutable release artifacts and deploy their recipes in the required order |
 | [Compute resources](operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |
@@ -71,8 +72,8 @@ evidence behind them.
 
 ## Keep documentation current
 
-Update a maintained guide in the same change that alters its behavior,
-configuration, or commands. Verify examples against the owning script or source,
-keep relative links and section anchors working, and distinguish a proposed
-design from implemented behavior. Preserve dated design and acceptance records
-as evidence of their original baseline.
+When a change affects behavior, configuration, or commands, update the maintained
+guide in the same change. Check examples against the owning script or source,
+keep relative links and section anchors working, and distinguish proposed designs
+from implemented behavior. Preserve dated design and acceptance records as
+evidence of their original baseline.
