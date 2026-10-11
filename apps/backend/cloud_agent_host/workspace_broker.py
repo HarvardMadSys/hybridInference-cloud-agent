@@ -464,7 +464,7 @@ class _TerminalSession:
         limits: _TerminalLimits | None = None,
     ) -> None:
         self.id = terminal_id
-        self.shell = "sh"
+        self.shell = getattr(process, "shell", "sh")
         self.cwd = "/workspace"
         self.rows = rows
         self.cols = cols
@@ -514,6 +514,22 @@ class _TerminalSession:
     def is_closed(self) -> bool:
         with self._condition:
             return self._closed
+
+    @property
+    def holds_process(self) -> bool:
+        """Whether this session still owns a process, and with it a terminal slot.
+
+        An exited shell keeps its output for replay until it is closed or
+        reaped, but runs nothing, so it does not count against either limit.
+        """
+        with self._condition:
+            return not self._closed and self.state != "exited"
+
+    @property
+    def has_exited(self) -> bool:
+        """Whether the shell ended on its own and the session is still listed."""
+        with self._condition:
+            return not self._closed and self.state == "exited"
 
     def expired(self, *, now: float, idle_ttl_s: float, hard_ttl_s: float) -> bool:
         """Whether idle or absolute lifetime requires this session to close."""
@@ -903,54 +919,72 @@ class _TerminalManager:
         self.reap()
         terminal_id = "term_" + secrets.token_urlsafe(18)
         now = time.monotonic()
-        with self._lock:
-            if workspace_id in self._suspended_workspaces:
-                raise HTTPException(status_code=409, detail="terminal workspace is not ready")
-            group = self._sessions.setdefault(workspace_id, {})
-            global_active = sum(
-                not session.is_closed
-                for sessions in self._sessions.values()
-                for session in sessions.values()
-            )
-            if global_active >= self._max_sessions:
-                if not group:
-                    self._sessions.pop(workspace_id, None)
-                raise HTTPException(status_code=503, detail="broker terminal limit reached")
-            active = sum(not session.is_closed for session in group.values())
-            if active >= self._max_sessions_per_workspace:
-                raise HTTPException(status_code=409, detail="workspace terminal limit reached")
-            spec = SandboxSpec(
-                argv=["/bin/sh"],
-                workdir=str(workdir),
-                env={
-                    **backend.base_env(),
-                    "GIT_CONFIG_NOSYSTEM": "1",
-                    "TERM": "xterm-256color",
-                },
-            )
-            try:
-                process = backend.spawn_terminal(spec, rows=rows, cols=cols)
-            except TerminalNotSupportedError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail=("Interactive terminals require the container or kata sandbox backend."),
-                ) from exc
-            except (OSError, SandboxError) as exc:
-                raise HTTPException(
-                    status_code=502, detail="terminal could not be started"
-                ) from exc
-            session = _TerminalSession(
-                terminal_id=terminal_id,
-                process=process,
-                workdir=workdir if isinstance(workdir, Path) else None,
-                rows=rows,
-                cols=cols,
-                now=now,
-                idle_ttl_s=idle_ttl_s,
-                on_closed=on_closed,
-                limits=self._limits,
-            )
-            group[terminal_id] = session
+        evicted: list[_TerminalSession] = []
+        try:
+            with self._lock:
+                if workspace_id in self._suspended_workspaces:
+                    raise HTTPException(status_code=409, detail="terminal workspace is not ready")
+                group = self._sessions.setdefault(workspace_id, {})
+                global_active = sum(
+                    session.holds_process
+                    for sessions in self._sessions.values()
+                    for session in sessions.values()
+                )
+                if global_active >= self._max_sessions:
+                    if not group:
+                        self._sessions.pop(workspace_id, None)
+                    raise HTTPException(status_code=503, detail="broker terminal limit reached")
+                active = sum(session.holds_process for session in group.values())
+                if active >= self._max_sessions_per_workspace:
+                    raise HTTPException(status_code=409, detail="workspace terminal limit reached")
+                spec = SandboxSpec(
+                    argv=["/bin/sh"],
+                    workdir=str(workdir),
+                    env={
+                        **backend.base_env(),
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                        "TERM": "xterm-256color",
+                    },
+                )
+                try:
+                    process = backend.spawn_terminal(spec, rows=rows, cols=cols)
+                except TerminalNotSupportedError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Interactive terminals require the container or kata sandbox backend."
+                        ),
+                    ) from exc
+                except (OSError, SandboxError) as exc:
+                    raise HTTPException(
+                        status_code=502, detail="terminal could not be started"
+                    ) from exc
+                session = _TerminalSession(
+                    terminal_id=terminal_id,
+                    process=process,
+                    workdir=workdir if isinstance(workdir, Path) else None,
+                    rows=rows,
+                    cols=cols,
+                    now=now,
+                    idle_ttl_s=idle_ttl_s,
+                    on_closed=on_closed,
+                    limits=self._limits,
+                )
+                # Exited shells stay listed for their output, within the same
+                # bound: the oldest make room for the new terminal.
+                exited = sorted(
+                    (candidate for candidate in group.values() if candidate.has_exited),
+                    key=lambda candidate: candidate.created_at,
+                )
+                while exited and len(group) >= self._max_sessions_per_workspace:
+                    evicted.append(group.pop(exited.pop(0).id))
+                group[terminal_id] = session
+        finally:
+            for stale in evicted:
+                try:
+                    stale.close(mark_activity=False)
+                except (SandboxError, OSError):
+                    logger.exception("workspace_terminal_eviction_cleanup_failed")
         session.start()
         return session.descriptor()
 
@@ -1355,6 +1389,19 @@ def _terminal_sse_frame(event: _TerminalEvent) -> str:
         payload = {"seq": event.seq, "exit_code": event.exit_code}
     data = json.dumps(payload, separators=(",", ":"))
     return f"id: {event.seq}\nevent: {event.kind}\ndata: {data}\n\n"
+
+
+def _terminal_attached_frame(last_seq: int) -> str:
+    """Tell a new viewer where the terminal's history ends.
+
+    Events up to ``last_seq`` were produced before the viewer attached. A fresh
+    screen replaying them must not answer the terminal queries among them --
+    the program that asked is long past waiting, or gone -- or the answers
+    reach the shell as typed input. It is not a resumable event, so it has no
+    id; a client that does not know it ignores it.
+    """
+    data = json.dumps({"seq": last_seq}, separators=(",", ":"))
+    return f"event: attached\ndata: {data}\n\n"
 
 
 def create_app(
@@ -2484,6 +2531,7 @@ def create_app(
         async def event_stream() -> AsyncIterator[str]:
             cursor = after
             try:
+                yield _terminal_attached_frame(session.descriptor()["last_seq"])
                 while True:
                     events = await session.events_after_async(
                         cursor,

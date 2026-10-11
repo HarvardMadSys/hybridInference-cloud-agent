@@ -106,7 +106,9 @@ class _WorkspaceBackend(RetainedChatBackend):
     def spawn_terminal(self, spec, *, rows, cols):
         assert rows > 0 and cols > 0
         self.spawned.append(spec)
-        process = _TerminalProcess()
+        # A shell stays open until it is killed; one that exits at once gives
+        # its slot back, which is not what the capacity tests are about.
+        process = _RunningTerminalProcess()
         self.processes.append(process)
         return process
 
@@ -1282,7 +1284,7 @@ def test_lower_terminal_total_output_limit_stops_the_process():
     assert events[-1].kind == "exit"
 
 
-class _RunningTerminalProcess(_TerminalProcess):
+class _RunningTerminalProcess(_SuspendableTerminalProcess):
     """A shell that stays open, silent, until it is killed."""
 
     def __init__(self) -> None:
@@ -1445,6 +1447,133 @@ def test_terminal_idle_guard_cannot_outlive_the_chat_clock(tmp_path):
     )
     assert session.expired(now=109, idle_ttl_s=30, hard_ttl_s=60) is False
     assert session.expired(now=110, idle_ttl_s=30, hard_ttl_s=60) is True
+
+
+class _Spawner:
+    """Hands ``_TerminalManager.create`` the next prepared process."""
+
+    def __init__(self, *processes: TerminalProcess) -> None:
+        self.processes = list(processes)
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {}
+
+    def spawn_terminal(self, _spec, *, rows: int, cols: int) -> TerminalProcess:
+        return self.processes.pop(0)
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "the condition never held"
+        time.sleep(0.01)
+
+
+def _state(terminals: _TerminalManager, terminal_id: str) -> str | None:
+    return next(
+        (row["state"] for row in terminals.list("athr_source") if row["id"] == terminal_id), None
+    )
+
+
+def test_an_exited_shell_gives_back_its_terminal_slot():
+    """`exit` must not leave the workspace stuck at its terminal limit."""
+    terminals = _TerminalManager(
+        idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8, max_sessions_per_workspace=2
+    )
+    running, exited, replacement = (
+        _RunningTerminalProcess(),
+        _TerminalProcess(),  # its output ends at once: the owner typed `exit`
+        _RunningTerminalProcess(),
+    )
+    spawner = _Spawner(running, exited, replacement, _RunningTerminalProcess())
+
+    def create() -> dict:
+        return terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+
+    first = create()
+    gone = create()
+    _wait_for(lambda: _state(terminals, gone["id"]) == "exited")
+    assert [row["id"] for row in terminals.list("athr_source")] == [first["id"], gone["id"]]
+
+    third = create()
+
+    # The exited shell made room and was dropped to stay within the bound.
+    assert [row["id"] for row in terminals.list("athr_source")] == [first["id"], third["id"]]
+    with pytest.raises(HTTPException) as refused:
+        create()
+    assert refused.value.status_code == 409
+    terminals.close()
+
+
+def test_an_exited_shell_stays_listed_while_there_is_room():
+    terminals = _TerminalManager(
+        idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8, max_sessions_per_workspace=4
+    )
+    spawner = _Spawner(_TerminalProcess(), _RunningTerminalProcess())
+    gone = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+    _wait_for(lambda: _state(terminals, gone["id"]) == "exited")
+
+    live = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+
+    assert {row["id"]: row["state"] for row in terminals.list("athr_source")} == {
+        gone["id"]: "exited",
+        live["id"]: "running",
+    }
+    terminals.close()
+
+
+def test_the_descriptor_names_the_shell_the_process_runs():
+    class Bash(_RunningTerminalProcess):
+        shell = "bash"
+
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    spawner = _Spawner(Bash(), _RunningTerminalProcess())
+
+    bash = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+    plain = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+
+    assert (bash["shell"], plain["shell"]) == ("bash", "sh")
+    terminals.close()
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_stream_first_says_where_its_history_ends(monkeypatch):
+    """A new viewer must know which bytes were produced before it attached."""
+
+    class Finished(_TerminalProcess):
+        def chunks(self):
+            yield b"\x1b[6n"  # a cursor-position query, long since answered
+
+    supervisor = _SharedSupervisor()
+    monkeypatch.setattr(
+        supervisor.workspace_backend, "spawn_terminal", lambda *_a, **_k: Finished()
+    )
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        created = await client.post(
+            "/workspaces/athr_source/terminals", headers=headers, json={"rows": 24, "cols": 80}
+        )
+        terminal_id = created.json()["id"]
+        terminals = app.state.terminal_manager
+        _wait_for(lambda: _state(terminals, terminal_id) == "exited")
+        replay = await client.get(
+            f"/workspaces/athr_source/terminals/{terminal_id}/stream", headers=headers
+        )
+        resumed = await client.get(
+            f"/workspaces/athr_source/terminals/{terminal_id}/stream?after=1", headers=headers
+        )
+
+    output = base64.b64encode(b"\x1b[6n").decode()
+    assert replay.text == (
+        'event: attached\ndata: {"seq":2}\n\n'
+        f'id: 1\nevent: output\ndata: {{"seq":1,"data":"{output}"}}\n\n'
+        'id: 2\nevent: exit\ndata: {"seq":2,"exit_code":0}\n\n'
+    )
+    assert resumed.text == (
+        'event: attached\ndata: {"seq":2}\n\nid: 2\nevent: exit\ndata: {"seq":2,"exit_code":0}\n\n'
+    )
 
 
 @pytest.mark.asyncio
