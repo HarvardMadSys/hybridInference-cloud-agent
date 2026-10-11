@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
+import asyncio
 import hashlib
 from typing import TYPE_CHECKING
 
@@ -92,6 +93,24 @@ async def _run_next_turn(store: Storage, parent: dict, sandbox: dict) -> dict:
     assert reserved is not None
     await _run_turn(store, follow, claim, reserved, context_status="live")
     return follow
+
+
+async def _blocked_by(pool, pid: int) -> None:
+    """Return once another backend waits on a lock that ``pid`` holds."""
+    async with asyncio.timeout(10), pool.acquire() as observer:
+        while not await observer.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks "
+            "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+            pid,
+        ):
+            await asyncio.sleep(0.01)
+
+
+async def _settle(task: asyncio.Task | None) -> None:
+    """Do not leave a call behind when an assertion ends the test early."""
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _snapshots(pool, sandbox_id: str) -> list[dict]:
@@ -198,3 +217,78 @@ async def test_a_turn_settled_during_a_capture_is_folded_into_the_capture_handed
     publication = await store.snapshot.claim_for_publish()
     assert publication is not None
     assert publication["included_job_ids"] == [first["id"], second["id"]]
+
+
+async def _claimed_for_publication(store: Storage) -> tuple[dict, dict, dict]:
+    """A finished retained turn whose captured snapshot a publisher has claimed."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None and publication["included_job_ids"] == [job["id"]]
+    return job, sandbox, publication
+
+
+async def test_a_publication_record_takes_its_turns_before_their_group(pool, store: Storage):
+    """Recording a publication waits behind a follow-up instead of crossing it.
+
+    A follow-up, a settlement and a Fork take the conversation's newest turn,
+    then its membership, then the group. Recording a publication wrote the
+    group first and the included turns after it, so a message sent while a
+    chat's snapshot was being recorded deadlocked with it -- and a record that
+    lost left the pull request it was recording open and unrecorded.
+    """
+    job, sandbox, publication = await _claimed_for_publication(store)
+    pr_url = "https://github.com/example-org/example-repo/pull/1"
+    publish = None
+    async with pool.acquire() as follow_up:
+        try:
+            async with follow_up.transaction():
+                # A follow-up's first two locks, in ``insert_follow_up``'s order.
+                await follow_up.execute(
+                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
+                )
+                await follow_up.execute(
+                    "SELECT id FROM agent_jobs WHERE thread_id = $1 "
+                    "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
+                    job["thread_id"],
+                )
+                follow_up_pid = await follow_up.fetchval("SELECT pg_backend_pid()")
+                publish = asyncio.create_task(
+                    store.snapshot.record_snapshot_publish(
+                        snapshot_id=publication["snapshot_id"],
+                        pr_url=pr_url,
+                        commit_sha="b" * 40,
+                    )
+                )
+                await _blocked_by(pool, follow_up_pid)
+                # Its next two, which the waiting record must not be holding.
+                await follow_up.execute(
+                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE",
+                    job["thread_id"],
+                )
+                await follow_up.execute(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
+                    sandbox["sandbox_id"],
+                )
+            assert await asyncio.wait_for(publish, timeout=10)
+        finally:
+            await _settle(publish)
+    published = await store.conversation_queries.get_job(job["id"])
+    assert published is not None and published["published_pr_url"] == pr_url

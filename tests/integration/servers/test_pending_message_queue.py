@@ -1538,13 +1538,19 @@ async def test_guarded_submit_does_not_hold_an_included_job_while_waiting_for_pu
             )
             assert snapshot_id is not None
             async with publisher.transaction():
-                # record_snapshot_publish locks snapshot -> group -> included
-                # jobs. Pause at its group boundary before the included write.
+                # record_snapshot_publish locks snapshot -> included jobs ->
+                # group. Pause past its group boundary before the included write.
                 await publisher.execute(
                     "UPDATE agent_sandbox_snapshots SET state = 'published', "
                     "published_commit_sha = $2, published_at = NOW() WHERE id = $1",
                     snapshot_id,
                     "a" * 40,
+                )
+                await publisher.fetch(
+                    "SELECT id FROM agent_jobs WHERE id IN ("
+                    "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1) "
+                    "ORDER BY id FOR NO KEY UPDATE",
+                    snapshot_id,
                 )
                 await publisher.fetchval(
                     "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
@@ -1566,8 +1572,9 @@ async def test_guarded_submit_does_not_hold_an_included_job_while_waiting_for_pu
                         publisher_pid,
                     ):
                         await asyncio.sleep(0.01)
-                # If Watch locked its parent before waiting for the group,
-                # this real included-job update would form a PostgreSQL cycle.
+                # Watch waits at the group without holding its parent, so the
+                # real included-job update and the publication's commit go
+                # through.
                 async with asyncio.timeout(10):
                     updated = await publisher.execute(
                         "UPDATE agent_jobs SET published_pr_url = $2, "

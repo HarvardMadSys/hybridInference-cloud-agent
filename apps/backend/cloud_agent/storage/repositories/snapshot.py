@@ -650,6 +650,19 @@ class PostgresSnapshotRepository:
             )
             if row is None:
                 return False
+            # The included turns before their group, in id order: a follow-up,
+            # a settlement and a Fork hold a turn while they wait for the group.
+            await conn.fetch(
+                """
+                SELECT id FROM agent_jobs
+                WHERE id IN (
+                    SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1
+                ) AND state = 'succeeded'
+                ORDER BY id
+                FOR NO KEY UPDATE
+                """,
+                snapshot_id,
+            )
             await conn.execute(
                 """
                 UPDATE agent_sandboxes
