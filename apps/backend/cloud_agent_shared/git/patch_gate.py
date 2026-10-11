@@ -11,8 +11,10 @@ Four gates, in the order they matter:
 1. **Workflow files** (``.github/``). Pushing a branch that modifies a
    workflow can make GitHub execute it *with repository secrets* on the push
    event — before any human reads the draft PR. Draft-PR review is therefore
-   not a mitigation for this class, so such patches are blocked and must be
-   released by a human explicitly.
+   not a mitigation for this class, so such patches are not published. The
+   result marks the block as the one a caller may override, but the platform
+   offers no release, and its publishing token lacks the ``workflows``
+   permission in any case.
 2. **Path escape.** ``..`` segments, absolute paths, and symlink-mode entries
    let a patch write outside the worktree or turn a file into a link to one.
    Gitlink (submodule) entries are refused with them: they pull in code from
@@ -255,6 +257,8 @@ class PatchGateResult:
     violations: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     requires_human_release: bool = False
+    #: The one violation an explicit release may override, word for word.
+    releasable_violation: str | None = None
 
     @property
     def reason(self) -> str:
@@ -372,11 +376,13 @@ def validate_change_set(
         if any(path.startswith(prefix) for prefix in _BLOCKED_PREFIXES)
     ]
     requires_human_release = bool(blocked)
+    releasable_violation = None
     if blocked:
-        violations.append(
-            "patch modifies CI/workflow configuration and needs explicit human "
-            f"release: {', '.join(sorted(blocked))}"
+        releasable_violation = (
+            "patch modifies CI/workflow configuration, which agent publication does "
+            f"not push: {', '.join(sorted(blocked))}"
         )
+        violations.append(releasable_violation)
 
     escaping = [path for path in unique_files if _is_escaping(path)]
     if escaping:
@@ -399,6 +405,7 @@ def validate_change_set(
         violations=violations,
         changed_files=unique_files,
         requires_human_release=requires_human_release,
+        releasable_violation=releasable_violation,
     )
 
 
@@ -412,9 +419,10 @@ def validate_patch(
 ) -> PatchGateResult:
     """Validate an agent-produced patch before it is allowed near git.
 
-    Returns a :class:`PatchGateResult`; ``requires_human_release`` marks the
-    workflow-file case, which a human may still choose to release after
-    reading the diff, as opposed to hard violations like a leaked credential.
+    Returns a :class:`PatchGateResult`; ``requires_human_release`` and
+    ``releasable_violation`` mark the workflow-file block, the one violation
+    an explicit release could override, as opposed to hard violations like a
+    leaked credential. Nothing in the platform releases it.
     """
     violations: list[str] = []
     requires_human_release = False
@@ -450,6 +458,7 @@ def validate_patch(
         violations=violations,
         changed_files=unique_files,
         requires_human_release=requires_human_release,
+        releasable_violation=path_result.releasable_violation,
     )
 
 

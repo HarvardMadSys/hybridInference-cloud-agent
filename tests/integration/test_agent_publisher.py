@@ -418,7 +418,7 @@ def test_the_push_credential_stays_out_of_argv_and_git_config(origin, monkeypatc
 
 
 def test_workflow_patch_is_refused_and_remote_untouched(origin):
-    """A .github/ patch never reaches the remote without human release."""
+    """A .github/ patch never reaches the remote."""
     clone_url, base_sha = origin
     patch = (
         "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
@@ -436,7 +436,7 @@ def test_workflow_patch_is_refused_and_remote_untouched(origin):
             base_sha=base_sha,
             commit_message="agent: sneak a workflow in",
         )
-    assert "human release" in str(excinfo.value)
+    assert "CI/workflow configuration" in str(excinfo.value)
     assert _branches(clone_url) == ["main"]
 
 

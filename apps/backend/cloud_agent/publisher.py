@@ -304,8 +304,9 @@ def publish_patch(
     remote: inside the URL it was written to the clone's ``.git/config`` and
     passed in the arguments of every ``git-remote-https`` process, where any
     process able to read ``/proc`` could see it. It never enters the sandbox.
-    ``allow_workflow_changes`` is the explicit human release for patches that
-    touch ``.github/``; it defaults to False so the gate holds by default.
+    ``allow_workflow_changes`` would release the block on patches that touch
+    ``.github/``. It defaults to False, and the platform never sets it: there
+    is no release path, and the publish worker's token cannot push workflows.
     Actual staged files, including binary assets, are size-checked and scanned
     for newly introduced credentials before committing or pushing.
 
@@ -446,12 +447,17 @@ def _gate_permits(gate: PatchGateResult, *, allow_workflow_changes: bool) -> boo
     """Return whether a gate result may proceed to publication.
 
     The only overridable violation is the workflow-file block, and only when a
-    human explicitly released it. Every other violation (secrets, path escape,
-    symlinks, submodules, size) is unconditional.
+    caller explicitly released it. Every other violation (secrets, path escape,
+    symlinks, submodules, size) is unconditional. The block is matched as the
+    exact violation the gate marked, never by its wording: a substring match
+    also dropped a path-escape or symlink violation naming a file such as
+    ``../human release.md``.
     """
     if gate.ok:
         return True
     if not allow_workflow_changes or not gate.requires_human_release:
         return False
-    remaining = [violation for violation in gate.violations if "human release" not in violation]
+    remaining = [
+        violation for violation in gate.violations if violation != gate.releasable_violation
+    ]
     return not remaining
