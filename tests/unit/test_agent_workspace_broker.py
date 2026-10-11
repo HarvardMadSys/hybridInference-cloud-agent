@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -1802,6 +1803,106 @@ def test_a_shortened_terminal_lifetime_closes_terminals_already_past_it():
     terminals.reap()
     assert "athr_source" not in terminals._sessions
     assert process.killed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/workspaces/athr_source/terminals", None),
+        ("POST", "/workspaces/athr_source/terminals/suspend", {"lease_generation": 1}),
+        ("POST", "/workspaces/athr_source/terminals/resume", {"lease_generation": 1}),
+        ("POST", "/workspaces/athr_source/terminals/resume-settled", {}),
+        ("GET", "/workspaces/athr_source/terminals/term_missing/stream", None),
+        ("POST", "/workspaces/athr_source/terminals/term_missing/input", {"data": "eA=="}),
+        ("POST", "/workspaces/athr_source/terminals/term_missing/resize", {"rows": 24, "cols": 80}),
+        ("DELETE", "/workspaces/athr_source/terminals/term_missing", None),
+        ("POST", "/workspaces/athr_source/terminals", {"rows": 24, "cols": 80}),
+    ],
+)
+async def test_terminal_routes_resolve_their_workspace_off_the_event_loop(method, path, body):
+    """A Docker inspect behind a keystroke must not stall every other request.
+
+    Resolving a member's terminal scope reads the container under the
+    supervisor's lock, and a busy daemon can take seconds to answer it.
+    """
+    supervisor = _SharedSupervisor()
+    status = supervisor.status
+    backend = supervisor.backend
+
+    def inspecting_status(thread_id: str):
+        time.sleep(0.5)
+        return status(thread_id)
+
+    def inspecting_backend(thread_id: str):
+        time.sleep(0.5)
+        return backend(thread_id)
+
+    supervisor.status = inspecting_status  # type: ignore[method-assign]
+    supervisor.backend = inspecting_backend  # type: ignore[method-assign]
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        started = time.monotonic()
+        tick = asyncio.create_task(asyncio.sleep(0.05))
+        answered = asyncio.create_task(client.request(method, path, headers=headers, json=body))
+        await tick
+        stalled_for = time.monotonic() - started
+        response = await answered
+        if path.endswith("/terminals") and method == "POST":
+            await client.delete(
+                f"/workspaces/athr_source/terminals/{response.json()['id']}", headers=headers
+            )
+
+    assert response.status_code in {200, 404}
+    assert stalled_for < 0.4
+
+
+@pytest.mark.parametrize("blocked", ["write", "suspend"])
+def test_a_blocked_terminal_write_or_signal_never_holds_up_its_viewers(blocked):
+    """Input into a shell that reads nothing must not freeze its output or viewers.
+
+    A PTY write blocks once the shell stops reading, and a suspension is a
+    Docker exec. The output pump and every viewer, on the event loop too,
+    take the session's condition, so neither may hold it while it waits.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Stuck(_SuspendableTerminalProcess):
+        def write(self, data: bytes) -> None:
+            entered.set()
+            release.wait(5)
+            super().write(data)
+
+        def suspend(self) -> None:
+            entered.set()
+            release.wait(5)
+            super().suspend()
+
+    session = _TerminalSession(
+        terminal_id="term_stuck", process=Stuck(), workdir=None, rows=24, cols=80, now=0
+    )
+    call = (
+        functools.partial(session.write, b"x", now=1.0) if blocked == "write" else session.suspend
+    )
+    caller = threading.Thread(target=call, daemon=True)
+    caller.start()
+    assert entered.wait(2)
+
+    def view() -> None:
+        session._append_output(b"output")
+        session.descriptor()
+
+    viewer = threading.Thread(target=view, daemon=True)
+    viewer.start()
+    viewer.join(1)
+    stuck = viewer.is_alive()
+    release.set()
+    caller.join(5)
+
+    assert not stuck, f"a blocked {blocked} held the session's viewers"
+    assert [event.data for event in session.events_after(0, wait_s=0)] == [b"output"]
 
 
 @pytest.mark.parametrize(

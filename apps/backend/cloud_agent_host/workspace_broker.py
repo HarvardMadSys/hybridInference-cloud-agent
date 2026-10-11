@@ -590,6 +590,11 @@ class _TerminalSession:
         self._buffer_bytes = 0
         self._last_seq = 0
         self._condition = threading.Condition(threading.RLock())
+        # Orders input against suspension. Both wait on the process -- a PTY
+        # write blocks while the shell reads nothing, and a signal is a Docker
+        # exec -- so neither may hold the condition, which the output pump and
+        # every viewer, on the event loop too, take.
+        self._control_lock = threading.Lock()
         self._close_lock = threading.Lock()
         self._closed = False
         self._suspended = False
@@ -655,10 +660,11 @@ class _TerminalSession:
 
     def write(self, data: bytes, *, now: float) -> dict[str, Any]:
         """Write terminal input, rejecting writes after exit/close."""
-        with self._condition:
-            if self.state != "running" or self._closed or self._suspended:
-                raise HTTPException(status_code=409, detail="terminal is not running")
-            self.last_active_at = now
+        with self._control_lock:
+            with self._condition:
+                if self.state != "running" or self._closed or self._suspended:
+                    raise HTTPException(status_code=409, detail="terminal is not running")
+                self.last_active_at = now
             try:
                 self._process.write(data)
             except SandboxError as exc:
@@ -687,21 +693,24 @@ class _TerminalSession:
 
     def suspend(self) -> None:
         """Freeze the process tree, serialized against accepted input."""
-        with self._condition:
-            if self.state != "running" or self._closed or self._suspended:
-                return
-            self._suspended = True
+        with self._control_lock:
+            with self._condition:
+                if self.state != "running" or self._closed or self._suspended:
+                    return
+                self._suspended = True
             try:
                 self._process.suspend()
             except (SandboxError, OSError):
-                self._suspended = False
+                with self._condition:
+                    self._suspended = False
                 raise
 
     def resume(self) -> None:
         """Resume a process tree frozen for workspace preparation or capture."""
-        with self._condition:
-            if self.state != "running" or self._closed or not self._suspended:
-                return
+        with self._control_lock:
+            with self._condition:
+                if self.state != "running" or self._closed or not self._suspended:
+                    return
             try:
                 self._process.resume()
             except (SandboxError, OSError):
@@ -712,7 +721,8 @@ class _TerminalSession:
                 with contextlib.suppress(SandboxError, OSError):
                     self._process.suspend()
                 raise
-            self._suspended = False
+            with self._condition:
+                self._suspended = False
 
     def resize(self, *, rows: int, cols: int, now: float) -> dict[str, Any]:
         """Resize a running terminal and persist the accepted dimensions."""
@@ -2937,15 +2947,15 @@ def create_app(
         call = open_call(
             request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
         )
-        owner = retained_owner(workspace_id)
+        owner = await endpoint_calls.run(retained_owner, workspace_id)
         terminal_token: str | None = None
         try:
             with call.stage("admission"):
                 token, descriptor = await endpoint_calls.run(owner.terminal_opened, workspace_id)
             terminal_token = token
-            retained = owner.backend(workspace_id)
+            retained = await endpoint_calls.run(owner.backend, workspace_id)
             with call.stage("network"):
-                retained.manager.require_network(retained.spec)
+                await endpoint_calls.run(retained.manager.require_network, retained.spec)
 
             def on_terminal_closed(last_activity: float) -> None:
                 owner.terminal_closed(
@@ -2968,8 +2978,8 @@ def create_app(
             return call.answer(body_out)
         except (HTTPException, SandboxError, ValueError) as exc:
             if terminal_token is not None:
-                with contextlib.suppress(SandboxError):
-                    owner.terminal_closed(workspace_id, terminal_token)
+                with contextlib.suppress(HTTPException, SandboxError):
+                    await endpoint_calls.run(owner.terminal_closed, workspace_id, terminal_token)
             if isinstance(exc, HTTPException):
                 raise
             raise supervisor_error(exc) from exc
@@ -2980,7 +2990,7 @@ def create_app(
         body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         return await endpoint_calls.run(
             terminals.suspend,
             scope,
@@ -2994,7 +3004,7 @@ def create_app(
         body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         return await endpoint_calls.run(
             terminals.resume,
             scope,
@@ -3008,7 +3018,7 @@ def create_app(
         body: TerminalSettledRequest | None = None,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         return await endpoint_calls.run(
             terminals.resume_settled,
             scope,
@@ -3024,11 +3034,14 @@ def create_app(
         call = open_call(
             request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
         )
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         with call.stage("list"):
+            listed, max_sessions = await endpoint_calls.run(
+                lambda: (terminals.list(scope), terminals.max_sessions_per_workspace)
+            )
             body = {
-                "terminals": await endpoint_calls.run(terminals.list, scope),
-                "max_sessions": terminals.max_sessions_per_workspace,
+                "terminals": listed,
+                "max_sessions": max_sessions,
                 "max_input_bytes": int(applied_settings["terminal_input_max_kib"]) * 1024,
             }
         return call.answer(body)
@@ -3044,9 +3057,9 @@ def create_app(
         call = open_call(
             request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
         )
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         with call.stage("stream_attach"):
-            session = terminals.get(scope, terminal_id)
+            session = await endpoint_calls.run(terminals.get, scope, terminal_id)
             session.open_stream()
 
         async def event_stream() -> AsyncIterator[str]:
@@ -3086,7 +3099,7 @@ def create_app(
         body: TerminalInputRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         try:
             data = base64.b64decode(body.data, validate=True)
         except (binascii.Error, ValueError) as exc:
@@ -3095,7 +3108,7 @@ def create_app(
             ) from exc
         if len(data) > int(applied_settings["terminal_input_max_kib"]) * 1024:
             raise HTTPException(status_code=413, detail="terminal input is too large")
-        session = terminals.get_for_control(scope, terminal_id)
+        session = await endpoint_calls.run(terminals.get_for_control, scope, terminal_id)
         return await endpoint_calls.run(session.write, data, now=time.monotonic())
 
     @app.post("/workspaces/{workspace_id}/terminals/{terminal_id}/resize")
@@ -3105,8 +3118,8 @@ def create_app(
         body: TerminalResizeRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        scope = terminal_scope(workspace_id)
-        session = terminals.get_for_control(scope, terminal_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
+        session = await endpoint_calls.run(terminals.get_for_control, scope, terminal_id)
         return await endpoint_calls.run(
             session.resize,
             rows=body.rows,
@@ -3120,7 +3133,7 @@ def create_app(
         terminal_id: str,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        scope = terminal_scope(workspace_id)
+        scope = await endpoint_calls.run(terminal_scope, workspace_id)
         return await endpoint_calls.run(terminals.delete, scope, terminal_id)
 
     @app.get("/workspaces/{workspace_id}/git")
