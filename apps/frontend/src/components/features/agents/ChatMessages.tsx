@@ -268,8 +268,7 @@ function ToolActivity({
         >
           {tools.map(({ event, blockKey }, index) => {
             // Compact shows the tool alone; richer views add what it ran on.
-            const label =
-              presentation === 'compact' ? event.tool : toolSummary(event);
+            const label = presentation === 'compact' ? event.tool : toolSummary(event);
             return (
               <li
                 key={blockKey ?? index}
