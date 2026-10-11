@@ -38,21 +38,24 @@ function Chevron({ className = '' }: { className?: string }) {
 
 function ToolIcon({ tool }: { tool: string }) {
   const normalized = tool.toLowerCase();
-  let path = 'M12 4v16m8-8H4';
-  if (normalized.includes('read') || normalized.includes('search')) {
+  let path =
+    'M14.7 6.3a5 5 0 0 0-6.4 6.4l-5 5a2.12 2.12 0 0 0 3 3l5-5a5 5 0 0 0 6.4-6.4l-3 3-3-3 3-3Z';
+  if (['read', 'search', 'grep', 'glob'].some((name) => normalized.includes(name))) {
     path =
       'M12 6.25c-2.5-2-6.5-2-9 0v12c2.5-2 6.5-2 9 0 2.5-2 6.5-2 9 0v-12c-2.5-2-6.5-2-9 0Zm0 0v12';
-  } else if (normalized.includes('bash') || normalized.includes('command')) {
+  } else if (
+    ['bash', 'command', 'exec', 'shell', 'terminal'].some((name) => normalized.includes(name))
+  ) {
     path =
       'm7 8 4 4-4 4m6 0h4M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z';
-  } else if (normalized.includes('edit') || normalized.includes('write')) {
+  } else if (['edit', 'write', 'patch'].some((name) => normalized.includes(name))) {
     path =
       'M16.86 4.49a1.5 1.5 0 0 1 2.12 0l.53.53a1.5 1.5 0 0 1 0 2.12L8.53 18.12 4 19.5l1.38-4.53L16.86 4.49Z';
   }
   return (
     <svg
       aria-hidden="true"
-      className="h-4 w-4 shrink-0 text-gray-400 dark:text-gray-500"
+      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
       fill="none"
       viewBox="0 0 24 24"
       stroke="currentColor"
@@ -181,9 +184,9 @@ function RichToolActivity({
       <section
         data-block-key={blockKey}
         aria-label={activity.kind === 'tasks' ? 'Task activity' : 'Subagent activity'}
-        className={`ui-card my-2 min-w-0 ${event.parentToolUseId ? 'ml-4 border-l-2' : ''}`}
+        className={`my-2 min-w-0 rounded-lg border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800 ${event.parentToolUseId ? 'ml-4 border-l-2' : ''}`}
       >
-        <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-white/5">
+        <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-3 py-2 dark:border-gray-700">
           <ToolIcon tool={event.tool} />
           <span className="text-[13px] font-medium text-gray-700 dark:text-gray-300">
             {activity.kind === 'tasks' ? 'Tasks' : 'Subagent'}
@@ -193,7 +196,7 @@ function RichToolActivity({
               type="button"
               onClick={() => onInspectEvent(event, jobId)}
               aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
-              className="ui-focus-ring min-w-0 truncate rounded text-left text-xs text-gray-600 hover:text-crimson dark:text-gray-300"
+              className="ui-focus-ring min-w-0 truncate rounded text-left text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
             >
               {toolSummary(event)}
             </button>
@@ -274,13 +277,13 @@ function ToolActivity({
                 key={blockKey ?? index}
                 data-block-key={blockKey}
                 title={`${toolSummary(event)} · ${toolResultLabel(event, t)}`}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-white/5"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-gray-800"
               >
                 <ToolIcon tool={event.tool} />
                 {event.parentToolUseId ? (
                   <span
                     title={`Delegated by ${event.parentToolUseId}`}
-                    className="text-[10px] text-violet-700 dark:text-violet-300"
+                    className="text-[10px] text-gray-600 dark:text-gray-400"
                   >
                     Subagent tool
                   </span>
@@ -290,7 +293,7 @@ function ToolActivity({
                     type="button"
                     onClick={() => onInspectEvent(event, jobId)}
                     aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
-                    className="ui-focus-ring max-w-80 truncate rounded text-left font-medium text-gray-700 hover:text-crimson dark:text-gray-300"
+                    className="ui-focus-ring max-w-80 truncate rounded text-left font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                   >
                     {label}
                   </button>
@@ -331,7 +334,7 @@ function ToolActivity({
       <div
         id={detailsId}
         hidden={!expanded}
-        className="mt-1 space-y-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5 dark:border-white/10 dark:bg-gray-900"
+        className="mt-1 space-y-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-gray-700 dark:bg-gray-800"
       >
         {tools.map(({ event, blockKey }, index) => {
           const call =
@@ -343,13 +346,16 @@ function ToolActivity({
           return (
             <section
               key={blockKey ?? index}
-              className="space-y-2 border-b border-gray-100 pb-3 last:border-b-0 last:pb-0 dark:border-white/5"
+              className="space-y-2 border-b border-gray-200 pb-3 last:border-b-0 last:pb-0 dark:border-gray-700"
             >
-              <p className="text-xs font-medium text-gray-700 dark:text-gray-300">
-                {event.tool} · Call {index + 1}
+              <p className="flex items-center gap-1.5 text-xs font-medium text-gray-700 dark:text-gray-300">
+                <ToolIcon tool={event.tool} />
+                <span>
+                  {event.tool} · Call {index + 1}
+                </span>
               </p>
               <p className="text-xs text-gray-500 dark:text-gray-400">Tool call</p>
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-50 px-3 py-2.5 font-mono text-xs leading-relaxed text-gray-700 dark:bg-white/5 dark:text-gray-300">
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-100 px-3 py-2.5 font-mono text-xs leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300">
                 {call}
               </pre>
               <p className="text-xs text-gray-500 dark:text-gray-400">Result</p>
