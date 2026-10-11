@@ -321,7 +321,8 @@ class PostgresHostPoolRepository:
         Args:
             host: The authenticated host name.
             credential_hash: Digest the request authenticated with. The
-                capacity write is refused unless the row still holds it.
+                archive revision, capacity write, and legacy settings import
+                are refused unless the row still holds it.
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
@@ -380,11 +381,10 @@ class PostgresHostPoolRepository:
                     settings_applied = COALESCE($12::jsonb, settings_applied),
                     settings_local = COALESCE($13::jsonb, settings_local),
                     sandbox_archive_settings_applied_revision = CASE
-                        WHEN $15 THEN $14
+                        WHEN $15 AND ($16::text IS NULL OR credential_hash = $16) THEN $14
                         ELSE sandbox_archive_settings_applied_revision
                     END
                 WHERE host = $1
-                  AND ($16::text IS NULL OR credential_hash = $16)
                 RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
                 """,
                 host,

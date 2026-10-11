@@ -173,7 +173,8 @@ class HostPoolRepository(Protocol):
         Args:
             host: The authenticated host name.
             credential_hash: Digest the request authenticated with. The
-                capacity write is refused unless the row still holds it.
+                archive revision, capacity write, and legacy settings import
+                are refused unless the row still holds it.
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.

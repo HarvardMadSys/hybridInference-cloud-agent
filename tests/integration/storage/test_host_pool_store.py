@@ -1103,7 +1103,9 @@ async def test_archive_revision_heartbeat_is_tristate_and_credential_fenced(
         sandbox_archive_settings_applied_revision=7,
         sandbox_archive_settings_revision_reported=True,
     )
-    assert stale is None
+    assert stale is not None
+    assert stale["last_heartbeat_at"] is not None
+    assert stale["sandbox_archive_settings_applied_revision"] is None
     assert (await hosts.get_host(host="runner-a"))[
         "sandbox_archive_settings_applied_revision"
     ] is None
