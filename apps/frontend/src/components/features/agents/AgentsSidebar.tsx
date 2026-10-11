@@ -575,22 +575,22 @@ export function AgentsSidebar({
       <aside
         id="agents-sidebar"
         style={{ width: pane.width }}
-        className="flex shrink-0 flex-col border-r border-gray-200/70 bg-gray-50/80 dark:border-white/10 dark:bg-gray-900/60"
+        className="ui-enter flex min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted"
       >
-        <div className="flex-1 overflow-y-auto px-3 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
           <div className="flex items-center gap-2">
             <Link
               href="/"
               aria-current={pathname === '/' ? 'page' : undefined}
-              className={`flex min-h-10 min-w-0 flex-1 items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${
+              className={`ui-focus-ring flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-xl border px-3 py-2.5 text-[13px] font-semibold transition-colors ${
                 pathname === '/'
-                  ? 'border-crimson/15 bg-crimson/[0.07] text-crimson-dark shadow-sm dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
-                  : 'border-gray-200/80 bg-white text-gray-700 shadow-sm hover:border-crimson/20 hover:bg-crimson/[0.03] hover:text-crimson-dark dark:border-white/10 dark:bg-gray-900 dark:text-gray-300 dark:hover:border-crimson/25 dark:hover:bg-crimson/10 dark:hover:text-crimson-light'
+                  ? 'border-border bg-surface text-foreground shadow-subtle'
+                  : 'border-border/70 bg-surface text-foreground hover:border-border-strong/50 hover:bg-surface-hover'
               }`}
             >
               <svg
                 aria-hidden="true"
-                className={`h-4 w-4 shrink-0 ${pathname === '/' ? 'text-crimson dark:text-crimson-light' : 'text-gray-500 dark:text-gray-400'}`}
+                className="h-4 w-4 shrink-0 text-accent"
                 fill="none"
                 viewBox="0 0 24 24"
                 stroke="currentColor"
@@ -608,14 +608,14 @@ export function AgentsSidebar({
           </div>
 
           {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
-            <section aria-labelledby="sidebar-pinned-heading" className="mt-4">
+            <section aria-labelledby="sidebar-pinned-heading" className="mt-6">
               <h2
                 id="sidebar-pinned-heading"
-                className="mb-1 px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500"
+                className="mb-2 px-2 text-[11px] font-medium tracking-[0.04em] text-muted"
               >
                 {t('sidebar.pinned')}
               </h2>
-              <div className="space-y-0.5">
+              <div className="space-y-1">
                 {visiblePinned.map((row) => (
                   <TaskRow
                     key={row.key}
@@ -640,18 +640,18 @@ export function AgentsSidebar({
             </section>
           )}
 
-          <div className="mb-1.5 mt-5 flex items-center justify-between pl-2 pr-0.5">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
+          <div className="mb-2 mt-6 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pl-2 pr-0.5">
+            <span className="text-[11px] font-medium tracking-[0.04em] text-muted">
               {t('sidebar.projects')}
             </span>
-            <div className="flex items-center gap-0.5">
+            <div className="ml-auto flex items-center gap-0.5">
               <button
                 ref={searchButton}
                 type="button"
                 aria-label={t('sidebar.search')}
                 title={`${t('sidebar.search')} (⌘K / Ctrl K)`}
                 aria-expanded={searchOpen}
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-200/60 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200"
+                className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
                 onClick={() => {
                   if (searchOpen) closeSearch();
                   else {
@@ -740,12 +740,12 @@ export function AgentsSidebar({
             />
           )}
           {actionError && (
-            <p role="alert" className="px-2 text-[12px] text-red-500">
+            <p role="alert" className="px-2 text-[12px] text-status-error">
               {actionError}
             </p>
           )}
           {projectsError && (
-            <p role="alert" className="px-2 text-[12px] text-red-500">
+            <p role="alert" className="px-2 text-[12px] text-status-error">
               {projectsError}
               <button onClick={reloadProjects}>{t('sidebar.retry')}</button>
             </p>
@@ -790,7 +790,7 @@ export function AgentsSidebar({
               />
             </div>
           ) : preferences.group === 'flat' ? (
-            <div className="space-y-0.5">
+            <div className="space-y-1">
               {flatRows.map((row) => (
                 <TaskRow
                   key={row.key}
@@ -859,13 +859,18 @@ export function AgentsSidebar({
           <span role="status" className="sr-only">
             {announcement}
           </span>
+        </div>
+
+        <GettingStarted />
+
+        <div className="shrink-0 space-y-1 border-t border-border/70 px-3 py-3">
           <Link
             href="/archived"
             aria-current={pathname === '/archived' ? 'page' : undefined}
-            className={`mt-4 flex min-h-9 items-center gap-2 rounded-lg px-2 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 ${
+            className={`ui-focus-ring flex min-h-10 items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
               pathname === '/archived'
-                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-surface-hover text-foreground'
+                : 'text-muted hover:bg-surface-hover hover:text-foreground'
             }`}
           >
             <svg
@@ -888,18 +893,16 @@ export function AgentsSidebar({
           <Link
             href="/integrations"
             aria-current={pathname === '/integrations' ? 'page' : undefined}
-            className={`mt-0.5 flex min-h-9 items-center gap-2 rounded-lg px-2 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 ${
+            className={`ui-focus-ring flex min-h-10 items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
               pathname === '/integrations'
-                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-surface-hover text-foreground'
+                : 'text-muted hover:bg-surface-hover hover:text-foreground'
             }`}
           >
             <GearIcon className="h-4 w-4" />
             {t('settings.title')}
           </Link>
         </div>
-
-        <GettingStarted />
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
     </>

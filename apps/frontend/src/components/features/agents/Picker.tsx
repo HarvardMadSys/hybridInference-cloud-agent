@@ -32,7 +32,7 @@ export function Picker({
   return (
     <label
       title={`${label}: ${value}`}
-      className="relative inline-flex min-h-9 max-w-full items-center gap-1 rounded-md border border-transparent px-1.5 py-1 text-xs font-medium text-foreground transition-colors hover:border-border hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15 [@media(pointer:coarse)]:min-h-11"
+      className="relative inline-flex min-h-10 max-w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15 [@media(pointer:coarse)]:min-h-11"
     >
       <span className="flex min-w-0 flex-col gap-0.5">
         <span className="text-[10px] font-normal leading-none text-muted">{label}</span>
@@ -48,7 +48,7 @@ export function Picker({
         fill="none"
         stroke="currentColor"
         strokeWidth={1.6}
-        className="h-3 w-3 shrink-0 text-gray-400 dark:text-gray-500"
+        className="h-3 w-3 shrink-0 text-muted"
       >
         <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
       </svg>

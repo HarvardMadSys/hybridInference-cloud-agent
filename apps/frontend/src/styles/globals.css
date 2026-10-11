@@ -28,12 +28,12 @@
   :root {
     --ui-surface: 255 255 255;
     --ui-surface-raised: 255 255 255;
-    --ui-surface-muted: 249 250 251;
-    --ui-surface-hover: 243 244 246;
-    --ui-foreground: 17 24 39;
-    --ui-muted: 107 114 128;
-    --ui-border: 229 231 235;
-    --ui-border-strong: 156 163 175;
+    --ui-surface-muted: 248 248 250;
+    --ui-surface-hover: 240 240 243;
+    --ui-foreground: 24 24 27;
+    --ui-muted: 107 107 116;
+    --ui-border: 228 228 231;
+    --ui-border-strong: 161 161 170;
     --ui-accent: 165 28 48;
     --ui-accent-hover: 139 23 41;
     --ui-accent-subtle: 252 236 239;
@@ -43,17 +43,20 @@
     --ui-status-error: 185 28 28;
     --ui-status-warning: 146 64 14;
     --ui-status-info: 29 78 216;
+    --ui-duration-fast: 160ms;
+    --ui-duration-enter: 240ms;
+    --ui-ease: cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .dark {
-    --ui-surface: 17 24 39;
-    --ui-surface-raised: 31 41 55;
-    --ui-surface-muted: 15 23 42;
-    --ui-surface-hover: 55 65 81;
-    --ui-foreground: 243 244 246;
-    --ui-muted: 156 163 175;
-    --ui-border: 55 65 81;
-    --ui-border-strong: 107 114 128;
+    --ui-surface: 24 24 27;
+    --ui-surface-raised: 30 30 34;
+    --ui-surface-muted: 19 19 22;
+    --ui-surface-hover: 39 39 44;
+    --ui-foreground: 244 244 245;
+    --ui-muted: 161 161 170;
+    --ui-border: 48 48 54;
+    --ui-border-strong: 113 113 122;
     --ui-accent: 241 139 155;
     --ui-accent-hover: 245 172 183;
     --ui-accent-subtle: 57 36 45;
@@ -67,6 +70,15 @@
 
   html {
     @apply min-h-full;
+  }
+
+  body {
+    text-rendering: optimizeLegibility;
+  }
+
+  :where(*):not(.xterm-viewport) {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--ui-border-strong) / 0.45) transparent;
   }
 
   ::selection {
@@ -94,6 +106,14 @@
   .ui-button,
   .ui-icon-button {
     @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors duration-150;
+    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-duration: var(--ui-duration-fast);
+    transition-timing-function: var(--ui-ease);
+  }
+
+  .ui-button:active:not(:disabled),
+  .ui-icon-button:active:not(:disabled) {
+    transform: scale(0.98);
   }
 
   .ui-button {
@@ -168,6 +188,57 @@
     @apply border-accent;
   }
 
+  .ui-composer {
+    @apply relative rounded-2xl border border-border bg-surface text-foreground;
+    box-shadow:
+      0 2px 8px -4px rgb(var(--ui-foreground) / 0.08),
+      0 12px 32px -20px rgb(var(--ui-foreground) / 0.12);
+    transition:
+      border-color var(--ui-duration-fast) ease,
+      box-shadow var(--ui-duration-fast) ease,
+      background-color var(--ui-duration-fast) ease;
+  }
+
+  .ui-composer:focus-within {
+    border-color: rgb(var(--ui-accent) / 0.35);
+    box-shadow:
+      0 0 0 3px rgb(var(--ui-accent) / 0.06),
+      0 12px 32px -20px rgb(var(--ui-foreground) / 0.12);
+  }
+
+  /* Opacity-only entrances keep measured menus and resizable panes stable. */
+  .ui-enter {
+    animation: ui-fade-in var(--ui-duration-enter) ease-out;
+  }
+
+  .ui-popover {
+    animation: ui-fade-in var(--ui-duration-fast) ease-out;
+  }
+
+  .ui-welcome-enter {
+    animation: ui-welcome-in 360ms var(--ui-ease);
+  }
+
+  @keyframes ui-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes ui-welcome-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
   @media (pointer: coarse) {
     .ui-button,
     .ui-icon-button,
@@ -188,14 +259,21 @@
       font-size: 16px;
     }
   }
+}
 
-  @media (prefers-reduced-motion: reduce) {
-    .ui-button,
-    .ui-icon-button,
-    .ui-tab,
-    .ui-tool-row {
-      transition: none;
-    }
+/* Cover legacy utility animations as well as the shared interaction classes. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ui-button:active:not(:disabled),
+  .ui-icon-button:active:not(:disabled) {
+    transform: none;
   }
 }
 

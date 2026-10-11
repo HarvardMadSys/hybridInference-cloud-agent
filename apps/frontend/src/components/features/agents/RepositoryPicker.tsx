@@ -177,15 +177,15 @@ export function RepositoryPicker({
         aria-label={`${t('composer.repository')}: ${value || t('composer.repositoryPlaceholder')}`}
         title={value || t('composer.repositoryPlaceholder')}
         onClick={() => onOpenChange(!open)}
-        className={`inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:hover:bg-white/10 [@media(pointer:coarse)]:min-h-11 ${
-          open ? 'bg-gray-100 dark:bg-white/10' : ''
-        } ${value ? 'text-gray-700 dark:text-gray-300' : 'text-crimson-dark dark:text-crimson-light'}`}
+        className={`ui-focus-ring inline-flex min-h-10 min-w-0 max-w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${
+          open ? 'bg-surface-hover' : ''
+        } ${value ? 'text-foreground' : 'text-accent'}`}
       >
         <GitHubMark className="h-3.5 w-3.5 shrink-0" />
         <span className="max-w-[10rem] truncate sm:max-w-[13rem]">
           {value ? (
             <>
-              <span className="text-gray-400 dark:text-gray-500">{owner}</span>
+              <span className="text-muted">{owner}</span>
               {name}
             </>
           ) : (
@@ -198,7 +198,7 @@ export function RepositoryPicker({
           fill="none"
           stroke="currentColor"
           strokeWidth={1.6}
-          className="h-3 w-3 shrink-0 text-gray-400 dark:text-gray-500"
+          className="h-3 w-3 shrink-0 text-muted"
         >
           <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
         </svg>

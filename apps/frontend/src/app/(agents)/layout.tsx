@@ -20,9 +20,9 @@ import { WebsitePreferences } from '@/components/features/settings/WebsitePrefer
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 const NAV_ITEM =
-  'inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 py-2 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 py-2 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
 const NAV_ITEM_CURRENT =
-  'inline-flex min-h-9 shrink-0 items-center rounded-lg bg-crimson/[0.06] px-3 py-2 text-crimson ring-1 ring-inset ring-crimson/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25 [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring inline-flex min-h-9 shrink-0 items-center rounded-lg bg-surface-hover px-3 py-2 text-foreground transition-colors [@media(pointer:coarse)]:min-h-11';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
@@ -50,16 +50,16 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   };
 
   return (
-    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 border-b border-gray-200/80 bg-white/95 px-4 py-3 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur max-[359px]:grid-cols-1 sm:px-5 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto] dark:border-white/10 dark:bg-gray-900/95">
-      <div className="flex min-w-0 items-center gap-2.5">
+    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b border-border bg-surface px-4 py-2.5 sm:gap-x-5 sm:px-5 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
         {sidebarToggle}
         <Link
           href="/"
-          className="flex min-w-0 items-center gap-2.5 rounded-md text-[17px] font-semibold tracking-[-0.02em] text-gray-950 transition-colors hover:text-crimson focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:text-gray-50 dark:hover:text-crimson-light"
+          className="ui-focus-ring flex min-w-0 items-center gap-2 rounded-lg text-[16px] font-semibold tracking-tight text-foreground transition-colors hover:text-accent sm:gap-2.5"
         >
           <span
             aria-hidden="true"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-subtle text-accent"
           >
             <svg
               className="h-5 w-5"
@@ -76,7 +76,7 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
         {branding.orgName && (
           <a
             href={branding.orgUrl}
-            className="hidden font-serif text-[13px] tracking-[0.01em] text-gray-500 transition-colors hover:text-crimson sm:inline dark:text-gray-400 dark:hover:text-crimson-light"
+            className="hidden border-l border-border pl-2.5 text-xs text-muted transition-colors hover:text-accent lg:inline"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -84,12 +84,12 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
           </a>
         )}
       </div>
-      <div className="max-[359px]:justify-self-end md:col-start-3 md:row-start-1">
-        <WebsitePreferences />
+      <div className="md:col-start-3 md:row-start-1">
+        <WebsitePreferences compact />
       </div>
       <nav
         aria-label={t('nav.aria')}
-        className="col-span-2 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto text-[13px] font-medium text-gray-600 max-[359px]:col-span-1 md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-end dark:text-gray-400"
+        className="col-span-2 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto text-xs font-medium md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-end"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the
@@ -172,7 +172,7 @@ function SidebarToggleButton({
       aria-controls="agents-sidebar"
       aria-keyshortcuts="Meta+B Control+B"
       title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+      className="ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg
         aria-hidden="true"
@@ -253,7 +253,7 @@ function AgentsShell({
             id="agents-workspace"
             hidden={mobileSidebarOpen}
             tabIndex={-1}
-            className="min-w-0 flex-1 overflow-y-auto bg-white/70 outline-none dark:bg-gray-950"
+            className="min-w-0 flex-1 overflow-y-auto bg-surface outline-none"
           >
             {children}
           </main>
@@ -377,7 +377,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
         ownerId={state.user?.id}
         enabled={hasAgentPermission(state.user?.agent_access, 'agent.use')}
       >
-        <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
+        <div className="fixed inset-0 z-50 flex flex-col bg-surface-muted">
           <a
             href="#agents-workspace"
             onClick={closeMobileSidebar}

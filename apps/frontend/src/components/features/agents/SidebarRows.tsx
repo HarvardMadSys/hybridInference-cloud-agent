@@ -18,10 +18,7 @@ export function Highlight({ text, query }: { text: string; query: string }) {
     const index = match.index;
     pieces.push(
       text.slice(offset, index),
-      <mark
-        key={index}
-        className="rounded bg-crimson/10 text-crimson-dark dark:bg-crimson/30 dark:text-rose-300"
-      >
+      <mark key={index} className="rounded bg-accent/10 text-accent">
         {match[0]}
       </mark>,
     );
@@ -37,13 +34,13 @@ function DropIndicator({ position }: { position?: 'before' | 'after' }) {
   return position ? (
     <span
       aria-hidden="true"
-      className={`pointer-events-none absolute inset-x-0 z-10 h-px bg-crimson dark:bg-rose-400 ${position === 'after' ? 'bottom-0' : 'top-0'}`}
+      className={`pointer-events-none absolute inset-x-0 z-10 h-px bg-accent ${position === 'after' ? 'bottom-0' : 'top-0'}`}
     />
   ) : null;
 }
 /** Mouse actions reveal on hover; touch actions stay visible and easy to reach. */
 const ROW_ACTION =
-  'ui-focus-ring absolute top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-300/50 hover:text-gray-800 focus:opacity-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100';
+  'ui-focus-ring absolute top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 disabled:cursor-wait disabled:opacity-60 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100';
 export interface RowActions {
   activeKey: string | null;
   isUnread: (row: SidebarConversation) => boolean;
@@ -101,17 +98,17 @@ export function TaskRow({
         aria-current={isActive ? 'page' : undefined}
         data-search-result={search ? 'true' : undefined}
         title={`${job.repo} · ${job.title}`}
-        className={`ui-focus-ring flex min-h-9 w-full items-center gap-2 rounded-lg py-1.5 pl-2 pr-20 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-24 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-24 ${
+        className={`ui-focus-ring flex min-h-10 w-full items-center gap-2.5 rounded-xl py-2 pl-2.5 pr-20 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-24 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-24 ${
           isActive
-            ? 'bg-gray-200/70 font-medium text-gray-900 dark:bg-white/10 dark:text-gray-50'
-            : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+            ? 'bg-surface-hover font-medium text-foreground ring-1 ring-inset ring-border/70'
+            : 'text-muted hover:bg-surface-hover hover:text-foreground'
         }`}
       >
         <span className="flex h-3 w-3 shrink-0 items-center justify-center">
           {review ? (
             <span
               aria-hidden="true"
-              className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-100 text-[10px] font-bold text-amber-800 dark:bg-amber-900/60 dark:text-amber-300"
+              className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-status-warning/10 text-[10px] font-bold text-status-warning"
             >
               !
             </span>
@@ -121,12 +118,12 @@ export function TaskRow({
               title={stateLabel}
               className={
                 conversationState === 'running'
-                  ? 'h-3 w-3 animate-spin rounded-full border-[1.5px] border-gray-400 border-t-transparent dark:border-gray-500 dark:border-t-transparent motion-reduce:animate-none'
+                  ? 'h-3 w-3 animate-spin rounded-full border-[1.5px] border-muted/60 border-t-transparent motion-reduce:animate-none'
                   : conversationState === 'queued'
-                    ? 'h-1.5 w-1.5 rounded-full bg-gray-400 dark:bg-gray-500'
+                    ? 'h-1.5 w-1.5 rounded-full bg-muted/60'
                     : conversationState === 'failed'
-                      ? 'h-1.5 w-1.5 rounded-full bg-red-500'
-                      : 'h-1.5 w-1.5 rounded-full border border-gray-400 dark:border-gray-500'
+                      ? 'h-1.5 w-1.5 rounded-full bg-status-error'
+                      : 'h-1.5 w-1.5 rounded-full border border-muted/60'
               }
             />
           )}
@@ -135,7 +132,7 @@ export function TaskRow({
           <Highlight text={job.title} query={query} />
           <SessionReviewBadge review={review} className="block truncate text-[11px]" />
           {flat && (
-            <span className="block truncate text-[11px] font-normal text-gray-500 dark:text-gray-400">
+            <span className="mt-0.5 block truncate text-[11px] font-normal text-muted">
               <Highlight text={job.repo} query={query} />
               {row.archived ? ` · ${t('sidebar.archived')}` : ''}
             </span>
@@ -145,14 +142,14 @@ export function TaskRow({
           <span
             aria-label={t('sidebar.unread')}
             title={t('sidebar.unread')}
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-info"
           />
         ) : null}
       </Link>
       {activity && (
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[11px] tabular-nums text-gray-400 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 dark:text-gray-500 max-md:hidden [@media(pointer:coarse)]:hidden"
+          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[11px] tabular-nums text-muted/80 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 max-md:hidden [@media(pointer:coarse)]:hidden"
         >
           {activity}
         </span>
@@ -173,7 +170,7 @@ export function TaskRow({
           job.pinnedAt
             ? 'opacity-100'
             : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
-        } ${pinning === key ? 'animate-pulse' : ''}`}
+        } ${pinning === key ? 'motion-safe:animate-pulse' : ''}`}
       >
         <svg
           className="h-3.5 w-3.5"
@@ -238,12 +235,12 @@ export function ListStatus({
   return (
     <>
       {loading && (
-        <p role="status" className="px-2 py-1.5 text-[12px] text-gray-500 dark:text-gray-400">
+        <p role="status" className="px-2 py-2 text-[12px] text-muted">
           {t('common.loading')}
         </p>
       )}
       {error && (
-        <p role="alert" className="px-2 py-1.5 text-[12px] text-red-500">
+        <p role="alert" className="px-2 py-2 text-[12px] text-status-error">
           {error}{' '}
           <button onClick={onRetry} className="underline">
             {t('sidebar.retry')}
@@ -251,7 +248,7 @@ export function ListStatus({
         </p>
       )}
       {!loading && !error && empty && (
-        <p className="px-2 py-1.5 text-[12px] text-gray-500 dark:text-gray-400">
+        <p className="px-2 py-2 text-[12px] text-muted">
           {t(search ? 'sidebar.noMatches' : 'sidebar.noJobs')}
         </p>
       )}
@@ -259,7 +256,7 @@ export function ListStatus({
         <button
           disabled={loading}
           onClick={onMore}
-          className="ui-focus-ring min-h-9 w-full rounded-lg px-2 py-1.5 text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-200/50 hover:text-gray-800 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200 [@media(pointer:coarse)]:min-h-11"
+          className="ui-focus-ring min-h-10 w-full rounded-xl px-2 py-2 text-left text-[12px] text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:opacity-50 [@media(pointer:coarse)]:min-h-11"
         >
           {t('sidebar.loadMore')}
         </button>
@@ -349,13 +346,13 @@ export function ProjectFolder({
   const visible = rows.slice(0, Math.max(shown, selectedIndex + 1));
   const listId = `project-${encodeURIComponent(repo)}`;
   return (
-    <div className="mt-1">
+    <div className="mt-1.5">
       {/* A folder is a heading for the rows under it, not a destination, so it
           is never painted as selected: the selected row is inside it. The one
-          it contains is told apart by weight and a crimson folder icon, which
+          it contains is told apart by weight and an accent folder icon, which
           still reads when the folder is collapsed. */}
       <div
-        className="group relative flex items-center gap-0.5 rounded-md transition-colors hover:bg-gray-200/50 dark:hover:bg-white/5"
+        className="group relative flex items-center gap-0.5 rounded-xl transition-colors hover:bg-surface-hover"
         {...reorderProps}
       >
         <DropIndicator position={reorderProps['data-drop-position']} />
@@ -368,10 +365,10 @@ export function ProjectFolder({
           aria-current={active ? 'true' : undefined}
           title={repo}
           onClick={onToggle}
-          className={`ui-focus-ring flex min-h-9 min-w-0 flex-1 items-center gap-1.5 rounded-lg py-1.5 pl-1.5 pr-1 text-left text-[13px] font-medium max-md:min-h-12 [@media(pointer:coarse)]:min-h-12 ${active ? 'text-gray-900 dark:text-gray-50' : 'text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100'}`}
+          className={`ui-focus-ring flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl py-2 pl-2 pr-1 text-left text-[13px] font-medium max-md:min-h-12 [@media(pointer:coarse)]:min-h-12 ${active ? 'text-foreground' : 'text-muted hover:text-foreground'}`}
         >
           <svg
-            className={`h-3 w-3 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${expanded ? 'rotate-90' : ''}`}
+            className={`h-3 w-3 shrink-0 text-muted/70 transition-transform ${expanded ? 'rotate-90' : ''}`}
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -381,7 +378,7 @@ export function ProjectFolder({
             <path d="m9 6 6 6-6 6" />
           </svg>
           <svg
-            className={`h-4 w-4 shrink-0 ${active ? 'text-crimson dark:text-crimson-light' : 'text-gray-400 dark:text-gray-500'}`}
+            className={`h-4 w-4 shrink-0 ${active ? 'text-accent' : 'text-muted/70'}`}
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -394,7 +391,7 @@ export function ProjectFolder({
           {!expanded && activeCount > 0 && (
             <span
               aria-label={t('sidebar.runningOrQueued', { count: activeCount })}
-              className="h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-gray-400 border-t-transparent dark:border-gray-500 dark:border-t-transparent motion-reduce:animate-none"
+              className="h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-muted/60 border-t-transparent motion-reduce:animate-none"
             />
           )}
         </button>
@@ -404,7 +401,7 @@ export function ProjectFolder({
           data-row-action
           aria-label={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
           title={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
-          className="ui-focus-ring mr-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 opacity-0 transition-colors hover:bg-gray-300/50 hover:text-gray-800 focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100"
+          className="ui-focus-ring mr-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted opacity-0 transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100"
         >
           <svg
             className="h-3.5 w-3.5"
@@ -420,10 +417,7 @@ export function ProjectFolder({
         </Link>
       </div>
       {expanded && (
-        <div
-          id={listId}
-          className="ml-[13px] mt-0.5 space-y-0.5 border-l border-gray-200 pl-1.5 dark:border-white/10"
-        >
+        <div id={listId} className="ml-[15px] mt-1 space-y-1 border-l border-border/80 pl-2">
           {visible.map((row) => (
             <TaskRow key={row.key} row={row} {...actions} reorderProps={taskReorder(rows, row)} />
           ))}

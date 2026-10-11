@@ -1795,8 +1795,8 @@ export function JobDetail({
   // The workspace and inspector share the right-hand region.
   const panelOpen = workspaceOpen || inspector !== null;
   const content = (
-    <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
-      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-4 sm:px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+    <section className="flex h-full min-h-0 flex-col bg-surface">
+      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-border bg-surface px-4 sm:px-6">
         {isArchived ? (
           <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
             <Link
@@ -1814,11 +1814,11 @@ export function JobDetail({
             <div className="min-w-0 flex-1">
               <h1
                 title={title}
-                className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50"
+                className="truncate text-base font-semibold tracking-[-0.01em] text-foreground"
               >
                 {title}
               </h1>
-              <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <div className="mt-1 flex items-center gap-2 text-xs text-muted">
                 <svg
                   aria-hidden="true"
                   className="h-3.5 w-3.5"
@@ -1848,7 +1848,7 @@ export function JobDetail({
           <div className="agent-conversation-controls flex flex-wrap items-center gap-x-3 gap-y-2 pb-3">
             <nav
               aria-label="Run views"
-              className="flex shrink-0 items-center gap-1 rounded-xl border border-gray-200/70 bg-gray-50 p-1 text-[13px] dark:border-white/10 dark:bg-white/[0.03]"
+              className="flex shrink-0 items-center gap-1 rounded-xl bg-surface-muted p-1 text-xs"
             >
               {(['chat', 'trajectory'] as const).map((view) => (
                 <button
@@ -1858,8 +1858,8 @@ export function JobDetail({
                   aria-current={tab === view ? 'page' : undefined}
                   className={`ui-focus-ring min-h-9 rounded-lg px-3 py-1.5 capitalize transition-colors [@media(pointer:coarse)]:min-h-11 ${
                     tab === view
-                      ? 'bg-white font-semibold text-crimson-dark shadow-sm ring-1 ring-gray-200/80 dark:bg-gray-800 dark:text-crimson-light dark:ring-white/10'
-                      : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                      ? 'bg-surface font-semibold text-foreground shadow-sm ring-1 ring-border'
+                      : 'text-muted hover:bg-surface-hover hover:text-foreground'
                   }`}
                 >
                   {view}
@@ -2282,7 +2282,7 @@ export function JobDetail({
                   className={
                     isArchived
                       ? undefined
-                      : `relative rounded-xl border bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05] ${dropping ? 'border-crimson/40 ring-4 ring-crimson/[0.08]' : 'border-gray-200/90 dark:border-white/10'}`
+                      : `ui-composer ${dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''}`
                   }
                 >
                   {job.goal ? (
@@ -2417,14 +2417,14 @@ export function JobDetail({
                             : 'Message or run a task, / commands, @ files or sessions'
                         }
                         aria-label="Add a follow-up"
-                        className="block max-h-[30vh] min-h-14 w-full resize-y rounded-xl border-0 bg-transparent px-3 py-2 text-sm leading-5 text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                        className="block max-h-[30vh] min-h-16 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
                       />
                       <AttachmentStrip
                         entries={attachments.entries}
                         onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
-                      <div className="flex flex-wrap items-center gap-0.5 border-t border-gray-100/90 px-2 py-1 dark:border-white/5">
+                      <div className="flex flex-wrap items-center gap-1 border-t border-border px-3 py-2">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
@@ -2439,7 +2439,7 @@ export function JobDetail({
                           mcpBlockedReason={mcpBlockedReason}
                           disabled={contextLost || submitting}
                         />
-                        <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+                        <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
                         {modelOptions.length > 0 ? (
                           <>
                             {/* The harness stays the thread's; the model is offered
@@ -2498,7 +2498,7 @@ export function JobDetail({
                           busy={submitting || goalCommand.busy}
                         />
                       </div>
-                      <p className="px-3 pb-2 text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+                      <p className="px-4 pb-3 text-[11px] leading-4 text-muted">
                         {contextLost
                           ? `Start a new chat · ${job.runtime}`
                           : job.state === 'cancelled'
