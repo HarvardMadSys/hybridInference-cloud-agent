@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, Fragment, useContext, type ReactNode } from 'react';
+import { createContext, Fragment, useContext, useMemo, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -135,18 +135,25 @@ const components: Components = {
 
 /** Render a Markdown string (GitHub-flavored) as styled HTML. */
 export function Markdown({ text }: { text: string }) {
-  const onOpenFile = useContext(WorkspaceLinkContext);
-  return (
-    <div className="break-words text-sm leading-relaxed [&>*:last-child]:mb-0">
+  const workspaceLinks = useContext(WorkspaceLinkContext) !== null;
+  // Settled messages should not be parsed and highlighted again when the
+  // composer or a live sibling updates. Link actions still receive the current
+  // workspace callback through MarkdownLink's own context subscription.
+  const content = useMemo(
+    () => (
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={components}
         urlTransform={(url, key) =>
-          key === 'href' && onOpenFile && workspaceLinkPath(url) ? url : defaultUrlTransform(url)
+          key === 'href' && workspaceLinks && workspaceLinkPath(url)
+            ? url
+            : defaultUrlTransform(url)
         }
       >
         {text}
       </ReactMarkdown>
-    </div>
+    ),
+    [text, workspaceLinks],
   );
+  return <div className="break-words text-sm leading-relaxed [&>*:last-child]:mb-0">{content}</div>;
 }

@@ -12,6 +12,7 @@ import {
 } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import toast from 'react-hot-toast';
 
 import { Markdown, WorkspaceLinkProvider } from '@/components/ui/Markdown';
@@ -58,7 +59,6 @@ import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
-import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { ActivityIcon, ActivityWindow } from './ActivityWindow';
@@ -69,21 +69,18 @@ import { NativeQuestionPrompt } from './NativeQuestionPrompt';
 import type { AgentEvent, AgentJob } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
-import { TrajectoryView } from './TrajectoryView';
 import {
-  TrajectoryInspector,
   normalizeStepTab,
   type InspectorSelection,
   type RunTab,
   type StepTab,
-} from './TrajectoryInspector';
+} from './trajectoryInspectorTabs';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { notDeliveredText, PendingMessageQueue } from './PendingMessageQueue';
 import { isSteerChord } from './composerKeys';
 import { usePendingMessages } from './usePendingMessages';
 import { useResizablePane } from './useResizablePane';
-import { WorkspaceFiles } from './WorkspaceFiles';
 import {
   composerModels,
   composerOverrides,
@@ -94,7 +91,6 @@ import { useComposerDraft } from './useComposerDraft';
 import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
 import { TurnDeliverables } from './TurnDeliverables';
 import { recordedTurnOutputs, type RecordedFileSelection } from './turnDeliverables';
-import { RecordedDiffPanel } from './RecordedDiffPanel';
 import {
   hasLostContext,
   isActiveConversationState,
@@ -103,7 +99,6 @@ import {
   ownerRunNote,
 } from './conversationJob';
 import { useFirstRun } from './firstRun';
-import { SideChat } from './SideChat';
 import { codeReviewPrompt } from './codeReview';
 import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
 import { WorkspaceTabBar } from './WorkspaceTabBar';
@@ -119,6 +114,41 @@ import {
   EventList,
   HistoryTurn,
 } from './ChatMessages';
+
+function PanelLoading({ children }: { children: string }) {
+  return (
+    <p role="status" className="p-4 text-sm text-gray-500 dark:text-gray-400">
+      {children}
+    </p>
+  );
+}
+
+// These panels are optional: loading a conversation should not also load its
+// terminal, file browser, side chats, and execution inspectors. Each loading
+// view also keeps its suspended import inside the panel in the App Router.
+const TerminalWorkspace = dynamic(
+  () => import('./TerminalWorkspace').then((module) => module.TerminalWorkspace),
+  { loading: () => <PanelLoading>Loading terminal…</PanelLoading> },
+);
+const WorkspaceFiles = dynamic(
+  () => import('./WorkspaceFiles').then((module) => module.WorkspaceFiles),
+  { loading: () => <PanelLoading>Loading files…</PanelLoading> },
+);
+const TrajectoryView = dynamic(
+  () => import('./TrajectoryView').then((module) => module.TrajectoryView),
+  { loading: () => <PanelLoading>Loading trajectory…</PanelLoading> },
+);
+const TrajectoryInspector = dynamic(
+  () => import('./TrajectoryInspector').then((module) => module.TrajectoryInspector),
+  { loading: () => <PanelLoading>Loading details…</PanelLoading> },
+);
+const RecordedDiffPanel = dynamic(
+  () => import('./RecordedDiffPanel').then((module) => module.RecordedDiffPanel),
+  { loading: () => <PanelLoading>Loading changes…</PanelLoading> },
+);
+const SideChat = dynamic(() => import('./SideChat').then((module) => module.SideChat), {
+  loading: () => <PanelLoading>Loading side chat…</PanelLoading>,
+});
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -745,6 +775,8 @@ export function JobDetail({
   const router = useRouter();
   const t = useT();
   const usage = useLedgerUsage(job);
+  const threadId = job.threadId ?? job.id;
+  const workspaceScope = JSON.stringify([userId, threadId]);
   const liveAttempt = useMemo(
     () => (job.attempts.length > 0 ? job.attempts[job.attempts.length - 1].no : 0),
     [job.attempts],
@@ -763,7 +795,20 @@ export function JobDetail({
   const [title, setTitle] = useState(job.title);
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [openWorkspaceScope, setOpenWorkspaceScope] = useState<string | null>(null);
+  const workspaceOpen = openWorkspaceScope === workspaceScope;
+  const setWorkspaceOpen = useCallback(
+    (open: boolean) => setOpenWorkspaceScope(open ? workspaceScope : null),
+    [workspaceScope],
+  );
+  const [initializedWorkspace, setInitializedWorkspace] = useState<{
+    scope: string;
+    tabs: ReadonlySet<WorkspaceTab>;
+  } | null>(null);
+  useEffect(() => {
+    setOpenWorkspaceScope(null);
+    setInitializedWorkspace(null);
+  }, [workspaceScope]);
   const workspaceTriggerRef = useRef<HTMLElement | null>(null);
   const focusWorkspaceRef = useRef(false);
   const [activityOpen, setActivityOpen] = useState(true);
@@ -779,6 +824,24 @@ export function JobDetail({
   const activityToggleRef = useRef<HTMLButtonElement>(null);
   const workspaceTabs = useWorkspaceTabs(userId, job, threadJobs);
   const workspaceTab = workspaceTabs.selected;
+  // Mount a panel only when first used, then retain it while hidden so closing
+  // the workspace preserves terminals, file previews, and side chat drafts.
+  const workspaceInitialized = workspaceOpen || initializedWorkspace?.scope === workspaceScope;
+  const terminalInitialized =
+    (workspaceOpen && workspaceTab === 'terminal') ||
+    (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('terminal'));
+  const filesInitialized =
+    (workspaceOpen && workspaceTab === 'files') ||
+    (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('files'));
+  useEffect(() => {
+    if (!workspaceOpen) return;
+    setInitializedWorkspace((current) => {
+      if (current?.scope === workspaceScope && current.tabs.has(workspaceTab)) return current;
+      const tabs = new Set(current?.scope === workspaceScope ? current.tabs : []);
+      tabs.add(workspaceTab);
+      return { scope: workspaceScope, tabs };
+    });
+  }, [workspaceOpen, workspaceScope, workspaceTab]);
   // The workspace and the step inspector take turns in the same right region.
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
   const focusInspectorRef = useRef(false);
@@ -803,7 +866,6 @@ export function JobDetail({
     }
     return buildTrajectorySteps(events, context);
   }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
-  const threadId = job.threadId ?? job.id;
   const draft = useComposerDraft({ userId, threadId });
   const { value: followUp, setValue: setFollowUp } = draft;
   const currentDraftScope = useRef(draft.capture().scope);
@@ -816,7 +878,6 @@ export function JobDetail({
     };
   }, []);
   const [presentation, setPresentation] = useTranscriptPresentation(userId, threadId);
-  const workspaceScope = JSON.stringify([userId, threadId]);
   const [requestedFile, setRequestedFile] = useState<{
     scope: string;
     path: string;
@@ -1092,7 +1153,7 @@ export function JobDetail({
       setInspector(null);
       setWorkspaceOpen(true);
     }
-  }, [workspaceOpen]);
+  }, [workspaceOpen, setWorkspaceOpen]);
 
   useEffect(() => {
     if (!workspaceOpen || !focusWorkspaceRef.current) return;
@@ -1140,7 +1201,7 @@ export function JobDetail({
         return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step, tab) : 'summary' };
       });
     },
-    [rememberInspectorTrigger, trajectorySteps],
+    [rememberInspectorTrigger, setWorkspaceOpen, trajectorySteps],
   );
 
   const inspectTranscriptEvent = useCallback(
@@ -1168,7 +1229,7 @@ export function JobDetail({
       setTab('trajectory');
       setFocusJobId(jobId);
     },
-    [rememberInspectorTrigger],
+    [rememberInspectorTrigger, setWorkspaceOpen],
   );
 
   const selectInspectorTab = useCallback((next: StepTab | RunTab) => {
@@ -1488,7 +1549,7 @@ export function JobDetail({
     setInspector(null);
     setFocusJobId(null);
     setActivityOpen(true);
-  }, [activityVisible, closeActivity]);
+  }, [activityVisible, closeActivity, setWorkspaceOpen]);
   const activityStepKey = useCallback(
     (event: Extract<AgentEvent, { kind: 'tool_use' }>) =>
       trajectorySteps.find(
@@ -1518,7 +1579,7 @@ export function JobDetail({
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [activityVisible, closeActivity]);
+  }, [activityVisible, closeActivity, setWorkspaceOpen]);
   const currentRewindAnchor = job.historyTurns
     ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
@@ -2538,6 +2599,7 @@ export function JobDetail({
         ) : null}
 
         <aside
+          key={workspaceScope}
           id="job-workspace-pane"
           role="region"
           aria-label="Job workspace"
@@ -2547,103 +2609,111 @@ export function JobDetail({
             workspaceOpen ? 'flex' : 'hidden'
           } h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
         >
-          <WorkspaceTabBar
-            key={`${userId}:${job.threadId ?? job.id}`}
-            selected={workspaceTab}
-            chats={workspaceTabs.chats}
-            diffCount={job.diffFiles.length}
-            onSelect={openWorkspace}
-            onAdd={workspaceTabs.add}
-            onClose={workspaceTabs.close}
-            onBack={toggleWorkspace}
-          />
-          <div
-            id="workspace-panel-git"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-git"
-            hidden={workspaceTab !== 'git'}
-            className="min-h-0 flex-1 overflow-y-auto p-5"
-          >
-            {recordedFile ? (
-              <RecordedDiffPanel
-                selection={recordedFile}
-                turnNo={
-                  threadJobs.find((turn) => turn.id === recordedFile.jobId)?.turn_no ??
-                  job.turnNo ??
-                  1
-                }
-                onClose={() => setRecordedFile(null)}
+          {workspaceInitialized ? (
+            <>
+              <WorkspaceTabBar
+                key={`${userId}:${job.threadId ?? job.id}`}
+                selected={workspaceTab}
+                chats={workspaceTabs.chats}
+                diffCount={job.diffFiles.length}
+                onSelect={openWorkspace}
+                onAdd={workspaceTabs.add}
+                onClose={workspaceTabs.close}
+                onBack={toggleWorkspace}
               />
-            ) : (
-              <GitPanel
-                job={job}
-                active={workspaceOpen && workspaceTab === 'git'}
-                onReview={canReview ? openReview : undefined}
-                onWatchPr={canWatchPr ? () => void watchPr() : undefined}
-              />
-            )}
-          </div>
-          <div
-            id="workspace-panel-terminal"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-terminal"
-            hidden={workspaceTab !== 'terminal'}
-            className="min-h-0 flex-1 p-3"
-          >
-            {isArchived ? (
-              <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
-                {t('sessionArchive.terminal')}
-              </p>
-            ) : (
-              // Keyed by the chat, not the turn: every turn shares the one
-              // workspace, and a new turn must not tear its terminals down.
-              <TerminalWorkspace
-                key={job.threadId ?? job.id}
-                jobId={job.id}
-                workspaceKey={job.threadId ?? job.id}
-                active={workspaceOpen && workspaceTab === 'terminal'}
-                ready={terminalWorkspaceReady}
-              />
-            )}
-          </div>
-          <div
-            id="workspace-panel-files"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-files"
-            hidden={workspaceTab !== 'files'}
-            className="min-h-0 flex-1 overflow-y-auto p-5"
-          >
-            <WorkspaceFiles
-              job={job}
-              active={workspaceOpen && workspaceTab === 'files'}
-              requestedPath={
-                requestedFile?.scope === workspaceScope ? requestedFile.path : undefined
-              }
-              requestToken={
-                requestedFile?.scope === workspaceScope ? requestedFile.token : undefined
-              }
-            />
-          </div>
-          {workspaceTabs.chats.map((chat) => (
-            <div
-              key={chat.id}
-              id={`workspace-panel-${chat.id}`}
-              data-side-chat-id={chat.id}
-              role="tabpanel"
-              aria-labelledby={`workspace-tab-${chat.id}`}
-              hidden={workspaceTab !== chat.id}
-              className="min-h-0 flex-1"
-            >
-              <SideChat
-                tab={chat}
-                sourceJob={job}
-                sourceJobs={threadJobs}
-                userId={userId}
-                config={config}
-                active={workspaceOpen && workspaceTab === chat.id}
-              />
-            </div>
-          ))}
+              <div
+                id="workspace-panel-git"
+                role="tabpanel"
+                aria-labelledby="workspace-tab-git"
+                hidden={workspaceTab !== 'git'}
+                className="min-h-0 flex-1 overflow-y-auto p-5"
+              >
+                {recordedFile ? (
+                  <RecordedDiffPanel
+                    selection={recordedFile}
+                    turnNo={
+                      threadJobs.find((turn) => turn.id === recordedFile.jobId)?.turn_no ??
+                      job.turnNo ??
+                      1
+                    }
+                    onClose={() => setRecordedFile(null)}
+                  />
+                ) : (
+                  <GitPanel
+                    job={job}
+                    active={workspaceOpen && workspaceTab === 'git'}
+                    onReview={canReview ? openReview : undefined}
+                    onWatchPr={canWatchPr ? () => void watchPr() : undefined}
+                  />
+                )}
+              </div>
+              <div
+                id="workspace-panel-terminal"
+                role="tabpanel"
+                aria-labelledby="workspace-tab-terminal"
+                hidden={workspaceTab !== 'terminal'}
+                className="min-h-0 flex-1 p-3"
+              >
+                {terminalInitialized ? (
+                  isArchived ? (
+                    <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
+                      {t('sessionArchive.terminal')}
+                    </p>
+                  ) : (
+                    // Keyed by the chat, not the turn: every turn shares the one
+                    // workspace, and a new turn must not tear its terminals down.
+                    <TerminalWorkspace
+                      key={workspaceScope}
+                      jobId={job.id}
+                      workspaceKey={workspaceScope}
+                      active={workspaceOpen && workspaceTab === 'terminal'}
+                      ready={terminalWorkspaceReady}
+                    />
+                  )
+                ) : null}
+              </div>
+              <div
+                id="workspace-panel-files"
+                role="tabpanel"
+                aria-labelledby="workspace-tab-files"
+                hidden={workspaceTab !== 'files'}
+                className="min-h-0 flex-1 overflow-y-auto p-5"
+              >
+                {filesInitialized ? (
+                  <WorkspaceFiles
+                    job={job}
+                    active={workspaceOpen && workspaceTab === 'files'}
+                    requestedPath={
+                      requestedFile?.scope === workspaceScope ? requestedFile.path : undefined
+                    }
+                    requestToken={
+                      requestedFile?.scope === workspaceScope ? requestedFile.token : undefined
+                    }
+                  />
+                ) : null}
+              </div>
+              {workspaceTabs.chats.map((chat) => (
+                <div
+                  key={chat.id}
+                  id={`workspace-panel-${chat.id}`}
+                  data-side-chat-id={chat.id}
+                  role="tabpanel"
+                  aria-labelledby={`workspace-tab-${chat.id}`}
+                  hidden={workspaceTab !== chat.id}
+                  className="min-h-0 flex-1"
+                >
+                  <SideChat
+                    tab={chat}
+                    sourceJob={job}
+                    sourceJobs={threadJobs}
+                    userId={userId}
+                    config={config}
+                    active={workspaceOpen && workspaceTab === chat.id}
+                  />
+                </div>
+              ))}
+            </>
+          ) : null}
         </aside>
 
         {inspector ? (

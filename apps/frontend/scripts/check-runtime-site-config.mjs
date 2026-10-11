@@ -51,12 +51,17 @@
 //      standalone server and the static chunks is taken before the first
 //      render and after the last, so "one image, many deployments" is checked
 //      rather than inferred from the shape of the loop.
+//  12. metadata and layout share one saved-settings fetch per request, while
+//      the next request sees saved edits without restarting the server.
 //
 // Run from `apps/frontend/`.
+// Use --saved-config-only to check request-scoped caching against an existing
+// production build without rebuilding either variant.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 
 const WEB_ROOT = resolve(import.meta.dirname, '..');
@@ -659,6 +664,73 @@ async function assertNeutralDeployment(variant) {
   }
 }
 
+/** One settings snapshot per render, refreshed on the next request. */
+async function assertSavedConfigRequestScope(variant) {
+  let target = DEPLOYMENTS[0];
+  let reads = 0;
+  const controlPlane = createServer((request, response) => {
+    if (request.url !== '/v1/agent/site-config') {
+      response.writeHead(404).end();
+      return;
+    }
+    reads += 1;
+    const saved = {
+      branding: expectedIdentity(target),
+      features: { rag: target.rag },
+    };
+    // Keep the two readers overlapping: a module cache or Next's fetch
+    // deduplication behaving differently must still satisfy the request count.
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(saved));
+    }, 20);
+  });
+  await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
+
+  const port = nextPort++;
+  const server = startServer(
+    { AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}` },
+    port,
+  );
+  const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
+  try {
+    for (const deployment of DEPLOYMENTS) {
+      target = deployment;
+      const before = reads;
+      const response = await waitForResponse(url);
+      const html = await response.text();
+      const where = `${variant.name} / saved ${target.name}`;
+      if (response.status !== 200) {
+        throw new Error(`${where}: page answered ${response.status}\n${server.logs.join('')}`);
+      }
+      if (reads - before !== 1) {
+        throw new Error(`${where}: rendered one page with ${reads - before} settings fetches`);
+      }
+      if (titleOf(html) !== target.appName || textOf(html, 'h1') !== target.appName) {
+        throw new Error(`${where}: metadata and layout did not read the current saved name`);
+      }
+      const identity = serializedIdentity(flightPayload(html));
+      if (JSON.stringify(identity) !== JSON.stringify(expectedIdentity(target))) {
+        throw new Error(`${where}: hydration did not receive the current saved identity`);
+      }
+    }
+
+    // Separate concurrent page requests must each read their own settings,
+    // rather than sharing a process-wide in-flight promise.
+    const before = reads;
+    const responses = await Promise.all([fetch(url), fetch(url)]);
+    await Promise.all(responses.map((response) => response.text()));
+    if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
+      throw new Error(`${variant.name}: concurrent pages did not each read one settings snapshot`);
+    }
+  } finally {
+    await server.stop();
+    await new Promise((done, reject) =>
+      controlPlane.close((error) => (error ? reject(error) : done())),
+    );
+  }
+}
+
 async function main() {
   for (const variant of VARIANTS) {
     buildVariant(variant);
@@ -670,6 +742,7 @@ async function main() {
 
     await assertReturnTo(variant);
     await assertNeutralDeployment(variant);
+    await assertSavedConfigRequestScope(variant);
 
     // One artifact, two environments, and the two documents must differ — the
     // core assertion. Equal documents mean the value was resolved at build
@@ -726,4 +799,15 @@ async function main() {
   );
 }
 
-await main();
+if (process.argv.includes('--saved-config-only')) {
+  const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
+  const variant = VARIANTS.find((item) => item.basePath === basePath);
+  if (!variant)
+    throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
+  await assertSavedConfigRequestScope(variant);
+  console.log(
+    'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
+  );
+} else {
+  await main();
+}

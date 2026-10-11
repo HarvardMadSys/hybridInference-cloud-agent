@@ -5,6 +5,13 @@ import { readRuntimeSiteConfig } from './site.server';
 
 vi.mock('server-only', () => ({}));
 vi.mock('next/server', () => ({ connection: vi.fn().mockResolvedValue(undefined) }));
+// Next supplies React's RSC cache API to Server Components. This suite runs
+// under React 18 without an RSC request; the built-server acceptance check
+// verifies deduplication and freshness in the real request context.
+vi.mock('react', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react')>()),
+  cache: <T>(reader: T): T => reader,
+}));
 
 beforeEach(() => {
   vi.stubEnv('AGENT_CONTROL_PLANE_URL', 'http://control-plane:8000');
