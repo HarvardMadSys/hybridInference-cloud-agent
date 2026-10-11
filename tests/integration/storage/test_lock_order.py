@@ -1,0 +1,200 @@
+"""Writers that meet on the same rows, interleaved on real Postgres.
+
+The order every transaction takes shared rows in is written down once, in
+:mod:`cloud_agent.storage`. A test here holds one writer's locks open on a
+connection of its own, in the order that writer's code takes them, runs the
+real repository call into it, and then asks for the rows the held writer takes
+next: two orders over the same rows is a deadlock, and Postgres says so.
+"""
+
+from __future__ import annotations
+
+# Imported pytest fixtures are intentionally named by test parameters.
+# ruff: noqa: F811
+import hashlib
+from typing import TYPE_CHECKING
+
+import pytest
+from tests.integration.storage.test_agent_job_store import (
+    _claim,
+    _reserve_shared_chat,
+    pool,  # noqa: F401 - pytest fixture
+    store,  # noqa: F401 - pytest fixture
+)
+
+if TYPE_CHECKING:
+    from cloud_agent.storage.assembly import Storage
+
+pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+_HOST = "shared-runner"
+_HOST_CREDENTIAL = "test-credential-hash"
+
+
+async def _run_turn(
+    store: Storage, job: dict, claim: dict, sandbox: dict, *, context_status: str = "new"
+) -> None:
+    """Start, admit, settle and finish one retained turn, as its runner does."""
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-lock-order", context_status=context_status
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-lock-order",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+
+async def _run_next_turn(store: Storage, parent: dict, sandbox: dict) -> dict:
+    """Send a follow-up into the same workspace and run it to the end."""
+    follow = await store.conversation_commands.create_follow_up(
+        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and update the docs"
+    )
+    assert follow is not None and follow.get("error") is None
+    claim = await _claim(
+        store,
+        worker_id="next-turn",
+        lease_ttl_seconds=60,
+        host=_HOST,
+        host_credential_hash=_HOST_CREDENTIAL,
+    )
+    assert claim is not None and claim["id"] == follow["id"]
+    reserved = await store.sandbox.reserve_thread_sandbox(
+        thread_id=follow["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host=_HOST,
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+    )
+    assert reserved is not None
+    await _run_turn(store, follow, claim, reserved, context_status="live")
+    return follow
+
+
+async def _snapshots(pool, sandbox_id: str) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id, s.state, s.workspace_epoch, s.anchor_job_id,
+                   ARRAY(
+                       SELECT included.job_id FROM agent_snapshot_jobs included
+                       WHERE included.snapshot_id = s.id
+                       ORDER BY included.created_at, included.job_id
+                   ) AS included
+            FROM agent_sandbox_snapshots s
+            WHERE s.sandbox_id = $1
+            ORDER BY s.id
+            """,
+            sandbox_id,
+        )
+    return [dict(row) for row in rows]
+
+
+@pytest.mark.parametrize("recovery", ["deferred", "reaped"])
+async def test_a_turn_settled_during_a_capture_is_folded_into_the_capture_handed_back(
+    pool, store: Storage, recovery: str
+):
+    """A capture handed back carries the turn that settled while it was out.
+
+    A turn is not refused while its workspace is captured, so the next turn's
+    settlement opens a second, pending snapshot behind the capturing one. The
+    capture handed back by a busy host, or by the stall reaper, used to become
+    pending beside it, which the one-pending-snapshot index refuses. The claim
+    then stayed ``capturing`` and its group ``snapshotting`` for good, and the
+    reaper's single statement failed for every workspace in the deployment.
+    """
+    first, first_claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, first, first_claim, sandbox)
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None and capture["anchor_job_id"] == first["id"]
+
+    second = await _run_next_turn(store, first, sandbox)
+    opened = [
+        row
+        for row in await _snapshots(pool, sandbox["sandbox_id"])
+        if row["id"] != capture["snapshot_id"]
+    ]
+    assert [(row["state"], row["included"]) for row in opened] == [("pending", [second["id"]])]
+
+    if recovery == "deferred":
+        assert await store.snapshot.defer_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            detail="the host is busy",
+        )
+    else:
+        assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [
+            capture["snapshot_id"]
+        ]
+
+    # One pending snapshot: the claim that was handed back, now at the second
+    # turn's boundary and carrying both turns.
+    assert await _snapshots(pool, sandbox["sandbox_id"]) == [
+        {
+            "id": capture["snapshot_id"],
+            "state": "pending",
+            "workspace_epoch": opened[0]["workspace_epoch"],
+            "anchor_job_id": second["id"],
+            "included": [first["id"], second["id"]],
+        }
+    ]
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT snapshot_state FROM agent_sandboxes WHERE id = $1", sandbox["sandbox_id"]
+            )
+            == "pending"
+        )
+        if recovery == "deferred":
+            assert await store.snapshot.claim_due_sandbox_snapshot() is None, "not before its retry"
+            await conn.execute(
+                "UPDATE agent_sandbox_snapshots SET retry_at = NOW() WHERE id = $1",
+                capture["snapshot_id"],
+            )
+
+    again = await store.snapshot.claim_due_sandbox_snapshot()
+    assert again is not None
+    assert again["snapshot_id"] == capture["snapshot_id"]
+    assert again["anchor_job_id"] == second["id"]
+    patch = "diff --git a/docs.md b/docs.md\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=again["snapshot_id"],
+            sandbox_id=again["sandbox_id"],
+            sandbox_generation=again["generation"],
+            container_id=again["container_id"],
+            workspace_epoch=again["workspace_epoch"],
+            base_sha=again["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None
+    assert publication["included_job_ids"] == [first["id"], second["id"]]

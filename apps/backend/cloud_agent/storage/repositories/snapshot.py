@@ -27,6 +27,57 @@ CAPTURE_RETRY_S = 5.0
 BASE_IMPORT_RETRY_S = 15.0
 
 
+async def _absorb_pending_snapshot(conn: Any, *, snapshot_id: int, sandbox_id: str) -> None:
+    """Fold the group's pending snapshot into a capture that is being handed back.
+
+    A turn is not refused while its workspace is captured, so a turn that
+    settles meanwhile opens a pending snapshot of its own: settlement only ever
+    extends a *pending* one, and the capturing claim is not. A group may hold
+    one pending snapshot, so the claim can only go back to the queue by taking
+    that one in, exactly as settlement would have: its turns, its newer
+    boundary and its anchor. A capture is the whole diff from the published
+    base, so the folded claim, captured later, covers both.
+
+    Called with the claim and its group locked, before the claim is made
+    pending again; the pending row is taken after the group, the order
+    settlement takes them in.
+    """
+    pending = await conn.fetchrow(
+        """
+        SELECT id, workspace_epoch, anchor_job_id, base_sha
+        FROM agent_sandbox_snapshots
+        WHERE sandbox_id = $1 AND state = 'pending'
+        FOR UPDATE
+        """,
+        sandbox_id,
+    )
+    if pending is None:
+        return
+    await conn.execute(
+        """
+        INSERT INTO agent_snapshot_jobs (snapshot_id, job_id, created_at)
+        SELECT $1, job_id, created_at FROM agent_snapshot_jobs WHERE snapshot_id = $2
+        ON CONFLICT DO NOTHING
+        """,
+        snapshot_id,
+        pending["id"],
+    )
+    # Before the claim takes its boundary: both the epoch and the pending state
+    # are unique per group.
+    await conn.execute("DELETE FROM agent_sandbox_snapshots WHERE id = $1", pending["id"])
+    await conn.execute(
+        """
+        UPDATE agent_sandbox_snapshots
+        SET workspace_epoch = $2, anchor_job_id = $3, base_sha = $4
+        WHERE id = $1
+        """,
+        snapshot_id,
+        pending["workspace_epoch"],
+        pending["anchor_job_id"],
+        pending["base_sha"],
+    )
+
+
 class PostgresSnapshotRepository:
     """Capture, publish and base-import, each claimed with SKIP LOCKED."""
 
@@ -243,7 +294,8 @@ class PostgresSnapshotRepository:
         """Release a failed host capture; busy retries, unsafe census dirties.
 
         A capture handed back for a retry is not claimed again before its
-        ``retry_at``, so a busy host is asked on that clock, not in a loop.
+        ``retry_at``, so a busy host is asked on that clock, not in a loop. It
+        takes in the pending snapshot of any turn that settled meanwhile.
         """
         next_state = "failed" if dirty else "pending"
         group_state = "dirty" if dirty else "pending"
@@ -286,6 +338,8 @@ class PostgresSnapshotRepository:
                     snapshot_id,
                 )
                 return False
+            if not dirty:
+                await _absorb_pending_snapshot(conn, snapshot_id=snapshot_id, sandbox_id=sandbox_id)
             await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
@@ -327,21 +381,40 @@ class PostgresSnapshotRepository:
     async def reap_stalled_sandbox_snapshot_captures(
         self, *, stall_seconds: float = 300.0
     ) -> list[int]:
-        """Return abandoned CAPTURING claims to the retryable pending queue."""
+        """Return abandoned CAPTURING claims to the retryable pending queue.
+
+        Claim by claim, each one's group before the group's pending snapshot:
+        a claim whose workspace settled another turn while it was out takes
+        that turn in, as a deferred capture does.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(
                 """
-                UPDATE agent_sandbox_snapshots
-                SET state = 'pending',
-                    last_error = 'snapshot coordinator stopped during capture',
-                    updated_at = NOW()
+                SELECT id, sandbox_id FROM agent_sandbox_snapshots
                 WHERE state = 'capturing'
                   AND updated_at < NOW() - make_interval(secs => $1)
-                RETURNING id, sandbox_id
+                ORDER BY id
+                FOR UPDATE
                 """,
                 stall_seconds,
             )
-            if rows:
+            for row in rows:
+                await conn.execute(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE", row["sandbox_id"]
+                )
+                await _absorb_pending_snapshot(
+                    conn, snapshot_id=int(row["id"]), sandbox_id=str(row["sandbox_id"])
+                )
+                await conn.execute(
+                    """
+                    UPDATE agent_sandbox_snapshots
+                    SET state = 'pending',
+                        last_error = 'snapshot coordinator stopped during capture',
+                        updated_at = NOW()
+                    WHERE id = $1 AND state = 'capturing'
+                    """,
+                    row["id"],
+                )
                 await conn.execute(
                     """
                     UPDATE agent_sandboxes
@@ -356,9 +429,9 @@ class PostgresSnapshotRepository:
                             THEN NOW() + make_interval(secs => idle_timeout_seconds)
                             ELSE NULL END,
                         updated_at = NOW()
-                    WHERE id = ANY($1::text[]) AND snapshot_state = 'snapshotting'
+                    WHERE id = $1 AND snapshot_state = 'snapshotting'
                     """,
-                    [row["sandbox_id"] for row in rows],
+                    row["sandbox_id"],
                 )
         return [int(row["id"]) for row in rows]
 
