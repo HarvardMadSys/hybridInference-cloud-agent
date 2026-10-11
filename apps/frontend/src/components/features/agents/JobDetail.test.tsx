@@ -351,7 +351,7 @@ describe('JobDetail', () => {
       expect(box).toHaveValue('Add regression coverage for CSV exports, including empty records.'),
     );
     expect(submitThreadMessage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith(
         'ajob_1',
@@ -2700,7 +2700,7 @@ describe('JobDetail', () => {
       expect(within(activity).queryByText('Current implementation plan')).not.toBeInTheDocument();
     });
 
-    it('moves focus into subagent execution details and restores it to the toggle', () => {
+    it('moves focus into subagent execution details and restores it to the toggle', async () => {
       render(
         <JobDetail
           job={makeJob({ events: activityEvents() })}
@@ -2735,7 +2735,9 @@ describe('JobDetail', () => {
 
       fireEvent.keyDown(closeDetails, { key: 'Escape' });
       expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Hide tasks and subagents' })).toHaveFocus();
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Hide tasks and subagents' })).toHaveFocus(),
+      );
     });
   });
 
