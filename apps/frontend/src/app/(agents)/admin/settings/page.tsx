@@ -1,16 +1,24 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
+import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
+import {
+  getSandboxArchiveSettings,
+  updateSandboxArchiveSettings,
+} from '@/lib/api/adminArchiveSettings';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
 import ApplicationSettings from './ApplicationSettings';
+import CloudLabSettings from './CloudLabSettings';
+import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { AdminNavigation } from '../AdminNavigation';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
@@ -19,6 +27,7 @@ const SETTINGS_TABS = [
   { id: 'application', label: 'Application' },
   { id: 'versions', label: 'Agent versions' },
   { id: 'sandbox', label: 'Sandbox' },
+  { id: 'cloudlab', label: 'CloudLab' },
 ] as const;
 
 type SettingsTab = (typeof SETTINGS_TABS)[number]['id'];
@@ -28,7 +37,11 @@ export default function AdminSettingsPage() {
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
     return <AccessDenied />;
   }
-  return <SettingsView key={state.user?.id ?? 'admin'} />;
+  return (
+    <Suspense>
+      <SettingsView key={state.user?.id ?? 'admin'} />
+    </Suspense>
+  );
 }
 
 function AccessDenied() {
@@ -45,9 +58,14 @@ function AccessDenied() {
 }
 
 function SettingsView() {
-  const [selectedTab, setSelectedTab] = useState<SettingsTab>('application');
+  const queryTab = useSearchParams().get('tab');
+  const selectedTab: SettingsTab =
+    SETTINGS_TABS.find(({ id }) => id === queryTab)?.id ?? 'application';
+  const [cloudLabVisited, setCloudLabVisited] = useState(selectedTab === 'cloudlab');
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const [pool, setPool] = useState<AgentRunnerHostPool | null>(null);
+  const [archiveSettings, setArchiveSettings] = useState<SandboxArchiveSettings | null>(null);
+  const [archiveEditorReset, setArchiveEditorReset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [denied, setDenied] = useState(false);
@@ -62,7 +80,15 @@ function SettingsView() {
   useEffect(() => {
     const index = SETTINGS_TABS.findIndex(({ id }) => id === selectedTab);
     tabButtons.current[index]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    if (selectedTab === 'cloudlab') setCloudLabVisited(true);
   }, [selectedTab]);
+
+  const selectTab = (tab: SettingsTab) => {
+    const url = new URL(window.location.href);
+    if (tab === 'application') url.searchParams.delete('tab');
+    else url.searchParams.set('tab', tab);
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  };
 
   const fail = useCallback((cause: unknown) => {
     if (cause instanceof APIError && (cause.statusCode === 401 || cause.statusCode === 403)) {
@@ -70,6 +96,7 @@ function SettingsView() {
       request.current?.abort();
       sequence.current += 1;
       setPool(null);
+      setArchiveSettings(null);
       setNotice(null);
       setError(null);
       setDenied(true);
@@ -85,9 +112,13 @@ function SettingsView() {
     request.current = controller;
     const current = ++sequence.current;
     try {
-      const next = await getAgentRunnerHosts(controller.signal);
+      const [nextPool, nextArchiveSettings] = await Promise.all([
+        getAgentRunnerHosts(controller.signal),
+        getSandboxArchiveSettings(controller.signal),
+      ]);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
-      setPool(next);
+      setPool(nextPool);
+      setArchiveSettings(nextArchiveSettings);
       setError(null);
     } catch (cause) {
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
@@ -110,7 +141,11 @@ function SettingsView() {
     };
   }, [load]);
 
-  const save = async (action: () => Promise<AgentRunnerHostPool>, message: string | null) => {
+  const save = async <Result,>(
+    action: () => Promise<Result>,
+    apply: (next: Result) => void,
+    message: string | null,
+  ) => {
     if (writing.current || revoked.current) return;
     writing.current = true;
     setBusy(true);
@@ -122,7 +157,7 @@ function SettingsView() {
     try {
       const next = await action();
       if (!mounted.current) return;
-      setPool(next);
+      apply(next);
       setNotice(message);
     } catch (cause) {
       if (mounted.current) fail(cause);
@@ -139,6 +174,7 @@ function SettingsView() {
     pool?.execution_profile ?? 'untrusted-kata-v1',
   ).flatMap(({ name, host }) => (host && host.status !== 'disabled' ? [{ name, host }] : []));
   const definitions = pool?.host_setting_definitions ?? [];
+  const showHostStatus = selectedTab === 'versions' || selectedTab === 'sandbox';
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -149,7 +185,7 @@ function SettingsView() {
         <AdminNavigation current="settings" />
         <div className="max-w-4xl">
           <p className="mt-6 text-sm text-gray-500 dark:text-gray-400">
-            Application settings, default agent versions, and sandbox settings for all servers.
+            Application settings, default agent versions, sandbox settings, and CloudLab defaults.
             Override sandbox settings for one server in{' '}
             <Link
               href="/admin/hosts"
@@ -176,7 +212,7 @@ function SettingsView() {
                 aria-controls={`admin-settings-panel-${id}`}
                 aria-selected={selectedTab === id}
                 tabIndex={selectedTab === id ? 0 : -1}
-                onClick={() => setSelectedTab(id)}
+                onClick={() => selectTab(id)}
                 onKeyDown={(event) => {
                   const nextTabs: Partial<Record<string, number>> = {
                     ArrowRight: (index + 1) % SETTINGS_TABS.length,
@@ -187,7 +223,7 @@ function SettingsView() {
                   const nextIndex = nextTabs[event.key];
                   if (nextIndex === undefined) return;
                   event.preventDefault();
-                  setSelectedTab(SETTINGS_TABS[nextIndex].id);
+                  selectTab(SETTINGS_TABS[nextIndex].id);
                   tabButtons.current[nextIndex]?.focus();
                 }}
                 className={`shrink-0 rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:focus-visible:ring-crimson-light ${
@@ -200,7 +236,7 @@ function SettingsView() {
               </button>
             ))}
           </div>
-          {selectedTab !== 'application' && error && (
+          {showHostStatus && error && (
             <div
               role="alert"
               className="mt-6 flex items-center justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-400"
@@ -216,12 +252,12 @@ function SettingsView() {
               </button>
             </div>
           )}
-          {selectedTab !== 'application' && notice && (
+          {showHostStatus && notice && (
             <p role="status" className="mt-6 text-sm text-gray-600 dark:text-gray-300">
               {notice}
             </p>
           )}
-          {selectedTab !== 'application' && loading && (
+          {showHostStatus && loading && (
             <p role="status" className="mt-8 text-sm text-gray-500 dark:text-gray-400">
               Loading settings…
             </p>
@@ -252,6 +288,7 @@ function SettingsView() {
                 onChange={(runtime, version) =>
                   void save(
                     () => setAgentRuntimeVersion(runtime, version || null),
+                    setPool,
                     version
                       ? `New ${agentName(runtime)} sandboxes use ${version}. Existing sessions keep their version.`
                       : `New ${agentName(runtime)} sandboxes use each server's default version.`,
@@ -278,7 +315,7 @@ function SettingsView() {
                   // No notice: each setting's own line says how far a saved
                   // value has reached, and keeps saying it as servers take it up.
                   onChange={(key, value) =>
-                    void save(() => setAgentHostSettings({ [key]: value }), null)
+                    void save(() => setAgentHostSettings({ [key]: value }), setPool, null)
                   }
                 />
               ) : (
@@ -286,6 +323,42 @@ function SettingsView() {
                   No sandbox settings are available.
                 </p>
               ))}
+            {archiveSettings && (
+              <SandboxArchiveSettingsCard
+                key={archiveEditorReset}
+                settings={archiveSettings}
+                hosts={servers.map(({ host }) => host)}
+                busy={busy}
+                onSave={(update) =>
+                  void save(
+                    () => updateSandboxArchiveSettings(update),
+                    (next) => {
+                      setArchiveSettings(next);
+                      // A successful idempotent retry may keep the same DB
+                      // revision. Reset the editor explicitly instead of
+                      // relying on a revision-key remount.
+                      setArchiveEditorReset((current) => current + 1);
+                    },
+                    update.enabled !== archiveSettings.enabled
+                      ? update.enabled
+                        ? 'Sandbox archives enabled.'
+                        : 'Sandbox archives disabled.'
+                      : 'Sandbox archive settings saved.',
+                  )
+                }
+              />
+            )}
+          </div>
+          <div
+            role="tabpanel"
+            id="admin-settings-panel-cloudlab"
+            aria-labelledby="admin-settings-tab-cloudlab"
+            hidden={selectedTab !== 'cloudlab'}
+            tabIndex={0}
+          >
+            {(cloudLabVisited || selectedTab === 'cloudlab') && (
+              <CloudLabSettings onAccessDenied={fail} />
+            )}
           </div>
         </div>
       </section>

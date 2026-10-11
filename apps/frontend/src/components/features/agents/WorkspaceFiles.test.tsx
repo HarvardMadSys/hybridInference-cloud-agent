@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getAgentJobFiles, type AgentJobFileApi, type AgentJobFilesApi } from '@/lib/api/agents';
@@ -67,7 +67,116 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('workspace file navigation', () => {
+  function respondWithFiles(paths: string[]) {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (path) {
+        return binaryFile({
+          path,
+          binary: false,
+          content: 'export const ready = true;',
+          content_base64: null,
+          media_type: null,
+        });
+      }
+      return {
+        path: '',
+        kind: 'directory',
+        entries: paths.map((filePath) => ({
+          path: filePath,
+          name: filePath.split('/').pop() ?? filePath,
+          kind: 'file' as const,
+        })),
+      };
+    });
+  }
+
+  it('uses one list-tab stop with arrow, Home and End navigation and associated panels', async () => {
+    respondWithFiles(['README.md']);
+    render(<WorkspaceFiles job={JOB} active />);
+    await screen.findByRole('button', { name: 'README.md' });
+    const list = screen.getByRole('tablist', { name: 'File list' });
+    const tabs = within(list).getAllByRole('tab');
+    tabs[0].focus();
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[0]]);
+    expect(tabs[0]).toHaveAttribute('aria-controls', screen.getByRole('tabpanel').id);
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', tabs[0].id);
+    expect(within(list).queryByRole('button', { name: 'Refresh files' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
+    expect(tabs[1]).toHaveFocus();
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[1]]);
+    expect(tabs[1]).toHaveAttribute('aria-controls', screen.getByRole('tabpanel').id);
+    fireEvent.keyDown(tabs[1], { key: 'ArrowRight' });
+    expect(tabs[0]).toHaveFocus();
+    fireEvent.keyDown(tabs[0], { key: 'End' });
+    expect(tabs[1]).toHaveFocus();
+    fireEvent.keyDown(tabs[1], { key: 'Home' });
+    expect(tabs[0]).toHaveFocus();
+  });
+
+  it.each(['Back', 'Escape'])(
+    'focuses narrow previews and restores the file row with %s',
+    async (action) => {
+      vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(420);
+      respondWithFiles(['src/auth/index.ts', 'src/ui/index.ts']);
+      render(
+        <WorkspaceFiles
+          job={{ ...JOB, diffFiles: ['src/auth/index.ts', 'src/ui/index.ts'] }}
+          active
+        />,
+      );
+      fireEvent.click(screen.getByRole('tab', { name: /Changes/ }));
+      const row = screen.getByRole('button', { name: 'src/auth/index.ts' });
+      expect(within(row).getByText('src/auth')).toBeVisible();
+      expect(
+        within(screen.getByRole('button', { name: 'src/ui/index.ts' })).getByText('src/ui'),
+      ).toBeVisible();
+      row.focus();
+      fireEvent.click(row);
+
+      const preview = screen.getByRole('region', { name: 'Preview of src/auth/index.ts' });
+      await waitFor(() => expect(preview).toHaveAttribute('aria-busy', 'false'));
+      expect(preview).toHaveFocus();
+      expect(screen.queryByRole('tablist', { name: 'File list' })).not.toBeInTheDocument();
+      expect(screen.getByText('src/auth')).toBeVisible();
+      const back = screen.getByRole('button', { name: 'Back to file list' });
+      expect(back).toHaveTextContent('Back');
+
+      if (action === 'Back') fireEvent.click(back);
+      else fireEvent.keyDown(preview, { key: 'Escape' });
+
+      expect(screen.getByRole('button', { name: 'src/auth/index.ts' })).toHaveFocus();
+      expect(screen.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.queryByRole('button', { name: 'Back to file list' })).not.toBeInTheDocument();
+    },
+  );
+
+  it('exposes the selected full path and a keyboard-scrollable preview in a wide pane', async () => {
+    respondWithFiles(['src/auth/index.ts']);
+    render(<WorkspaceFiles job={JOB} active />);
+    const row = await screen.findByRole('button', { name: 'src/auth/index.ts' });
+    row.focus();
+    fireEvent.click(row);
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: 'Preview of src/auth/index.ts' })).toHaveAttribute(
+        'aria-busy',
+        'false',
+      ),
+    );
+    expect(row).toHaveFocus();
+    expect(row).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByRole('region', { name: 'Preview of src/auth/index.ts' })).toHaveAttribute(
+      'tabindex',
+      '0',
+    );
+    expect(screen.getByText('src/auth')).toBeVisible();
+  });
 });
 
 describe('connected workspace previews', () => {

@@ -113,6 +113,10 @@ class ServerQueries:
             # the rest of provider configuration remain private.
             "connection_id": row.get("connection_id"),
             "ssh_connection_id": row.get("ssh_connection_id"),
+            "sandbox_storage_path": (
+                (row.get("deployment_profile") or {}).get("sandbox_storage_path")
+                or (row.get("deployment_profile") or {}).get("data_mount")
+            ),
             "state": row.get("observed_state", "unknown"),
             "external_id": row.get("external_id"),
             "expires_at": row.get("expires_at"),

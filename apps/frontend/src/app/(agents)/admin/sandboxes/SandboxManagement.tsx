@@ -127,12 +127,13 @@ export function SandboxManagement({
     deletionBusyReason ??
     (sandbox?.state !== 'running' ? 'Only a running idle sandbox can be stopped.' : null) ??
     idleBlocked ??
+    detail?.terminal_activity_error ??
     (sandbox?.terminal_count == null || !Number.isFinite(terminalObserved)
-      ? 'Wait for the host to report its open terminals.'
-      : sandbox.terminal_count > 0
-        ? 'Close all open terminals before stopping the sandbox.'
-        : !Number.isFinite(serverNow) || serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
-          ? 'Wait for a fresh terminal report from the host.'
+      ? 'Terminal activity is unavailable. Refresh details to check the host.'
+      : !Number.isFinite(serverNow) || serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
+        ? 'Terminal activity is stale. Refresh details to check the host.'
+        : sandbox.terminal_count > 0
+          ? 'Close all open terminals before stopping the sandbox.'
           : !sandbox.container_id
             ? 'The current container identity is unavailable.'
             : null);

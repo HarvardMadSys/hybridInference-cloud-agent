@@ -17,6 +17,9 @@ import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 import { SettingsLauncher } from './SettingsLauncher';
 
 vi.mock('next/navigation', () => ({ usePathname: () => '/' }));
+vi.mock('@/components/providers/AuthProvider', () => ({
+  useAuth: () => ({ state: { user: { id: 'alice' } } }),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),

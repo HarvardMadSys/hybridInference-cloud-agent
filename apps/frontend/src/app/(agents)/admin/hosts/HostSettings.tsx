@@ -1,6 +1,6 @@
 'use client';
 
-// Sandbox settings — the turn time limit, the repository size limit,
+// Sandbox settings — container resources, turn and repository limits,
 // sessions per sandbox, idle timeouts and terminal limits — set from the admin
 // pages instead of in each server's `.env`.
 //
@@ -52,7 +52,7 @@ const CLEAR_CLASS =
  * Re-keyed on the saved value by its parent, like the execution-slots field:
  * a poll landing mid-edit does not reset what the admin is typing, and a saved
  * change does replace it. The amount is typed in a unit — 8 h, not 28800 —
- * and sent in the setting's own seconds or MiB.
+ * and sent in the setting's own seconds, MiB or millicores.
  */
 function SettingForm({
   definition,

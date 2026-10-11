@@ -69,12 +69,16 @@ It appears only when at least one task or subagent has meaningful recorded data;
 an empty Tasks or Subagents section is omitted. Close it to read underneath, and
 use the header toggle to reopen it.
 
-Task checklists include recorded status and dependencies. Subagent cards show
-assigned work, agent type, model, expandable prompts, and the latest reported
-agent state. A successful background launch does not imply that delegated work
-has finished. Chat keeps compact tool calls with expandable recorded arguments
-and output. **View subagent execution** opens the source call in the trajectory
-inspector when its stored record is available.
+Task checklists include recorded status and dependencies. Task creation results
+link assigned IDs to their names and descriptions, so later status updates change
+the same row. **Status not recorded** means the selected events contain no status
+for that task; a successful creation does not mean the task is completed.
+
+Subagent cards show assigned work, agent type, model, expandable prompts, and
+the latest reported agent state. A successful background launch does not imply
+that delegated work has finished. Chat keeps compact tool calls with expandable
+recorded arguments and output. **View subagent execution** opens the source call
+in the trajectory inspector when its stored record is available.
 
 Trajectory marks explicitly recorded child activity with a **Subagent** label.
 Select a delegation step to browse its child steps in the inspector, or use
@@ -96,6 +100,23 @@ Back to bottom appears while you are away from the end. New content adds a dot
 and updates the button's tooltip and accessible name. It does not automatically
 pull you back to the live end. Switching from Chat to Trajectory and back keeps
 the page's reading position; reloading opens at the end again.
+
+## Workspace navigation
+
+Open the workspace from the header or with Ctrl/Command+J. On smaller screens,
+**Back to conversation** returns to Chat and preserves the selected workspace
+view. The task title and controls adapt to the space left by the sidebar.
+
+Workspace, Git, file-list, and terminal tabs use Left/Right arrows, Home, and End
+to select a view while keeping keyboard focus in the tab strip. Narrow Git panes
+use a changed-file selector so the diff keeps the available width. The diff and
+file preview are keyboard-scrollable regions.
+
+Opening a file in a narrow pane focuses its preview. **Back** or Escape returns
+to the file list and focuses the file you opened. Changed files show their parent
+paths to distinguish matching names in different directories. Terminal splits
+follow the pane's width and scroll vertically when the screen is too short to
+show both shells.
 
 ## Accessibility
 

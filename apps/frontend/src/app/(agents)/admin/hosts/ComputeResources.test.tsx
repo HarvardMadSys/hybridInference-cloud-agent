@@ -178,6 +178,9 @@ function renderAdd(onOperation = vi.fn(), testCatalog = catalog, saved = connect
 function fillSshForm() {
   fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Test server' } });
   fireEvent.change(screen.getByLabelText('Host address'), { target: { value: 'host.example' } });
+  fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+    target: { value: '/mnt/user-data' },
+  });
 }
 
 describe('server acquisition UI', () => {
@@ -187,7 +190,13 @@ describe('server acquisition UI', () => {
     const receive = renderAdd();
     expect(screen.queryByLabelText('Agent deployment')).not.toBeInTheDocument();
     expect(screen.queryByText('Deployment settings')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('');
+    expect(screen.getByLabelText('Sandbox storage path')).toBeRequired();
+    expect(screen.getByRole('region', { name: 'Sandbox storage' })).toBeVisible();
     fillSshForm();
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: ' /mnt/custom-data/ ' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(receive).toHaveBeenCalledWith(next, true));
     expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -196,6 +205,7 @@ describe('server acquisition UI', () => {
         mode: 'attach',
         connection_id: 'ssh-account',
         configuration: { address: 'host.example' },
+        sandbox_storage_path: '/mnt/custom-data',
       }),
     );
     expect(vi.mocked(api.createComputeServer).mock.calls[0][0]).not.toHaveProperty(
@@ -214,6 +224,9 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -223,6 +236,7 @@ describe('server acquisition UI', () => {
           connection_id: 'cloudlab-account',
           ssh_connection_id: 'ssh-account',
           configuration: { project: 'FAST25-AE', profile: 'small-lan' },
+          sandbox_storage_path: '/mnt/cloudlab-data',
         }),
       ),
     );
@@ -249,6 +263,9 @@ describe('server acquisition UI', () => {
     expect(screen.getByLabelText('Project')).toHaveValue('FAST25-AE');
     expect(screen.getByLabelText('Profile')).toHaveValue('small-lan');
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
 
     await waitFor(() =>
@@ -259,6 +276,64 @@ describe('server acquisition UI', () => {
       ),
     );
   });
+
+  it.each([
+    '',
+    'data/sandboxes',
+    '////',
+    '/mnt/data//sandboxes',
+    '/mnt/./data',
+    '/mnt/../data',
+    '/mnt/data disk',
+    '/mnt/data;touch',
+    '/mnt',
+    '/etc',
+    '/etc/sandboxes',
+    '/var/lib',
+    '/var/lib/docker',
+    '/var/lib/docker/sandboxes',
+    '/var/lib/containerd/sandboxes',
+    '/var/lib/cloud-agent/sandboxes',
+    '/var/lib/hybridinference/sandboxes',
+    `/mnt/${'a'.repeat(4092)}`,
+  ])('rejects invalid sandbox storage path %j before saving credentials', async (path) => {
+    renderAdd(vi.fn(), catalog, []);
+    fillSshForm();
+    const storage = screen.getByLabelText('Sandbox storage path');
+    fireEvent.change(storage, { target: { value: path } });
+    fireEvent.change(screen.getByLabelText('SSH private key'), {
+      target: { value: 'unsaved-private-key' },
+    });
+    fireEvent.submit(storage.closest('form')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sandbox storage path');
+    expect(storage).toHaveAttribute('aria-invalid', 'true');
+    expect(storage).toHaveFocus();
+    expect(api.saveComputeConnection).not.toHaveBeenCalled();
+    expect(api.createComputeServer).not.toHaveBeenCalled();
+    expect(api.getComputeOperations).not.toHaveBeenCalled();
+  });
+
+  it.each(['/', ' / '])(
+    'rejects root storage path %j without falling back to defaults',
+    async (path) => {
+      renderAdd(vi.fn(), catalog, []);
+      fillSshForm();
+      const storage = screen.getByLabelText('Sandbox storage path');
+      fireEvent.change(storage, { target: { value: path } });
+      fireEvent.change(screen.getByLabelText('SSH private key'), {
+        target: { value: 'unsaved-private-key' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Sandbox storage path must point to a dedicated mounted data disk outside system and service directories.',
+      );
+      expect(storage).toHaveAttribute('aria-invalid', 'true');
+      expect(storage).toHaveFocus();
+      expect(api.saveComputeConnection).not.toHaveBeenCalled();
+      expect(api.createComputeServer).not.toHaveBeenCalled();
+      expect(api.getComputeOperations).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
@@ -294,6 +369,9 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     const advanced = screen.getByText('Advanced options');
     const details = advanced.closest('details')!;
     expect(details).not.toHaveAttribute('open');
@@ -463,6 +541,9 @@ describe('server acquisition UI', () => {
     });
     fireEvent.change(screen.getByLabelText('Experiment ID'), { target: { value: 'experiment-a' } });
     fireEvent.change(screen.getByLabelText('CloudLab SSH user'), { target: { value: 'unused' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/unused-data' },
+    });
     fireEvent.click(screen.getByText('Advanced options'));
     fireEvent.click(
       screen.getByRole('checkbox', { name: 'Only track this resource (skip server setup)' }),
@@ -471,6 +552,7 @@ describe('server acquisition UI', () => {
     expect(screen.queryByLabelText('CloudLab SSH user')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('SSH private key')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Import resource' })).toBeEnabled();
+    expect(screen.queryByLabelText('Sandbox storage path')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Import resource' }));
     await waitFor(() =>
       expect(api.importComputeResource).toHaveBeenCalledWith(
@@ -483,6 +565,9 @@ describe('server acquisition UI', () => {
     expect(vi.mocked(api.importComputeResource).mock.calls[0][0]).not.toHaveProperty(
       'ssh_connection_id',
     );
+    expect(vi.mocked(api.importComputeResource).mock.calls[0][0]).not.toHaveProperty(
+      'sandbox_storage_path',
+    );
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.saveComputeConnection).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole('radio', { name: 'Create new' })).toBeEnabled());
@@ -491,6 +576,7 @@ describe('server acquisition UI', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('No server setup is configured.');
     expect(screen.queryByRole('button', { name: 'Import resource' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('SSH private key')).toBeInTheDocument();
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/mnt/unused-data');
   });
 
   it('recovers an acquisition whose response was lost instead of issuing another create', async () => {
@@ -552,6 +638,9 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Research' } });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     fireEvent.change(screen.getByLabelText('Portal API token'), {
       target: { value: 'cloud-token' },
     });
@@ -639,6 +728,29 @@ describe('connection credentials', () => {
 });
 
 describe('resource management', () => {
+  it('shows the saved sandbox storage path in server details when configured', () => {
+    const { rerender } = render(
+      <ComputeResourcePanel
+        allocation={allocation({ sandbox_storage_path: '/mnt/user-data' })}
+        section="details"
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Sandbox storage path').closest('div')).toHaveTextContent(
+      '/mnt/user-data',
+    );
+    rerender(
+      <ComputeResourcePanel
+        allocation={allocation({ sandbox_storage_path: null })}
+        section="details"
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Sandbox storage path')).not.toBeInTheDocument();
+  });
+
   it('shows the configured check interval without promising the next execution time', () => {
     const { rerender } = render(
       <ComputeResourcePanel
@@ -1196,6 +1308,9 @@ describe('resource dashboard', () => {
     });
     fireEvent.change(within(dialog).getByLabelText('Host address'), {
       target: { value: 'host.example' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/user-data' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Change SSH key' }));
     fireEvent.change(within(dialog).getByLabelText('Use SSH key'), {

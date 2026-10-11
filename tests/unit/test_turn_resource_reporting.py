@@ -142,6 +142,15 @@ def _run_terminal_turn(
         "context_status": "new",
         "resident_state": "live",
     }
+    supervisor.initial_archive_status.return_value = {
+        "enabled": False,
+        "prepared": False,
+        "stored": False,
+    }
+    supervisor.capture_initial_archive.return_value = {
+        "enabled": False,
+        "stored": False,
+    }
     supervisor.ensure_shared_resident.return_value = {
         "context_status": "new",
         "process_generation": 1,

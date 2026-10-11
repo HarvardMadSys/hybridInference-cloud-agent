@@ -109,6 +109,7 @@ export interface ComputeAllocation {
   id: string;
   connection_id?: string | null;
   ssh_connection_id?: string | null;
+  sandbox_storage_path?: string | null;
   name: string;
   provider_id: string;
   state: string;
@@ -151,6 +152,7 @@ export interface ServerRequest {
   ssh_connection_id?: string;
   configuration: Record<string, unknown>;
   deployment_profile?: string;
+  sandbox_storage_path?: string;
 }
 
 export interface DeploymentProfileRequest {

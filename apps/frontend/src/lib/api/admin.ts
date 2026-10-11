@@ -246,10 +246,12 @@ export interface AgentRunnerHost {
    * with no admin value. Clearing an admin value returns the host to this.
    */
   settings_local?: HostSettingValues | null;
+  /** Archive-policy revision this host's broker confirmed applying. */
+  sandbox_archive_settings_applied_revision?: number | null;
 }
 
 /** Which unit a runtime setting's whole number counts. */
-export type HostSettingUnit = 'seconds' | 'MiB' | 'KiB' | 'count';
+export type HostSettingUnit = 'seconds' | 'MiB' | 'KiB' | 'count' | 'millicores';
 
 /**
  * One runtime setting an admin may set, as the control plane defines it

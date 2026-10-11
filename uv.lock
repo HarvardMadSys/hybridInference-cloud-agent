@@ -436,7 +436,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "asyncpg", specifier = ">=0.28.0" },
-    { name = "boto3", specifier = ">=1.35.99" },
+    { name = "boto3", specifier = ">=1.40.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "email-validator", specifier = ">=2.2" },
     { name = "fastapi", specifier = ">=0.110.0" },

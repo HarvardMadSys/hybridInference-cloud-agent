@@ -108,6 +108,7 @@ class AdminSandbox(BaseModel):
     deleted_at: datetime | None = None
     memory_limit: str
     cpu_limit: str
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     member_count: int = Field(ge=0)
     active_attempt_count: int = Field(ge=0)
     resident_slot_capacity: int = Field(8, ge=1)
@@ -164,6 +165,7 @@ class AdminSandboxDetail(BaseModel):
     sandbox: AdminSandbox
     members: list[AdminSandboxMember] = Field(max_length=128)
     observed_at: datetime
+    terminal_activity_error: str | None = None
 
 
 class AdminSandboxStopRequest(BaseModel):

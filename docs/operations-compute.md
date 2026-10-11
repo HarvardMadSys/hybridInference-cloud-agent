@@ -58,6 +58,39 @@ CloudLab experiments can be observed, but automatic deployment refuses them
 rather than selecting one node. Failed or unsupported installation leaves the
 resource visible and does not destroy it.
 
+### Sandbox storage path
+
+When adding or creating a server, enter **Sandbox storage path**, for example
+`/mydata`. This must be an existing writable mounted data disk on the remote
+server.
+Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
+and `<path>/containerd`, binding these directories to the daemons' standard
+`/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
+saved choice. Observation-only imports do not need a storage path.
+Attachment preflight checks the selected disk without changing the host;
+deployment checks it again before preparing storage.
+
+The path is saved with the allocation and reused on retries and replacement
+nodes, where the same mount must exist. A missing or read-only mount, symlink or
+conflicting existing store blocks setup. Any nonempty Docker or containerd store
+outside the selected mount also blocks setup. New hosts require empty `docker`
+and `containerd` directories on the selected disk. Deployment retries can reuse
+nonempty directories only when the existing deployment identity matches and
+both daemon directories are already bound to those same storage directories.
+Retained data with missing binds requires operator repair before retrying.
+Existing `/etc/fstab` entries for either daemon directory must match the selected
+storage bind; conflicting or duplicate entries block setup before host changes.
+Native systemd mount units, masks, or mount overrides for these directories also
+block setup; ordinary `fstab`-generated mount units remain supported.
+Preflight does not query or start these daemons, and bootstrap never deletes or
+moves existing sandbox data to a different disk. Docker and containerd must use
+their default `/var/lib/docker`
+and `/var/lib/containerd` data directories. Setup rejects custom daemon storage
+configuration before restarting services.
+Daemon startup requires the configured disk and bind mount after
+a reboot. Older API clients that omit `sandbox_storage_path` continue to
+use the operator profile's `data_mount` configuration.
+
 ## Prepare a trusted deployment profile
 
 ### Admin-managed setup

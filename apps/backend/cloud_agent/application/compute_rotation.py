@@ -517,6 +517,12 @@ class ComputeRotation:
                 and profile.deployment_sha == exclude.get("deployment_sha")
                 and profile.source_sha256 == exclude.get("source_sha256")
             ):
+                if exclude.get("sandbox_storage_path") is not None:
+                    # Storage belongs to the Host and survives a change of the
+                    # tunnel/broker profile used by its replacement node.
+                    return profile.model_copy(
+                        update={"sandbox_storage_path": exclude["sandbox_storage_path"]}
+                    )
                 return profile
         return None
 

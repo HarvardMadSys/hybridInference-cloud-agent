@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0040_admin_sandbox_archive"
-down_revision = "0039_compute_defaults"
+revision = "0043_admin_sandbox_archive"
+down_revision = "0042_sandbox_archive_settings"
 branch_labels = None
 depends_on = None
 

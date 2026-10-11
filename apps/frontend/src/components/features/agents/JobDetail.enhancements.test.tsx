@@ -151,6 +151,70 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('conversation work details', () => {
+  it('folds completed activity around a pending plan when changing the visible detail setting', async () => {
+    render(
+      <JobDetail
+        userId="alice"
+        job={job('thread-first', {
+          state: 'done',
+          events: [
+            {
+              kind: 'tool_use',
+              tool: 'update_plan',
+              detail: 'Review work',
+              sourceEventId: 1,
+              input: { plan: [{ step: 'Review changes', status: 'pending' }] },
+              resultState: 'received',
+              output: ['Plan recorded.'],
+            },
+            {
+              kind: 'tool_use',
+              tool: 'Read',
+              detail: 'Read source',
+              sourceEventId: 2,
+              input: { file_path: 'src/main.ts' },
+              resultState: 'received',
+              output: ['Source file contents'],
+            },
+            {
+              kind: 'tool_use',
+              tool: 'Bash',
+              detail: 'Run checks',
+              sourceEventId: 3,
+              input: { command: 'npm test' },
+              resultState: 'received',
+              output: ['Checks passed'],
+            },
+            { kind: 'message', text: 'The change is ready.', sourceEventId: 4 },
+          ],
+        })}
+      />,
+    );
+    await waitFor(() => expect(getThreadQueue).toHaveBeenCalledWith('thread-first'));
+    const details = screen.getByRole('combobox', { name: 'Work details' });
+    const activity = within(screen.getByLabelText('Agent activity'));
+    expect(details).toHaveValue('standard');
+    expect(activity.getByText('Read: src/main.ts')).toBeVisible();
+    expect(activity.getByText('Bash: npm test')).toBeVisible();
+    expect(activity.getByText('Checks passed')).not.toBeVisible();
+
+    fireEvent.change(details, { target: { value: 'compact' } });
+    expect(activity.getByText('update_plan: Review work')).toBeVisible();
+    expect(activity.getByText('Read: src/main.ts')).not.toBeVisible();
+    expect(activity.getByText('Bash: npm test')).not.toBeVisible();
+    expect(activity.getByRole('button', { name: 'Show process (2)' })).toBeVisible();
+    expect(activity.getByText('The change is ready.')).toBeVisible();
+
+    fireEvent.change(details, { target: { value: 'detailed' } });
+    expect(activity.getByText('Review changes')).toBeVisible();
+    expect(activity.getByText('Source file contents')).toBeVisible();
+    expect(activity.getByText('Checks passed')).toBeVisible();
+    expect(activity.getByText('The change is ready.')).toBeVisible();
+    expect(activity.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+  });
+});
+
 describe('conversation composer continuity', () => {
   it('restores drafts after a page remount and keeps account/chat navigation isolated', async () => {
     const first = render(<JobDetail job={job()} userId="alice" />);

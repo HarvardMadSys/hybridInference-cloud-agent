@@ -38,6 +38,7 @@ from cloud_agent.schemas import (
     HostRegisterResponse,
     ResidencyBeat,
     RetainedSandboxStop,
+    SandboxArchiveSettingsResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
@@ -272,6 +273,10 @@ async def heartbeat_host(
         # not a number Postgres will keep.
         settings_applied=reported_values(body.settings_applied),
         settings_local=reported_values(body.settings_local),
+        sandbox_archive_settings_applied_revision=(body.sandbox_archive_settings_applied_revision),
+        sandbox_archive_settings_revision_reported=(
+            "sandbox_archive_settings_applied_revision" in body.model_fields_set
+        ),
     )
     if updated is None:
         # The row vanished between authentication and the write — a forget
@@ -393,6 +398,9 @@ async def heartbeat_host(
         settings=merge_admin_values(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
+        ),
+        sandbox_archive_settings=SandboxArchiveSettingsResponse.model_validate(
+            await job_store.host_pool.sandbox_archive_settings()
         ),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,

@@ -30,6 +30,7 @@ from cloud_agent.ports.operation_measurements import (
     OperationMeasurements,
 )
 from cloud_agent.ports.pending_messages import PendingMessageRepository
+from cloud_agent.ports.pr_archive import PrArchiveRepository
 from cloud_agent.ports.profiling_control import ProfilingControl
 from cloud_agent.ports.residency import ResidencyRepository
 from cloud_agent.ports.sandbox import SandboxRepository
@@ -60,6 +61,7 @@ __all__ = [
     "MeasurementWriteResult",
     "OperationMeasurements",
     "PendingMessageRepository",
+    "PrArchiveRepository",
     "ProfilingControl",
     "ResidencyRepository",
     "SandboxRepository",

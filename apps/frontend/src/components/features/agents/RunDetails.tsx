@@ -8,6 +8,8 @@
 // its own ledger snapshot.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useT } from '@/components/providers';
+import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 
 import {
   getAgentJobUsage,
@@ -33,6 +35,8 @@ import {
 import { formatDuration } from './TurnFooter';
 import type { AgentJob } from './types';
 import { isOlderUsage, onAgentRecordsChanged } from './agentPush';
+import { isRepositoryTooLarge, ownerFailureMessage } from './adapt';
+import { hasLostContext, ownerRunNote } from './conversationJob';
 
 export type RunTab = 'overview' | 'usage' | 'raw';
 
@@ -42,13 +46,22 @@ export const RUN_TABS: Array<{ key: RunTab; label: string }> = [
   { key: 'raw', label: 'Raw' },
 ];
 
-const STATE_LABEL: Record<AgentJobApiState, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  publishing: 'Publishing',
-  succeeded: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+const STATE_LABEL: Record<AgentJobApiState, TranslationKey> = {
+  queued: 'turnNavigation.state.queued',
+  running: 'turnNavigation.state.running',
+  publishing: 'runDetails.publishing',
+  succeeded: 'turnNavigation.state.needsReview',
+  failed: 'turnNavigation.state.failed',
+  cancelled: 'turnNavigation.state.cancelled',
+};
+
+const FALLBACK_STATE: Record<AgentJob['state'], AgentJobApiState> = {
+  queued: 'queued',
+  running: 'running',
+  done: 'succeeded',
+  needs_review: 'succeeded',
+  failed: 'failed',
+  cancelled: 'cancelled',
 };
 
 const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
@@ -307,6 +320,7 @@ export function RunDetails({
   events: StoredEvent[];
   onOpenGitDiff: () => void;
 }) {
+  const t = useT();
   const idPrefix = `run-${jobId}`;
   const { usage, loaded, refreshing, error, refresh } = useJobUsage(jobId);
 
@@ -322,11 +336,39 @@ export function RunDetails({
     return [...grouped.entries()].sort(([a], [b]) => a - b);
   }, [runEvents]);
 
-  const state = job?.state ?? null;
-  const startedAt = job?.started_at ?? fallback?.startedAt ?? null;
-  const finishedAt = job?.finished_at ?? fallback?.finishedAt ?? null;
+  // The loaded conversation can describe a different turn while a historical
+  // row is unavailable. It must never supply that turn's status or metadata.
+  const turnFallback = !job && fallback?.id === jobId ? fallback : null;
+  const state = job?.state ?? (turnFallback ? FALLBACK_STATE[turnFallback.state] : null);
+  const startedAt = job ? (job.started_at ?? null) : (turnFallback?.startedAt ?? null);
+  const finishedAt = job ? (job.finished_at ?? null) : (turnFallback?.finishedAt ?? null);
   const attemptRows = job?.attempt_telemetry ?? [];
-  const openUrl = job?.published_pr_url ?? fallback?.prUrl ?? null;
+  const openUrl = job ? job.published_pr_url : (turnFallback?.prUrl ?? null);
+  const contextLost = job
+    ? job.native_state === 'lost' || job.context_status === 'lost'
+    : Boolean(turnFallback && hasLostContext(turnFallback));
+  const failedOrStopped = state === 'failed' || state === 'cancelled';
+  const failureNote = failedOrStopped
+    ? job?.detail
+      ? ownerFailureMessage(job.detail)
+      : turnFallback
+        ? ownerRunNote(turnFallback)
+        : state === 'failed'
+          ? t('runDetails.failureMissing')
+          : undefined
+    : undefined;
+  const guidance = contextLost
+    ? t('runDetails.contextLost')
+    : state === 'failed'
+      ? isRepositoryTooLarge(job?.detail) || turnFallback?.failureCause === 'repository_too_large'
+        ? t('runDetails.repositoryLimit')
+        : /^Site misconfigured:/i.test(job?.detail ?? '') ||
+            turnFallback?.failureCause === 'site_misconfigured'
+          ? t('runDetails.siteMisconfigured')
+          : t('runDetails.followUp')
+      : state === 'cancelled'
+        ? t('runDetails.stoppedFollowUp')
+        : null;
 
   if (tab === 'usage') {
     if (!loaded) {
@@ -456,21 +498,52 @@ export function RunDetails({
 
   return (
     <TabPanel idPrefix={idPrefix} tab="overview">
+      <section
+        aria-label={t('runDetails.summary', { number: turnNo })}
+        className={`rounded-xl border p-4 ${
+          state === 'failed'
+            ? 'border-red-200 bg-red-50/60 dark:border-red-500/25 dark:bg-red-500/5'
+            : 'border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/5'
+        }`}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {t('turnNavigation.turn', { turn: turnNo })}
+            </p>
+            <h3
+              className={`mt-1 text-lg font-semibold ${state === 'failed' ? 'text-red-800 dark:text-red-300' : 'text-gray-900 dark:text-gray-100'}`}
+            >
+              {state ? t(STATE_LABEL[state]) : t('runDetails.notRecorded')}
+            </h3>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-500 dark:text-gray-400">{t('runDetails.elapsed')}</p>
+            <p className="mt-1 text-sm font-medium tabular-nums text-gray-800 dark:text-gray-200">
+              {elapsedLabel(startedAt, finishedAt)}
+            </p>
+          </div>
+        </div>
+        {failureNote ? (
+          <p className="mt-3 text-sm leading-relaxed text-gray-800 [overflow-wrap:anywhere] dark:text-gray-200">
+            {failureNote}
+          </p>
+        ) : null}
+        {guidance ? (
+          <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+            {guidance}
+          </p>
+        ) : null}
+      </section>
       <DetailRows>
-        <DetailRow
-          label="Status"
-          tone={state === 'failed' ? 'error' : state === 'succeeded' ? 'default' : 'muted'}
-        >
-          {state ? STATE_LABEL[state] : 'Not recorded'}
-        </DetailRow>
-        <DetailRow label="Turn">{turnNo}</DetailRow>
         <DetailRow label="Started">{recordedAt(startedAt)}</DetailRow>
         <DetailRow label="Finished">{recordedAt(finishedAt)}</DetailRow>
-        <DetailRow label="Elapsed">{elapsedLabel(startedAt, finishedAt)}</DetailRow>
-        <DetailRow label="Runtime">{job?.runtime ?? fallback?.runtime ?? 'Not recorded'}</DetailRow>
-        <DetailRow label="Model">{job?.model ?? fallback?.model ?? 'Not recorded'}</DetailRow>
+        <DetailRow label="Runtime">
+          {job?.runtime ?? turnFallback?.runtime ?? 'Not recorded'}
+        </DetailRow>
+        <DetailRow label="Model">{job?.model ?? turnFallback?.model ?? 'Not recorded'}</DetailRow>
         <DetailRow label="Reasoning effort">
-          {job?.reasoning_effort ?? fallback?.reasoningEffort ?? 'Auto'}
+          {job?.reasoning_effort ?? turnFallback?.reasoningEffort ?? 'Auto'}
         </DetailRow>
       </DetailRows>
 
@@ -504,7 +577,7 @@ export function RunDetails({
         <button
           type="button"
           onClick={onOpenGitDiff}
-          className="rounded border border-gray-200 px-2 py-1 text-[11px] text-gray-600 transition-colors hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-300 dark:hover:border-white/20 dark:hover:text-gray-50"
+          className="ui-focus-ring inline-flex min-h-9 items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-300 dark:hover:border-white/20 dark:hover:text-gray-50"
         >
           Open current Git diff
         </button>

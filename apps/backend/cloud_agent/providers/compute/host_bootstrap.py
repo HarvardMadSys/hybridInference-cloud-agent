@@ -45,9 +45,259 @@ if TYPE_CHECKING:
     )
 
 
-_PREFLIGHT = r"""
-import hashlib, json, os, platform, shutil, subprocess
+# The two remote entrypoints use the same read-only daemon configuration guard.
+# Never ask a daemon for this evidence: a socket request can start workloads.
+_DAEMON_STORAGE_GUARD = r"""
+import json, os, re, shlex, subprocess
 from pathlib import Path
+def storage_fstab_entries(base, text=None):
+    try:
+        fstab = Path('/etc/fstab')
+        if fstab.is_symlink() or fstab.resolve() != fstab or fstab.exists() and not fstab.is_file():
+            return None
+        if text is None:
+            text = fstab.read_text() if fstab.exists() else ''
+        targets = {Path('/var/lib') / name: name for name in ('docker', 'containerd')}
+        entries = set()
+        for line in text.splitlines():
+            fields = [re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), field) for field in line.split('#', 1)[0].split()]
+            if len(fields) < 2 or not fields[1].startswith('/'):
+                continue
+            target = Path('/' + os.path.normpath(fields[1]).lstrip('/'))
+            name = targets.get(target)
+            if name is None:
+                continue
+            if name in entries or not 4 <= len(fields) <= 6 or fields[2] != 'none' or any(value != '0' for value in fields[4:]):
+                return None
+            source = fields[0].rstrip('/')
+            if source != os.path.normpath(source) or not source.startswith('/') or Path(source) != base / name:
+                return None
+            if fields[1].rstrip('/') != '/' + os.path.normpath(fields[1]).lstrip('/'):
+                return None
+            options = fields[3].split(',')
+            if 'bind' not in options or len(set(options)) != len(options):
+                return None
+            for option in options:
+                if option in ('bind', 'defaults', 'rw', 'nofail'):
+                    continue
+                key, separator, value = option.partition('=')
+                if key != 'x-systemd.requires-mounts-for' or not separator or not value.startswith('/') or value.rstrip('/') != os.path.normpath(value) or Path(value.rstrip('/')) != base:
+                    return None
+            entries.add(name)
+        return entries
+    except (OSError, ValueError, UnicodeError):
+        return None
+def storage_mount_units_compatible():
+    native = ('/etc/systemd/system', '/etc/systemd/system.control', '/etc/systemd/system.attached', '/run/systemd/system', '/run/systemd/system.control', '/run/systemd/system.attached', '/run/systemd/transient', '/usr/local/lib/systemd/system', '/usr/lib/systemd/system', '/lib/systemd/system')
+    generated = ('/run/systemd/generator', '/run/systemd/generator.early', '/run/systemd/generator.late')
+    try:
+        for name in ('docker', 'containerd'):
+            unit = 'var-lib-' + name + '.mount'
+            # Inspect dormant files too: a later daemon-reload would otherwise
+            # activate an operator override absent from current unit metadata.
+            for directory in native:
+                path = Path(directory) / unit
+                if path.exists() or path.is_symlink():
+                    return False
+            for directory in native + generated:
+                path = Path(directory) / (unit + '.d')
+                if path.is_symlink() or path.exists() and (not path.is_dir() or any(path.iterdir())):
+                    return False
+            shown = subprocess.run(['systemctl', 'show', unit, '--property=LoadState', '--property=FragmentPath', '--property=DropInPaths'], capture_output=True, text=True)
+            properties = dict(line.split('=', 1) for line in shown.stdout.splitlines() if '=' in line)
+            fragment, dropins = properties.get('FragmentPath'), properties.get('DropInPaths')
+            if fragment is None or dropins is None or dropins:
+                return False
+            if properties.get('LoadState') == 'not-found':
+                if fragment:
+                    return False
+            elif shown.returncode or properties.get('LoadState') != 'loaded' or fragment and fragment not in tuple(directory + '/' + unit for directory in generated):
+                return False
+        return True
+    except OSError:
+        return False
+def deployment_storage_owned(deployment):
+    if not isinstance(deployment, dict) or not isinstance(deployment.get('identity'), dict):
+        return False
+    try:
+        root = Path(deployment['root'])
+        marker = root / '.compute-identity.json'
+        return root.is_dir() and root.resolve() == root and not root.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.resolve() == marker and json.loads(marker.read_text()) == deployment['identity']
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+def storage_state_compatible(base, owned):
+    try:
+        if storage_fstab_entries(base) is None or not storage_mount_units_compatible():
+            return False
+        nonempty = False
+        bound = True
+        for name in ('docker', 'containerd'):
+            source, target = base / name, Path('/var/lib') / name
+            if any(path.is_symlink() or path.resolve() != path or path.exists() and not path.is_dir() for path in (source, target)):
+                return False
+            mounted = target.is_dir() and subprocess.run(['mountpoint', '-q', str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            if mounted and (not source.is_dir() or not os.path.samefile(source, target)):
+                return False
+            nonempty = nonempty or any(path.is_dir() and any(path.iterdir()) for path in (source, target))
+            bound = bound and mounted
+        # A marker alone cannot authorize a newly substituted disk. Both daemon
+        # stores must already be bound to this exact managed deployment.
+        return not nonempty or owned and bound
+    except OSError:
+        return False
+def _default_path(value, expected):
+    return isinstance(value, str) and value.rstrip('/') == expected
+def _toml_key_path(value):
+    keys = []
+    remaining = value.strip()
+    while remaining:
+        match = re.match(r"(?:([A-Za-z0-9_-]+)|\"([^\"\\]*)\"|'([^']*)')", remaining)
+        if not match:
+            return None
+        keys.append(next(part for part in match.groups() if part is not None))
+        remaining = remaining[match.end():].strip()
+        if not remaining:
+            return tuple(keys)
+        if not remaining.startswith('.'):
+            return None
+        remaining = remaining[1:].strip()
+    return None
+def _daemon_config_default(path, daemon, explicit=False):
+    try:
+        config = Path(path)
+        if not config.exists():
+            return not explicit
+        if not config.is_file():
+            return False
+        text = config.read_text()
+        if daemon == 'dockerd':
+            value = json.loads(text)
+            if not isinstance(value, dict):
+                return False
+            if any(key in value and not _default_path(value[key], '/var/lib/docker') for key in ('data-root', 'graph')):
+                return False
+            return 'containerd' not in value or value['containerd'] in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock')
+        # Ubuntu 22.04's Python has no tomllib. Inspect literal top-level and
+        # grpc keys; imported/indirect config cannot attest the root or socket.
+        section = ()
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('['):
+                header = re.fullmatch(r'(\[\[?)(.*?)(\]\]?)\s*(?:#.*)?', line)
+                if not header or len(header[1]) != len(header[3]):
+                    return False
+                section = _toml_key_path(header[2])
+                if section is None or section[0] == 'grpc' and (section != ('grpc',) or len(header[1]) != 1):
+                    return False
+                continue
+            if section not in ((), ('grpc',)):
+                continue
+            match = re.fullmatch(r'(.*?)\s*=\s*(.*)', line)
+            if not match:
+                return False
+            key, value = _toml_key_path(match[1]), match[2]
+            if key is None:
+                return False
+            key = section + key
+            if key == ('imports',) and value.split('#', 1)[0].strip() != '[]':
+                return False
+            if key == ('grpc',) or key[0] == 'root' and key != ('root',) or key[:2] == ('grpc', 'address') and len(key) != 2:
+                return False
+            if key in (('root',), ('grpc', 'address')):
+                words = shlex.split(value, comments=True)
+                if len(words) != 1 or '\\' in value:
+                    return False
+                if key == ('root',) and not _default_path(words[0], '/var/lib/containerd'):
+                    return False
+                if key == ('grpc', 'address') and words[0] not in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock'):
+                    return False
+        return True
+    except (OSError, ValueError, UnicodeError):
+        return False
+def _daemon_argv_default(argv, daemon):
+    if not argv or argv[0] not in ('/usr/bin/' + daemon, '/usr/sbin/' + daemon):
+        return False
+    if any(any(mark in arg for mark in ('$', '%', '\\', ';', '|', '&')) for arg in argv):
+        return False
+    expected = '/var/lib/docker' if daemon == 'dockerd' else '/var/lib/containerd'
+    config = '/etc/docker/daemon.json' if daemon == 'dockerd' else '/etc/containerd/config.toml'
+    roots = ('--data-root', '--graph', '-g') if daemon == 'dockerd' else ('--root', '-r')
+    configs = ('--config-file',) if daemon == 'dockerd' else ('--config', '-c')
+    addresses = ('--containerd',) if daemon == 'dockerd' else ('--address', '-a')
+    explicit = False
+    index = 1
+    while index < len(argv):
+        word = argv[index]
+        option, separator, value = word.partition('=')
+        if option in roots + configs + addresses:
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    return False
+                value = argv[index]
+        elif any(word.startswith(short) and len(word) > len(short) for short in roots + configs + addresses if short.startswith('-') and not short.startswith('--')):
+            option, value = word[:2], word[2:].removeprefix('=')
+        else:
+            # Grouped short options can hide a legacy root flag (-Dg/path).
+            # Accept only known standalone options outside the root/config set.
+            short_options = ('-H', '-D', '-l', '-s', '-p') if daemon == 'dockerd' else ('-l',)
+            if word.startswith('-') and not word.startswith('--') and word not in short_options:
+                return False
+            index += 1
+            continue
+        if option in roots and not _default_path(value, expected):
+            return False
+        if option in configs:
+            if not value.startswith('/'):
+                return False
+            config, explicit = value, True
+        if option in addresses and value not in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock'):
+            return False
+        index += 1
+    return _daemon_config_default(config, daemon, explicit)
+def daemon_storage_default(allow_missing):
+    for daemon, service, config in (
+        ('dockerd', 'docker', '/etc/docker/daemon.json'),
+        ('containerd', 'containerd', '/etc/containerd/config.toml'),
+    ):
+        if not _daemon_config_default(config, daemon):
+            return False
+        try:
+            shown = subprocess.run(['systemctl', 'show', service, '--property=LoadState', '--property=ExecStart', '--property=MainPID'], capture_output=True, text=True)
+        except OSError:
+            return False
+        properties = dict(line.split('=', 1) for line in shown.stdout.splitlines() if '=' in line)
+        if properties.get('LoadState') == 'not-found':
+            if not allow_missing or properties.get('MainPID') != '0':
+                return False
+            continue
+        if shown.returncode or properties.get('LoadState') != 'loaded':
+            return False
+        start = re.fullmatch(r'\{\s*path=([^;]+);\s*argv\[\]=(.*?);\s*[^{}]*\}', properties.get('ExecStart', ''))
+        if not start or start[1].strip() not in ('/usr/bin/' + daemon, '/usr/sbin/' + daemon):
+            return False
+        try:
+            if not _daemon_argv_default(shlex.split(start[2].strip()), daemon):
+                return False
+            pid = properties.get('MainPID', '')
+            if not pid.isdigit():
+                return False
+            if int(pid):
+                command = (Path('/proc') / pid / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+                if not _daemon_argv_default([part.decode() for part in command], daemon):
+                    return False
+        except (OSError, ValueError, UnicodeError):
+            return False
+    return True
+"""
+
+
+_PREFLIGHT = r"""
+import hashlib, json, os, platform, shutil, subprocess, sys
+from pathlib import Path
+params = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 osinfo = {}
 for line in Path('/etc/os-release').read_text().splitlines():
     key, _, value = line.partition('=')
@@ -63,21 +313,90 @@ checks = {
     'docker': bool(shutil.which('docker')),
     'compose': bool(shutil.which('docker')) and works(['sudo', '-n', 'docker', 'compose', 'version']),
 }
+if params.get('data_mount'):
+    # Root-owned daemon stores need privileged inspection. This helper only
+    # reads paths and mount state; preflight never mounts or changes state.
+    storage_script = r'''
+import json, os, subprocess, sys
+from pathlib import Path
+def inspect_storage(data_mount, allow_missing=True, deployment=None):
+    result = {'data_mount_available': False, 'data_mount_conflict_free': False}
+    quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+    try:
+        base = Path(data_mount)
+        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode or os.statvfs(base).f_flag & os.ST_RDONLY:
+            return result
+        for name in ('docker', 'containerd'):
+            for path in (base / name, Path('/var/lib') / name):
+                if path.is_dir() and os.statvfs(path).f_flag & os.ST_RDONLY:
+                    return result
+        result['data_mount_available'] = True
+        if not daemon_storage_default(allow_missing):
+            return result
+        if not storage_state_compatible(base, deployment_storage_owned(deployment)):
+            return result
+        result['data_mount_conflict_free'] = True
+    except OSError:
+        pass
+    return result
+'''
+    if os.geteuid() == 0:
+        storage = {}
+        exec(storage_script, storage)
+        checks.update(storage['inspect_storage'](params['data_mount'], params.get('install_prerequisites', True), params.get('deployment')))
+    elif root:
+        inspected = subprocess.run(
+            ['sudo', '-n', 'python3', '-c', storage_script + "\nparams = json.loads(sys.argv[1]); print(json.dumps(inspect_storage(params['data_mount'], params.get('install_prerequisites', True), params.get('deployment'))))", json.dumps(params)],
+            capture_output=True, text=True,
+        )
+        try:
+            storage = json.loads(inspected.stdout) if inspected.returncode == 0 else {}
+        except ValueError:
+            storage = {}
+        checks.update({key: storage.get(key) is True for key in ('data_mount_available', 'data_mount_conflict_free')})
+    else:
+        checks.update({'data_mount_available': False, 'data_mount_conflict_free': False})
 machine = Path('/etc/machine-id').read_text().strip().lower()
 print(json.dumps({'machine_identity': hashlib.sha256(machine.encode()).hexdigest(),
     'operating_system': osinfo.get('ID', '') + ':' + osinfo.get('VERSION_ID', ''),
     'architecture': platform.machine(), 'checks': checks}))
-"""
+""".replace(
+    "def inspect_storage(data_mount, allow_missing=True, deployment=None):",
+    _DAEMON_STORAGE_GUARD
+    + "\ndef inspect_storage(data_mount, allow_missing=True, deployment=None):",
+)
 
 # Executed with sudo and a tar stream on stdin, never a secret command argument.
 # Existing installations require our persisted identity marker. A retry uses
 # the same identity and flock; it cannot overwrite or enroll a different Host.
-_DEPLOY = r"""
-import fcntl, io, json, os, shutil, subprocess, sys, tarfile
+_DEPLOY = (
+    _DAEMON_STORAGE_GUARD
+    + r"""
+import fcntl, io, json, os, subprocess, sys, tarfile
 from pathlib import Path
 params = json.loads(sys.argv[1])
 root = Path(params['root'])
 identity = params['identity']
+owned_storage = deployment_storage_owned({'root': str(root), 'identity': identity})
+def storage_available(base):
+    try:
+        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            return False
+        paths = [base] + [path for name in ('docker', 'containerd') for path in (base / name, Path('/var/lib') / name) if path.is_dir()]
+        return not any(os.statvfs(path).f_flag & os.ST_RDONLY for path in paths)
+    except OSError:
+        return False
+# Reject an unavailable or read-only disk before even changing the deployment
+# checkout. The later check still guards changes between inspection and use.
+if params.get('data_mount') and not storage_available(Path(params['data_mount'])):
+    print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_unavailable']}))
+    raise SystemExit(0)
+if params.get('data_mount') and not daemon_storage_default(params['install']):
+    print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
+    raise SystemExit(0)
+if params.get('data_mount') and not storage_state_compatible(Path(params['data_mount']), owned_storage):
+    print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
+    raise SystemExit(0)
 root.parent.mkdir(parents=True, exist_ok=True)
 if root.is_symlink() or root.resolve() != root:
     raise SystemExit('unsafe deployment root')
@@ -87,6 +406,11 @@ if lock_path.is_symlink():
 with open(lock_path, 'a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     marker = root / '.compute-identity.json'
+    # Capture ownership before this invocation can create its own marker.
+    owned_storage = deployment_storage_owned({'root': str(root), 'identity': identity})
+    if params.get('data_mount') and not storage_state_compatible(Path(params['data_mount']), owned_storage):
+        print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
+        raise SystemExit(0)
     if root.exists() and any(root.iterdir()):
         if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != identity:
             raise SystemExit('existing deployment identity conflict')
@@ -105,7 +429,9 @@ with open(lock_path, 'a') as lock:
                 raise SystemExit('unsafe existing deployment path')
         archive.extractall(root, filter='data')
     environment = os.environ.copy()
-    environment.update({'DEBIAN_FRONTEND': 'noninteractive', 'AGENT_DEPLOYMENT_SHA': params['sha']})
+    environment.update({'DEBIAN_FRONTEND': 'noninteractive', 'AGENT_DEPLOYMENT_SHA': params['sha'], 'DOCKER_HOST': 'unix:///var/run/docker.sock', 'DOCKER_CONTEXT': 'default'})
+    for name in ('DOCKER_TLS', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
+        environment.pop(name, None)
     quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
     def blocked(step):
         print(json.dumps({'ready': False, 'blocked_reasons': [step]}))
@@ -113,41 +439,74 @@ with open(lock_path, 'a') as lock:
     def run(step, args):
         if subprocess.run(args, cwd=root, env=environment, **quiet).returncode:
             blocked(step)
-    def listed(args):
-        result = subprocess.run(args, capture_output=True, text=True)
-        if result.returncode:
-            blocked('data_mount_conflict')
-        return result.stdout.strip()
     if params.get('data_mount'):
         # Keep Docker's and containerd's default paths, but on the provider's
         # large local disk: a Host's whole state is what moves between nodes.
         base = Path(params['data_mount'])
-        if base.is_symlink() or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode:
+        if not storage_available(base):
             blocked('data_mount_unavailable')
+        if not daemon_storage_default(params['install']):
+            blocked('data_mount_conflict')
+        if not storage_state_compatible(base, owned_storage):
+            blocked('data_mount_conflict')
         fstab = Path('/etc/fstab')
+        stores = []
         for name in ('docker', 'containerd'):
             source, target = base / name, Path('/var/lib') / name
-            if source.is_symlink() or target.is_symlink():
+            if source.is_symlink() or source.resolve() != source or target.is_symlink() or target.resolve() != target:
+                blocked('data_mount_conflict')
+            if (source.exists() and not source.is_dir()) or (target.exists() and not target.is_dir()):
                 blocked('data_mount_conflict')
             source.mkdir(mode=0o711, exist_ok=True)
             target.mkdir(mode=0o711, exist_ok=True)
-            if subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode:
-                if any(target.iterdir()):
-                    # A daemon that already ran here may only have initialised
-                    # an empty store. Never mount over containers or images.
-                    if not shutil.which('docker') or listed(['docker', 'ps', '-aq']) or listed(['docker', 'image', 'ls', '-aq']):
-                        blocked('data_mount_conflict')
-                    subprocess.run(['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'], **quiet)
-                    for child in target.iterdir():
-                        if child.is_dir() and not child.is_symlink():
-                            shutil.rmtree(child)
-                        else:
-                            child.unlink()
+            mounted = subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode == 0
+            if mounted and not os.path.samefile(source, target):
+                # An already mounted daemon must use this Host's selected disk.
+                # Never accept or replace a different store on a retry.
+                blocked('data_mount_conflict')
+            if not mounted and any(target.iterdir()):
+                # Neither store may be hidden or reclaimed from an unrelated
+                # daemon's inventory. Retained files are never discarded here.
+                blocked('data_mount_conflict')
+            stores.append((name, source, target, mounted))
+        unmounted = [target for _, _, target, mounted in stores if not mounted]
+        active_daemons = [name for name in ('docker.socket', 'docker', 'containerd') if subprocess.run(['systemctl', 'is-active', '--quiet', name], **quiet).returncode == 0] if unmounted else []
+        if unmounted and active_daemons:
+            if subprocess.run(['systemctl', 'stop', *active_daemons], cwd=root, env=environment, **quiet).returncode:
+                # systemctl may stop some requested units before returning an
+                # error. Restore only the units that were active on entry.
+                run('data_mount_failed', ['systemctl', 'start', *active_daemons])
+                blocked('data_mount_failed')
+        # Recheck after stopping: a daemon may have populated an initially
+        # empty store while its disk was being inspected.
+        if not storage_state_compatible(base, owned_storage):
+            if active_daemons:
+                run('data_mount_failed', ['systemctl', 'start', *active_daemons])
+            blocked('data_mount_conflict')
+        for name, source, target, mounted in stores:
+            if not mounted:
                 run('data_mount_failed', ['mount', '--bind', str(source), str(target)])
-            entry = f'{source} {target} none bind,nofail,x-systemd.requires-mounts-for={base} 0 0'
-            current = fstab.read_text() if fstab.exists() else ''
-            if entry not in current.splitlines():
-                fstab.write_text((current.rstrip('\n') + '\n' if current.strip() else '') + entry + '\n')
+        # Re-read operator configuration after mounting and immediately before
+        # persistence. Equivalent existing entries are reused without rewriting.
+        current = fstab.read_text() if fstab.exists() else ''
+        existing = storage_fstab_entries(base, current)
+        if existing is None or not storage_mount_units_compatible():
+            if active_daemons:
+                run('data_mount_failed', ['systemctl', 'start', *active_daemons])
+            blocked('data_mount_conflict')
+        missing = [f'{source} {target} none bind,nofail,x-systemd.requires-mounts-for={base} 0 0' for name, source, target, _ in stores if name not in existing]
+        if missing:
+            with fstab.open('a') as persisted:
+                if current and not current.endswith('\n'):
+                    persisted.write('\n')
+                persisted.write('\n'.join(missing) + '\n')
+        for name, _, target, _ in stores:
+            # On reboot a missing disk must keep its daemon stopped rather
+            # than silently opening an empty store under the bare target.
+            dropin = Path('/etc/systemd/system') / (name + '.service.d')
+            dropin.mkdir(parents=True, exist_ok=True)
+            (dropin / 'cloud-agent-storage.conf').write_text(f'[Unit]\nRequiresMountsFor={base} {target}\n')
+        run('data_mount_failed', ['systemctl', 'daemon-reload'])
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
         run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables'])
@@ -178,6 +537,7 @@ with open(lock_path, 'a') as lock:
     envfile.write_text('\n'.join(line for line in envfile.read_text().splitlines() if not line.startswith('AGENT_ENROLL_TOKEN=')) + '\n')
     print(json.dumps({'ready': True, 'blocked_reasons': []}))
 """
+)
 
 _READINESS = r"""
 import json, os, subprocess, sys
@@ -263,9 +623,27 @@ class SshHostBootstrap:
         return value
 
     async def preflight(self, node: NodeObservation, profile: DeploymentProfile) -> PreflightResult:
-        """Verify machine identity and prerequisites without installing software."""
+        """Verify identity, prerequisites and selected storage without changing state."""
+        return await self._preflight(node, profile)
+
+    async def _preflight(
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        *,
+        deployment: dict[str, Any] | None = None,
+    ) -> PreflightResult:
+        """Only an existing allocation may attest ownership of retained storage."""
+        data_mount = profile.sandbox_storage_path or profile.data_mount
+        parameters: dict[str, Any] = {
+            "data_mount": data_mount,
+            "install_prerequisites": profile.install_prerequisites,
+        }
+        if deployment is not None:
+            parameters["deployment"] = deployment
         text = await self._transport.run(
-            self._connection(node), "python3 -c " + shlex.quote(_PREFLIGHT)
+            self._connection(node),
+            "python3 -c " + shlex.quote(_PREFLIGHT) + " " + shlex.quote(json.dumps(parameters)),
         )
         result = self._json(text)
         checks = result.get("checks", {})
@@ -273,6 +651,11 @@ class SshHostBootstrap:
         if not profile.install_prerequisites:
             required |= {"docker", "compose"}
         blocked = [name for name in sorted(required) if checks.get(name) is not True]
+        if data_mount:
+            if checks.get("data_mount_available") is not True:
+                blocked.append("data_mount_unavailable")
+            elif checks.get("data_mount_conflict_free") is not True:
+                blocked.append("data_mount_conflict")
         if node.machine_identity and result.get("machine_identity") != node.machine_identity:
             blocked.append("machine_identity_changed")
         return PreflightResult(
@@ -303,13 +686,15 @@ class SshHostBootstrap:
             # Only a node that took a Host over records the namespace it
             # inherited, so markers written before rotation existed still match.
             identity["namespace"] = intent.namespace
+        if profile.sandbox_storage_path is not None:
+            identity["sandbox_storage_path"] = profile.sandbox_storage_path
         return {
             "root": profile.deploy_root,
             "sha": profile.deployment_sha,
             "install": profile.install_prerequisites if install is None else install,
             "activate": activate,
             "reenroll": reenroll,
-            "data_mount": profile.data_mount,
+            "data_mount": profile.sandbox_storage_path or profile.data_mount,
             "project": intent.project,
             "identity": identity,
         }
@@ -377,6 +762,10 @@ class SshHostBootstrap:
                 "AGENT_SANDBOX_BACKEND": "kata",
             }
         )
+        if profile.sandbox_storage_path is not None:
+            # Both daemon stores are bound from the selected disk to their
+            # standard paths. Broker and runner must attest that same daemon.
+            values["AGENT_RETAINED_DOCKER_DATA_ROOT"] = "/var/lib/docker"
         # A persisted runner credential takes precedence in the existing host
         # recipe. A retry never deletes that file to spend another token.
         if enrollment_token is not None:
@@ -521,7 +910,9 @@ class SshHostBootstrap:
         intent: BootstrapIntent,
         enrollment_token: SecretStr | None,
     ) -> BootstrapResult:
-        preflight = await self.preflight(node, profile)
+        preflight = await self._preflight(
+            node, profile, deployment={"root": params["root"], "identity": params["identity"]}
+        )
         if not preflight.ready:
             return BootstrapResult(
                 ready=False,

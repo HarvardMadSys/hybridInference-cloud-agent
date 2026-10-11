@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -1168,6 +1177,103 @@ describe('JobDetail', () => {
     );
   });
 
+  it('pastes clipboard file images and waits for their uploads before sending a follow-up', async () => {
+    let finishUpload!: (value: Awaited<ReturnType<typeof uploadAttachment>>) => void;
+    vi.mocked(uploadAttachment).mockReturnValue(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use this screenshot' } });
+    const image = new File(['pixels'], 'image.png', { type: 'image/png' });
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [image, new File(['notes'], 'notes.txt', { type: 'text/plain' })],
+      },
+    });
+    fireEvent(box, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(uploadAttachment).toHaveBeenCalledOnce();
+    const [uploaded, path] = vi.mocked(uploadAttachment).mock.calls[0];
+    expect(uploaded).toEqual(
+      expect.objectContaining({ name: path, type: 'image/png', size: image.size }),
+    );
+    expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
+    expect(screen.getByText(path!)).toBeInTheDocument();
+    expect(box).toHaveValue('Use this screenshot');
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishUpload({ id: 43, path: path!, size_bytes: image.size, content_type: image.type });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Use this screenshot',
+        attachment_ids: [43],
+      }),
+    );
+    await waitFor(() => expect(box).toHaveValue(''));
+    expect(screen.queryByText(path!)).not.toBeInTheDocument();
+    expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('leaves plain text follow-up pastes to the browser', () => {
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Existing follow-up' } });
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        files: [],
+        getData: () => 'Pasted text',
+      },
+    });
+    fireEvent(box, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(box).toHaveValue('Existing follow-up');
+  });
+
+  it('does not upload pasted images after native context is lost', () => {
+    render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    expect(box).toBeDisabled();
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload pasted images while a follow-up is being submitted', async () => {
+    vi.mocked(submitThreadMessage).mockReturnValue(new Promise(() => {}));
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Send the follow-up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledOnce());
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
   it('accepts dropped files and removes them before sending', async () => {
     vi.mocked(uploadAttachment).mockResolvedValue({
       id: 12,
@@ -1580,17 +1686,37 @@ describe('JobDetail', () => {
     expect(history.getByText('Agent finished')).toBeInTheDocument();
   });
 
-  it('shows reasoning as a status without rendering raw thinking text', () => {
+  it('shows reasoning as a status when no reasoning content was recorded', () => {
     render(
       <JobDetail
         job={makeJob({
-          events: [{ kind: 'thinking', text: 'private chain of thought', attemptNo: 1 }],
+          events: [{ kind: 'thinking', text: '', attemptNo: 1 }],
         })}
       />,
     );
 
     expect(screen.getByLabelText('Agent reasoning')).toHaveTextContent('Agent is reasoning');
-    expect(screen.queryByText('private chain of thought')).not.toBeInTheDocument();
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  it('keeps recorded reasoning collapsed and separate from the assistant reply', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          events: [
+            { kind: 'thinking', text: 'Check the parser before editing.', attemptNo: 1 },
+            { kind: 'message', text: 'Fixed the parser.', attemptNo: 1 },
+          ],
+        })}
+      />,
+    );
+
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('Check the parser before editing.')).toBeInTheDocument();
+    expect(within(reasoning).queryByText('Fixed the parser.')).not.toBeInTheDocument();
+    expect(screen.getByText('Fixed the parser.')).toBeVisible();
   });
 
   it('shows inline tool activity with its complete call and result available on demand', () => {
@@ -2969,6 +3095,79 @@ describe('JobDetail', () => {
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
   });
 
+  it('navigates Git views from the keyboard and associates the selected panel', async () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    openWorkspace();
+    const tabs = within(screen.getByRole('tablist', { name: 'Git views' })).getAllByRole('tab');
+    tabs[0].focus();
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[0]]);
+    fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
+    expect(tabs[2]).toHaveFocus();
+    expect(tabs[2]).toHaveAttribute('aria-selected', 'true');
+    expect(document.getElementById(tabs[2].getAttribute('aria-controls')!)).toHaveAttribute(
+      'aria-labelledby',
+      tabs[2].id,
+    );
+    fireEvent.keyDown(tabs[2], { key: 'Home' });
+    expect(tabs[0]).toHaveFocus();
+    fireEvent.keyDown(tabs[0], { key: 'ArrowRight' });
+    expect(tabs[1]).toHaveFocus();
+    fireEvent.keyDown(tabs[1], { key: 'End' });
+    expect(tabs[2]).toHaveFocus();
+  });
+
+  it('selects full changed paths without a tall file list and exposes a keyboard-scrollable diff', async () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          diffFileDetails: [
+            {
+              path: 'src/auth/index.ts',
+              add: 1,
+              del: 0,
+              lines: [{ marker: 'add', text: '+auth' }],
+            },
+            { path: 'src/ui/index.ts', add: 1, del: 0, lines: [{ marker: 'add', text: '+ui' }] },
+          ],
+        })}
+      />,
+    );
+    openWorkspace();
+    const picker = screen.getByRole('combobox', { name: 'Changed file' });
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['src/auth/index.ts (+1 −0)', 'src/ui/index.ts (+1 −0)']);
+    fireEvent.change(picker, { target: { value: 'src/ui/index.ts' } });
+    const diff = screen.getByRole('region', { name: 'Diff for src/ui/index.ts' });
+    expect(diff).toHaveTextContent('+ui');
+    expect(diff).not.toHaveTextContent('+auth');
+    expect(diff).toHaveAttribute('tabindex', '0');
+  });
+
+  it('returns to the conversation from the workspace without losing its selected view', async () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    const trigger = screen.getByRole('button', { name: 'Open workspace' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(
+      within(screen.getByRole('tablist', { name: 'Workspace views' })).getByRole('tab', {
+        name: 'Files',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Back to conversation' }));
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+    fireEvent.click(trigger);
+    expect(
+      within(screen.getByRole('tablist', { name: 'Workspace views' })).getByRole('tab', {
+        name: 'Files',
+      }),
+    ).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('says nothing in the Git header while the live workspace is still answering', async () => {
     let settle: (value: Awaited<ReturnType<typeof getAgentJobGit>>) => void = () => {};
     vi.mocked(getAgentJobGit)
@@ -3264,17 +3463,22 @@ describe('JobDetail', () => {
       render(<JobDetail job={makeJob()} />);
       openWorkspace();
       fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
-      fireEvent.click(await screen.findByRole('button', { name: /README\.md/ }));
+      const row = await screen.findByRole('button', { name: /README\.md/ });
+      row.focus();
+      fireEvent.click(row);
 
       // The file takes the pane rather than sharing it with a 200px sidebar…
       await waitFor(() =>
         expect(screen.getByLabelText('Workspace files')).toHaveTextContent('# Narrow'),
       );
       expect(screen.queryByRole('button', { name: /README\.md/ })).not.toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Preview of README.md' })).toHaveFocus();
 
       // …and the header button walks back to the tree instead of hiding it.
-      fireEvent.click(screen.getByRole('button', { name: 'Show file tree' }));
-      expect(await screen.findByRole('button', { name: /README\.md/ })).toBeInTheDocument();
+      const back = screen.getByRole('button', { name: 'Back to file list' });
+      expect(back).toHaveTextContent('Back');
+      fireEvent.click(back);
+      expect(await screen.findByRole('button', { name: /README\.md/ })).toHaveFocus();
     } finally {
       if (clientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth);
       else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
@@ -3298,10 +3502,12 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
     fireEvent.click(await screen.findByRole('tab', { name: /Changes/ }));
 
-    fireEvent.click(screen.getByRole('button', { name: /example\.ts/ }));
+    const changedFile = screen.getByRole('button', { name: 'src/example.ts' });
+    expect(within(changedFile).getByText('src')).toBeVisible();
+    fireEvent.click(changedFile);
 
     await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledWith('ajob_1', 'src/example.ts'));
-    expect(await screen.findByText('src')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Preview of src/example.ts' })).toBeVisible();
     expect(screen.getByLabelText('Workspace files')).toHaveTextContent('modified');
   });
 

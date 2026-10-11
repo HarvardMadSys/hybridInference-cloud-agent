@@ -16,7 +16,6 @@ export function AdminNavigation({
     | 'measurements'
     | 'settings'
     | 'database'
-    | 'cloudlab'
     | 'audit';
 }) {
   const section = current === 'runs' ? 'activity' : current;
@@ -39,7 +38,6 @@ export function AdminNavigation({
           { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
           { key: 'settings', label: 'Settings', href: '/admin/settings' },
           { key: 'database', label: 'Database', href: '/admin/database' },
-          { key: 'cloudlab', label: 'CloudLab', href: '/admin/cloudlab' },
           { key: 'audit', label: 'Audit log', href: '/admin/audit' },
         ].map((item) => (
           <Link

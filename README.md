@@ -17,6 +17,14 @@ editor for review and can be edited before sending. Cancel or an unsuccessful
 rewrite preserves the original draft. Rewriting uses the account's normal model
 permissions and inference quota.
 
+To receive desktop alerts when an agent asks a question or a turn finishes,
+open **Settings → Notifications**, select **Enable notifications**, and allow
+the browser permission prompt. Questions and turn completions can be toggled
+separately. Alerts follow all your chats while the app remains open, including
+chats you are not viewing; clicking an alert opens its turn. These browser
+preferences are saved separately for each account. A closed browser does not
+receive alerts.
+
 ## Getting started
 
 Choose a path based on what you want to do:

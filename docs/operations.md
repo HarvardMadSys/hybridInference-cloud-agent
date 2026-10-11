@@ -29,7 +29,7 @@ Start with the task you need:
 | Add a host on another machine | [Tunnels and broker routing](#running-runners-on-another-machine) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
 | Preserve an old database or apply a maintenance migration | [Old-chain conversion](#preserving-an-old-chain-database), [database rebuild](#rebuilding-the-agent-database), [maintenance migrations](#applying-migrations-that-are-not-backwards-compatible) |
-| Protect workspaces and monitor disk use | [Retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
+| Protect workspaces and monitor disk use | [Sandbox archives](#sandbox-archives), [retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
 | Diagnose connectivity | [The sandbox network](#the-sandbox-network), [refusal messages](#when-something-is-refused) |
 | Configure or troubleshoot tools and repository access | [MCP servers](#mcp-servers), [repository entitlements](#who-may-run-a-job-against-which-repository) |
 | Answer a waiting agent question | [Native agent questions](#native-agent-questions) |
@@ -48,7 +48,7 @@ with deployment values before running commands.
 
 Open **Admin → Settings** to manage application and integration configuration,
 publication, web appearance, operational intervals, upload and skill limits,
-task-title generation, and sandbox/workspace limits. Application settings are
+task-title generation, sandbox/workspace limits, and sandbox archives. Application settings are
 persisted in the Agent database. The application API is
 `GET /admin/agent/settings` and `PUT /admin/agent/settings` with a partial body
 such as `{"settings": {"max_attempts": 3}}`; omitted keys retain their values.
@@ -59,7 +59,7 @@ required fields and partially configured optional integrations produce an
 **Administrator setup required** prompt with links to the fields to complete.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0037_admin_sandbox_stop`, then start the main control-plane listener with its
+`0042_sandbox_archive_settings`, then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once.
 The MCP-only listener waits for initialization and reads the same settings.
 Newly migrated runtime identity, service keys, broker credentials and policy
@@ -69,6 +69,11 @@ restores an old `.env` value. Listeners synchronize saved changes every five
 seconds; web appearance uses the saved public fields on each request. Apply
 changes to subsequent operations according to the description beside each
 setting.
+
+Automatic session archiving after a verified GitHub PR merge is enabled by
+default. Configure it under **Publication**; see
+[automatic PR archiving](automatic-pr-archiving.md) for its session selection,
+retry ledger, verification, and rollout steps.
 
 For a new installation, provision the database, a stable
 `AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
@@ -109,6 +114,10 @@ appear on the page with hidden values. See [the environment inventory](../ENVIRO
 
 ## Sandbox archive storage
 
+This section configures the archive required by the explicit **Archive to S3
+and delete** control. Automatic lifecycle archives use the separate policy
+under **Admin → Settings → Sandbox**, described in [Sandbox archives](#sandbox-archives).
+
 Configure **Admin → Settings → Application → Sandbox archives** before enabling stopped
 sandbox deletion. Set the S3 bucket and, optionally, its region, HTTPS
 S3-compatible endpoint and object prefix. The matching
@@ -122,7 +131,8 @@ configured archive prefix; `HeadObject` uses `s3:GetObject`. If SSE-KMS is appli
 by the bucket, also grant the required KMS permissions, including
 `kms:GenerateDataKey` and `kms:Decrypt` so checksum-enabled HEAD can verify the
 object. The application does not need `s3:DeleteObject` for archive storage.
-Keep credentials off execution hosts and sandbox containers. The base Compose
+Provision these manual-deletion credentials only on the main control plane;
+the owning broker receives a request-specific presigned upload URL. The base Compose
 does not forward AWS credential variables. For environment credentials, create
 a private override restricted to the main service, for example:
 
@@ -140,8 +150,10 @@ For shared profiles, mount the credentials and configuration files read-only
 in this service and set `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE` and
 `AWS_PROFILE` to their container paths and selected profile. Use the saved
 archive region setting or provision `AWS_DEFAULT_REGION` in the same override.
-Never apply these mounts or variables to a runner host, sandbox, web application
-or MCP relay.
+Apply these manual-deletion credential mounts and variables only to the main
+control plane. The automatic lifecycle archive policy separately uses the
+trusted workspace broker's workload identity; neither path provides AWS
+credentials to sandbox containers, the web application or the MCP relay.
 
 The host receives a 15-minute presigned PUT for exactly one request object, with
 a fixed byte length, full-object SHA-256 checksum and `If-None-Match: *`. The
@@ -357,6 +369,13 @@ option or enter a custom answer when offered, then submit to continue the
 same native tool call. **Answer later** dismisses the dialog without answering;
 **Review question** reopens it. **Skip** explicitly declines the request.
 
+Claude Code `ExitPlanMode` uses the same dialog to present its plan for
+approval. Select **Approve plan** and submit to let Claude exit plan mode and
+continue implementation. **Skip** declines the plan approval and asks the
+agent to keep planning; **Answer later** leaves the native approval request
+waiting until the owner answers it. Claude handles entering plan mode and
+reading or updating its plan file within the native session.
+
 The page reads pending questions from the resident agent, so reloading the
 conversation rediscovers unanswered requests. An answer names the job,
 attempt, and request it was read from. The owner API and host both fence that
@@ -446,6 +465,14 @@ before accepting the request, and refuses a busy group, pending snapshot or
 publication work, or a group with open terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
+When the terminal report is zero, missing, or older than 90 seconds, opening or
+refreshing details queries the owning workspace broker directly. Stop requests
+also verify terminal activity before closing admission: older brokers may report
+only the origin session's terminals even when another member is active. This also
+supports runners that omit terminal counts from their heartbeats. The report
+must match the reviewed container and generation; an unavailable broker or
+unknown activity keeps stopping disabled and shows the required recovery step.
+Resource-stat failures do not discard an otherwise valid terminal report.
 The page shows the pending request until a host observation confirms the stop;
 an offline host cannot complete it. New turns wait while the stop is pending.
 This action does not delete the container or reclaim its retained disk space.
@@ -493,8 +520,8 @@ measurements.
 Sandbox controls require migration `0037_admin_sandbox_stop` and matching
 control-plane and host releases. Apply `alembic upgrade head` before starting
 the updated API. Inventory removal additionally requires
-`0040_admin_sandbox_archive`, and S3-backed container deletion requires
-`0041_admin_sandbox_deletion` plus the matching workspace broker release.
+`0043_admin_sandbox_archive`, and S3-backed container deletion requires
+`0044_admin_sandbox_deletion` plus the matching workspace broker release.
 Resource persistence requires migration
 `0034_sandbox_resource_usage` and a host running the updated workspace broker.
 Older hosts still appear in the inventory with resource usage unavailable.
@@ -1441,7 +1468,8 @@ machine, and only _Host default_ returns it to the environment.
 #### Sandbox settings
 
 Use the admin settings pages for sandbox and workspace limits. The turn time
-limit, repository size limit, sandbox idle timeout, sessions per sandbox,
+limit, repository size limit, container CPU, memory and disk limits, sandbox
+idle timeout, sessions per sandbox,
 workspace command/file limits and terminal resource limits sit in the
 _Sandbox_ card on the _Settings_ page, once
 for every server, and in the _Sandbox_ table of each server's details on the
@@ -1463,10 +1491,110 @@ saving is not applying. Each host reports what it applies, the runner's share
 as it hands each turn over and the workspace broker's as the broker confirms
 it, and the page shows _applying_ until the report matches. Nothing running is
 cut short: a turn keeps the time limit it started with, an existing sandbox
-keeps the chat capacity built into it, and a shortened terminal lifetime
+keeps its CPU, memory, disk quota and chat capacity, and a shortened terminal lifetime
 closes terminals already past it on the broker's next sweep. A runner that
 does not advertise `host-settings-v1` keeps its `.env` values until it is
 redeployed.
+
+The container size controls apply to each new sandbox group, shared by its
+conversation and forks. Defaults are 2 vCPU, 4 GiB memory, and disk 0 (no
+per-container quota). CPU accepts fractional vCPU; memory and disk accept MiB
+or GiB. A positive disk limit bounds the writable layer, including the
+workspace and installed files, using Docker's `--storage-opt size=`. It
+requires `overlay2` on XFS mounted with project quotas (`pquota` or
+`prjquota`); Docker rejects creation on an unsupported host. Existing groups
+keep their original limits through follow-ups, restarts, snapshots and Fork.
+See `ENVIRONMENT.md` for bootstrap variables and storage requirements.
+
+#### Sandbox archives
+
+This policy captures automatic initial and final lifecycle archives. The
+explicit **Archive to S3 and delete** control has its own control-plane storage
+configuration, documented in [Sandbox archive storage](#sandbox-archive-storage).
+
+Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to store
+the deployment-wide archive policy in the Agent database. The destination is
+fixed at `s3://freeinference/cloud-agent/sandbox`; it is displayed read-only and
+is never accepted from the browser. An administrator atomically saves the
+enabled state, AWS region, customer-managed KMS key ARN, expected 12-digit
+bucket owner, maximum compressed archive size, multipart threshold, and part
+size. Updates use the revision returned by the last read, so two administrators
+cannot silently overwrite each other. Every change is recorded in the Audit
+log.
+
+The dashboard uses admin-only `GET` and `PUT`
+`/admin/agent/sandbox-archive-settings`. To inspect the same policy and host
+rollout directly in Postgres, use read-only queries such as:
+
+```sql
+SELECT sandbox_archive_settings,
+       sandbox_archive_revision,
+       sandbox_archive_updated_at
+FROM agent_runner_policy
+WHERE id IS TRUE;
+
+SELECT host,
+       sandbox_archive_settings_applied_revision
+FROM agent_runner_hosts
+ORDER BY host;
+```
+
+Do not put AWS access keys, archive policy, or the destination in `.env`. The
+workspace broker uses the host's AWS workload identity and the ordinary SDK
+credential chain. That identity needs the narrow S3 multipart/write and exact
+object-metadata permissions for the fixed prefix, plus encrypt access to the
+configured KMS key. The bucket must have versioning enabled. Configure lifecycle
+retention and access logging on the bucket itself; neither the runner nor a
+sandbox receives AWS credentials.
+
+Concretely, grant the broker role `s3:GetBucketVersioning` on
+`arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
+`cloud-agent/sandbox/*` prefix (so an exact-key `HeadObject` can distinguish a
+missing immutable initial object from an authorization failure); and
+`s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
+`arn:aws:s3:::freeinference/cloud-agent/sandbox/*`. The configured KMS key
+policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
+multipart uploads. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
+rule as defense in depth for a host that disappears before its bounded abort
+request completes.
+
+Enabling archives requires migration `0042_sandbox_archive_settings` and a
+runner/workspace broker advertising `sandbox-archive-settings-v1`. The settings
+card distinguishes the saved database revision from the revision each broker
+has confirmed applying. While archives are enabled, new claims fail closed on
+hosts or exact runner replicas that have not applied that revision; disabling
+the policy preserves compatibility with older hosts.
+
+This is a lifecycle archive, not a per-turn transcript log:
+
+- the initial object captures `/workspace` once after source/setup and before
+  the first Agent process receives a prompt;
+- each broker-managed clean stop flushes native Agent state and stores a final
+  object containing `/workspace`, `/agent-state`, and the optional
+  `/home/agent/.freeinference-platform` state;
+- repeated turns while the sandbox remains live do not create objects. A later
+  wake followed by another clean stop replaces the deterministic final key;
+  S3 bucket versioning retains its earlier object versions according to the
+  bucket's lifecycle policy.
+
+Policy changes are forward-only. Enabling archives cannot reconstruct the true
+pre-prompt baseline of a sandbox that already ran while the policy was
+disabled, so such a sandbox can have a final object without an initial object.
+Disabling prevents new archive preparations and can leave an earlier initial
+object without a later final. It does not abandon durable work that was already
+prepared while enabled: an initial baseline whose upload result is unresolved,
+or a clean stop already fenced for final capture, remains pinned to its original
+revision and finishes under that revision. For paired before/after archives,
+enable the policy and wait for the settings page to show the revision applied on
+every compatible server before admitting new work; stop or drain those
+sandboxes before disabling it.
+
+The initial object is immutable and retry-safe. Final capture is synchronous
+with the stop hook, bounded by the configured size and operation deadline, and
+an exhausted upload is reported as a failed clean stop instead of being called
+successful. Archives are an export/forensics boundary only: this release does
+not list, download, replay, or restore a sandbox from S3. The retained Docker
+writable layer remains authoritative for normal stop/start continuity.
 
 #### Launch failures and queue order
 
@@ -1608,12 +1736,14 @@ in parallel under the exact-SHA readiness fence described here. See
 #### Host and control-plane readiness
 
 The host prepares the replacement sandbox/runner artifacts and proves Kata
-before invalidating its ready marker. It then stops the old runner container
-and lets its five-minute grace
-drain admitted turns before replacing the broker; no new turn can be admitted
-in that interval. After the isolation, tunnel, runtime and retained Docker-root
-checks pass, it records `.deployed-sha` and only then publishes an exact
-`shared-sandbox-deployment:<sha>` capability. In parallel, the control-plane
+before invalidating its ready marker. It resolves the old runner's exact
+Compose container IDs, then asks Docker Engine for an unbounded graceful stop.
+The runner stops claiming and waits for every admitted turn; the broker and
+tunnels remain available until those turns settle. Only then does activation
+replace the broker and runner. After the isolation, tunnel, runtime and
+retained Docker-root checks pass, it records `.deployed-sha` and only then
+publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
+the control-plane
 deployment prepares its artifacts and migrates, then waits for a heartbeat newer than the start of that
 check and reverse-probes every new-chat placement broker before `compose up`
 can replace a running API. The claim route enforces that same exact deployment

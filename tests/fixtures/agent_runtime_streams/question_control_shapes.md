@@ -20,6 +20,21 @@ call ran without another prompt. No `updatedPermissions` response was needed.
 The observed 2.1.220 exit input was empty; its type also permits the deprecated
 `allowedPrompts` field covered by the unit regression.
 
+The plan fixture was captured with the same pinned Claude binary and resident
+flags against a deterministic local SSE server. The model called
+`EnterPlanMode`, read a workspace file, wrote the native plan file, and called
+`ExitPlanMode` with `{}`. Entering plan mode, reading, and writing the plan file
+required no stdio permission request. For `ExitPlanMode`, the CLI added `plan`
+and `planFilePath` to its `can_use_tool` input and required user interaction.
+Returning `behavior: "allow"` with that exact `updatedInput`, without
+`updatedPermissions`, produced the approved-plan tool result, the native
+exited-plan-mode reminder, and a successful subsequent workspace write. An
+exit without a plan file instead sent `{}` as its input and accepted the same
+allow response. A deny response produced an error tool result containing the
+decline message and recorded the native permission denial; it did not emit
+the exited-plan-mode reminder. Plan mode under `bypassPermissions` does not
+enforce a filesystem write boundary.
+
 The Codex fixture is synthetic and follows `ToolRequestUserInputParams` and
 `ToolRequestUserInputResponse` JSON schemas generated from the actual pinned
 `@openai/codex` 0.145.0 Linux binary with

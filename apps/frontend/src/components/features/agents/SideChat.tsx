@@ -6,6 +6,8 @@ import { cancelAgentJob, type AgentConfigApi, type AgentJobApi } from '@/lib/api
 import { submitThreadMessage, type ThreadMessageRequest } from '@/lib/api/pendingMessages';
 import { useT } from '@/components/providers/LocaleProvider';
 import { hasLostContext, latestAttempt, latestJob, ownerRunNote } from './conversationJob';
+import { AttachmentStrip } from './attachments/AttachmentStrip';
+import { useAttachments } from './attachments/useAttachments';
 import { sideChatKeys } from './sideChatStorage';
 import {
   composerModels,
@@ -70,6 +72,8 @@ function SideChatContent({
   }, []);
   const active = selected && visible;
   const t = useT();
+  const attachments = useAttachments(t, config?.attachment_limits);
+  const { reset: resetAttachments } = attachments;
   const { session, status, error, recoverable, retry, restart, advance } = useSideChatSession(
     sourceJob,
     userId,
@@ -264,8 +268,15 @@ function SideChatContent({
       setActionError(t('sideChat.preparing'));
       return;
     }
-    if (!current) return;
-    await sendMessage({ prompt: draft.trim(), ...composerOverrides(current, model, effort) }, true);
+    if (!current || attachments.uploading) return;
+    await sendMessage(
+      {
+        prompt: draft.trim(),
+        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+        ...composerOverrides(current, model, effort),
+      },
+      true,
+    );
   }
 
   async function fixReview() {
@@ -292,7 +303,10 @@ function SideChatContent({
         ? await submitThreadMessage(threadId, body, { requestId })
         : await submitThreadMessage(threadId, body);
       if (!mounted.current) return;
-      if (clearDraft) setDraft('');
+      if (clearDraft) {
+        setDraft('');
+        resetAttachments();
+      }
       queue.apply(result);
       // Idle, the message is the side chat's next turn now and the pane moves
       // to it; busy, it waits above the composer and nothing moves.
@@ -355,11 +369,14 @@ function SideChatContent({
   }, [active, stop, tab]);
   useEffect(() => {
     const clear = (event: Event) => {
-      if ((event as CustomEvent).detail === userId) setDraft('');
+      if ((event as CustomEvent).detail === userId) {
+        setDraft('');
+        resetAttachments();
+      }
     };
     window.addEventListener('agents:side-chat-drafts-cleared', clear);
     return () => window.removeEventListener('agents:side-chat-drafts-cleared', clear);
-  }, [userId]);
+  }, [resetAttachments, userId]);
   const failure = error ?? loadError ?? actionError;
   return (
     <section
@@ -455,7 +472,16 @@ function SideChatContent({
                 value={draft}
                 disabled={unavailable || !userId}
                 onChange={(event) => setDraft(event.target.value)}
+                onPaste={(event) => {
+                  if (!ready || unavailable || !userId || submission.current) return;
+                  attachments.onPaste(event);
+                }}
                 className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-50 dark:placeholder:text-gray-500"
+              />
+              <AttachmentStrip
+                entries={attachments.entries}
+                onRemove={attachments.remove}
+                disabled={unavailable || submitting}
               />
               <div className="flex flex-wrap items-center gap-1 px-3 pb-2">
                 {models.length ? (
@@ -505,7 +531,9 @@ function SideChatContent({
                     label={t('sideChat.send')}
                     title={t('sideChat.sendHint')}
                     busy={submitting || (active && status === 'preparing')}
-                    disabled={!ready || unavailable || !draft.trim() || submitting}
+                    disabled={
+                      !ready || unavailable || !draft.trim() || submitting || attachments.uploading
+                    }
                   />
                 </div>
               </div>
@@ -520,8 +548,15 @@ function SideChatContent({
                 {current?.archivedAt ? t('sideChat.archived') : t('sideChat.lost')}
               </p>
             ) : null}
-            {unavailable && draft ? (
-              <button type="button" onClick={() => setDraft('')} className="mt-2 text-xs underline">
+            {unavailable && (draft || attachments.entries.length) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft('');
+                  resetAttachments();
+                }}
+                className="mt-2 text-xs underline"
+              >
                 {t('sideChat.discard')}
               </button>
             ) : null}

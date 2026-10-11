@@ -145,7 +145,9 @@ function QuestionDialog({
                 >
                   <legend className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                     {question.header ? <span className="mb-1 block">{question.header}</span> : null}
-                    {question.question}
+                    <span className="block whitespace-pre-wrap break-words">
+                      {question.question}
+                    </span>
                   </legend>
                   {question.multiple && question.options.length ? (
                     <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">

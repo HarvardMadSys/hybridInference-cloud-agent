@@ -28,7 +28,11 @@ from cloud_agent.ports.external.compute_provider import (
     ResourceRef,
     SshConnection,
 )
-from cloud_agent.ports.external.host_bootstrap import BootstrapResult, DeploymentProfile
+from cloud_agent.ports.external.host_bootstrap import (
+    BootstrapResult,
+    DeploymentProfile,
+    PreflightResult,
+)
 from cloud_agent.schemas_compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
@@ -239,6 +243,48 @@ async def test_ready_host_uses_public_enrolled_fact_and_opens_only_its_bootstrap
         call.kwargs["purpose"] == "lease_deadline"
         for call in h.repository.set_admission_hold.await_args_list
     )
+
+
+@pytest.mark.parametrize("blocked", [None, "data_mount_unavailable", "data_mount_conflict"])
+async def test_attach_preflight_reports_selected_storage_evidence(monkeypatch, blocked):
+    h = harness(monkeypatch, kind="preflight")
+    h.operation["parameters"] = {
+        "provider_id": "cloudlab",
+        "mode": "attach",
+        "validated_configuration": REF.config,
+        "profile": PROFILE.model_copy(update={"sandbox_storage_path": "/mydata"}).model_dump(
+            mode="json"
+        ),
+    }
+    h.bootstrap.preflight = AsyncMock(
+        return_value=PreflightResult(
+            ready=blocked is None,
+            machine_identity="machine",
+            operating_system="ubuntu:24.04",
+            architecture="x86_64",
+            checks={
+                "data_mount_available": blocked != "data_mount_unavailable",
+                "data_mount_conflict_free": blocked is None,
+                "private_remote_detail": True,
+            },
+            blocked_reasons=() if blocked is None else (blocked,),
+        )
+    )
+    await h.reconciler.execute(h.operation)
+    if blocked:
+        assert h.operation["state"] == "blocked"
+        reasons = h.operation["result"]["blocked_reasons"]
+        assert [reason["code"] for reason in reasons] == [blocked]
+        assert "Sandbox storage" in reasons[0]["message"]
+    else:
+        assert h.operation["state"] == "succeeded"
+        assert h.operation["result"]["checks"] == {
+            "data_mount_available": True,
+            "data_mount_conflict_free": True,
+        }
+    h.bootstrap.deploy.assert_not_awaited()
+    h.host_pool.issue_enroll_token.assert_not_awaited()
+    h.repository.clear_bootstrap_hold.assert_not_awaited()
 
 
 @pytest.mark.asyncio

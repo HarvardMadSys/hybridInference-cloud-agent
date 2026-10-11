@@ -44,6 +44,10 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.host_settings import admin_values
+from cloud_agent_shared.sandbox_archive_settings import (
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
+)
 from cloud_agent_shared.shared_protocol import HOST_LAUNCH_ERROR_MAX_CHARS
 
 if TYPE_CHECKING:
@@ -136,6 +140,10 @@ class HostIdentity:
     #: whole on every answer, so a cleared value does not linger, and kept
     #: through a failed beat, so an outage does not revert anything.
     settings: dict[str, int] = field(default_factory=dict)
+    #: Complete database-owned archive policy returned by the last answered
+    #: heartbeat. ``None`` means the control plane did not provide the contract,
+    #: which is distinct from an explicit policy whose ``enabled`` is false.
+    sandbox_archive_settings: dict[str, Any] | None = None
 
 
 def credential_path() -> Path:
@@ -318,6 +326,7 @@ def heartbeat(
     profiling: dict[str, Any] | None = None,
     settings_applied: dict[str, int | float] | None = None,
     settings_local: dict[str, int | float] | None = None,
+    sandbox_archive_settings_applied_revision: int | None = None,
     on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -370,6 +379,9 @@ def heartbeat(
             "profiling": profiling,
             "settings_applied": settings_applied,
             "settings_local": settings_local,
+            "sandbox_archive_settings_applied_revision": (
+                sandbox_archive_settings_applied_revision
+            ),
             "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
@@ -385,6 +397,21 @@ def heartbeat(
     stop_retained = answer.get("retained_sandboxes_stop")
     if stop_retained and on_retained_sandboxes_stop is not None:
         on_retained_sandboxes_stop([item for item in stop_retained if isinstance(item, dict)])
+    raw_archive_settings = answer.get("sandbox_archive_settings")
+    if raw_archive_settings is None:
+        archive_settings: dict[str, Any] | None = None
+    elif not isinstance(raw_archive_settings, dict):
+        raise EnrollmentError("heartbeat returned invalid sandbox archive settings")
+    else:
+        try:
+            archive_policy = SandboxArchivePolicy.from_mapping(raw_archive_settings)
+        except SandboxArchivePolicyError as exc:
+            raise EnrollmentError("heartbeat returned invalid sandbox archive settings") from exc
+        archive_settings = archive_policy.as_dict()
+        updated_at = raw_archive_settings.get("updated_at")
+        if isinstance(updated_at, str):
+            archive_settings["updated_at"] = updated_at
+
     identity.status = str(answer.get("status") or identity.status)
     interval = answer.get("heartbeat_interval_seconds")
     if isinstance(interval, (int, float)) and interval > 0:
@@ -400,6 +427,7 @@ def heartbeat(
     # this host does not. A control plane predating settings sends none, which
     # leaves every setting on the host's own .env.
     identity.settings = admin_values(answer.get("settings"))
+    identity.sandbox_archive_settings = archive_settings
     # The profiling policy rides this same answer, and the caller applies it to
     # its own process's policy store. Returning it rather than applying it here
     # keeps this module about talking to the control plane: the store belongs to
@@ -533,6 +561,8 @@ class HostHeartbeat:
             Callable[[], tuple[dict[str, int | float], dict[str, int | float]]] | None
         ) = None,
         on_settings: Callable[[dict[str, int]], None] | None = None,
+        sandbox_archive_settings_report: Callable[[], int | None] | None = None,
+        on_sandbox_archive_settings: Callable[[dict[str, Any] | None], None] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -586,6 +616,8 @@ class HostHeartbeat:
         # must not raise; one that does is logged and the beats go on.
         self._settings_report = settings_report
         self._on_settings = on_settings
+        self._sandbox_archive_settings_report = sandbox_archive_settings_report
+        self._on_sandbox_archive_settings = on_sandbox_archive_settings
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
@@ -653,6 +685,11 @@ class HostHeartbeat:
                 settings_applied, settings_local = (
                     self._settings_report() if self._settings_report is not None else (None, None)
                 )
+                archive_settings_applied_revision = (
+                    self._sandbox_archive_settings_report()
+                    if self._sandbox_archive_settings_report is not None
+                    else None
+                )
                 heartbeat(
                     base_url=self._base_url,
                     identity=self._identity,
@@ -681,10 +718,12 @@ class HostHeartbeat:
                     profiling=(self._profiling() if self._profiling is not None else None),
                     settings_applied=settings_applied,
                     settings_local=settings_local,
+                    sandbox_archive_settings_applied_revision=(archive_settings_applied_revision),
                     on_residencies_lost=self._on_residencies_lost,
                     on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )
                 self._apply_settings()
+                self._apply_sandbox_archive_settings()
             except HostRemoved:
                 # Definitive: this credential is not one the control plane
                 # accepts. Stop claiming and stop asking — retrying a refusal
@@ -735,6 +774,22 @@ class HostHeartbeat:
             logger.exception(
                 "agent_host_settings_apply_failed",
                 extra={"event": "agent_host_settings_apply_failed", "host": self._identity.host},
+            )
+
+    def _apply_sandbox_archive_settings(self) -> None:
+        """Relay the answered DB policy without letting a failure stop heartbeats."""
+        if self._on_sandbox_archive_settings is None:
+            return
+        settings = self._identity.sandbox_archive_settings
+        try:
+            self._on_sandbox_archive_settings(None if settings is None else dict(settings))
+        except Exception:
+            logger.exception(
+                "agent_sandbox_archive_settings_apply_failed",
+                extra={
+                    "event": "agent_sandbox_archive_settings_apply_failed",
+                    "host": self._identity.host,
+                },
             )
 
     def _wait_for_next_beat(self) -> None:

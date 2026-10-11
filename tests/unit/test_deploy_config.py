@@ -740,6 +740,24 @@ def test_shared_chat_timeout_matches_and_no_legacy_gate_remains(compose: dict):
     assert runner_env["AGENT_CHAT_IDLE_TIMEOUT_S"] == broker_env["AGENT_CHAT_IDLE_TIMEOUT_S"]
 
 
+@pytest.mark.parametrize("stack_fixture", ["compose", "local_compose"])
+def test_s3_archive_policy_is_not_configured_through_environment(request, stack_fixture: str):
+    """Archive policy comes from Postgres; Compose must not add an env fallback."""
+    stack = request.getfixturevalue(stack_fixture)
+    archive_settings = {
+        "AGENT_SANDBOX_ARCHIVE_S3_URI",
+        "AGENT_SANDBOX_ARCHIVE_REGION",
+        "AGENT_SANDBOX_ARCHIVE_KMS_KEY_ARN",
+        "AGENT_SANDBOX_ARCHIVE_EXPECTED_BUCKET_OWNER",
+        "AGENT_SANDBOX_ARCHIVE_MAX_BYTES",
+        "AGENT_SANDBOX_ARCHIVE_MULTIPART_THRESHOLD_BYTES",
+        "AGENT_SANDBOX_ARCHIVE_MULTIPART_PART_BYTES",
+    }
+
+    for service in stack["services"].values():
+        assert archive_settings.isdisjoint((service.get("environment") or {}).keys())
+
+
 def test_runner_receives_exact_sha_rollout_metadata(compose: dict) -> None:
     """Runners read deployment metadata without owning its host directory."""
     runner = compose["services"]["runner"]

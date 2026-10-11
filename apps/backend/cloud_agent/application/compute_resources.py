@@ -307,6 +307,10 @@ class ComputeCommands:
         """Record one attachment or acquisition before any external side effect."""
         kind = "preflight" if preflight else "acquire"
         parameters = request.model_dump(mode="json")
+        if request.sandbox_storage_path is None:
+            # Preserve fingerprints of requests recorded before this optional
+            # creation field existed.
+            parameters.pop("sandbox_storage_path")
         existing = await self._existing(request.request_id, kind, parameters)
         if existing is not None:
             return existing
@@ -327,6 +331,10 @@ class ComputeCommands:
             if existing is not None:
                 return existing
             raise
+        if request.sandbox_storage_path is not None:
+            profile = profile.model_copy(
+                update={"sandbox_storage_path": request.sandbox_storage_path}
+            )
         if request.policy.enabled and (
             not entry.provider.capabilities().can_extend or request.mode != "provision"
         ):

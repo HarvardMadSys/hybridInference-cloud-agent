@@ -43,6 +43,20 @@ export const en = {
   'transcript.callUnknown': 'Pairing unknown',
   'transcript.callInterrupted': 'Call interrupted',
   'transcript.callFailed': 'Call failed',
+  'runDetails.summary': 'Turn {number} summary',
+  'runDetails.publishing': 'Publishing',
+  'runDetails.notRecorded': 'Status not recorded',
+  'runDetails.elapsed': 'Elapsed',
+  'runDetails.failureMissing':
+    'The run stopped before it could finish. No failure details were recorded.',
+  'runDetails.followUp': 'Review these details before sending a follow-up to try again.',
+  'runDetails.stoppedFollowUp': 'Send a follow-up to continue from any saved intermediate changes.',
+  'runDetails.contextLost':
+    'We couldn’t reconnect this chat. You can review its conversation and available files. Start a new chat to continue.',
+  'runDetails.repositoryLimit':
+    'A follow-up would fail the same way. Ask an admin to raise the repository import limit, or use a smaller repository.',
+  'runDetails.siteMisconfigured':
+    'An admin needs to finish setting up the site before you try another turn.',
   'turnResults.region': 'Recorded turn results',
   'turnResults.title': 'Recorded changes',
   'turnResults.files': '{count} changed files',
@@ -192,6 +206,27 @@ export const en = {
   'settings.title': 'Settings',
   'settings.close': 'Close settings',
   'settings.done': 'Done',
+  'settings.notifications.title': 'Notifications',
+  'settings.notifications.description':
+    'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
+  'settings.notifications.enable': 'Enable notifications',
+  'settings.notifications.enabling': 'Enabling…',
+  'settings.notifications.disable': 'Disable notifications',
+  'settings.notifications.events': 'Notify me about',
+  'settings.notifications.questions': 'Agent questions',
+  'settings.notifications.turns': 'Turn completions',
+  'settings.notifications.enabled': 'Browser notifications are enabled for this account.',
+  'settings.notifications.off': 'Browser notifications are off.',
+  'settings.notifications.unsupported':
+    'This browser cannot send notifications. Try a supported browser over HTTPS.',
+  'settings.notifications.denied':
+    'Notifications are blocked. Allow notifications for this site in your browser settings, then return here.',
+  'settings.notifications.error':
+    'Could not enable notifications. Check your browser settings and try again.',
+  'notifications.question': 'Agent needs your answer',
+  'notifications.succeeded': 'Agent turn finished',
+  'notifications.failed': 'Agent turn failed',
+  'notifications.cancelled': 'Agent turn cancelled',
 
   'sessionArchive.badge': 'Archived',
   'sessionArchive.back': 'Archived sessions',

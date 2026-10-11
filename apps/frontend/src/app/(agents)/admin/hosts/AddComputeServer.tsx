@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 
 import {
   createComputeServer,
@@ -45,6 +45,61 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+function parseSandboxStoragePath(value: string): string {
+  const path = value.trim();
+  const invalid = (message: string): never => {
+    throw new ProviderFieldError('sandbox_storage_path', message);
+  };
+  if (!path) return invalid('Sandbox storage path is required.');
+  if (path.length > 4096) {
+    return invalid('Sandbox storage path must be 4096 characters or fewer.');
+  }
+  if (!/^\/[A-Za-z0-9/_-]*$/.test(path) || path.includes('//')) {
+    return invalid(
+      'Sandbox storage path must be an absolute path using letters, numbers, /, _ or - with no repeated separators.',
+    );
+  }
+  const normalized = path.replace(/\/$/, '') || '/';
+  const systemRoots = [
+    '/',
+    '/home',
+    '/media',
+    '/mnt',
+    '/opt',
+    '/root',
+    '/srv',
+    '/tmp',
+    '/var',
+    '/var/lib',
+  ];
+  const protectedTrees = [
+    '/bin',
+    '/boot',
+    '/dev',
+    '/etc',
+    '/lib',
+    '/lib64',
+    '/proc',
+    '/run',
+    '/sbin',
+    '/sys',
+    '/usr',
+    '/var/lib/docker',
+    '/var/lib/containerd',
+    '/var/lib/cloud-agent',
+    '/var/lib/hybridinference',
+  ];
+  if (
+    systemRoots.includes(normalized) ||
+    protectedTrees.some((root) => normalized === root || normalized.startsWith(`${root}/`))
+  ) {
+    return invalid(
+      'Sandbox storage path must point to a dedicated mounted data disk outside system and service directories.',
+    );
+  }
+  return normalized;
+}
+
 export default function AddComputeServer({
   catalog,
   connections,
@@ -72,6 +127,8 @@ export default function AddComputeServer({
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [mode, setMode] = useState<'attach' | 'provision'>(provider?.modes[0] ?? 'attach');
   const [name, setName] = useState('');
+  const [sandboxStoragePath, setSandboxStoragePath] = useState('');
+  const storageId = useId();
   const [account, setAccount] = useState(() => initialCredential(provider, connections));
   const sshProvider = catalog.providers.find((item) => item.id === 'existing_ssh');
   const [ssh, setSsh] = useState(() => initialCredential(sshProvider, connections));
@@ -156,6 +213,7 @@ export default function AddComputeServer({
         throw new Error('Configure server setup before this server can run sandboxes.');
       }
       const configuration = parseFields(fields, values);
+      const storagePath = observeOnly ? undefined : parseSandboxStoragePath(sandboxStoragePath);
       if (needsSshKey && !observeOnly && !sshProvider) {
         throw new Error('SSH access is not configured.');
       }
@@ -174,6 +232,7 @@ export default function AddComputeServer({
         connection_id: connectionId,
         ...(sshConnectionId ? { ssh_connection_id: sshConnectionId } : {}),
         configuration,
+        ...(storagePath ? { sandbox_storage_path: storagePath } : {}),
       };
       stage = 'server';
       submitted = true;
@@ -327,6 +386,44 @@ export default function AddComputeServer({
                 onChange={setValues}
                 errors={fieldErrors}
               />
+            </div>
+          </Section>
+        )}
+        {!observeOnly && (
+          <Section title="Sandbox storage">
+            <div>
+              <Field label="Sandbox storage path">
+                <input
+                  className={inputClass}
+                  required
+                  maxLength={4096}
+                  value={sandboxStoragePath}
+                  placeholder="e.g. /mnt/data"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-invalid={Boolean(fieldErrors.sandbox_storage_path) || undefined}
+                  aria-describedby={[
+                    `${storageId}-help`,
+                    fieldErrors.sandbox_storage_path && `${storageId}-error`,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onChange={(event) => setSandboxStoragePath(event.target.value)}
+                />
+              </Field>
+              <p id={`${storageId}-help`} className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Absolute path to an existing mounted data disk on this server. Sandboxes,
+                workspaces, and session data are stored there.
+              </p>
+              {fieldErrors.sandbox_storage_path && (
+                <p
+                  id={`${storageId}-error`}
+                  role="alert"
+                  className="mt-1 text-xs text-red-700 dark:text-red-300"
+                >
+                  {fieldErrors.sandbox_storage_path}
+                </p>
+              )}
             </div>
           </Section>
         )}

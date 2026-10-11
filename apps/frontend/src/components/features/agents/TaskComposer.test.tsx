@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -860,6 +869,131 @@ describe('TaskComposer source-control onboarding', () => {
         expect.objectContaining({ attachment_ids: [41] }),
       ),
     );
+  });
+
+  it('pastes images synchronously and sends uploads with unique names across repeated pastes and remounts', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    let attachmentId = 41;
+    vi.mocked(uploadAttachment).mockImplementation(async (file, path) => ({
+      id: attachmentId++,
+      path: path!,
+      size_bytes: file.size,
+      content_type: file.type,
+    }));
+    const view = render(<TaskComposer />);
+    await chooseRepository();
+    const box = screen.getByRole('textbox');
+    fireEvent.change(box, { target: { value: 'Compare these screenshots' } });
+    const image = new File(['pixels'], 'image.png', { type: 'image/png' });
+    const textFile = new File(['notes'], 'notes.txt', { type: 'text/plain' });
+    const pasteImage = (target: HTMLElement) => {
+      const getAsFile = vi.fn<() => File | null>(() => image);
+      const event = createEvent.paste(target, {
+        clipboardData: {
+          items: [
+            { kind: 'string', type: 'text/plain', getAsFile: () => null },
+            { kind: 'file', type: 'image/png', getAsFile },
+            { kind: 'file', type: 'text/plain', getAsFile: () => textFile },
+          ],
+          // Browsers expose the same image here too; it must be uploaded once.
+          files: [image, textFile],
+        },
+      });
+      fireEvent(target, event);
+      expect(getAsFile).toHaveBeenCalledOnce();
+      expect(event.defaultPrevented).toBe(true);
+      // Clipboard file access expires when the synchronous paste handler exits.
+      getAsFile.mockReturnValue(null);
+    };
+
+    pasteImage(box);
+    pasteImage(box);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
+    expect(uploadAttachment).toHaveBeenCalledTimes(2);
+    expect(box).toHaveValue('Compare these screenshots');
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(
+        expect.objectContaining({ attachment_ids: [41, 42] }),
+      ),
+    );
+
+    // Attachments from later messages share the archive with earlier uploads.
+    view.unmount();
+    render(<TaskComposer />);
+    await chooseRepository();
+    pasteImage(screen.getByRole('textbox'));
+    await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(3));
+    const paths = vi.mocked(uploadAttachment).mock.calls.map(([file, path]) => {
+      expect(file).toEqual(
+        expect.objectContaining({ name: path, type: 'image/png', size: image.size }),
+      );
+      expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
+      return path;
+    });
+    expect(new Set(paths).size).toBe(3);
+  });
+
+  it.each(['plain text', 'non-image file'])(
+    'leaves a %s paste to the browser without uploading it',
+    async (kind) => {
+      vi.mocked(getAgentConfig).mockResolvedValue(config());
+      render(<TaskComposer />);
+      await chooseRepository();
+      const box = screen.getByRole('textbox');
+      fireEvent.change(box, { target: { value: 'Existing task' } });
+      const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
+      const event = createEvent.paste(box, {
+        clipboardData: {
+          items:
+            kind === 'plain text'
+              ? [{ kind: 'string', type: 'text/plain', getAsFile: () => null }]
+              : [{ kind: 'file', type: 'text/plain', getAsFile: () => file }],
+          files: kind === 'plain text' ? [] : [file],
+          getData: () => 'Pasted text',
+        },
+      });
+      fireEvent(box, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(uploadAttachment).not.toHaveBeenCalled();
+      expect(box).toHaveValue('Existing task');
+    },
+  );
+
+  it('does not upload pasted images before GitHub is connected', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ github_connected: false, github_install_url: '/agents/integrations' }),
+    );
+    render(<TaskComposer />);
+    await screen.findByText('Connect GitHub to start');
+    const box = screen.getByRole('textbox');
+    expect(box).toBeEnabled();
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload pasted images while a task is being created', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockReturnValue(new Promise(() => {}));
+    render(<TaskComposer />);
+    await chooseRepository();
+    const box = screen.getByRole('textbox');
+    fireEvent.change(box, { target: { value: 'Start the task' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledOnce());
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
   });
 
   it('keeps a folder’s structure and shows it as one chip', async () => {

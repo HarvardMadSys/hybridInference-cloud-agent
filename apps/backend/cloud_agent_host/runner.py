@@ -98,7 +98,7 @@ from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.runtime_qualification import VERDICT_KEY, HostQualification, adopt_verdict
-from cloud_agent_host.runtime_settings import RuntimeSettings
+from cloud_agent_host.runtime_settings import RuntimeSettings, SandboxArchiveRuntimeSettings
 from cloud_agent_host.runtimes import (
     AgentRuntime,
     NormalizedEvent,
@@ -138,6 +138,7 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
@@ -1325,6 +1326,10 @@ def _shared_live_host_capabilities(
         # Named per runtime: the broker of this same deployment takes a
         # message into a running turn only through a driver that wires it.
         *steerable,
+        # This exact replica can accept the deployment-wide DB archive policy
+        # over its authenticated broker channel. A claim also attests the
+        # exact revision that broker confirmed.
+        SANDBOX_ARCHIVE_CAPABILITY,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1358,7 +1363,11 @@ def _shared_live_deployment_ready(
     )
 
 
-def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
+def _claim_attestation(
+    backend: SandboxBackend,
+    *,
+    sandbox_archive_settings_applied_revision: int | None = None,
+) -> dict[str, Any]:
     """Build the exact-replica proof required for every claim."""
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
@@ -1367,6 +1376,10 @@ def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    if sandbox_archive_settings_applied_revision is not None:
+        stamp["sandbox_archive_settings_applied_revision"] = (
+            sandbox_archive_settings_applied_revision
+        )
     if stamp["runner_capabilities"]:
         # For a control plane older than this release. Hosts roll out before
         # the API, so a replacement runner polls that API for a while, and it
@@ -1465,8 +1478,135 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             client.close()
 
 
+_RETAINED_STOP_COMMAND_MAX = 128
+_RetainedStopKey = tuple[str, int, int]
+
+
+class _RetainedSandboxStopWorker:
+    """Keep synchronous broker stops off the host-heartbeat thread.
+
+    The control plane repeats a durable stop fence until Docker reports the
+    group stopped. Exact duplicate fences are ignored and overflow is left for
+    a later heartbeat. Closing discards pending work but joins the one request
+    already in flight, including a bounded synchronous final archive.
+    """
+
+    def __init__(
+        self,
+        apply: Callable[[list[dict[str, Any]]], None],
+        *,
+        max_commands: int = _RETAINED_STOP_COMMAND_MAX,
+    ) -> None:
+        if max_commands < 1:
+            raise ValueError("retained stop worker capacity must be positive")
+        self._apply = apply
+        self._max_commands = max_commands
+        self._condition = threading.Condition()
+        self._pending: dict[_RetainedStopKey, dict[str, Any]] = {}
+        self._active: set[_RetainedStopKey] = set()
+        self._closed = False
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _key(command: dict[str, Any]) -> _RetainedStopKey | None:
+        thread_id = command.get("thread_id")
+        generation = command.get("generation")
+        activation = command.get("activation_generation")
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or isinstance(activation, bool)
+            or not isinstance(activation, int)
+            or activation < 0
+        ):
+            return None
+        return thread_id, generation, activation
+
+    def submit(self, commands: list[dict[str, Any]]) -> None:
+        """Admit unique exact fences without ever waiting for broker I/O."""
+        invalid = 0
+        overflow = 0
+        with self._condition:
+            if self._closed:
+                return
+            for command in commands:
+                key = self._key(command)
+                if key is None:
+                    invalid += 1
+                    continue
+                if key in self._pending or key in self._active:
+                    continue
+                if len(self._pending) + len(self._active) >= self._max_commands:
+                    overflow += 1
+                    continue
+                self._pending[key] = dict(command)
+            if self._pending and self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    daemon=True,
+                    name="agent-retained-sandbox-stop",
+                )
+                self._thread.start()
+            self._condition.notify_all()
+        if invalid:
+            logger.warning(
+                "agent_retained_stop_command_invalid",
+                extra={"event": "agent_retained_stop_command_invalid", "count": invalid},
+            )
+        if overflow:
+            logger.warning(
+                "agent_retained_stop_queue_full",
+                extra={
+                    "event": "agent_retained_stop_queue_full",
+                    "count": overflow,
+                    "capacity": self._max_commands,
+                },
+            )
+
+    def close(self) -> None:
+        """Seal intake, abandon pending durable commands, and join active I/O."""
+        with self._condition:
+            self._closed = True
+            dropped = len(self._pending)
+            self._pending.clear()
+            self._condition.notify_all()
+            thread = self._thread
+        if dropped:
+            logger.info(
+                "agent_retained_stop_shutdown_drop",
+                extra={"event": "agent_retained_stop_shutdown_drop", "count": dropped},
+            )
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._pending:
+                    if self._closed:
+                        return
+                    self._condition.wait()
+                key = next(iter(self._pending))
+                command = self._pending.pop(key)
+                self._active.add(key)
+            try:
+                self._apply([command])
+            except Exception:
+                logger.exception(
+                    "agent_retained_stop_worker_failed",
+                    extra={"event": "agent_retained_stop_worker_failed"},
+                )
+            finally:
+                with self._condition:
+                    self._active.discard(key)
+                    self._condition.notify_all()
+
+
 def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
-    """Apply durable settled-idle stop commands without breaking host beats."""
+    """Apply one worker batch of durable settled-idle stop commands."""
     client: SessionSupervisorClient | None = None
     try:
         client = _session_supervisor_from_env()
@@ -1475,6 +1615,7 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
                 client.stop_shared_idle(
                     str(command["thread_id"]),
                     generation=int(command["generation"]),
+                    activation_generation=int(command["activation_generation"]),
                     reason=str(command.get("reason") or "idle"),
                     member_activation_generations=command.get("member_activation_generations"),
                 )
@@ -2092,6 +2233,21 @@ def _run_shared_live_attempt(
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
         return 2
+    if existing:
+        # Resource limits belong to the retained group. A settings edit must
+        # not change its reservation or a fork's shared container. Legacy
+        # groups have no disk quota, including when a new default is set.
+        memory_limit = str(existing.get("memory_limit") or "4g")
+        cpu_limit = str(existing.get("cpu_limit") or "2")
+        disk_limit_mib = int(existing.get("disk_limit_mib") or 0)
+    else:
+        try:
+            memory_limit = f"{_sandbox_resource_setting('sandbox_memory_mib', settings)}m"
+            cpu_limit = f"{_sandbox_resource_setting('sandbox_cpu_millicores', settings) / 1000:g}"
+            disk_limit_mib = _sandbox_resource_setting("sandbox_disk_mib", settings)
+        except ValueError as exc:
+            finish_attempt("failed", str(exc))
+            return 2
     sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
     origin_thread_id = str(existing.get("origin_thread_id") or job.thread_id)
     seed_spec = ChatSandboxSpec(
@@ -2107,6 +2263,10 @@ def _run_shared_live_attempt(
         ),
         shared_live=True,
         resident_slot_capacity=capacity,
+        memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        disk_limit_mib=disk_limit_mib,
+        stop_timeout_s=int(existing.get("stop_timeout_seconds") or 10),
     )
     if existing:
         if existing.get("host") != host:
@@ -2131,6 +2291,7 @@ def _run_shared_live_attempt(
                 "resident_slot_capacity": capacity,
                 "memory_limit": seed_spec.memory_limit,
                 "cpu_limit": seed_spec.cpu_limit,
+                "disk_limit_mib": seed_spec.disk_limit_mib,
                 "stop_timeout_seconds": seed_spec.stop_timeout_s,
                 # What the image a new container is created from declares, so
                 # Fork can ask it of this group after the host moves on to a
@@ -2146,6 +2307,18 @@ def _run_shared_live_attempt(
         finish_attempt("failed", f"could not reserve shared chat sandbox: {exc}")
         return 2
 
+    if (
+        reservation.get("memory_limit") != seed_spec.memory_limit
+        or reservation.get("cpu_limit") != seed_spec.cpu_limit
+        or reservation.get("disk_limit_mib", 0) != seed_spec.disk_limit_mib
+    ):
+        finish_attempt(
+            "failed",
+            "Site misconfigured: the control plane did not confirm the reserved "
+            "container CPU, memory and disk limits. Update the control plane and host together.",
+        )
+        return 2
+
     spec = ChatSandboxSpec(
         thread_id=str(reservation.get("origin_thread_id") or origin_thread_id),
         sandbox_id=str(reservation["sandbox_id"]),
@@ -2157,6 +2330,7 @@ def _run_shared_live_attempt(
         resident_slot_capacity=int(reservation.get("resident_slot_capacity") or capacity),
         memory_limit=str(reservation.get("memory_limit") or seed_spec.memory_limit),
         cpu_limit=str(reservation.get("cpu_limit") or seed_spec.cpu_limit),
+        disk_limit_mib=int(reservation.get("disk_limit_mib", seed_spec.disk_limit_mib)),
         stop_timeout_s=int(reservation.get("stop_timeout_seconds") or seed_spec.stop_timeout_s),
     )
     activation_generation = int(reservation["activation_generation"])
@@ -2212,8 +2386,11 @@ def _run_shared_live_attempt(
 
     try:
         if not has_context:
-            # Cloned on the host while the activation below creates and boots
-            # the guest; only the import, at the checkout stage, waits for both.
+            # Clone into a host-local temporary archive while the activation
+            # below creates and boots the guest. This cannot mutate the
+            # sandbox whose durable initial marker still has to be probed. If
+            # that probe recovers a prepared baseline, discard this speculative
+            # source instead of importing it.
             import_mib = settings.get("source_import_max_mib")
             source = _prefetch_retained_source(
                 job=job,
@@ -2297,36 +2474,75 @@ def _run_shared_live_attempt(
         terminals_suspended = True
 
         imported_base: str | None = None
+        recovered_initial = False
         if not has_context:
-            stage = _stage(measurement, "workspace_reset")
-            manager.reset_unsettled_state(spec)
-            stage = _stage(measurement, "checkout")
-            if source is None:
-                raise SandboxError("a new chat's source was never prepared")
-            base_sha = source.import_into(
-                manager, spec, observer=operation_profiling.stage_observer(measurement)
+            # A previous activation may have committed the immutable S3
+            # baseline and then died before returning its receipt. Resolve
+            # that durable marker before reset, setup, permissions, or uploads
+            # can alter the exact prepared bytes it names.
+            stage = _stage(measurement, "initial_archive_status")
+            initial_status = supervisor.initial_archive_status(
+                spec,
+                thread_id=job.thread_id,
+                token=lease_token,
+                members=manifest,
+                expected_container_id=str(lease["container_id"]),
+                preparation_id=job.job_id,
             )
-            reused_workspace = False
-            if job.setup_script:
-                stage = _stage(measurement, "setup")
-                setup = run_setup(
-                    script=job.setup_script,
-                    workdir=CHAT_WORKDIR,
-                    backend=retained,
+            status_enabled = initial_status.get("enabled")
+            status_prepared = initial_status.get("prepared")
+            status_stored = initial_status.get("stored")
+            valid_status = (
+                status_enabled is False and status_prepared is False and status_stored is False
+            ) or (status_enabled is True and status_prepared is False and status_stored is False)
+            if status_enabled is True and status_prepared is True and status_stored is True:
+                recovered_base = initial_status.get("base_sha")
+                if isinstance(recovered_base, str) and re.fullmatch(
+                    r"(?:[0-9a-f]{40}|[0-9a-f]{64})", recovered_base
+                ):
+                    base_sha = recovered_base
+                    recovered_initial = True
+                    reused_workspace = True
+                    valid_status = True
+            if not valid_status:
+                raise SandboxError("workspace broker returned an invalid initial archive status")
+            if recovered_initial and source is not None:
+                source.discard()
+                source = None
+
+        if not has_context:
+            if not recovered_initial:
+                # The marker probe above proved there is no prepared baseline.
+                # Only now may the prefetched source mutate the sandbox.
+                stage = _stage(measurement, "workspace_reset")
+                manager.reset_unsettled_state(spec)
+                stage = _stage(measurement, "checkout")
+                if source is None:
+                    raise SandboxError("a new chat's source was never prepared")
+                base_sha = source.import_into(
+                    manager, spec, observer=operation_profiling.stage_observer(measurement)
                 )
-                control.append_event(
-                    NormalizedEvent(
-                        "lifecycle",
-                        {"phase": "setup", "cached": False, "ran": setup.ran},
+                reused_workspace = False
+                if job.setup_script:
+                    stage = _stage(measurement, "setup")
+                    setup = run_setup(
+                        script=job.setup_script,
+                        workdir=CHAT_WORKDIR,
+                        backend=retained,
                     )
-                )
-                if setup.exit_code != 0:
-                    failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
-                    abandon_before_finish(lost=False, detail=failure_detail)
-                    finish_attempt("failed", failure_detail, base_sha=base_sha)
-                    return 1
-            stage = _stage(measurement, "workspace_permissions")
-            manager.prepare_shared_workspace(spec)
+                    control.append_event(
+                        NormalizedEvent(
+                            "lifecycle",
+                            {"phase": "setup", "cached": False, "ran": setup.ran},
+                        )
+                    )
+                    if setup.exit_code != 0:
+                        failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
+                        abandon_before_finish(lost=False, detail=failure_detail)
+                        finish_attempt("failed", failure_detail, base_sha=base_sha)
+                        return 1
+                stage = _stage(measurement, "workspace_permissions")
+                manager.prepare_shared_workspace(spec)
         else:
             stage = _stage(measurement, "native_workspace_resume")
             if not native_session_id:
@@ -2361,7 +2577,11 @@ def _run_shared_live_attempt(
             control=control,
             manager=manager,
             spec=spec,
-            fresh_container=not has_context,
+            # A recovered baseline belongs to the same retained container, so
+            # its earlier thread uploads are already present. A replacement
+            # first-turn job can still add files of its own and must import the
+            # thread's current attachment set before prompt admission.
+            fresh_container=not has_context and not recovered_initial,
         )
         if imported_uploads:
             control.append_event(
@@ -2371,6 +2591,50 @@ def _run_shared_live_attempt(
                         "phase": "uploads_imported",
                         "files": imported_uploads,
                         "path": CHAT_UPLOADS_DIR,
+                    },
+                )
+            )
+        if not has_context and not recovered_initial:
+            # Source, setup, permissions, and uploaded files are complete, and
+            # no resident CLI or prompt exists yet. Capture this point-in-time
+            # boundary before admitting either. The broker owns S3 access; the
+            # runner never receives cloud credentials.
+            stage = _stage(measurement, "initial_archive")
+            initial_archive = supervisor.capture_initial_archive(
+                spec,
+                thread_id=job.thread_id,
+                token=lease_token,
+                members=manifest,
+                expected_container_id=str(lease["container_id"]),
+                preparation_id=job.job_id,
+                base_sha=base_sha,
+            )
+            archive_enabled = initial_archive.get("enabled")
+            archive_stored = initial_archive.get("stored")
+            if not (
+                (archive_enabled is False and archive_stored is False)
+                or (archive_enabled is True and archive_stored is True)
+            ):
+                raise SandboxError("workspace broker returned an invalid initial archive receipt")
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "initial_archive",
+                        "enabled": archive_enabled,
+                        "stored": archive_stored,
+                    },
+                )
+            )
+        elif recovered_initial:
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "initial_archive",
+                        "enabled": True,
+                        "stored": True,
+                        "recovered": True,
                     },
                 )
             )
@@ -3122,17 +3386,14 @@ _STOPPING = threading.Event()
 def _drain_on_sigterm() -> None:
     """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
 
-    The split is deliberate. `docker stop` and `compose up -d` send SIGTERM and
-    then wait `stop_grace_period` — that wait is exactly the room to let a job
-    end, and the container is being replaced anyway, so exiting after it is
-    right. A person pressing Ctrl-C means *now*, and turning that into a
+    The split is deliberate. `docker stop` sends SIGTERM; supported activation
+    asks the Engine to wait indefinitely, so a job finishes before its runner
+    is replaced. Direct, out-of-band Compose operations retain their configured
+    grace period. A person pressing Ctrl-C means *now*, and turning that into a
     several-minute wait would be its own surprise.
 
-    The lease machinery remains the backstop, not the plan: a job outlasting
-    the grace period is SIGKILLed, its lease expires, and the control plane
-    supersedes the attempt — which is what happened to every job through a
-    deploy before this, and is exactly the outcome this narrows to the rare
-    case.
+    The lease machinery remains the backstop for a host failure or an explicit
+    forced kill, not the deployment plan.
     """
 
     def handler(signum: int, frame: object) -> None:
@@ -3247,13 +3508,14 @@ def _turn_host_settings(raw: Any) -> dict[str, float]:
     """The runner's share of the runtime settings a turn was handed, checked again.
 
     The parent already resolved them, so this only drops what no turn should
-    act on: a key the runner does not apply, or a value that is not a positive
-    finite number. A setting dropped here is read from the environment instead.
+    act on: a key the runner does not apply, or a value that is not a usable
+    finite number. Zero is valid for the optional disk quota. A setting
+    dropped here is read from the environment instead.
     """
     return {
         key: float(value)
         for key, value in (reported_values(raw) or {}).items()
-        if key in RUNNER_SETTING_KEYS and value > 0
+        if key in RUNNER_SETTING_KEYS and (value > 0 or key == "sandbox_disk_mib")
     }
 
 
@@ -3450,8 +3712,8 @@ def _serve_turn(
     # Installed before the answer, so there is no window in which this process
     # owns a turn and SIGTERM would still kill it outright. From here the turn
     # is this process's: SIGTERM means the container is being replaced, the
-    # turn still runs to its end, and the grace period bounds that exactly as
-    # it did when a replica ran one job at a time.
+    # turn still runs to its end, and supported activation has no forced-kill
+    # deadline.
     _drain_on_sigterm()
     write_handover(handover_fd, f"{HANDOVER_ACCEPTED} {job.job_id}")
     # Only an accepted turn can finish and deliver the inherited measurement,
@@ -3600,6 +3862,9 @@ def run_forever(
         _runner_local_settings(agent_timeout_s),
         broker=None if settings_broker is None else settings_broker.apply_host_settings,
     )
+    archive_settings = SandboxArchiveRuntimeSettings(
+        None if settings_broker is None else settings_broker.apply_sandbox_archive_settings
+    )
 
     capacity = _start_host_capacity_collector(backend)
     # The policy sync is installed *before* the host starts taking work, so
@@ -3636,6 +3901,20 @@ def run_forever(
         logger.warning("agent_profiling_policy_unavailable", exc_info=True)
         policy_sync = None
 
+    retained_stop_worker = _RetainedSandboxStopWorker(_stop_retained_sandboxes)
+
+    def apply_archive_settings(settings: dict[str, Any] | None) -> None:
+        """Relay policy and immediately report loss or gain of confirmation."""
+        before = archive_settings.report()
+        try:
+            if settings is None:
+                archive_settings.invalidate()
+            else:
+                archive_settings.apply(settings)
+        finally:
+            if archive_settings.report() != before:
+                pool.wake()
+
     pool = HostHeartbeat(
         base_url=base_url,
         identity=identity,
@@ -3667,11 +3946,13 @@ def run_forever(
         # stale on the page, which is the truth.
         capacity_beats=None if capacity is None else lambda: capacity.latest()[0],
         settings_report=runtime_settings.report,
+        sandbox_archive_settings_report=archive_settings.report,
         # A changed report goes out now rather than an interval later, so the
         # admin page stops saying "applying" as soon as it is true.
         on_settings=lambda admin: pool.wake() if runtime_settings.apply(admin) else None,
+        on_sandbox_archive_settings=apply_archive_settings,
         on_residencies_lost=_handle_host_residencies_lost,
-        on_retained_sandboxes_stop=_stop_retained_sandboxes,
+        on_retained_sandboxes_stop=retained_stop_worker.submit,
     )
     if policy_sync is not None:
         # Its own loop as well as the beat's answer: the answer only arrives
@@ -3683,7 +3964,7 @@ def run_forever(
     _drain_on_sigterm()
 
     def stop_all() -> None:
-        """Stop heartbeating and sampling, in that order.
+        """Stop heartbeating, lifecycle work, and sampling, in that order.
 
         The sampler never joins a heartbeat in flight, so the pool is stopped
         first and the thread that fed it second; neither call can block on the
@@ -3691,6 +3972,7 @@ def run_forever(
         daemon it no longer needs.
         """
         pool.stop()
+        retained_stop_worker.close()
         if policy_sync is not None:
             policy_sync.stop()
         if capacity is not None:
@@ -3806,6 +4088,12 @@ def run_forever(
             if not runtime_settings.adopted and time.monotonic() < settings_deadline:
                 time.sleep(idle_wait)
                 continue
+            # Archive policy is a stop-safety boundary. The broker must
+            # explicitly confirm the complete DB revision, including an
+            # explicit disabled policy, before this process creates work.
+            if not archive_settings.ready:
+                time.sleep(idle_wait)
+                continue
 
             # A distinct lease owner per turn. Fencing never reads this
             # string, but "which turn is stuck" stops being answerable the
@@ -3829,7 +4117,10 @@ def run_forever(
                         host_credential=pool.credential,
                         worker_id=turn_worker_id,
                         lease_ttl=lease_ttl,
-                        attestation=_claim_attestation(backend),
+                        attestation=_claim_attestation(
+                            backend,
+                            sandbox_archive_settings_applied_revision=archive_settings.report(),
+                        ),
                     )
             except ClaimUnreachable as exc:
                 operation_profiling.discard(measurement)
@@ -4262,7 +4553,33 @@ def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
             os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
             or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
         ),
+        **{
+            key: _sandbox_resource_setting(key, {})
+            for key in ("sandbox_cpu_millicores", "sandbox_memory_mib", "sandbox_disk_mib")
+        },
     }
+
+
+def _sandbox_resource_setting(key: str, settings: Mapping[str, float]) -> int:
+    """Read a bounded whole-number resource policy, preserving a zero disk quota."""
+    setting = HOST_SETTINGS_BY_KEY[key]
+    value = settings.get(key)
+    if value is None:
+        raw = os.environ.get(setting.env)
+        try:
+            value = int(raw) if raw else setting.default
+        except ValueError as exc:
+            raise ValueError(f"{setting.label} must be a whole number") from exc
+    try:
+        checked = int(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"{setting.label} must be a whole number") from exc
+    if isinstance(value, bool) or value != checked or not setting.accepts(checked):
+        raise ValueError(
+            f"{setting.label} must be a whole number from "
+            f"{setting.minimum} through {setting.maximum} {setting.unit}"
+        )
+    return checked
 
 
 def default_worker_id() -> str:

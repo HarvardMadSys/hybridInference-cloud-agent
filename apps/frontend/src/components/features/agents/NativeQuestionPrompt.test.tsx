@@ -34,6 +34,22 @@ const request: AgentQuestionRequestApi = {
     },
   ],
 };
+const planRequest: AgentQuestionRequestApi = {
+  request_id: 'plan-request-1',
+  questions: [
+    {
+      id: '0',
+      header: 'Plan approval',
+      question:
+        'Approve this plan and allow the agent to proceed?\n\n1. Inspect the issue.\n2. Fix it.',
+      multiple: false,
+      options: [
+        { label: 'Approve plan', description: 'Allow the agent to proceed with this plan.' },
+      ],
+      allow_custom: false,
+    },
+  ],
+};
 function snapshot(questions = [request]): AgentQuestionsApi {
   return { job_id: props.jobId, attempt_id: props.attemptId, questions };
 }
@@ -79,6 +95,55 @@ it('opens a discovered question, sends its selected answer, and checks for anoth
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(list).toHaveBeenCalledTimes(2);
 });
+
+it.each(['approve', 'reject'] as const)(
+  'preserves plan paragraphs and sends a plan %s to the exact live request',
+  async (decision) => {
+    list.mockResolvedValue(snapshot([planRequest]));
+    let rerender!: ReturnType<typeof render>['rerender'];
+    await act(async () => {
+      ({ rerender } = render(<NativeQuestionPrompt {...props} />));
+    });
+    const plan = screen.getByText(planRequest.questions[0].question, {
+      exact: true,
+      normalizer: (text) => text,
+    });
+    expect(plan).toHaveClass('whitespace-pre-wrap', 'break-words');
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: 'Other' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: 'Approve plan' }));
+
+    // A native request ID may recur in a later attempt. It needs a new decision
+    // and must use that attempt's live ownership when approval is submitted.
+    const nextProps = { ...props, attemptId: 11 };
+    list.mockResolvedValue({ ...snapshot([planRequest]), attempt_id: nextProps.attemptId });
+    await act(async () => {
+      rerender(<NativeQuestionPrompt {...nextProps} />);
+    });
+    expect(screen.getByRole('radio', { name: 'Approve plan' })).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled();
+
+    if (decision === 'approve') {
+      fireEvent.click(screen.getByRole('radio', { name: 'Approve plan' }));
+    }
+    list.mockResolvedValue({ ...snapshot([]), attempt_id: nextProps.attemptId });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: decision === 'approve' ? 'Send answer' : 'Skip question',
+        }),
+      );
+    });
+    expect(answer).toHaveBeenCalledExactlyOnceWith('thread-1', {
+      request_id: 'plan-request-1',
+      job_id: 'job-1',
+      attempt_id: 11,
+      answers: decision === 'approve' ? { 0: ['Approve plan'] } : {},
+      ...(decision === 'reject' ? { reject: true } : {}),
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  },
+);
 
 it('supports multiple questions, multiple options, and a custom answer', async () => {
   list.mockResolvedValue(

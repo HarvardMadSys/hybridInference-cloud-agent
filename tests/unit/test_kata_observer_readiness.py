@@ -130,13 +130,19 @@ def test_kata_exec_delivers_eof_and_preserves_input_and_literal_arguments(monkey
     spec = ChatSandboxSpec(
         thread_id="thread", sandbox_id="sandbox", generation=1, runtime_id="claude-code"
     )
+    container_id = "immutable-container-id"
     literal = "spaces ' \" $HOME $(false) `false`\nnext line"
     real_run = subprocess.run
-    monkeypatch.setattr(manager, "_require", lambda spec: SimpleNamespace(running=True))
+    monkeypatch.setattr(
+        manager,
+        "_require",
+        lambda spec: SimpleNamespace(running=True, container_id=container_id),
+    )
 
     def docker_exec(argv, **kwargs):
         assert ("--interactive" in argv) == bool(payload)
-        guest_argv = argv[argv.index(spec.container_name) + 1 :]
+        assert spec.container_name not in argv
+        guest_argv = argv[argv.index(container_id) + 1 :]
         assert guest_argv[:3] == ["/usr/bin/setpriv", "--no-new-privs", "--"]
         guest_argv = guest_argv[3:]
         if payload:

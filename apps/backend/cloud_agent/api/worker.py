@@ -1105,6 +1105,7 @@ async def worker_reserve_thread_sandbox(
             resident_slot_capacity=body.resident_slot_capacity,
             memory_limit=body.memory_limit,
             cpu_limit=body.cpu_limit,
+            disk_limit_mib=body.disk_limit_mib,
             stop_timeout_seconds=body.stop_timeout_seconds,
             fork_helper_version=body.fork_helper_version,
         )

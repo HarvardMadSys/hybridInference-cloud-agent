@@ -51,6 +51,8 @@ export interface AdminSandbox {
   deletion_error?: string | null;
   memory_limit: string;
   cpu_limit: string;
+  /** Retained writable-layer quota; zero or absent on older responses means no quota. */
+  disk_limit_mib?: number;
   member_count: number;
   active_attempt_count: number;
   resource_usage?: AdminSandboxResourceUsage | null;
@@ -95,6 +97,7 @@ export interface AdminSandboxDetail {
   sandbox: AdminSandbox;
   members: AdminSandboxMember[];
   observed_at: string;
+  terminal_activity_error?: string | null;
 }
 
 export interface AdminSandboxStopRequest {

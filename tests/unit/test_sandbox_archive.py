@@ -197,6 +197,36 @@ def test_prepare_rejects_running_or_stale_identity(archive_setup, change):
     assert manager.exports == manager.removals == 0
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "initial_archive_preservation_pending",
+        "stop_archive_pending",
+        "stop_archive_blocked",
+        "orphan_finalization_pending",
+        "start_archive_completion_pending",
+    ],
+)
+def test_deletion_preserves_lifecycle_archive_fences(archive_setup, monkeypatch, flag):
+    manager, supervisor, service, identity, spec, _members = archive_setup
+    group = supervisor._groups[spec.sandbox_id]
+    setattr(group, flag, True)
+    with pytest.raises(SessionBusy, match="lifecycle archive"):
+        service.prepare(identity)
+    assert manager.exports == 0
+    setattr(group, flag, False)
+    receipt = service.prepare(identity)
+    _upload(service, identity, receipt, monkeypatch)
+    # The lifecycle barrier is rechecked on receipt replay and commit, even
+    # though the matching admin request already holds its own admission fence.
+    setattr(group, flag, True)
+    with pytest.raises(SessionBusy, match="lifecycle archive"):
+        service.prepare(identity)
+    with pytest.raises(SessionBusy, match="lifecycle archive"):
+        service.commit(identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"])
+    assert manager.removals == 0
+
+
 def test_upload_failure_never_deletes_and_abort_releases_barrier(archive_setup, monkeypatch):
     manager, supervisor, service, identity, spec, members = archive_setup
     receipt = service.prepare(identity)
@@ -309,7 +339,7 @@ async def test_internal_archive_routes_require_host_broker_auth(archive_setup):
         backend=ProcessBackend(),
         shared_session_supervisor=supervisor,
     )
-    app.state.sandbox_archive_service = service
+    app.state.sandbox_deletion_archive_service = service
     body = {
         "request_id": identity.request_id,
         "generation": identity.generation,

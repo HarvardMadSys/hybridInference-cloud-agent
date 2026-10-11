@@ -52,10 +52,12 @@ from cloud_agent.schemas import (
     IssueHostEnrollTokenRequest,
     IssueHostEnrollTokenResponse,
     ListAgentRunnerHostsResponse,
+    SandboxArchiveSettingsResponse,
     SetActiveAgentRunnerHostRequest,
     SetHostSettingsRequest,
     SetHostSlotsRequest,
     SetRuntimeVersionRequest,
+    SetSandboxArchiveSettingsRequest,
     host_setting_definitions,
 )
 from cloud_agent_shared.host_settings import admin_values, reported_values
@@ -169,6 +171,9 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         settings_desired=admin_values(row.get("settings_desired")),
         settings_applied=reported_values(row.get("settings_applied")),
         settings_local=reported_values(row.get("settings_local")),
+        sandbox_archive_settings_applied_revision=row.get(
+            "sandbox_archive_settings_applied_revision"
+        ),
     )
 
 
@@ -317,6 +322,82 @@ async def set_agent_host_settings(
         actor_id=_admin_id,
     )
     return await _snapshot(job_store.host_pool)
+
+
+@router.get(
+    "/agent/sandbox-archive-settings",
+    response_model=SandboxArchiveSettingsResponse,
+)
+async def get_sandbox_archive_settings(
+    _admin_id: str = Depends(verify_admin_access),
+    store: _AdminHostsStorage | None = Depends(get_storage),
+) -> SandboxArchiveSettingsResponse:
+    """Read the one database-backed archive policy shared by every host."""
+    values = await _require_store(store).host_pool.sandbox_archive_settings()
+    return SandboxArchiveSettingsResponse.model_validate(values)
+
+
+def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | str]:
+    """Keep a complete, non-secret policy snapshot in the admin audit row."""
+    return {
+        key: values[key]
+        for key in (
+            "enabled",
+            "region",
+            "kms_key_arn",
+            "expected_bucket_owner",
+            "max_archive_bytes",
+            "multipart_threshold_bytes",
+            "multipart_part_bytes",
+        )
+    }
+
+
+@router.put(
+    "/agent/sandbox-archive-settings",
+    response_model=SandboxArchiveSettingsResponse,
+)
+async def set_sandbox_archive_settings(
+    request: Request,
+    payload: SetSandboxArchiveSettingsRequest,
+    _admin_id: str = Depends(verify_admin_access),
+    store: _AdminHostsStorage | None = Depends(get_storage),
+) -> SandboxArchiveSettingsResponse:
+    """Atomically replace the archive policy; hosts apply it on their next beat.
+
+    The destination is fixed in server code and credentials are intentionally
+    absent. Brokers authenticate to AWS with their workload identity; this
+    route stores only the non-secret region, KMS key identity, owner fence and
+    bounded transfer limits.
+    """
+    job_store = _require_store(store)
+    previous = await job_store.host_pool.sandbox_archive_settings()
+    settings = payload.model_dump(exclude={"revision"})
+    updated = await job_store.host_pool.set_sandbox_archive_settings(
+        expected_revision=payload.revision,
+        settings=settings,
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Sandbox archive settings changed since this page loaded; reload and retry.",
+        )
+    changed = updated.pop("_changed", False) is True
+    if changed:
+        await log_admin_action(
+            job_store,
+            get_client_ip(request),
+            "agent.sandbox_archive_settings.set",
+            None,
+            {
+                "old_revision": previous["revision"],
+                "new_revision": updated["revision"],
+                "old_settings": _archive_audit_snapshot(previous),
+                "new_settings": _archive_audit_snapshot(updated),
+            },
+            actor_id=_admin_id,
+        )
+    return SandboxArchiveSettingsResponse.model_validate(updated)
 
 
 @router.put("/agent/runner-hosts/{host}/settings", response_model=ListAgentRunnerHostsResponse)

@@ -2,11 +2,69 @@
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 from pydantic import Field, SecretStr, field_validator
 
 from cloud_agent.ports.external.compute_provider import ComputeValue, NodeObservation, SshConnection
+
+
+def validate_sandbox_storage_path(value: str) -> str:
+    """Require a dedicated absolute storage directory without traversal.
+
+    The host verifies the directory is an existing mount before deploying.
+    Docker and containerd keep their default paths and store their data in
+    this mount's ``docker`` and ``containerd`` child directories.
+    """
+    if not re.fullmatch(r"/[a-zA-Z0-9/_-]+", value) or "//" in value:
+        raise ValueError("Sandbox storage must be an absolute path without traversal")
+    value = value.rstrip("/") or "/"
+    system_roots = {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/media",
+        "/mnt",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+        "/var/lib",
+    }
+    protected_roots = (
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/lib",
+        "/lib64",
+        "/proc",
+        "/run",
+        "/sbin",
+        "/sys",
+        "/usr",
+        "/var/lib/docker",
+        "/var/lib/containerd",
+        "/var/lib/cloud-agent",
+        "/var/lib/hybridinference",
+    )
+    if value in system_roots or any(
+        value == root or value.startswith(root + "/") for root in protected_roots
+    ):
+        raise ValueError("Choose a dedicated sandbox storage directory")
+    return value
 
 
 class DeploymentProfile(ComputeValue):
@@ -31,6 +89,14 @@ class DeploymentProfile(ComputeValue):
     # ``dataMount``) that holds Docker's and containerd's state under their
     # default paths. A Host's whole state is what moves between nodes.
     data_mount: str | None = Field(default=None, pattern=r"^/[a-zA-Z0-9/_-]+$")
+    # A per-Host creation value takes precedence over the legacy profile mount.
+    sandbox_storage_path: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("sandbox_storage_path")
+    @classmethod
+    def validate_storage_path(cls, value: str | None) -> str | None:
+        """Validate storage paths both when configured and when loaded from storage."""
+        return None if value is None else validate_sandbox_storage_path(value)
 
     @field_validator("deploy_root")
     @classmethod

@@ -27,7 +27,7 @@ settings live in the Agent database and are authoritative across restarts.
 The inventory below records defaults and the environment names used for an
 initial import; registered settings are no longer continuously read from `.env`.
 
-Run `alembic upgrade head` (through `0037_admin_sandbox_stop`) before starting
+Run `alembic upgrade head` (through `0042_sandbox_archive_settings`) before starting
 this release. The main control-plane listener initializes the settings document
 once from its existing environment. The MCP-only listener waits for that document and uses the same
 saved values. Later environment edits do not overwrite it. **Reset** restores
@@ -44,6 +44,16 @@ heartbeats, including the broker's report. Admin edits and resets exclude only
 the changed keys from pending imports, preserving unrelated legacy values.
 Global exclusions also apply to newly enrolled hosts. Later environment changes
 are ignored; clearing an override never reactivates an old environment value.
+
+Sandbox archives are configured only in **Admin → Settings → Sandbox** and are
+stored as one revisioned policy in the Agent database. There is deliberately no
+`AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
+`s3://freeinference/cloud-agent/sandbox`; the saved policy contains enablement,
+region, KMS key ARN, expected bucket owner, and bounded upload sizes, but no AWS
+credential. Workspace brokers authenticate with their deployment workload
+identity through the standard AWS SDK credential chain. See
+[Sandbox archives](docs/operations.md#sandbox-archives) for IAM, bucket
+versioning, rollout, and lifecycle semantics.
 
 Control-plane runtime identity, signing/encryption keys, broker credentials,
 cookie/proxy policy, MCP target policy and the default execution profile are also
@@ -110,6 +120,21 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_DATABASE_URL` | **NEW** | Postgres DSN for a database owned exclusively by Cloud Agent. Do not share the gateway's database. |
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | existing | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | **NEW** | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
+
+### Automatic PR merge archiving
+
+These environment values are imported when the Admin Settings row is first
+created. After that, edit the saved **Publication** settings. See
+[the archiving runbook](docs/automatic-pr-archiving.md).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENT_PR_ARCHIVE_ENABLED` | `true` | Enable automatic archival after verifying that the current published PR merged. |
+| `AGENT_PR_ARCHIVE_POLL_S` | `30` | Seconds between GitHub merge checks; saved setting accepts 5–3600 seconds. |
+
+API timeout, batch size, retry delay limit, and repeated integration-failure
+threshold are saved settings. The worker uses existing GitHub App credentials
+or the configured publication token, and never passes them to the sandbox.
 
 ### pgAdmin database administration
 
@@ -238,6 +263,7 @@ relay reachability and connection target policy.
 Host settings can be set from the admin pages instead of in each host's
 `.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
 `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_SHARED_RESIDENT_CAPACITY`,
+`AGENT_SANDBOX_CPU_MILLICORES`, `AGENT_SANDBOX_MEMORY_MIB`, `AGENT_SANDBOX_DISK_MIB`,
 `AGENT_TERMINAL_IDLE_TTL_SECONDS`, `AGENT_TERMINAL_HARD_TTL_SECONDS` and
 `AGENT_TERMINAL_MAX_SESSIONS`. The **Settings** page sets a value for every
 server (`PUT /admin/agent/host-settings`), and a server's details on the
@@ -255,6 +281,24 @@ and remain visible as diagnostic local values. Clearing a per-server value
 uses the global value or built-in default; clearing a global value uses the
 built-in default. The bounds an admin may set are in
 `cloud_agent_shared/host_settings.py` and are typo guards, not capacity statements.
+
+Container CPU, memory, and disk settings apply to new sandbox groups. Resuming a
+chat or forking it preserves the group's original limits; all members share
+those resources. CPU is entered as vCPU in the admin pages and stored in
+millicores (1 vCPU = 1000 millicores). Memory and disk accept MiB or GiB.
+Defaults are 2 vCPU, 4096 MiB memory, and no per-container disk quota. Initial
+environment values are `AGENT_SANDBOX_CPU_MILLICORES=2000`,
+`AGENT_SANDBOX_MEMORY_MIB=4096`, and `AGENT_SANDBOX_DISK_MIB=0`.
+
+A positive disk limit sets Docker's `--storage-opt size=<MiB>M` on the writable
+layer, including the workspace, caches, and installed files. It excludes the
+read-only image and memory-backed temporary files. This requires Docker
+`overlay2` on an XFS backing filesystem mounted with project quotas (`pquota`
+or `prjquota`). Docker refuses container creation when the storage backend does
+not support the requested quota. Set the disk value to 0 to create groups with
+no disk quota; resetting an override inherits the global value or default.
+The runner's existing storage attestation continues to measure the host
+filesystem rather than each sandbox's quota.
 
 The same cards also manage workspace and terminal resource limits. These
 additional environment names supply initial local values only:
@@ -275,7 +319,7 @@ additional environment names supply initial local values only:
 The values ride the heartbeat answer, so a host applies a change within one
 heartbeat (about 30 seconds) with no redeploy. Nothing running is interrupted:
 a turn keeps the time limit it started with, an existing sandbox keeps the
-session capacity it was created with, and the broker's terminal limits apply from its
+session capacity and CPU, memory, and disk limits it was created with, and the broker's terminal limits apply from its
 next sweep. Each host reports what it applies and what its own `.env` gives,
 and the page shows a value as *applying* until the host confirms it. A runner
 that predates this (it does not advertise `host-settings-v1`) keeps its `.env`

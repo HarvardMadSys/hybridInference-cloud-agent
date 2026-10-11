@@ -43,6 +43,17 @@ afterEach(() => {
 });
 
 describe('LiveAgentStatus', () => {
+  it('retains the complete phase text and exposes it in the status and title', () => {
+    const liveNote = 'Running a tool call while checking a particularly long repository path';
+    render(<LiveAgentStatus job={job({ liveNote })} />);
+
+    const status = screen.getByRole('status', { name: 'Agent status' });
+    expect(status).toHaveTextContent(liveNote);
+    expect(status).toHaveAttribute('title', liveNote);
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(status).toHaveAttribute('aria-atomic', 'true');
+  });
+
   it.each(['Waiting for LLM response', 'Running tool call', 'Receiving LLM response'])(
     'shows an updating timer beside %s using its recorded start',
     (liveNote) => {

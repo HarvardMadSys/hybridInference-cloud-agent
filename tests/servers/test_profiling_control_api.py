@@ -818,6 +818,10 @@ class _IdleSupervisor:
         """Own no workspace."""
         return False
 
+    def has_pending_archive_work(self) -> bool:
+        """Report that this container-free double has nothing to archive."""
+        return False
+
 
 def _run_sync(function, service, **kwargs):
     """Drive one asynchronous service call from a synchronous test."""

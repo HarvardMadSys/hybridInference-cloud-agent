@@ -118,6 +118,18 @@ class SandboxRepository(Protocol):
         """
         ...
 
+    async def record_terminal_observation(
+        self,
+        *,
+        sandbox_id: str,
+        host: str,
+        generation: int,
+        container_id: str,
+        terminal_count: int,
+    ) -> bool:
+        """Refresh terminal activity only for the exact running container."""
+        ...
+
     async def request_admin_stop(
         self,
         *,
@@ -173,6 +185,7 @@ class SandboxRepository(Protocol):
         resident_slot_capacity: int = 8,
         memory_limit: str = "4g",
         cpu_limit: str = "2",
+        disk_limit_mib: int = 0,
         stop_timeout_seconds: int = 10,
         fork_helper_version: str | None = None,
     ) -> dict[str, Any] | None:

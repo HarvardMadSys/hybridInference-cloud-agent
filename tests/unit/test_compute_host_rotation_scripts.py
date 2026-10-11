@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pathlib
 import shlex
 import subprocess
@@ -89,11 +90,32 @@ class Machine:
         self.root = root
         self.calls: list[list[str]] = []
         self.mounted: set[str] = {"/mydata"}
+        self.bind_sources: dict[str, str] = {}
         self.containers: list[str] = []
         self.images: list[str] = []
+        self.volumes: list[str] = []
         self.runner: list[str] = []
         self.active = {"docker": True, "containerd": True}
         self.rsync_codes: list[int] = []
+        self.environments: list[dict[str, str]] = []
+        self.units = {
+            service: {
+                "LoadState": "loaded",
+                "ExecStart": f"{{ path=/usr/bin/{daemon} ; argv[]=/usr/bin/{daemon} ; ignore_errors=no ; }}",
+                "MainPID": "0",
+            }
+            for service, daemon in (("docker", "dockerd"), ("containerd", "containerd"))
+        }
+        self.units.update(
+            {
+                f"var-lib-{name}.mount": {
+                    "LoadState": "not-found",
+                    "FragmentPath": "",
+                    "DropInPaths": "",
+                }
+                for name in ("docker", "containerd")
+            }
+        )
 
     def logical(self, value: str) -> str:
         """Map redirected paths back to the node paths they stand for."""
@@ -102,29 +124,42 @@ class Machine:
     def run(self, args, **kwargs):
         args = [self.logical(str(arg)) for arg in args]
         self.calls.append(args)
+        if "env" in kwargs:
+            self.environments.append(kwargs["env"].copy())
         out = ""
         code = 0
         if args[:2] == ["mountpoint", "-q"]:
             code = 0 if args[2] in self.mounted else 1
         elif args[:2] == ["mount", "--bind"]:
             self.mounted.add(args[3])
+            self.bind_sources[args[3]] = args[2]
         elif args[:2] == ["docker", "ps"]:
+            if not self.active["docker"]:
+                return subprocess.CompletedProcess(args, 1, "", "daemon stopped")
             if "label=com.docker.compose.service=runner" in args:
                 out = "\n".join(self.runner)
             else:
                 out = "\n".join(self.containers)
         elif args[:3] == ["docker", "image", "ls"]:
             out = "\n".join(self.images)
+        elif args[:3] == ["docker", "volume", "ls"]:
+            out = "\n".join(self.volumes)
         elif args[:2] == ["docker", "stop"]:
             stopped = set(args[2:])
             self.runner = [c for c in self.runner if c not in stopped]
             self.containers = [c for c in self.containers if c not in stopped]
         elif args[:2] == ["systemctl", "stop"]:
-            self.active = {"docker": False, "containerd": False}
+            for name in args[2:]:
+                if name in self.active:
+                    self.active[name] = False
         elif args[:2] == ["systemctl", "start"]:
-            self.active = {"docker": True, "containerd": True}
+            for name in args[2:]:
+                if name in self.active:
+                    self.active[name] = True
         elif args[:3] == ["systemctl", "is-active", "--quiet"]:
             code = 0 if self.active.get(args[3]) else 3
+        elif args[:2] == ["systemctl", "show"]:
+            out = "\n".join(f"{key}={value}" for key, value in self.units[args[2]].items())
         elif args[:2] == ["pgrep", "-x"]:
             code = 1
         elif args[0] == "rsync":
@@ -146,13 +181,32 @@ def machine(tmp_path, monkeypatch):
 
     def path(value="", *rest):
         value = str(value)
-        if value.startswith(("/var/lib", "/etc/fstab", "/mydata")):
+        if value.startswith(
+            (
+                "/var/lib",
+                "/etc/",
+                "/mydata",
+                "/proc",
+                "/run/systemd/",
+                "/usr/local/lib/systemd/",
+                "/usr/lib/systemd/",
+                "/lib/systemd/",
+            )
+        ):
             return original(str(node) + value, *rest)
         return original(value, *rest)
 
     monkeypatch.setattr("pathlib.Path", path)
     monkeypatch.setattr("subprocess.run", fake.run)
     monkeypatch.setattr("shutil.which", lambda name: None)
+    original_samefile = os.path.samefile
+
+    def samefile(source, target):
+        if fake.bind_sources.get(fake.logical(str(target))) == fake.logical(str(source)):
+            return True
+        return original_samefile(source, target)
+
+    monkeypatch.setattr("os.path.samefile", samefile)
     for directory in ("mydata", "etc", "var/lib"):
         (node / directory).mkdir(parents=True)
     return fake
@@ -222,6 +276,12 @@ def test_staging_mounts_state_on_the_data_disk_and_starts_nothing(
         "/mydata/docker /var/lib/docker none bind,nofail,x-systemd.requires-mounts-for=/mydata 0 0",
         "/mydata/containerd /var/lib/containerd none bind,nofail,x-systemd.requires-mounts-for=/mydata 0 0",
     ]
+    for name in ("docker", "containerd"):
+        dropin = machine.root / f"etc/systemd/system/{name}.service.d/cloud-agent-storage.conf"
+        assert machine.logical(dropin.read_text()) == (
+            f"[Unit]\nRequiresMountsFor=/mydata /var/lib/{name}\n"
+        )
+    assert machine.calls.index(["systemctl", "daemon-reload"]) < machine.calls.index(install)
     # A repeated stage neither mounts twice nor duplicates the fstab entries.
     run_remote(
         _DEPLOY,
@@ -247,21 +307,194 @@ def test_state_is_never_mounted_over_existing_containers(tmp_path, machine, monk
     assert (machine.root / "var/lib/docker/engine-id").exists()
 
 
-def test_an_empty_initialised_store_is_replaced_by_the_data_disk(
+def test_initial_docker_metadata_is_preserved_and_requires_operator_cleanup(
     tmp_path, machine, monkeypatch, capsys
 ):
     (machine.root / "var/lib/docker/network").mkdir(parents=True)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
-    run_remote(
+    result = run_remote(
         _DEPLOY,
         deploy_params(tmp_path / "deploy", activate=False),
         monkeypatch,
         capsys,
         stdin=payload(),
     )
-    assert ["systemctl", "stop", "docker.socket", "docker", "containerd"] in machine.calls
-    assert not (machine.root / "var/lib/docker/network").exists()
-    assert ["mount", "--bind", "/mydata/docker", "/var/lib/docker"] in machine.calls
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert (machine.root / "var/lib/docker/network").exists()
+    assert not [
+        call
+        for call in machine.calls
+        if call[0] in {"docker", "mount", "systemctl"} and call[:2] != ["systemctl", "show"]
+    ]
+
+
+def test_non_docker_containerd_state_is_preserved_even_when_docker_is_empty(
+    tmp_path, machine, monkeypatch, capsys
+):
+    (machine.root / "var/lib/docker/network").mkdir(parents=True)
+    state = machine.root / "var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"k8s.io workload state")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert state.read_bytes() == b"k8s.io workload state"
+    assert (machine.root / "var/lib/docker/network").exists()
+    assert not [
+        call
+        for call in machine.calls
+        if call[0] in {"mount", "systemctl", "apt-get"} and call[:2] != ["systemctl", "show"]
+    ]
+
+
+@pytest.mark.parametrize("store", ["docker", "containerd"])
+def test_store_state_created_during_inspection_is_preserved(
+    tmp_path, machine, monkeypatch, capsys, store
+):
+    original_run = machine.run
+    state = machine.root / f"var/lib/{store}/meta.db"
+
+    def run(args, **kwargs):
+        if args[:2] == ["systemctl", "stop"]:
+            state.write_bytes(b"concurrent daemon state")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert state.read_bytes() == b"concurrent daemon state"
+    assert machine.active == {"docker": True, "containerd": True}
+    assert ["systemctl", "start", "docker", "containerd"] in machine.calls
+    assert not [call for call in machine.calls if call[0] in {"mount", "apt-get"}]
+
+
+@pytest.mark.parametrize(
+    ("docker_active", "daemon_root"),
+    [(False, "/var/lib/docker"), (True, "/other-disk/docker")],
+)
+def test_nonempty_unbound_store_never_activates_or_queries_an_unrelated_daemon(
+    tmp_path, machine, monkeypatch, capsys, docker_active, daemon_root
+):
+    state = machine.root / "var/lib/docker/retained-state"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"retained sandbox data")
+    machine.active = {"docker.socket": True, "docker": docker_active, "containerd": False}
+    machine.daemon_root = daemon_root
+    original_run = machine.run
+    activations = []
+
+    def run(args, **kwargs):
+        if args[0] == "docker" and not machine.active["docker"]:
+            activations.append("socket activated")
+            machine.active["docker"] = True
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert state.read_bytes() == b"retained sandbox data"
+    assert not activations
+    assert machine.active["docker"] is docker_active
+    assert not [
+        call
+        for call in machine.calls
+        if call[0] in {"docker", "systemctl", "mount"} and call[:2] != ["systemctl", "show"]
+    ]
+
+
+def test_correctly_bound_existing_stores_are_retained_without_inventory(
+    tmp_path, machine, monkeypatch, capsys
+):
+    retained = []
+    for store in ("docker", "containerd"):
+        source = machine.root / f"mydata/{store}"
+        target = machine.root / f"var/lib/{store}"
+        source.mkdir()
+        target.mkdir()
+        for directory in (source, target):
+            state = directory / "retained-state"
+            state.write_bytes(b"existing user data")
+            retained.append(state)
+        machine.mounted.add(f"/var/lib/{store}")
+        machine.bind_sources[f"/var/lib/{store}"] = f"/mydata/{store}"
+    root = tmp_path / "deploy"
+    root.mkdir()
+    (root / ".compute-identity.json").write_text(json.dumps(IDENTITY))
+    result = run_remote(
+        _DEPLOY,
+        deploy_params(root, activate=False, install=False),
+        monkeypatch,
+        capsys,
+        stdin=payload(),
+    )
+    assert result == {"ready": True, "blocked_reasons": []}
+    assert all(state.read_bytes() == b"existing user data" for state in retained)
+    assert not [call for call in machine.calls if call[0] in {"docker", "mount"}]
+    assert not [
+        call
+        for call in machine.calls
+        if call[:2] in (["systemctl", "stop"], ["systemctl", "start"])
+    ]
+
+
+@pytest.mark.parametrize(
+    "readonly_path",
+    ["/mydata", "/mydata/docker", "/mydata/containerd", "/var/lib/docker", "/var/lib/containerd"],
+)
+def test_readonly_disk_or_bind_blocks_before_any_filesystem_or_service_mutation(
+    tmp_path, machine, monkeypatch, capsys, readonly_path
+):
+    path = machine.root / readonly_path.lstrip("/")
+    path.mkdir(parents=True, exist_ok=True)
+    if readonly_path == "/var/lib/docker":
+        (machine.root / "mydata/docker").mkdir()
+        (path / "retained-state").write_bytes(b"user data on read-only bind")
+        machine.mounted.add(readonly_path)
+        machine.bind_sources[readonly_path] = "/mydata/docker"
+    original_statvfs = os.statvfs
+
+    def statvfs(path):
+        if machine.logical(str(path)) == readonly_path:
+            return SimpleNamespace(f_flag=os.ST_RDONLY)
+        return original_statvfs(path)
+
+    def snapshot():
+        return {
+            path: None if path.is_dir() else path.read_bytes() for path in machine.root.rglob("*")
+        }
+
+    before = snapshot()
+    monkeypatch.setattr("os.statvfs", statvfs)
+    deploy_root = tmp_path / "deploy"
+    result = run_remote(_DEPLOY, deploy_params(deploy_root), monkeypatch, capsys, stdin=payload())
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_unavailable"]}
+    assert snapshot() == before
+    assert not deploy_root.exists()
+    assert not (tmp_path / ".deploy.compute-lock").exists()
+    assert not [
+        call for call in machine.calls if call[0] in {"docker", "systemctl", "mount", "apt-get"}
+    ]
+
+
+def test_an_existing_volume_is_never_hidden_by_the_selected_disk(
+    tmp_path, machine, monkeypatch, capsys
+):
+    (machine.root / "var/lib/docker/volumes").mkdir(parents=True)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
+    machine.volumes = ["user-data"]
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert not [call for call in machine.calls if call[0] == "mount"]
+    assert (machine.root / "var/lib/docker/volumes").exists()
 
 
 def test_a_missing_data_disk_blocks_before_anything_is_installed(
@@ -275,8 +508,36 @@ def test_a_missing_data_disk_blocks_before_anything_is_installed(
     assert not [call for call in machine.calls if call[0] == "apt-get"]
 
 
-def test_reenrollment_spends_the_new_token_instead_of_a_revoked_credential(
-    tmp_path, machine, monkeypatch, capsys
+def test_an_existing_mount_on_another_disk_blocks_setup(tmp_path, machine, monkeypatch, capsys):
+    (machine.root / "var/lib/docker").mkdir(parents=True)
+    (machine.root / "var/lib/docker/retained-data").write_text("keep")
+    machine.mounted.add("/var/lib/docker")
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert not [call for call in machine.calls if call[0] in {"mount", "apt-get"}]
+    assert (machine.root / "var/lib/docker/retained-data").read_text() == "keep"
+
+
+def test_a_storage_path_through_a_symlink_blocks_setup(tmp_path, machine, monkeypatch, capsys):
+    (machine.root / "mydata/real/disk").mkdir(parents=True)
+    (machine.root / "mydata/link").symlink_to(machine.root / "mydata/real")
+    machine.mounted.add("/mydata/link/disk")
+    result = run_remote(
+        _DEPLOY,
+        deploy_params(tmp_path / "deploy", data_mount="/mydata/link/disk"),
+        monkeypatch,
+        capsys,
+        stdin=payload(),
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_unavailable"]}
+    assert not [call for call in machine.calls if call[0] in {"mount", "apt-get"}]
+
+
+@pytest.mark.parametrize("reenroll", [False, True])
+def test_only_explicit_reenrollment_discards_the_persisted_credential(
+    tmp_path, machine, monkeypatch, capsys, reenroll
 ):
     credential = machine.root / "var/lib/cloud-agent/compute-a/credential"
     credential.parent.mkdir(parents=True)
@@ -284,13 +545,15 @@ def test_reenrollment_spends_the_new_token_instead_of_a_revoked_credential(
     machine.active = {"docker": False, "containerd": False}
     result = run_remote(
         _DEPLOY,
-        deploy_params(tmp_path / "deploy", install=False, reenroll=True),
+        deploy_params(tmp_path / "deploy", install=False, reenroll=reenroll),
         monkeypatch,
         capsys,
         stdin=payload(),
     )
     assert result["ready"]
-    assert not credential.exists()
+    assert credential.exists() is (not reenroll)
+    if not reenroll:
+        assert credential.read_text() == "revoked"
     start = machine.calls.index(["systemctl", "start", "containerd", "docker"])
     assert start < machine.calls.index(["bash", "deploy/host/sandbox_host.sh", "up"])
 

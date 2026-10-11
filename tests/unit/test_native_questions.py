@@ -25,16 +25,14 @@ from cloud_agent_shared.shared_protocol import INPUT_REFUSED, INPUT_TURN_ENDED
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/agent_runtime_streams"
 
 
-def _fixture(runtime):
+def _fixture(runtime, kind="question"):
     return [
         json.loads(line)
-        for line in (FIXTURES / f"{runtime}_question_control_contract.jsonl")
-        .read_text()
-        .splitlines()
+        for line in (FIXTURES / f"{runtime}_{kind}_control_contract.jsonl").read_text().splitlines()
     ]
 
 
-def _turn(tmp_path, runtime):
+def _turn(tmp_path, runtime, kind="question"):
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
     if runtime == "claude":
@@ -48,7 +46,7 @@ def _turn(tmp_path, runtime):
         session.ensure_started(model="m", reasoning_effort=None)
         process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="choose", model="m"))
-    request, response = _fixture(runtime)
+    request, response = _fixture(runtime, kind)
     turn.events_for_line(json.dumps(request))
     return process, session, turn, request, response, spawned
 
@@ -287,7 +285,7 @@ def test_bridge_keeps_failed_question_post_retryable_and_fences_siblings():
         {"allowedPrompts": [{"tool": "Bash", "prompt": "run tests"}]},
     ],
 )
-def test_claude_exit_plan_mode_allows_the_original_input(tmp_path, tool_input):
+def test_claude_exit_plan_mode_approval_allows_the_original_input(tmp_path, tool_input):
     process, _session, turn, request, _response, _spawned = _turn(tmp_path, "claude")
     turn.events_for_line(
         json.dumps({"type": "control_cancel_request", "request_id": request["request_id"]})
@@ -296,7 +294,11 @@ def test_claude_exit_plan_mode_allows_the_original_input(tmp_path, tool_input):
     request["request"]["tool_name"] = "ExitPlanMode"
     request["request"]["input"] = tool_input
 
+    before = len(process.sent)
     turn.events_for_line(json.dumps(request))
+    assert len(process.sent) == before
+    (pending,) = turn.pending_questions()
+    assert turn.answer_question(pending["request_id"], {"0": ["Approve plan"]}).accepted
 
     reply = json.loads(process.sent[-1])
     assert reply == {
@@ -335,6 +337,131 @@ def test_claude_unsupported_or_malformed_interactions_are_denied(tmp_path, tool_
     assert reply["response"]["response"]["behavior"] == "deny"
     assert "Ask the user in chat" in reply["response"]["response"]["message"]
     assert turn.pending_questions() == []
+
+
+def _plan_turn(tmp_path, original):
+    process, session, turn, request, _response, _spawned = _turn(tmp_path, "claude")
+    turn.events_for_line(
+        json.dumps({"type": "control_cancel_request", "request_id": request["request_id"]})
+    )
+    request["request_id"] = "plan-native-1"
+    request["request"]["tool_name"] = "ExitPlanMode"
+    request["request"]["input"] = original
+    turn.events_for_line(json.dumps(request))
+    return process, session, turn, request
+
+
+def test_claude_plan_approval_matches_the_pinned_native_contract(tmp_path):
+    process, _session, turn, request, response, _spawned = _turn(tmp_path, "claude", "plan")
+    (pending,) = turn.pending_questions()
+    assert request["request"]["input"]["plan"] in pending["questions"][0]["question"]
+    assert turn.answer_question(pending["request_id"], {"0": ["Approve plan"]}).accepted
+    assert json.loads(process.sent[-1]) == response
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        {},
+        {"allowedPrompts": [{"tool": "Bash", "prompt": "run tests"}]},
+        {
+            "plan": "# Plan\n\n1. Implement the fix.\n2. Run tests.",
+            "planFilePath": "/state/plan.md",
+        },
+    ],
+)
+def test_claude_plan_approval_waits_and_preserves_native_input(tmp_path, original):
+    process, _session, turn, request = _plan_turn(tmp_path, original)
+    expected = copy.deepcopy(original)
+    before = len(process.sent)
+    turn.events_for_line(json.dumps(request))
+    (pending,) = turn.pending_questions()
+    (question,) = pending["questions"]
+    assert question["header"] == "Plan approval"
+    assert question["multiple"] is False
+    assert question["allow_custom"] is False
+    assert [option["label"] for option in question["options"]] == ["Approve plan"]
+    if expected.get("plan"):
+        assert expected["plan"] in question["question"]
+    assert len(process.sent) == before
+    # Neither the caller's native input nor a public snapshot controls the reply.
+    original["plan"] = "changed"
+    question["options"][0]["label"] = "changed"
+    answers = {question["id"]: ["Approve plan"]}
+    assert turn.answer_question(pending["request_id"], answers).accepted
+    assert json.loads(process.sent[-1]) == {
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": "plan-native-1",
+            "response": {"behavior": "allow", "updatedInput": expected},
+        },
+    }
+    assert turn.pending_questions() == []
+    assert turn.answer_question(pending["request_id"], answers).reason == INPUT_REFUSED
+    turn.events_for_line(json.dumps(request))
+    assert turn.pending_questions() == []
+    assert len(process.sent) == before + 1
+
+
+def test_claude_declining_plan_sends_native_denial(tmp_path):
+    process, _session, turn, _request = _plan_turn(tmp_path, {})
+    (pending,) = turn.pending_questions()
+    assert turn.answer_question(pending["request_id"], {}, reject=True).accepted
+    reply = json.loads(process.sent[-1])
+    assert reply["response"]["request_id"] == "plan-native-1"
+    assert reply["response"]["response"] == {
+        "behavior": "deny",
+        "message": "The user declined this plan. Keep planning.",
+    }
+    assert turn.pending_questions() == []
+
+
+@pytest.mark.parametrize("answer", [[], ["Other"], ["Approve plan", "Other"]])
+def test_claude_plan_approval_requires_the_explicit_choice(tmp_path, answer):
+    process, _session, turn, _request = _plan_turn(tmp_path, {})
+    (pending,) = turn.pending_questions()
+    before = len(process.sent)
+    assert turn.answer_question(pending["request_id"], {"0": answer}).reason == INPUT_REFUSED
+    assert turn.pending_questions() == [pending]
+    assert len(process.sent) == before
+
+
+@pytest.mark.parametrize("boundary", ["control_cancel_request", "result", "cancel"])
+def test_claude_plan_approval_cannot_survive_its_native_boundary(tmp_path, boundary):
+    process, _session, turn, request = _plan_turn(tmp_path, {})
+    (pending,) = turn.pending_questions()
+    if boundary == "cancel":
+        turn.cancel()
+    else:
+        turn.events_for_line(json.dumps({"type": boundary, "request_id": "plan-native-1"}))
+    assert turn.pending_questions() == []
+    turn.events_for_line(json.dumps(request))
+    assert turn.pending_questions() == []
+    before = len(process.sent)
+    assert not turn.answer_question(pending["request_id"], {"0": ["Approve plan"]}).accepted
+    assert len(process.sent) == before
+
+
+@pytest.mark.parametrize("original", [None, [], {"plan": 42}, {"plan": None}])
+def test_claude_malformed_plan_requests_are_denied_without_blocking(tmp_path, original):
+    process, _session, turn, _request = _plan_turn(tmp_path, original)
+    reply = json.loads(process.sent[-1])
+    assert reply["response"]["request_id"] == "plan-native-1"
+    assert reply["response"]["response"]["behavior"] == "deny"
+    assert "invalid" in reply["response"]["response"]["message"]
+    assert turn.pending_questions() == []
+
+
+def test_claude_plan_preview_is_bounded_without_truncating_native_input(tmp_path):
+    original = {"plan": "plan detail\n" * 2_000}
+    process, _session, turn, _request = _plan_turn(tmp_path, original)
+    (pending,) = turn.pending_questions()
+    text = pending["questions"][0]["question"]
+    assert len(text) == 10_000
+    assert text.endswith("[Plan preview truncated.]")
+    assert turn.answer_question(pending["request_id"], {"0": ["Approve plan"]}).accepted
+    assert json.loads(process.sent[-1])["response"]["response"]["updatedInput"] == original
 
 
 def test_codex_malformed_native_question_gets_invalid_params_response(tmp_path):

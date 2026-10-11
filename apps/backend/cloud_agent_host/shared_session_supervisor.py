@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CPU_LIMIT_LABEL,
+    CHAT_DISK_LIMIT_LABEL,
     CHAT_GENERATION_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
     CHAT_MEMORY_LIMIT_LABEL,
@@ -29,7 +30,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
+    ChatSandboxStatus,
     RetainedChatBackend,
+    RetainedChatFailStopped,
     RetainedChatLost,
     SandboxActionFacts,
 )
@@ -61,6 +64,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
+from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.operation_profiling import (
     StageRecorder,
     context_call_id,
@@ -315,8 +319,20 @@ class _Group:
     terminal_tokens: dict[str, str] = field(default_factory=dict)
     operation_tokens: dict[str, str] = field(default_factory=dict)
     snapshotting: bool = False
+    # A failed initial archive observed (or could not rule out) its durable
+    # preparation marker, but the exact container could not yet be stopped.
+    # Only a later accepted STOPPED inspection may release this snapshot fence.
+    initial_archive_preservation_pending: bool = False
+    starting: bool = False
     stopping: bool = False
     archive_request_id: str | None = None
+    stop_archive_pending: bool = False
+    stop_archive_blocked: bool = False
+    stop_archive_members: tuple[SharedMemberManifest, ...] | None = None
+    orphan_finalization_pending: bool = False
+    orphan_marker_unreadable: bool = False
+    start_archive_completion_pending: bool = False
+    container_lost: bool = False
     lifecycle_generation: int = 0
     idle_deadline: float | None = None
     fork_mutex: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -326,6 +342,16 @@ NativeForker = Callable[
     [ChatSandboxSpec, ResidentTransport[DialectRuntime], str, ResidentLaunch, int],
     str,
 ]
+StoppedArchiveHook = Callable[
+    [ChatSandboxSpec, ChatSandboxInspection, tuple[SharedMemberManifest, ...]],
+    object,
+]
+StoppedArchivePrepareHook = Callable[
+    [ChatSandboxSpec, ChatSandboxInspection],
+    None,
+]
+ArchiveInspectionHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], None]
+MarkerlessFinalPrepareHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], bool]
 
 #: How long a message sent into a turn that has not started here is kept for
 #: it. Long past any sandbox preparation; a turn that never starts leaves its
@@ -357,6 +383,12 @@ class SharedChatSessionSupervisor:
         checkpoint_interval_s: float = RUNNING_CHECKPOINT_INTERVAL_S,
         window_sample_interval_s: float = MEMBER_WINDOW_SAMPLE_INTERVAL_MS / 1000,
         window_checkpoint_hook: Callable[[str, dict[str, Any]], None] | None = None,
+        stopped_archive_prepare_hook: StoppedArchivePrepareHook | None = None,
+        stopped_archive_invalidate_hook: ArchiveInspectionHook | None = None,
+        starting_archive_prepare_hook: ArchiveInspectionHook | None = None,
+        started_archive_hook: ArchiveInspectionHook | None = None,
+        markerless_final_prepare_hook: MarkerlessFinalPrepareHook | None = None,
+        stopped_archive_hook: StoppedArchiveHook | None = None,
     ) -> None:
         if idle_timeout_s <= 0 or sweep_interval_s <= 0:
             raise ValueError("shared sandbox timeout values must be positive")
@@ -376,6 +408,16 @@ class SharedChatSessionSupervisor:
         self._clock = clock
         self._transport_factory = transport_factory or ResidentTransportFactory(manager)
         self._native_forker = native_forker or self._transport_factory.fork_native
+        # Called only after Docker has cleanly stopped the exact generation,
+        # while a lifecycle barrier still blocks concurrent workspace writes.
+        # It is synchronous so success means the durable final object exists;
+        # failure remains pending and prevents the group from restarting.
+        self._stopped_archive_prepare_hook = stopped_archive_prepare_hook
+        self._stopped_archive_invalidate_hook = stopped_archive_invalidate_hook
+        self._starting_archive_prepare_hook = starting_archive_prepare_hook
+        self._started_archive_hook = started_archive_hook
+        self._markerless_final_prepare_hook = markerless_final_prepare_hook
+        self._stopped_archive_hook = stopped_archive_hook
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
         self._held_inputs: dict[str, list[_HeldInput]] = {}
@@ -402,12 +444,129 @@ class SharedChatSessionSupervisor:
         with self._lock:
             self._idle_timeout_s = idle_timeout_s
 
+    def configure_stopped_archive_hook(self, hook: StoppedArchiveHook) -> None:
+        """Bind the durable final-archive hook before lifecycle admission.
+
+        ``create_app`` also accepts an injected supervisor, so constructor
+        wiring alone cannot prove that clean stops reach the archive service.
+        Permit one pre-start binding, accept an idempotent verification of the
+        same callback, and reject every live or conflicting reconfiguration.
+        """
+        if not callable(hook):
+            raise TypeError("shared sandbox stopped archive hook must be callable")
+        with self._lock:
+            current = self._stopped_archive_hook
+            if current is not None:
+                if current != hook:
+                    raise ValueError("shared sandbox stopped archive hook is already configured")
+                return
+            if self._thread is not None or self._groups:
+                raise ValueError(
+                    "shared sandbox stopped archive hook must be configured before start"
+                )
+            self._stopped_archive_hook = hook
+
+    def configure_stopped_archive_prepare_hook(
+        self,
+        hook: StoppedArchivePrepareHook,
+    ) -> None:
+        """Bind the durable pre-stop policy fence before lifecycle admission."""
+        if not callable(hook):
+            raise TypeError("shared sandbox stopped archive prepare hook must be callable")
+        with self._lock:
+            current = self._stopped_archive_prepare_hook
+            if current is not None:
+                if current != hook:
+                    raise ValueError(
+                        "shared sandbox stopped archive prepare hook is already configured"
+                    )
+                return
+            if self._thread is not None or self._groups:
+                raise ValueError(
+                    "shared sandbox stopped archive prepare hook must be configured before start"
+                )
+            self._stopped_archive_prepare_hook = hook
+
+    def configure_archive_transition_hooks(
+        self,
+        *,
+        invalidate_final: ArchiveInspectionHook,
+        prepare_start: ArchiveInspectionHook,
+        complete_start: ArchiveInspectionHook,
+        prepare_markerless_final: MarkerlessFinalPrepareHook,
+    ) -> None:
+        """Bind marker transitions that bracket start and failed native flush."""
+        hooks = (
+            invalidate_final,
+            prepare_start,
+            complete_start,
+            prepare_markerless_final,
+        )
+        if not all(callable(hook) for hook in hooks):
+            raise TypeError("shared sandbox archive transition hooks must be callable")
+        with self._lock:
+            current = (
+                self._stopped_archive_invalidate_hook,
+                self._starting_archive_prepare_hook,
+                self._started_archive_hook,
+                self._markerless_final_prepare_hook,
+            )
+            if any(hook is not None for hook in current):
+                if current != hooks:
+                    raise ValueError(
+                        "shared sandbox archive transition hooks are already configured"
+                    )
+                return
+            if self._thread is not None or self._groups:
+                raise ValueError(
+                    "shared sandbox archive transition hooks must be configured before start"
+                )
+            (
+                self._stopped_archive_invalidate_hook,
+                self._starting_archive_prepare_hook,
+                self._started_archive_hook,
+                self._markerless_final_prepare_hook,
+            ) = hooks
+
+    def _prepare_markerless_final_locked(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+    ) -> bool:
+        """Ask the dynamic policy owner to authorize markerless cleanup.
+
+        A static archive service has no such authority and therefore keeps the
+        conservative quarantine behavior.  The dynamic controller writes the
+        disabled-policy marker atomically before returning ``True``.
+        """
+        hook = self._markerless_final_prepare_hook
+        if self._stopped_archive_hook is None or hook is None:
+            return False
+        try:
+            return hook(spec, inspection)
+        except Exception:
+            logger.exception(
+                "markerless sandbox policy fence could not be prepared",
+                extra={
+                    "event": "sandbox_markerless_final_prepare_failed",
+                    "sandbox_id": spec.sandbox_id,
+                    "generation": spec.generation,
+                },
+            )
+            return False
+
     def start(self) -> None:
         """Reconstruct shared containers and start the group idle sweep."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
-            self.reconcile()
+        # Reconciliation may synchronously upload a final archive.  Do not
+        # retain the supervisor-wide metadata lock while that bounded I/O is
+        # in flight: unrelated status calls must remain responsive.
+        self.reconcile()
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
             self._stop.clear()
             self._thread = threading.Thread(
                 target=self._sweep_loop,
@@ -423,13 +582,28 @@ class SharedChatSessionSupervisor:
                 )
                 self._sampler_thread.start()
 
+    def quiesce(self) -> None:
+        """Stop background admission without detaching live native transports."""
+        self._stop.set()
+        threads = (self._thread, self._sampler_thread)
+        current_thread = threading.current_thread()
+        if any(thread is current_thread for thread in threads):
+            raise RuntimeError("cannot close the supervisor from its background thread")
+        # A sweep may already be inside the synchronous final-archive hook.
+        # Its upload is bounded by the archive service's operation deadline,
+        # so wait for completion instead of abandoning a daemon thread and
+        # closing the service underneath it.  The sampler is joined for the
+        # same ownership guarantee.
+        for thread in threads:
+            if thread is not None:
+                thread.join()
+        with self._lock:
+            self._thread = None
+            self._sampler_thread = None
+
     def close(self) -> None:
         """Stop the supervisor process; leave Docker-owned state intact."""
-        self._stop.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=self._sweep_interval_s + 1)
-        self._thread = None
+        self.quiesce()
         # Pipes cannot be reattached by a replacement supervisor. Close them
         # explicitly; native locators remain in Docker and are resumed later.
         with self._lock:
@@ -486,6 +660,408 @@ class SharedChatSessionSupervisor:
             with contextlib.suppress(RuntimeError):
                 turn_lock.release()
 
+    def stop_all_for_shutdown(self, *, include_running: bool = True) -> None:
+        """Cleanly stop and archive every running group during broker shutdown.
+
+        The broker calls this only when final archival is configured, after
+        :meth:`quiesce` has stopped background admission but before
+        :meth:`close` detaches native transports. A failed archive remains
+        pending and is reported after the other groups have also had a chance
+        to stop.
+        """
+        with self._lock:
+            candidates = [
+                (next(iter(group.members)), group.spec.generation, group)
+                for group in self._groups.values()
+                if group.members
+                and (
+                    (include_running and group.inspection.running)
+                    or group.stop_archive_pending
+                    or group.orphan_finalization_pending
+                    or group.start_archive_completion_pending
+                )
+            ]
+        failures: builtins.list[Exception] = []
+        for thread_id, generation, group in candidates:
+            with self._lock:
+                retry_pending = group.stop_archive_pending
+                blocked = group.stop_archive_blocked
+                if retry_pending:
+                    if group.stopping:
+                        failures.append(
+                            SessionBusy("shared sandbox group stop is already in progress")
+                        )
+                        continue
+                    group.stopping = True
+            if retry_pending:
+                try:
+                    if blocked:
+                        self._stop_blocked_group(group)
+                        failures.append(
+                            SandboxError(
+                                "shared sandbox final archive remains blocked by native flush failure"
+                            )
+                        )
+                    else:
+                        self._retry_stopped_archive(group)
+                except Exception as exc:
+                    failures.append(exc)
+                finally:
+                    with self._lock:
+                        group.stopping = False
+                        self._condition.notify_all()
+                continue
+            try:
+                self.stop_if_idle(
+                    thread_id,
+                    generation=generation,
+                    reason="orphaned_attempt",
+                )
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise SandboxError(
+                f"{len(failures)} shared sandbox shutdown stop/archive operation(s) failed"
+            ) from failures[0]
+
+    def shutdown_archive_candidate_count(self) -> int:
+        """Return how many groups shutdown must stop or finish archiving."""
+        with self._lock:
+            return sum(
+                group.inspection.running
+                or group.stop_archive_pending
+                or group.orphan_finalization_pending
+                or group.start_archive_completion_pending
+                for group in self._groups.values()
+            )
+
+    def has_pending_archive_work(self) -> bool:
+        """Whether shutdown must preserve or finish an older archive lifecycle."""
+        with self._lock:
+            return any(
+                group.stop_archive_pending
+                or group.stop_archive_blocked
+                or group.orphan_finalization_pending
+                or group.start_archive_completion_pending
+                for group in self._groups.values()
+            )
+
+    @staticmethod
+    def _archive_members_locked(group: _Group) -> tuple[SharedMemberManifest, ...]:
+        """Snapshot final-archive membership while the supervisor lock is held."""
+        return tuple(
+            SharedMemberManifest(
+                thread_id=member.thread_id,
+                native_session_id=member.native_session_id,
+                context_status=member.context_status,
+                activation_generation=member.activation_generation,
+                process_generation=member.process_generation,
+                residency_generation=member.residency_generation,
+                resident_state=member.resident_state,
+                resident_slot_id=member.resident_slot_id,
+                last_settled_job_id=member.last_settled_job_id,
+            )
+            for member in sorted(group.members.values(), key=lambda item: item.thread_id)
+        )
+
+    @staticmethod
+    def _mark_container_lost_locked(group: _Group) -> None:
+        """Make a same-name replacement permanently inadmissible to this group."""
+        if not group.container_lost:
+            group.lifecycle_generation += 1
+        group.container_lost = True
+        group.idle_deadline = None
+        for member in group.members.values():
+            member.context_status = "lost"
+            member.resident_state = "lost"
+
+    def _accept_inspection_locked(
+        self,
+        group: _Group,
+        inspection: ChatSandboxInspection,
+    ) -> ChatSandboxInspection:
+        """Refresh status only for the immutable Docker object first adopted.
+
+        Docker names and ownership labels are reusable.  The container ID in
+        the group's first inspection is therefore its lifetime fence: never
+        replace it with a later same-name object, especially not before a
+        final archive whose key belongs to the original generation.
+        """
+        if inspection.container_id != group.inspection.container_id:
+            self._mark_container_lost_locked(group)
+            raise RetainedChatLost("shared sandbox container identity changed")
+        if group.container_lost:
+            raise RetainedChatLost("shared sandbox container identity was lost")
+        group.inspection = inspection
+        if group.initial_archive_preservation_pending and not inspection.running:
+            group.initial_archive_preservation_pending = False
+            group.snapshotting = False
+            self._condition.notify_all()
+        return inspection
+
+    def _require_current_inspection(self, group: _Group) -> ChatSandboxInspection:
+        """Inspect and accept only the exact Docker object owned by ``group``."""
+        current = self._manager.inspect(group.spec.container_name)
+        with self._lock:
+            if current is None:
+                self._mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container is missing")
+            return self._accept_inspection_locked(group, current)
+
+    def _persist_stopped_archive(
+        self,
+        group: _Group,
+        inspection: ChatSandboxInspection,
+        members: tuple[SharedMemberManifest, ...],
+    ) -> ChatSandboxInspection:
+        """Persist one clean stop, then release its durable retry marker."""
+        if inspection.running:
+            raise SandboxError("refusing to archive a running shared sandbox as stopped")
+        with self._lock:
+            self._accept_inspection_locked(group, inspection)
+            if self._stopped_archive_hook is None:
+                group.stop_archive_pending = False
+                group.stop_archive_blocked = False
+                group.stop_archive_members = None
+                group.orphan_finalization_pending = False
+                group.orphan_marker_unreadable = False
+                group.start_archive_completion_pending = False
+                return inspection
+            group.stop_archive_pending = True
+            group.stop_archive_members = members
+        try:
+            self._stopped_archive_hook(group.spec, inspection, members)
+        except Exception as exc:
+            logger.exception(
+                "stopped sandbox final archive failed",
+                extra={
+                    "event": "sandbox_final_archive_failed",
+                    "sandbox_id": group.spec.sandbox_id,
+                    "generation": group.spec.generation,
+                    "detail": str(exc)[:300],
+                },
+            )
+            raise
+        # The owned bridge is the durable marker that a stopped container has
+        # not completed its final archive. Release it only after the upload
+        # returned successfully, using the same exact-container fence as the
+        # original stop. A cleanup failure leaves ``stop_archive_pending`` and
+        # the bridge intact so this operation is retried rather than reported
+        # as a clean stop.
+        released = self._manager.stop(
+            group.spec,
+            expected_container_id=inspection.container_id,
+            release_networks=True,
+        )
+        with self._lock:
+            self._accept_inspection_locked(group, released)
+            group.stop_archive_pending = False
+            group.stop_archive_blocked = False
+            group.stop_archive_members = None
+            group.orphan_finalization_pending = False
+            group.orphan_marker_unreadable = False
+            group.start_archive_completion_pending = False
+        return released
+
+    def _retry_stopped_archive(self, group: _Group, *, persist: bool = True) -> None:
+        """Finish a prepared stop, optionally deferring archive persistence."""
+        with self._lock:
+            members = group.stop_archive_members
+            pending = group.stop_archive_pending
+        if not pending or members is None:
+            return
+        inspection = self._require_current_inspection(group)
+        if inspection.running:
+            if self._stopped_archive_prepare_hook is not None:
+                try:
+                    self._stopped_archive_prepare_hook(group.spec, inspection)
+                except Exception:
+                    if not persist:
+                        # Network fail-stop phase one cannot leave a group
+                        # running merely because its prepared marker is no
+                        # longer usable. Persist the blocked state and retain
+                        # the bridge; this group must never upload.
+                        with self._lock:
+                            group.stop_archive_blocked = True
+                            group.stop_archive_pending = True
+                            group.stop_archive_members = members
+                        self._stop_blocked_group(group, inspection)
+                    raise
+            inspection = self._manager.stop(
+                group.spec,
+                expected_container_id=inspection.container_id,
+                release_networks=self._stopped_archive_hook is None,
+            )
+            with self._lock:
+                self._accept_inspection_locked(group, inspection)
+        if not persist:
+            return
+        self._persist_stopped_archive(group, inspection, members)
+
+    def _stop_blocked_group(
+        self,
+        group: _Group,
+        inspection: ChatSandboxInspection | None = None,
+    ) -> ChatSandboxInspection:
+        """Exact-stop a native-flush-blocked group without upload or release."""
+        current = inspection or self._require_current_inspection(group)
+        marker_persisted = False
+        if self._stopped_archive_invalidate_hook is not None:
+            try:
+                self._stopped_archive_invalidate_hook(group.spec, current)
+                marker_persisted = True
+            except Exception:
+                logger.exception(
+                    "blocked sandbox marker retry failed",
+                    extra={
+                        "event": "sandbox_archive_block_marker_retry_failed",
+                        "sandbox_id": group.spec.sandbox_id,
+                        "generation": group.spec.generation,
+                    },
+                )
+        if current.running:
+            current = self._manager.stop(
+                group.spec,
+                expected_container_id=current.container_id,
+                release_networks=False,
+            )
+            with self._lock:
+                self._accept_inspection_locked(group, current)
+        if not marker_persisted and self._stopped_archive_invalidate_hook is not None:
+            try:
+                self._stopped_archive_invalidate_hook(group.spec, current)
+            except Exception:
+                logger.exception(
+                    "stopped sandbox block marker retry failed",
+                    extra={
+                        "event": "sandbox_archive_stopped_block_marker_retry_failed",
+                        "sandbox_id": group.spec.sandbox_id,
+                        "generation": group.spec.generation,
+                    },
+                )
+        return current
+
+    def _start_group(
+        self,
+        group: _Group,
+        *,
+        facts: SandboxActionFacts | None = None,
+        observer: StageRecorder | None = None,
+    ) -> ChatSandboxInspection:
+        """Start a group and archive a guest-network fail-stop exactly once."""
+        with self._lock:
+            if group.container_lost:
+                raise RetainedChatLost("shared sandbox container identity was lost")
+            if group.starting:
+                raise SessionBusy("shared workspace start is in progress")
+            if group.stopping:
+                raise SessionBusy("shared workspace stop is in progress")
+            if group.stop_archive_pending:
+                raise SessionBusy("shared workspace final archive retry is pending")
+            if group.stop_archive_blocked:
+                raise SessionBusy(
+                    "shared workspace final archive is blocked by native flush failure"
+                )
+            if group.orphan_finalization_pending:
+                raise SessionBusy("shared workspace orphan finalization is pending")
+            group.starting = True
+            members = self._archive_members_locked(group)
+            expected_container_id = group.inspection.container_id
+        start_fence_prepared = False
+
+        def prepare_stopped_start(current: ChatSandboxInspection) -> None:
+            nonlocal start_fence_prepared
+            if self._starting_archive_prepare_hook is None:
+                return
+            self._starting_archive_prepare_hook(group.spec, current)
+            with self._lock:
+                self._accept_inspection_locked(group, current)
+                group.start_archive_completion_pending = True
+                start_fence_prepared = True
+
+        try:
+            with self._lock:
+                completion_pending = group.start_archive_completion_pending
+            if completion_pending:
+                current = self._require_current_inspection(group)
+                if current.running:
+                    if self._started_archive_hook is None:
+                        raise SandboxError(
+                            "shared workspace start archive completion hook is unavailable"
+                        )
+                    # ``start_archive_completion_pending`` is set only after
+                    # ``manager.start`` returned a fully network-verified
+                    # running container and the durable marker completion hook
+                    # failed. Retry that idempotent completion in place. A cold
+                    # stop here would introduce a markerless crash window after
+                    # the completion hook had already cleared the marker.
+                    self._started_archive_hook(group.spec, current)
+                    with self._lock:
+                        self._accept_inspection_locked(group, current)
+                        group.start_archive_completion_pending = False
+                    return current
+            if self._starting_archive_prepare_hook is None:
+                inspection = self._manager.start(
+                    group.spec,
+                    facts=facts,
+                    observer=observer,
+                    expected_container_id=expected_container_id,
+                    defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
+                )
+            else:
+                inspection = self._manager.start(
+                    group.spec,
+                    facts=facts,
+                    observer=observer,
+                    expected_container_id=expected_container_id,
+                    defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
+                    before_stopped_start=prepare_stopped_start,
+                )
+        except RetainedChatFailStopped as exc:
+            with self._lock:
+                self._accept_inspection_locked(group, exc.inspection)
+            self._persist_stopped_archive(group, exc.inspection, members)
+            raise
+        except BaseException:
+            if not start_fence_prepared:
+                raise
+            # Once the durable start fence exists, any untyped manager error
+            # is ambiguous: Docker may have started the container before guest
+            # network synchronization or proof failed. Never admit reuse from
+            # that state. Exact-stop it with the bridge retained and complete
+            # the same fail-stop archive path; if stopping itself fails, the
+            # pending barrier remains for reconcile/shutdown to retry.
+            with self._lock:
+                group.stop_archive_pending = self._stopped_archive_hook is not None
+                group.stop_archive_members = (
+                    members if self._stopped_archive_hook is not None else None
+                )
+            uncertain = self._require_current_inspection(group)
+            if uncertain.running:
+                uncertain = self._manager.stop(
+                    group.spec,
+                    expected_container_id=expected_container_id,
+                    release_networks=self._stopped_archive_hook is None,
+                )
+            self._persist_stopped_archive(group, uncertain, members)
+            raise
+        else:
+            with self._lock:
+                completion_pending = group.start_archive_completion_pending
+            if (
+                start_fence_prepared or completion_pending
+            ) and self._started_archive_hook is not None:
+                self._started_archive_hook(group.spec, inspection)
+            with self._lock:
+                self._accept_inspection_locked(group, inspection)
+                if start_fence_prepared or completion_pending:
+                    group.start_archive_completion_pending = False
+            return inspection
+        finally:
+            with self._lock:
+                group.starting = False
+                self._condition.notify_all()
+
     def reconcile(self) -> builtins.list[SharedSessionDescriptor]:
         """Discover only containers labelled for the shared-live protocol."""
         found: builtins.list[SharedSessionDescriptor] = []
@@ -495,6 +1071,13 @@ class SharedChatSessionSupervisor:
                 continue
             spec = self._spec_from_inspection(inspection)
             specs.append(spec)
+            owned_bridge = self._manager.network_for(spec)
+            finalize = False
+            retry = False
+            blocked = False
+            invalidate_unknown = False
+            marker_unreadable = False
+            members: tuple[SharedMemberManifest, ...] = ()
             with self._lock:
                 group = self._groups.get(spec.sandbox_id)
                 if group is None:
@@ -503,22 +1086,352 @@ class SharedChatSessionSupervisor:
                     # adopting it; list() also calls reconcile(), so stopping a
                     # group already managed by this process would race every
                     # active turn with ordinary status polling.
-                    inspection = self._manager.stop(spec)
                     group = _Group(spec=spec, inspection=inspection)
                     origin = _Member(thread_id=spec.thread_id, resident_slot_id=0)
                     group.members[origin.thread_id] = origin
                     self._groups[spec.sandbox_id] = group
                     self._members[origin.thread_id] = group
+                    try:
+                        marker_payload = (
+                            self._manager.read_running_final_archive_marker(
+                                spec,
+                                expected_container_id=inspection.container_id,
+                            )
+                            if inspection.running
+                            else self._manager.read_stopped_final_archive_marker_optional(
+                                spec,
+                                expected_container_id=inspection.container_id,
+                            )
+                        )
+                    except BaseException:
+                        # A marker read is an authority check, not optional
+                        # observability. Keep the adopted group fenced if its
+                        # broker-private lifecycle record is unreadable, but do
+                        # not let one damaged orphan prevent healthy groups from
+                        # reconciling and receiving the network guard.
+                        group.orphan_finalization_pending = True
+                        group.orphan_marker_unreadable = True
+                        marker_unreadable = True
+                        logger.exception(
+                            "sandbox final archive marker could not be classified",
+                            extra={
+                                "event": "sandbox_archive_marker_unreadable",
+                                "sandbox_id": spec.sandbox_id,
+                                "generation": spec.generation,
+                            },
+                        )
+                    else:
+                        marker_present = marker_payload is not None
+                        if (
+                            not marker_present
+                            and inspection.status is not ChatSandboxStatus.CREATED
+                            and (inspection.running or owned_bridge in inspection.networks)
+                        ):
+                            marker_present = self._prepare_markerless_final_locked(
+                                spec,
+                                inspection,
+                            )
+                        unknown_unflushed = (
+                            self._stopped_archive_hook is not None
+                            and not marker_present
+                            and inspection.status is not ChatSandboxStatus.CREATED
+                            and (inspection.running or owned_bridge in inspection.networks)
+                        )
+                        if unknown_unflushed:
+                            members = self._archive_members_locked(group)
+                            group.stop_archive_pending = True
+                            group.stop_archive_blocked = True
+                            group.stop_archive_members = members
+                            group.stopping = inspection.running
+                            blocked = True
+                            if (
+                                inspection.running
+                                and self._stopped_archive_invalidate_hook is not None
+                            ):
+                                invalidate_unknown = True
+                        else:
+                            # With a marker, its original policy and phase are
+                            # authoritative even if an external actor removed the
+                            # bridge. Without archive hooks, retain legacy cleanup.
+                            finalize = marker_present or (
+                                self._stopped_archive_hook is None
+                                and (inspection.running or owned_bridge in inspection.networks)
+                            )
+                        if finalize:
+                            group.orphan_finalization_pending = True
+                            group.stopping = True
+                            members = self._archive_members_locked(group)
                 else:
                     if group.spec != spec:
                         raise SandboxError("shared sandbox immutable labels changed")
-                    if not inspection.running and inspection.networks and self._is_quiescent(group):
-                        # Retry an idempotent release after an external stop or
-                        # a prior stop whose Docker network cleanup failed.
-                        # Active member/terminal operations fence this path
-                        # from a concurrent wake or phase transition.
-                        inspection = self._manager.stop(spec)
-                    group.inspection = inspection
+                    self._accept_inspection_locked(group, inspection)
+                    if group.orphan_marker_unreadable:
+                        try:
+                            marker_payload = (
+                                self._manager.read_running_final_archive_marker(
+                                    spec,
+                                    expected_container_id=inspection.container_id,
+                                )
+                                if inspection.running
+                                else self._manager.read_stopped_final_archive_marker_optional(
+                                    spec,
+                                    expected_container_id=inspection.container_id,
+                                )
+                            )
+                        except BaseException:
+                            marker_unreadable = True
+                            logger.exception(
+                                "sandbox final archive marker remains unreadable",
+                                extra={
+                                    "event": "sandbox_archive_marker_still_unreadable",
+                                    "sandbox_id": spec.sandbox_id,
+                                    "generation": spec.generation,
+                                },
+                            )
+                        else:
+                            group.orphan_marker_unreadable = False
+                            marker_present = marker_payload is not None
+                            if (
+                                not marker_present
+                                and inspection.status is not ChatSandboxStatus.CREATED
+                                and (inspection.running or owned_bridge in inspection.networks)
+                            ):
+                                marker_present = self._prepare_markerless_final_locked(
+                                    spec,
+                                    inspection,
+                                )
+                            unknown_unflushed = (
+                                self._stopped_archive_hook is not None
+                                and not marker_present
+                                and inspection.status is not ChatSandboxStatus.CREATED
+                                and (inspection.running or owned_bridge in inspection.networks)
+                            )
+                            if unknown_unflushed:
+                                members = self._archive_members_locked(group)
+                                group.stop_archive_pending = True
+                                group.stop_archive_blocked = True
+                                group.stop_archive_members = members
+                                group.orphan_finalization_pending = False
+                                group.stopping = inspection.running
+                                blocked = True
+                                if (
+                                    inspection.running
+                                    and self._stopped_archive_invalidate_hook is not None
+                                ):
+                                    invalidate_unknown = True
+                            elif marker_present:
+                                group.stopping = True
+                                finalize = True
+                                members = self._archive_members_locked(group)
+                            else:
+                                group.orphan_finalization_pending = False
+                    elif group.stop_archive_blocked:
+                        group.stopping = inspection.running
+                        blocked = True
+                    elif group.orphan_finalization_pending:
+                        if group.stopping:
+                            raise SessionBusy(
+                                "shared sandbox orphan finalization is already in progress"
+                            )
+                        group.stopping = True
+                        finalize = True
+                        members = self._archive_members_locked(group)
+                    elif group.stop_archive_pending:
+                        if group.stopping:
+                            raise SessionBusy("shared sandbox group stop is already in progress")
+                        group.stopping = True
+                        retry = True
+                    elif (
+                        not inspection.running
+                        and inspection.status is not ChatSandboxStatus.CREATED
+                        and owned_bridge in inspection.networks
+                        and self._is_quiescent(group)
+                    ):
+                        # Bridge presence alone is not authority to invent a
+                        # clean final archive. Classify the durable marker first:
+                        # present means retry its exact lifecycle; absent means
+                        # native history is unknown and must remain blocked.
+                        try:
+                            marker_payload = (
+                                self._manager.read_stopped_final_archive_marker_optional(
+                                    spec,
+                                    expected_container_id=inspection.container_id,
+                                )
+                            )
+                        except BaseException:
+                            group.orphan_finalization_pending = True
+                            group.orphan_marker_unreadable = True
+                            marker_unreadable = True
+                            logger.exception(
+                                "stopped sandbox final archive marker is unreadable",
+                                extra={
+                                    "event": "sandbox_stopped_archive_marker_unreadable",
+                                    "sandbox_id": spec.sandbox_id,
+                                    "generation": spec.generation,
+                                },
+                            )
+                        else:
+                            members = self._archive_members_locked(group)
+                            marker_present = marker_payload is not None
+                            if not marker_present:
+                                marker_present = self._prepare_markerless_final_locked(
+                                    spec,
+                                    inspection,
+                                )
+                            if not marker_present and self._stopped_archive_hook is not None:
+                                group.stop_archive_pending = True
+                                group.stop_archive_blocked = True
+                                group.stop_archive_members = members
+                                blocked = True
+                            else:
+                                if group.stopping:
+                                    raise SessionBusy(
+                                        "shared sandbox group stop is already in progress"
+                                    )
+                                group.stopping = True
+                                finalize = True
+
+            if marker_unreadable:
+                if inspection.running:
+                    try:
+                        inspection = self._manager.stop(
+                            spec,
+                            expected_container_id=inspection.container_id,
+                            release_networks=False,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "unreadable-marker sandbox could not be exact-stopped",
+                            extra={
+                                "event": "sandbox_archive_marker_quarantine_stop_failed",
+                                "sandbox_id": spec.sandbox_id,
+                                "generation": spec.generation,
+                            },
+                        )
+                    else:
+                        with self._lock:
+                            self._accept_inspection_locked(group, inspection)
+                with self._lock:
+                    found.extend(self._descriptors(group))
+                continue
+
+            if invalidate_unknown:
+                try:
+                    assert self._stopped_archive_invalidate_hook is not None
+                    self._stopped_archive_invalidate_hook(spec, inspection)
+                except Exception:
+                    logger.exception(
+                        "unknown running orphan block marker could not be persisted",
+                        extra={
+                            "event": "sandbox_orphan_block_marker_failed",
+                            "sandbox_id": spec.sandbox_id,
+                            "generation": spec.generation,
+                        },
+                    )
+
+            if blocked:
+                try:
+                    inspection = self._stop_blocked_group(group, inspection)
+                except Exception:
+                    logger.exception(
+                        "blocked shared sandbox could not be stopped",
+                        extra={
+                            "event": "sandbox_archive_blocked_stop_failed",
+                            "sandbox_id": spec.sandbox_id,
+                            "generation": spec.generation,
+                        },
+                    )
+                finally:
+                    with self._lock:
+                        group.stopping = False
+                        self._condition.notify_all()
+                        found.extend(self._descriptors(group))
+                continue
+
+            # Docker stop, compression, and S3 upload may take minutes. The
+            # per-group ``stopping`` barrier rejects competing activation while
+            # allowing unrelated groups' status and lifecycle calls to proceed.
+            if retry or finalize:
+                try:
+                    if retry:
+                        self._retry_stopped_archive(group)
+                    else:
+                        if inspection.running and self._stopped_archive_prepare_hook is not None:
+                            self._stopped_archive_prepare_hook(spec, inspection)
+                        inspection = self._manager.stop(
+                            spec,
+                            expected_container_id=inspection.container_id,
+                            release_networks=self._stopped_archive_hook is None,
+                        )
+                        inspection = self._persist_stopped_archive(group, inspection, members)
+                        with self._lock:
+                            group.orphan_finalization_pending = False
+                except SandboxArchiveBlocked:
+                    with self._lock:
+                        group.stop_archive_pending = True
+                        group.stop_archive_blocked = True
+                        group.stop_archive_members = members
+                        group.orphan_finalization_pending = False
+                    try:
+                        if inspection.running:
+                            inspection = self._manager.stop(
+                                spec,
+                                expected_container_id=inspection.container_id,
+                                release_networks=False,
+                            )
+                        with self._lock:
+                            self._accept_inspection_locked(group, inspection)
+                    except Exception:
+                        logger.exception(
+                            "durably blocked sandbox could not be exact-stopped",
+                            extra={
+                                "event": "sandbox_archive_durable_block_stop_failed",
+                                "sandbox_id": spec.sandbox_id,
+                                "generation": spec.generation,
+                            },
+                        )
+                except Exception as exc:
+                    # Durable marker decoding, an exact Docker stop, and the S3
+                    # operation can all fail independently. This orphan stays
+                    # fenced and is reclassified from its marker on the next
+                    # reconciliation, but it must not prevent later groups from
+                    # receiving their own lifecycle and network-guard work.
+                    with self._lock:
+                        group.orphan_finalization_pending = True
+                        group.orphan_marker_unreadable = self._stopped_archive_hook is not None
+                    if inspection.running:
+                        try:
+                            inspection = self._manager.stop(
+                                spec,
+                                expected_container_id=inspection.container_id,
+                                release_networks=False,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "failed-finalization sandbox could not be exact-stopped",
+                                extra={
+                                    "event": "sandbox_archive_finalization_stop_failed",
+                                    "sandbox_id": spec.sandbox_id,
+                                    "generation": spec.generation,
+                                },
+                            )
+                        else:
+                            with self._lock:
+                                self._accept_inspection_locked(group, inspection)
+                    logger.exception(
+                        "shared sandbox archive finalization remains pending",
+                        extra={
+                            "event": "sandbox_archive_finalization_pending",
+                            "sandbox_id": spec.sandbox_id,
+                            "generation": spec.generation,
+                            "detail": str(exc)[:300],
+                        },
+                    )
+                finally:
+                    with self._lock:
+                        group.stopping = False
+                        self._condition.notify_all()
+            with self._lock:
                 found.extend(self._descriptors(group))
         self._manager.prune_orphan_networks(specs)
         return found
@@ -678,12 +1591,20 @@ class SharedChatSessionSupervisor:
         with self._lock:
             group, member = self._member(thread_id)
             transition_deadline = time.monotonic() + 30.0
-            while group.snapshotting or group.stopping:
+            while group.snapshotting or group.starting or group.stopping:
                 remaining = transition_deadline - time.monotonic()
                 if remaining <= 0:
-                    transition = "snapshot" if group.snapshotting else "stop"
+                    transition = (
+                        "snapshot"
+                        if group.snapshotting
+                        else ("start" if group.starting else "stop")
+                    )
                     raise SessionBusy(f"shared workspace {transition} is in progress")
                 self._condition.wait(timeout=min(remaining, 0.5))
+            if group.stop_archive_pending:
+                raise SessionBusy("shared workspace final archive retry is pending")
+            if group.orphan_finalization_pending:
+                raise SessionBusy("shared workspace orphan finalization is pending")
             if member.lease_token is not None:
                 if member.lease_owner == owner:
                     return self._lease(
@@ -706,11 +1627,42 @@ class SharedChatSessionSupervisor:
                 member.context_status = "lost"
                 member.resident_state = "lost"
                 raise RetainedChatLost("shared sandbox container identity changed")
-            group.inspection = self._manager.start(
-                group.spec,
-                facts=facts,
-                observer=recorder,
+            lifecycle_generation = group.lifecycle_generation
+
+        inspection = self._start_group(
+            group,
+            facts=facts,
+            observer=recorder,
+        )
+        with self._lock:
+            current_group = self._members.get(thread_id)
+            current_member = (
+                current_group.members.get(thread_id) if current_group is not None else None
             )
+            if (
+                current_group is not group
+                or current_member is not member
+                or group.lifecycle_generation != lifecycle_generation
+            ):
+                raise SessionLeaseLost("shared sandbox lifecycle changed during activation")
+            self._require_mutation_admission(group)
+            if group.stop_archive_pending:
+                raise SessionBusy("shared workspace final archive retry is pending")
+            if member.lease_token is not None:
+                if member.lease_owner == owner:
+                    return self._lease(
+                        group, member, facts=facts, recorder=recorder, call_id=call_id
+                    )
+                raise SessionBusy(f"chat {thread_id!r} already has an active turn")
+            if member.current_turn is not None:
+                raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+            if activation_generation < member.activation_generation:
+                raise SessionLeaseLost("member activation generation is stale")
+            if expected_container_id and inspection.container_id != expected_container_id:
+                member.context_status = "lost"
+                member.resident_state = "lost"
+                raise RetainedChatLost("shared sandbox container identity changed")
+            group.inspection = inspection
             member.activation_generation = activation_generation
             member.settlement_receipt = None
             member.lease_token = secrets.token_urlsafe(32)
@@ -722,8 +1674,6 @@ class SharedChatSessionSupervisor:
                 else ("restored" if has_settled_context else "new")
             )
             group.idle_deadline = None
-
-        with self._lock:
             return self._lease(
                 group,
                 member,
@@ -1768,6 +2718,11 @@ class SharedChatSessionSupervisor:
             raise SandboxError("native session fork is not configured on this host")
         with self._lock:
             group, source = self._member(source_thread_id)
+        self._recover_start_archive_completion(group)
+        with self._lock:
+            current_group, current_source = self._member(source_thread_id)
+            if current_group is not group or current_source is not source:
+                raise SessionLeaseLost("source membership changed before fork admission")
             self._require_mutation_admission(group)
             mutex = group.fork_mutex
             activity_token = f"fork:{operation_id}"
@@ -1984,8 +2939,25 @@ class SharedChatSessionSupervisor:
         """Reference-count one shared workspace operation without serializing it."""
         with self._lock:
             group, member = self._member(thread_id)
+        self._recover_start_archive_completion(group)
+        with self._lock:
+            current_group, current_member = self._member(thread_id)
+            if current_group is not group or current_member is not member:
+                raise SessionLeaseLost("shared membership changed before operation admission")
             self._require_mutation_admission(group)
-            self._ensure_running(group)
+            lifecycle_generation = group.lifecycle_generation
+        self._ensure_running(group)
+        with self._lock:
+            current_group, current_member = self._member(thread_id)
+            if (
+                current_group is not group
+                or current_member is not member
+                or group.lifecycle_generation != lifecycle_generation
+            ):
+                raise SessionLeaseLost(
+                    "shared sandbox lifecycle changed during operation admission"
+                )
+            self._require_mutation_admission(group)
             token = secrets.token_urlsafe(24)
             group.operation_tokens[token] = thread_id
             group.idle_deadline = None
@@ -2008,8 +2980,14 @@ class SharedChatSessionSupervisor:
         """
         with self._lock:
             group, _ = self._member(thread_id)
+        self._recover_start_archive_completion(group)
+        with self._lock:
+            group, _ = self._member(thread_id)
+            self._require_mutation_admission(group)
             if group.stopping:
                 raise SessionBusy("shared workspace stop is in progress")
+            if group.starting:
+                raise SessionBusy("shared workspace start is in progress")
             if group.snapshotting:
                 raise SessionBusy("shared workspace snapshot capture is already in progress")
             if not self._is_quiescent(group):
@@ -2017,10 +2995,11 @@ class SharedChatSessionSupervisor:
             current = self._manager.inspect(group.spec.container_name)
             if current is None:
                 raise RetainedChatLost("shared sandbox container is missing")
-            group.inspection = current
+            self._accept_inspection_locked(group, current)
             group.snapshotting = True
             group.idle_deadline = None
             lifecycle_generation = group.lifecycle_generation
+            expected_container_id = group.inspection.container_id
             slots = [member.resident_slot_id for member in group.members.values()]
 
         manifest: str | None = None
@@ -2028,7 +3007,7 @@ class SharedChatSessionSupervisor:
         result: dict[str, Any] | None = None
         try:
             if not current.running:
-                started = self._manager.start(group.spec)
+                started = self._start_group(group)
                 with self._lock:
                     if group.stopping or group.lifecycle_generation != lifecycle_generation:
                         raise SessionLeaseLost(
@@ -2039,38 +3018,294 @@ class SharedChatSessionSupervisor:
                 group.spec,
                 slot_ids=slots,
                 token=secrets.token_hex(16),
+                expected_container_id=expected_container_id,
             )
             result = capture(RetainedChatBackend(self._manager, group.spec))
         except BaseException as exc:
             capture_error = exc
         thaw_error: BaseException | None = None
+        identity_error: BaseException | None = None
         if manifest is not None:
+            try:
+                self._require_current_inspection(group)
+            except BaseException as exc:
+                identity_error = exc
             try:
                 self._manager.thaw_shared_writers(
                     group.spec,
                     slot_ids=slots,
                     manifest=manifest,
+                    expected_container_id=expected_container_id,
                 )
             except BaseException as exc:
                 thaw_error = exc
+            try:
+                self._require_current_inspection(group)
+            except BaseException as exc:
+                if identity_error is None:
+                    identity_error = exc
         with self._lock:
             group.snapshotting = False
             self._arm_idle_if_quiescent(group)
             self._condition.notify_all()
         if thaw_error is not None:
             raise thaw_error
+        if identity_error is not None:
+            raise identity_error
         if capture_error is not None:
             raise capture_error
         if result is None:
             raise SandboxError("shared snapshot capture returned no result")
         return result
 
+    def capture_initial_archive(
+        self,
+        thread_id: str,
+        token: str,
+        *,
+        expected_spec: ChatSandboxSpec | None = None,
+        expected_container_id: str | None = None,
+        capture: Callable[
+            [
+                RetainedChatBackend,
+                ChatSandboxSpec,
+                tuple[SharedMemberManifest, ...],
+            ],
+            dict[str, Any],
+        ],
+    ) -> dict[str, Any]:
+        """Capture the pre-prompt workspace owned by one fresh activation.
+
+        Unlike a publication snapshot, this boundary deliberately permits the
+        addressed activation lease: the runner has completed checkout/setup
+        but has not created a resident CLI process or admitted its prompt.
+        Every other writer remains excluded, and setup descendants are frozen
+        while Docker copies the workspace.
+        """
+        with self._lock:
+            group, member = self._leased_member(thread_id, token)
+            self._require_mutation_admission(group)
+            if expected_spec is not None and group.spec != expected_spec:
+                raise SandboxError("shared sandbox immutable identity/configuration changed")
+            if (
+                expected_container_id is not None
+                and group.inspection.container_id != expected_container_id
+            ):
+                raise RetainedChatLost("shared sandbox container identity changed")
+            if group.stopping:
+                raise SessionBusy("shared workspace stop is in progress")
+            if group.snapshotting:
+                raise SessionBusy("shared workspace snapshot capture is already in progress")
+            if group.operation_tokens or group.terminal_tokens:
+                raise SessionBusy("shared workspace still has active mutations")
+            if member.current_turn is not None or member.transport is not None:
+                raise SessionBusy("initial archive must precede resident process creation")
+            if any(
+                peer is not member
+                and (peer.lease_token is not None or peer.current_turn is not None)
+                for peer in group.members.values()
+            ):
+                raise SessionBusy("a sibling member is active during initial archive capture")
+            current = self._manager.inspect(group.spec.container_name)
+            if current is None:
+                raise RetainedChatLost("shared sandbox container is missing")
+            if not current.running:
+                raise SandboxError("initial archive requires the prepared running sandbox")
+            if current.container_id != group.inspection.container_id:
+                raise RetainedChatLost("shared sandbox container identity changed")
+            group.inspection = current
+            group.snapshotting = True
+            group.idle_deadline = None
+            lifecycle_generation = group.lifecycle_generation
+            authoritative_spec = group.spec
+            authoritative_members = self._archive_members_locked(group)
+            expected_container_id = group.inspection.container_id
+            activation_generation = member.activation_generation
+            slots = [peer.resident_slot_id for peer in group.members.values()]
+
+        manifest: str | None = None
+        capture_error: BaseException | None = None
+        result: dict[str, Any] | None = None
+        try:
+            manifest = self._manager.freeze_shared_writers(
+                group.spec,
+                slot_ids=slots,
+                token=secrets.token_hex(16),
+                expected_container_id=expected_container_id,
+            )
+            result = capture(
+                RetainedChatBackend(self._manager, group.spec),
+                authoritative_spec,
+                authoritative_members,
+            )
+        except BaseException as exc:
+            capture_error = exc
+        preserve_frozen_writers = False
+        release_snapshot_barrier = True
+        marker_read_error: BaseException | None = None
+        preservation_error: BaseException | None = None
+        preservation_inspection_error: BaseException | None = None
+        if capture_error is not None and manifest is not None:
+            try:
+                initial_marker = self._manager.read_initial_archive_marker(
+                    authoritative_spec,
+                    expected_container_id=expected_container_id,
+                )
+            except BaseException as exc:
+                # A timed-out marker read cannot prove that the immutable
+                # initial object was not prepared. Preserve the frozen bytes
+                # exactly as if the marker had been observed.
+                marker_read_error = exc
+                preserve_frozen_writers = True
+            else:
+                preserve_frozen_writers = initial_marker is not None
+            if preserve_frozen_writers:
+                with self._lock:
+                    group.initial_archive_preservation_pending = True
+                try:
+                    stopped = self.stop_if_idle(
+                        thread_id,
+                        generation=authoritative_spec.generation,
+                        activation_generation=activation_generation,
+                        reason="orphaned_attempt",
+                    )
+                except BaseException as exc:
+                    preservation_error = exc
+                    # A network fail-stop or shutdown can already own the same
+                    # group. Do not sample its still-running pre-stop state and
+                    # leave the snapshot fence orphaned after that exact stop
+                    # completes. Every stop path clears ``stopping`` and
+                    # notifies this condition; retain the frozen-writer barrier
+                    # until the owning transition has a stable result to inspect.
+                    with self._condition:
+                        while group.stopping:
+                            self._condition.wait(timeout=0.5)
+                    try:
+                        current = self._require_current_inspection(group)
+                    except BaseException as inspection_exc:
+                        preservation_inspection_error = inspection_exc
+                        release_snapshot_barrier = False
+                    else:
+                        # A failed final upload leaves the exact container
+                        # stopped with its bridge and pending marker retained.
+                        # A pre-stop failure must keep this admission barrier:
+                        # thawing or admitting a new writer would destroy the
+                        # only bytes that can reconcile the initial object.
+                        release_snapshot_barrier = not current.running
+                else:
+                    release_snapshot_barrier = not stopped.running
+        thaw_error: BaseException | None = None
+        identity_error: BaseException | None = None
+        if manifest is not None and not preserve_frozen_writers:
+            try:
+                self._require_current_inspection(group)
+            except BaseException as exc:
+                identity_error = exc
+            try:
+                self._manager.thaw_shared_writers(
+                    group.spec,
+                    slot_ids=slots,
+                    manifest=manifest,
+                    expected_container_id=expected_container_id,
+                )
+            except BaseException as exc:
+                thaw_error = exc
+            try:
+                self._require_current_inspection(group)
+            except BaseException as exc:
+                if identity_error is None:
+                    identity_error = exc
+        with self._lock:
+            current_group = self._members.get(thread_id)
+            current_member = (
+                current_group.members.get(thread_id) if current_group is not None else None
+            )
+            lease_is_current = (
+                current_group is group
+                and current_member is member
+                and not group.stopping
+                and group.lifecycle_generation == lifecycle_generation
+                and member.lease_token == token
+            )
+            # A concurrent exact stop can land after the inspection above but
+            # before this bookkeeping lock. Honour that accepted STOPPED state
+            # instead of recording a stale preservation barrier. Otherwise mark
+            # this specific snapshot fence for release by a later exact stop.
+            if (
+                not release_snapshot_barrier
+                and preserve_frozen_writers
+                and not group.inspection.running
+            ):
+                release_snapshot_barrier = True
+            if release_snapshot_barrier:
+                group.initial_archive_preservation_pending = False
+                group.snapshotting = False
+                self._arm_idle_if_quiescent(group)
+            elif preserve_frozen_writers:
+                group.initial_archive_preservation_pending = True
+            self._condition.notify_all()
+        if preservation_error is not None:
+            preservation_error.add_note(
+                "initial archive capture failed before fail-stop preservation: "
+                f"{type(capture_error).__name__}: {capture_error}"
+            )
+            if marker_read_error is not None:
+                preservation_error.add_note(
+                    "the initial archive marker could not be read, so its presence "
+                    "was treated as uncertain: "
+                    f"{type(marker_read_error).__name__}: {marker_read_error}"
+                )
+            if preservation_inspection_error is not None:
+                preservation_error.add_note(
+                    "the exact container state could not be confirmed after fail-stop; "
+                    "the snapshot admission barrier remains set: "
+                    f"{type(preservation_inspection_error).__name__}: "
+                    f"{preservation_inspection_error}"
+                )
+            elif not release_snapshot_barrier:
+                preservation_error.add_note(
+                    "fail-stop did not stop the exact container; the snapshot "
+                    "admission barrier remains set"
+                )
+            raise preservation_error from capture_error
+        if thaw_error is not None:
+            raise thaw_error
+        if identity_error is not None:
+            raise identity_error
+        if capture_error is not None:
+            if marker_read_error is not None:
+                capture_error.add_note(
+                    "the initial archive marker could not be read; the exact sandbox "
+                    "was fail-stopped while its writers remained frozen"
+                )
+            raise capture_error
+        if result is None:
+            raise SandboxError("initial archive capture returned no result")
+        if not lease_is_current:
+            raise SessionLeaseLost("shared sandbox lifecycle changed during initial archive")
+        return result
+
     def terminal_opened(self, thread_id: str) -> tuple[str, SharedSessionDescriptor]:
         """Reference-count one member-owned PTY against the shared group."""
         with self._lock:
             group, member = self._member(thread_id)
+        self._recover_start_archive_completion(group)
+        with self._lock:
+            current_group, current_member = self._member(thread_id)
+            if current_group is not group or current_member is not member:
+                raise SessionLeaseLost("shared membership changed before terminal admission")
             self._require_mutation_admission(group)
-            self._ensure_running(group)
+            lifecycle_generation = group.lifecycle_generation
+        self._ensure_running(group)
+        with self._lock:
+            current_group, current_member = self._member(thread_id)
+            if (
+                current_group is not group
+                or current_member is not member
+                or group.lifecycle_generation != lifecycle_generation
+            ):
+                raise SessionLeaseLost("shared sandbox lifecycle changed during terminal admission")
+            self._require_mutation_admission(group)
             token = secrets.token_urlsafe(24)
             group.terminal_tokens[token] = thread_id
             group.idle_deadline = None
@@ -2128,7 +3363,7 @@ class SharedChatSessionSupervisor:
                 member.context_status = "lost"
                 member.resident_state = "lost"
                 raise RetainedChatLost("shared sandbox container is missing")
-            group.inspection = current
+            self._accept_inspection_locked(group, current)
             stale_transport = self._detach_dead_transport(member)
             descriptor = self._descriptor(group, member)
         if stale_transport is not None:
@@ -2161,9 +3396,11 @@ class SharedChatSessionSupervisor:
         thread_id: str,
         *,
         generation: int,
+        activation_generation: int | None = None,
         reason: Literal["idle", "orphaned_attempt", "lost", "unguarded"] = "idle",
         member_activation_generations: dict[str, int] | None = None,
         require_expired_deadline: bool = False,
+        defer_archive: bool = False,
     ) -> SharedSessionDescriptor:
         """Close all member transports, then stop the group exactly once.
 
@@ -2176,10 +3413,19 @@ class SharedChatSessionSupervisor:
         activity can finish and refresh it after the sweep selects candidates.
         Direct stop requests retain their quiescence-only admission behavior.
         """
+        created_cleanup = False
+        quarantine_unreadable = False
         with self._lock:
             group, requested = self._member(thread_id)
+            if group.container_lost:
+                raise RetainedChatLost("shared sandbox container identity was lost")
             if group.spec.generation != generation:
                 raise SessionLeaseLost("shared sandbox generation is stale")
+            if (
+                activation_generation is not None
+                and requested.activation_generation != activation_generation
+            ):
+                raise SessionLeaseLost("shared member activation generation is stale")
             if member_activation_generations is not None and any(
                 member_activation_generations.get(member.thread_id) != member.activation_generation
                 for member in group.members.values()
@@ -2189,6 +3435,8 @@ class SharedChatSessionSupervisor:
                 )
             if group.stopping:
                 raise SessionBusy("shared sandbox group stop is already in progress")
+            if group.starting:
+                raise SessionBusy("shared sandbox group start is in progress")
             if reason == "idle" and not self._is_quiescent(group):
                 raise SessionBusy("shared sandbox group still has active members")
             if (
@@ -2197,75 +3445,340 @@ class SharedChatSessionSupervisor:
                 and (group.idle_deadline is None or group.idle_deadline > self._clock())
             ):
                 raise SessionBusy("shared sandbox group inactivity deadline has not elapsed")
-            group.stopping = True
-            group.lifecycle_generation += 1
-            group.idle_deadline = None
-            group.operation_tokens.clear()
-            group.terminal_tokens.clear()
-            transports = [
-                member.transport
-                for member in group.members.values()
-                if member.transport is not None
-            ]
-            observations = [
-                (group.spec, member.observer_cursor)
-                for member in group.members.values()
-                if member.observer_cursor is not None
-            ]
-            interrupted_turn_locks: builtins.list[Any] = []
-            for member in group.members.values():
-                if member.current_turn is not None and member.turn_lock.locked():
-                    interrupted_turn_locks.append(member.turn_lock)
-                member.transport = None
-                member.current_turn = None
-                member.activation_processes = None
-                member.observer_cursor = None
-                member.tool_mark_reader = None
-                member.lease_token = None
-                member.lease_owner = None
-                member.resident_state = "lost" if reason == "lost" else "stopped"
-                if reason == "lost":
-                    member.context_status = "lost"
+            current = self._manager.inspect(group.spec.container_name)
+            if current is None:
+                self._mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container is missing")
+            self._accept_inspection_locked(group, current)
+            owned_bridge = self._manager.network_for(group.spec)
+            blocked = group.stop_archive_blocked
+            retry_pending = (
+                group.stop_archive_pending
+                or group.orphan_finalization_pending
+                or group.start_archive_completion_pending
+            )
+            quarantine_unreadable = current.running and group.orphan_marker_unreadable
+            if (
+                not current.running
+                and self._stopped_archive_hook is not None
+                and not blocked
+                and not group.stop_archive_pending
+            ):
+                try:
+                    marker_payload = self._manager.read_stopped_final_archive_marker_optional(
+                        group.spec,
+                        expected_container_id=current.container_id,
+                    )
+                except BaseException:
+                    group.orphan_finalization_pending = True
+                    group.orphan_marker_unreadable = True
+                    raise
+                group.orphan_marker_unreadable = False
+                if marker_payload is not None:
+                    retry_pending = True
+                elif (
+                    current.status is ChatSandboxStatus.CREATED
+                    and not group.stop_archive_pending
+                    and not group.start_archive_completion_pending
+                ):
+                    # Docker create attaches the owned bridge before the first
+                    # start fence exists. A canceled pre-start activation has no
+                    # native history to archive; clean up that exact never-run
+                    # container without inventing a final marker.
+                    created_cleanup = True
+                    group.orphan_finalization_pending = False
+                    retry_pending = False
+                elif self._prepare_markerless_final_locked(group.spec, current):
+                    # The dynamic controller atomically wrote an explicit
+                    # disabled-policy marker.  Finish that no-upload lifecycle
+                    # through the normal retry path and release its bridge.
+                    retry_pending = True
+                else:
+                    # A stopped non-CREATED container with no durable record is
+                    # unclassified native history. Persist the blocked state and
+                    # retain its bridge; never fabricate a clean final archive.
+                    blocked = True
+                    group.stop_archive_blocked = True
+                    group.stop_archive_pending = True
+                    group.stop_archive_members = self._archive_members_locked(group)
+                    retry_pending = True
+            if retry_pending and not group.stop_archive_pending and not quarantine_unreadable:
+                group.stop_archive_pending = self._stopped_archive_hook is not None
+                group.stop_archive_members = (
+                    self._archive_members_locked(group)
+                    if self._stopped_archive_hook is not None
+                    else None
+                )
+                retry_pending = group.stop_archive_pending
+            if quarantine_unreadable or blocked:
+                group.stopping = True
+                group.idle_deadline = None
+            elif not current.running and owned_bridge not in current.networks and not retry_pending:
+                for member in group.members.values():
+                    member.resident_state = "lost" if reason == "lost" else "stopped"
+                    if reason == "lost":
+                        member.context_status = "lost"
+                group.idle_deadline = None
+                return self._descriptor(group, requested)
+            elif retry_pending and not created_cleanup:
+                group.stopping = True
+                group.idle_deadline = None
+            else:
+                group.stopping = True
+                group.lifecycle_generation += 1
+                group.idle_deadline = None
+                group.operation_tokens.clear()
+                group.terminal_tokens.clear()
+                transports = [
+                    member.transport
+                    for member in group.members.values()
+                    if member.transport is not None
+                ]
+                observations = [
+                    (group.spec, member.observer_cursor)
+                    for member in group.members.values()
+                    if member.observer_cursor is not None
+                ]
+                interrupted_turn_locks: builtins.list[Any] = []
+                for member in group.members.values():
+                    if member.current_turn is not None and member.turn_lock.locked():
+                        interrupted_turn_locks.append(member.turn_lock)
+                    member.transport = None
+                    member.current_turn = None
+                    member.activation_processes = None
+                    member.observer_cursor = None
+                    member.tool_mark_reader = None
+                    member.lease_token = None
+                    member.lease_owner = None
+                    member.resident_state = "lost" if reason == "lost" else "stopped"
+                    if reason == "lost":
+                        member.context_status = "lost"
+                archive_members = self._archive_members_locked(group)
+                expected_container_id = group.inspection.container_id
+
+        if quarantine_unreadable:
+            try:
+                quarantined = self._manager.stop(
+                    group.spec,
+                    expected_container_id=current.container_id,
+                    release_networks=False,
+                )
+                with self._lock:
+                    self._accept_inspection_locked(group, quarantined)
+                    for member in group.members.values():
+                        member.resident_state = "stopped"
+                    group.idle_deadline = None
+            finally:
+                with self._lock:
+                    group.stopping = False
+                    self._condition.notify_all()
+            raise SandboxError("shared sandbox final archive marker remains unreadable")
+
+        if blocked:
+            try:
+                self._stop_blocked_group(group, current)
+            finally:
+                with self._lock:
+                    group.stopping = False
+                    self._condition.notify_all()
+            raise SandboxError("shared sandbox final archive is blocked by native flush failure")
+
+        if retry_pending:
+            try:
+                self._retry_stopped_archive(group, persist=not defer_archive)
+            finally:
+                with self._lock:
+                    group.stopping = False
+                    self._condition.notify_all()
+            with self._lock:
+                return self._descriptor(group, requested)
+
+        inspection: ChatSandboxInspection | None = None
+        flush_error: Exception | None = None
         try:
+            # Native transports are closed before Docker stop so each runtime
+            # can flush its own session history into the retained layer.
             for transport in transports:
-                with contextlib.suppress(Exception):
+                try:
                     transport.close()
+                except Exception as exc:
+                    if flush_error is None:
+                        flush_error = exc
+                    logger.exception(
+                        "native transport close failed before sandbox final archive",
+                        extra={
+                            "event": "sandbox_native_history_flush_failed",
+                            "sandbox_id": group.spec.sandbox_id,
+                            "generation": group.spec.generation,
+                        },
+                    )
             for spec, cursor in observations:
                 with contextlib.suppress(Exception):
                     self._manager.finish_guest_observation(spec, cursor)
             for turn_lock in interrupted_turn_locks:
                 with contextlib.suppress(RuntimeError):
                     turn_lock.release()
-            current = self._manager.inspect(group.spec.container_name)
-            if current is None:
-                raise RetainedChatLost("shared sandbox container is missing")
-            # ``ChatSandboxManager.stop`` is deliberately idempotent: when
-            # Docker already stopped the container it still releases the
-            # retained phase network. Always delegate so an external stop, or
-            # a retry after network cleanup failed, cannot leak the chat's
-            # private subnet.
-            inspection = self._manager.stop(group.spec)
+            if flush_error is not None:
+                with self._lock:
+                    group.stop_archive_pending = self._stopped_archive_hook is not None
+                    group.stop_archive_blocked = True
+                    group.stop_archive_members = (
+                        archive_members if self._stopped_archive_hook is not None else None
+                    )
+                invalidate_error: Exception | None = None
+                if self._stopped_archive_invalidate_hook is not None:
+                    try:
+                        self._stopped_archive_invalidate_hook(group.spec, current)
+                    except Exception as exc:
+                        invalidate_error = exc
+                try:
+                    inspection = self._manager.stop(
+                        group.spec,
+                        expected_container_id=expected_container_id,
+                        release_networks=(
+                            self._stopped_archive_hook is None and invalidate_error is None
+                        ),
+                    )
+                except BaseException:
+                    if (
+                        invalidate_error is not None
+                        and self._stopped_archive_invalidate_hook is not None
+                    ):
+                        retry_current = self._require_current_inspection(group)
+                        if retry_current.running:
+                            try:
+                                self._stopped_archive_invalidate_hook(group.spec, retry_current)
+                            except Exception:
+                                logger.exception(
+                                    "running sandbox block marker retry failed after stop error",
+                                    extra={
+                                        "event": "sandbox_archive_block_retry_after_stop_failed",
+                                        "sandbox_id": group.spec.sandbox_id,
+                                        "generation": group.spec.generation,
+                                    },
+                                )
+                    raise
+                with self._lock:
+                    self._accept_inspection_locked(group, inspection)
+                if invalidate_error is not None:
+                    assert self._stopped_archive_invalidate_hook is not None
+                    try:
+                        self._stopped_archive_invalidate_hook(group.spec, inspection)
+                    except Exception:
+                        raise SandboxError(
+                            "native flush failure archive block could not be persisted"
+                        ) from invalidate_error
+                raise SandboxError(
+                    "native session history could not be flushed before final archive"
+                ) from flush_error
+            if created_cleanup:
+                inspection = self._manager.stop(
+                    group.spec,
+                    expected_container_id=expected_container_id,
+                    release_networks=True,
+                )
+            else:
+                if self._stopped_archive_hook is not None:
+                    with self._lock:
+                        group.stop_archive_pending = True
+                        group.stop_archive_members = archive_members
+                if self._stopped_archive_prepare_hook is not None:
+                    try:
+                        self._stopped_archive_prepare_hook(group.spec, current)
+                    except Exception:
+                        if not defer_archive:
+                            raise
+                        # Network proof is already lost. Archive preparation
+                        # failure cannot leave this group running while later
+                        # groups wait. Convert it to the durable blocked state,
+                        # exact-stop with the bridge retained, and never upload.
+                        with self._lock:
+                            group.stop_archive_pending = True
+                            group.stop_archive_blocked = True
+                            group.stop_archive_members = archive_members
+                        marker_persisted = False
+                        if self._stopped_archive_invalidate_hook is not None:
+                            try:
+                                self._stopped_archive_invalidate_hook(group.spec, current)
+                                marker_persisted = True
+                            except Exception:
+                                logger.exception(
+                                    "unguarded sandbox block marker could not be persisted",
+                                    extra={
+                                        "event": "shared_chat_network_block_marker_failed",
+                                        "sandbox_id": group.spec.sandbox_id,
+                                        "generation": group.spec.generation,
+                                    },
+                                )
+                        inspection = self._manager.stop(
+                            group.spec,
+                            expected_container_id=expected_container_id,
+                            release_networks=False,
+                        )
+                        with self._lock:
+                            self._accept_inspection_locked(group, inspection)
+                        if (
+                            not marker_persisted
+                            and self._stopped_archive_invalidate_hook is not None
+                        ):
+                            try:
+                                self._stopped_archive_invalidate_hook(group.spec, inspection)
+                            except Exception:
+                                logger.exception(
+                                    "stopped unguarded sandbox block marker could not be persisted",
+                                    extra={
+                                        "event": "shared_chat_network_stopped_block_marker_failed",
+                                        "sandbox_id": group.spec.sandbox_id,
+                                        "generation": group.spec.generation,
+                                    },
+                                )
+                        raise
+                inspection = self._manager.stop(
+                    group.spec,
+                    expected_container_id=expected_container_id,
+                    release_networks=self._stopped_archive_hook is None,
+                )
+                # This is synchronous and fail-closed. A failed upload remains
+                # pinned to the same policy revision and leaves the stopped
+                # container/network as the durable retry marker.
+                if not defer_archive:
+                    inspection = self._persist_stopped_archive(
+                        group,
+                        inspection,
+                        archive_members,
+                    )
         except BaseException:
             failed_inspection: ChatSandboxInspection | None = None
             with contextlib.suppress(Exception):
                 failed_inspection = self._manager.inspect(group.spec.container_name)
             with self._lock:
-                if failed_inspection is None:
+                if inspection is not None:
+                    self._accept_inspection_locked(group, inspection)
                     for member in group.members.values():
-                        member.context_status = "lost"
-                        member.resident_state = "lost"
+                        member.resident_state = "lost" if reason == "lost" else "stopped"
+                        if reason == "lost":
+                            member.context_status = "lost"
+                    group.idle_deadline = None
+                elif failed_inspection is None:
+                    self._mark_container_lost_locked(group)
                 else:
-                    group.inspection = failed_inspection
-                    for member in group.members.values():
-                        member.resident_state = (
-                            "restarting" if member.native_session_id else "stopped"
-                        )
+                    try:
+                        self._accept_inspection_locked(group, failed_inspection)
+                    except RetainedChatLost:
+                        pass
+                    else:
+                        for member in group.members.values():
+                            member.resident_state = (
+                                "restarting" if member.native_session_id else "stopped"
+                            )
                 group.stopping = False
-                self._arm_idle_if_quiescent(group)
+                if inspection is None:
+                    self._arm_idle_if_quiescent(group)
                 self._condition.notify_all()
             raise
+        assert inspection is not None
         with self._lock:
-            group.inspection = inspection
+            self._accept_inspection_locked(group, inspection)
             for member in group.members.values():
                 member.resident_state = "lost" if reason == "lost" else "stopped"
                 if reason == "lost":
@@ -2291,6 +3804,9 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("sandbox archive generation is stale")
             if group.archive_request_id not in (None, request_id):
                 raise SessionBusy("another sandbox archive is in progress")
+            self._require_deletion_lifecycle_admission(group)
+            if group.archive_request_id is None:
+                self._require_mutation_admission(group)
             if group.archive_request_id is None and not self._is_quiescent(group):
                 raise SessionBusy("sandbox archive requires an idle group")
             current = self._manager.require_stopped_archive(group.spec, container_id=container_id)
@@ -2338,6 +3854,9 @@ class SharedChatSessionSupervisor:
                     raise SessionLeaseLost("sandbox archive identity changed")
                 if group.archive_request_id not in (None, request_id):
                     raise SessionLeaseLost("sandbox archive request is stale")
+                self._require_deletion_lifecycle_admission(group)
+                if group.archive_request_id is None:
+                    self._require_mutation_admission(group)
                 if group.archive_request_id is None and not self._is_quiescent(group):
                     raise SessionBusy("sandbox deletion requires an idle group")
                 group.archive_request_id = request_id
@@ -2479,10 +3998,28 @@ class SharedChatSessionSupervisor:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:
             raise RetainedChatLost("shared sandbox container is missing")
-        group.inspection = self._manager.start(group.spec)
+        if group.stop_archive_pending:
+            raise SessionBusy("shared workspace final archive retry is pending")
+        if group.orphan_finalization_pending:
+            raise SessionBusy("shared workspace orphan finalization is pending")
+        group.inspection = self._start_group(group)
+
+    def _recover_start_archive_completion(self, group: _Group) -> None:
+        """Retry an idempotent post-start marker completion before admission."""
+        with self._lock:
+            pending = group.start_archive_completion_pending
+        if pending:
+            self._start_group(group)
 
     def _arm_idle_if_quiescent(self, group: _Group) -> None:
-        if self._is_quiescent(group) and group.inspection.running:
+        if (
+            self._is_quiescent(group)
+            and group.inspection.running
+            and not group.stop_archive_pending
+            and not group.stop_archive_blocked
+            and not group.orphan_finalization_pending
+            and not group.start_archive_completion_pending
+        ):
             group.idle_deadline = self._clock() + self._idle_timeout_s
         else:
             group.idle_deadline = None
@@ -2508,6 +4045,7 @@ class SharedChatSessionSupervisor:
     def _is_quiescent(group: _Group) -> bool:
         return (
             not group.snapshotting
+            and not group.starting
             and not group.stopping
             and not group.operation_tokens
             and not group.terminal_tokens
@@ -2518,11 +4056,37 @@ class SharedChatSessionSupervisor:
         )
 
     @staticmethod
+    def _require_deletion_lifecycle_admission(group: _Group) -> None:
+        """Preserve native flush and lifecycle archive fences during deletion."""
+        if group.container_lost:
+            raise RetainedChatLost("shared sandbox container identity was lost")
+        if (
+            group.snapshotting
+            or group.starting
+            or group.initial_archive_preservation_pending
+            or group.stop_archive_pending
+            or group.stop_archive_blocked
+            or group.orphan_finalization_pending
+            or group.start_archive_completion_pending
+        ):
+            raise SessionBusy("sandbox lifecycle archive must finish before deletion")
+
+    @staticmethod
     def _require_mutation_admission(group: _Group) -> None:
         if group.snapshotting:
             raise SessionBusy("shared workspace snapshot capture is in progress")
         if group.stopping:
             raise SessionBusy("shared workspace stop is in progress")
+        if group.starting:
+            raise SessionBusy("shared workspace start is in progress")
+        if group.stop_archive_blocked:
+            raise SessionBusy("shared workspace final archive is blocked by native flush failure")
+        if group.stop_archive_pending:
+            raise SessionBusy("shared workspace final archive retry is pending")
+        if group.orphan_finalization_pending:
+            raise SessionBusy("shared workspace orphan finalization is pending")
+        if group.start_archive_completion_pending:
+            raise SessionBusy("shared workspace start archive completion is pending")
 
     def _member(self, thread_id: str) -> tuple[_Group, _Member]:
         group = self._members.get(thread_id)
@@ -2631,6 +4195,7 @@ class SharedChatSessionSupervisor:
                 sandbox_image_digest=labels.get(CHAT_IMAGE_DIGEST_LABEL) or None,
                 memory_limit=labels[CHAT_MEMORY_LIMIT_LABEL],
                 cpu_limit=labels[CHAT_CPU_LIMIT_LABEL],
+                disk_limit_mib=int(labels.get(CHAT_DISK_LIMIT_LABEL, "0")),
                 stop_timeout_s=int(labels[CHAT_STOP_TIMEOUT_LABEL]),
                 shared_live=True,
                 resident_slot_capacity=int(labels[CHAT_RESIDENT_CAPACITY_LABEL]),
@@ -2678,11 +4243,49 @@ class SharedChatSessionSupervisor:
                     "detail": str(exc)[:300],
                 },
             )
-        stopped: builtins.list[SharedSessionDescriptor] = []
+        staged: builtins.list[tuple[str, int]] = []
         for thread_id, generation in running:
-            with contextlib.suppress(SessionBusy, SessionLeaseLost, SandboxError):
+            try:
+                self.stop_if_idle(
+                    thread_id,
+                    generation=generation,
+                    reason="unguarded",
+                    defer_archive=True,
+                )
+            except Exception:
+                logger.exception(
+                    "unguarded shared sandbox could not be stopped",
+                    extra={
+                        "event": "shared_chat_network_fail_stop_failed",
+                        "thread_id": thread_id,
+                        "generation": generation,
+                    },
+                )
+            else:
+                staged.append((thread_id, generation))
+
+        # Compression and S3 upload can take minutes. No group remains running
+        # on a host whose packet boundary is unproven while an earlier group's
+        # final archive is in flight: every exact Docker stop above completes
+        # before this second persistence/release phase begins.
+        stopped: builtins.list[SharedSessionDescriptor] = []
+        for thread_id, generation in staged:
+            try:
                 stopped.append(
-                    self.stop_if_idle(thread_id, generation=generation, reason="unguarded")
+                    self.stop_if_idle(
+                        thread_id,
+                        generation=generation,
+                        reason="unguarded",
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "unguarded shared sandbox final archive did not complete",
+                    extra={
+                        "event": "shared_chat_network_final_archive_failed",
+                        "thread_id": thread_id,
+                        "generation": generation,
+                    },
                 )
         return stopped
 
