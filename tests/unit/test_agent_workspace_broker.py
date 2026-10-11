@@ -1691,6 +1691,30 @@ def _repository(root) -> None:
         subprocess.run(argv, cwd=root, env=env, check=True, capture_output=True)
 
 
+def test_git_inspection_never_rewrites_the_shared_index(tmp_path, monkeypatch):
+    """The Git tab must not take index.lock from an agent's concurrent git add.
+
+    A tracked file whose cached stat no longer matches is what makes an
+    ordinary ``git status`` refresh the index and write it back.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("plain\n")
+    _repository(tmp_path)
+    os.utime(tmp_path / "notes.txt", (1_000_000_000, 1_000_000_000))
+    index = tmp_path / ".git" / "index"
+    before = (index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes())
+
+    inspected = _finish_within(
+        30,
+        lambda: broker_mod._run_git(
+            ProcessBackend(acknowledged_unsafe=True), str(tmp_path), timeout_s=20
+        ),
+    )
+
+    assert inspected["changes"] == []
+    assert (index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()) == before
+
+
 def test_git_inspection_shows_a_patch_that_is_not_utf8_but_never_captures_one(
     tmp_path, monkeypatch
 ):

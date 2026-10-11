@@ -1505,7 +1505,10 @@ def _run_git(
         backend,
         workdir=workdir,
         script=script,
-        env={},
+        # Inspection must never take the shared index.lock: git status would
+        # otherwise refresh and rewrite /workspace/.git/index, failing an
+        # agent's or the runner's concurrent git add or commit.
+        env={"GIT_OPTIONAL_LOCKS": "0"},
         timeout_s=timeout_s,
         max_output_bytes=max_output_bytes,
     )
