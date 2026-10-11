@@ -607,6 +607,65 @@ class TestConnectionManagement:
             body = client.get("/v1/agent/mcp/templates").json()
         assert body and {"name", "url", "transport"} <= set(body[0])
 
+    @pytest.mark.parametrize(
+        "name,url,auth_kind,documentation_url",
+        [
+            (
+                "github",
+                "https://api.githubcopilot.com/mcp/readonly",
+                "static",
+                "https://github.com/github/github-mcp-server",
+            ),
+            (
+                "slack",
+                "https://mcp.slack.com/mcp",
+                "oauth",
+                "https://docs.slack.dev/ai/slack-mcp-server/",
+            ),
+            (
+                "google-drive",
+                "https://drivemcp.googleapis.com/mcp/v1",
+                "oauth",
+                "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server",
+            ),
+        ],
+    )
+    def test_common_service_presets_can_be_added_without_the_registry(
+        self, name, url, auth_kind, documentation_url
+    ) -> None:
+        """Known services carry an actionable recipe even before a directory sync."""
+        store = FakeStore()
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/connections")
+            assert response.status_code == 200
+            templates = {item["name"]: item for item in response.json()["templates"]}
+            assert {"linear", "notion", "context7"} <= templates.keys()
+            template = templates[name]
+            assert template["url"] == url
+            assert template["auth_kind"] == auth_kind
+            assert template["documentation_url"] == documentation_url
+            assert template["notes"]
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": template["label"],
+                    "url": template["url"],
+                    "transport": template["transport"],
+                    "auth_kind": template["auth_kind"],
+                    "template": template["name"],
+                    **({"secret": "github-test-token"} if auth_kind == "static" else {}),
+                },
+            )
+        assert created.status_code == 201, created.text
+        assert created.json()["template"] == name
+        assert created.json()["auth_kind"] == auth_kind
+        assert "github-test-token" not in created.text
+        row = store.connections[created.json()["id"]]
+        if auth_kind == "static":
+            assert mcp_cipher(_ENCRYPTION_KEY).decrypt(row["access_token_ciphertext"]) == (
+                "github-test-token"
+            )
+
     def test_a_connection_can_be_added_without_a_template(self) -> None:
         """The whole point: a server nobody reviewed is still addable."""
         store = FakeStore()
@@ -856,6 +915,162 @@ class TestAuthorization:
         assert raised.value.status_code == 400
         assert "invalid authorization endpoint" in str(raised.value.detail)
         persist.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "session_base,override,expected_base",
+        [
+            ("https://example.com/agents/api", "", "https://example.com/agents/api"),
+            (
+                "https://example.com/agents/api",
+                "https://mcp.example.com/api/",
+                "https://mcp.example.com/api",
+            ),
+        ],
+    )
+    def test_registration_required_response_names_the_callback_to_register(
+        self, monkeypatch, session_base, override, expected_base
+    ) -> None:
+        """A user bringing an OAuth app needs this deployment's precise callback."""
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
+        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://mcp.slack.com",
+            authorization_endpoint="https://mcp.slack.com/authorize",
+            token_endpoint="https://mcp.slack.com/token",
+            token_endpoint_auth_methods_supported=("client_secret_basic",),
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        store = FakeStore()
+        connection_id = _seed(store, url="https://mcp.slack.com/mcp", auth_kind="oauth")
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                headers={"Host": "untrusted.example", "X-Forwarded-Host": "untrusted.example"},
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["needs_client_id"] is True
+        assert body["authorization_url"] is None
+        assert body["redirect_uri"] == (
+            f"{expected_base}/v1/agent/mcp/oauth/callback/{connection_id}"
+        )
+        assert store.oauth_flow is None
+
+    @pytest.mark.parametrize(
+        "resource_url,metadata_resource,stored_resource,expected_resource",
+        [
+            ("https://mcp.slack.com/mcp", "https://mcp.slack.com", None, "https://mcp.slack.com"),
+            ("https://mcp.slack.com/mcp", None, "https://mcp.slack.com", "https://mcp.slack.com"),
+            (
+                "https://drivemcp.googleapis.com/mcp/v1",
+                None,
+                None,
+                "https://drivemcp.googleapis.com/mcp/v1",
+            ),
+            (
+                "https://mcp.example.com/tenant-b",
+                None,
+                "https://mcp.example.com/tenant-a",
+                "https://mcp.example.com/tenant-b",
+            ),
+        ],
+    )
+    def test_a_supplied_confidential_client_completes_authorization(
+        self, monkeypatch, resource_url, metadata_resource, stored_resource, expected_resource
+    ) -> None:
+        """Authorization, redemption and refresh preserve the verified OAuth resource."""
+        from cloud_agent.mcp import oauth, refresh
+        from cloud_agent.mcp.registry import oauth_cipher
+
+        base_url = "https://example.com/agents/api"
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", base_url)
+        monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://example.com/agents")
+        issuer = f"https://{urlsplit(resource_url).hostname}"
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer=issuer,
+            authorization_endpoint=f"{issuer}/authorize",
+            token_endpoint=f"{issuer}/token",
+            token_endpoint_auth_methods_supported=("client_secret_basic",),
+        )
+        resource_metadata = (
+            oauth.ProtectedResourceMetadata(
+                resource=metadata_resource, authorization_servers=(issuer,)
+            )
+            if metadata_resource
+            else None
+        )
+        discover = AsyncMock(return_value=(resource_metadata, metadata))
+        monkeypatch.setattr(oauth, "discover_authorization_server", discover)
+        exchange = AsyncMock(
+            return_value={
+                "access_token": "service-test-token",
+                "refresh_token": "test-refresh-token",
+            }
+        )
+        register = AsyncMock()
+        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        monkeypatch.setattr(mcp_connections, "_register_client", register)
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            url=resource_url,
+            auth_kind="oauth",
+            auth_config={},
+            resource=stored_resource,
+            issuer=issuer if stored_resource else None,
+        )
+
+        async def save_flow(**kwargs):
+            store.oauth_flow = kwargs
+            store.oauth_state_hash = kwargs["state_hash"]
+            store.connections[connection_id]["oauth_generation"] = kwargs["oauth_generation"]
+
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                json={"client_id": "service-test-client", "client_secret": "service-test-secret"},
+            )
+            assert response.status_code == 200, response.text
+            assert "service-test-secret" not in response.text
+            query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+            assert query["client_id"] == ["service-test-client"]
+            assert query["resource"] == [expected_resource]
+            assert store.oauth_flow["resource"] == expected_resource
+            assert query["redirect_uri"] == [
+                f"{base_url}/v1/agent/mcp/oauth/callback/{connection_id}"
+            ]
+            callback = client.get(
+                f"/v1/agent/mcp/oauth/callback/{connection_id}",
+                params={"state": query["state"][0], "code": "service-test-code"},
+                follow_redirects=False,
+            )
+        assert callback.status_code == 302
+        assert parse_qs(urlsplit(callback.headers["location"]).query)["mcp_authorized"] == ["1"]
+        register.assert_not_awaited()
+        assert discover.call_args.kwargs["preregistered_issuer"] == (
+            issuer if stored_resource else None
+        )
+        request = exchange.call_args.args[0]
+        assert request.client.client_id == "service-test-client"
+        assert request.client.client_secret == "service-test-secret"
+        assert request.client.auth_method == "client_secret_basic"
+        assert request.form()["resource"] == expected_resource
+        row = store.connections[connection_id]
+        assert row["registration"] == "preregistered"
+        assert row["resource"] == expected_resource
+        assert oauth_cipher(_ENCRYPTION_KEY).decrypt(row["client_secret_ciphertext"]) == (
+            "service-test-secret"
+        )
+        assert mcp_cipher(_ENCRYPTION_KEY).decrypt(row["access_token_ciphertext"]) == (
+            "service-test-token"
+        )
+        refresh_request = refresh._build_request(row, cipher=mcp_cipher(_ENCRYPTION_KEY))
+        assert refresh_request.form()["resource"] == expected_resource
 
     @pytest.mark.parametrize(
         "session_base,override,expected_base",

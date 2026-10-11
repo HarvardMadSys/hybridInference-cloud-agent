@@ -226,6 +226,53 @@ describe('McpConnectionsSection', () => {
     expect(mockedList).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['slack', 'google-drive'])(
+    'accepts OAuth client credentials and shows the registered callback for %s',
+    async (template) => {
+      const redirectUri = 'https://agent.example.com/agents/v1/agent/mcp/oauth/callback';
+      mockedList.mockResolvedValue({
+        ...api,
+        connections: [{ ...connection, template }],
+      });
+      mockedAuthorize.mockResolvedValueOnce({
+        authorization_url: null,
+        needs_client_id: true,
+        redirect_uri: redirectUri,
+        message: 'Provide a registered client ID and secret.',
+      });
+      mockedAuthorize.mockResolvedValueOnce({
+        authorization_url: null,
+        needs_client_id: false,
+        message: 'authorized',
+      });
+
+      render(<McpConnectionsSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+      const redirect = await screen.findByLabelText('OAuth redirect URI');
+      expect(redirect).toHaveValue(redirectUri);
+      expect(redirect).toHaveAttribute('readonly');
+      const secret = screen.getByLabelText('OAuth client secret');
+      expect(secret).toHaveAttribute('type', 'password');
+      expect(secret).toHaveAttribute('autocomplete', 'off');
+      fireEvent.change(screen.getByLabelText('OAuth client ID'), {
+        target: { value: 'registered-client' },
+      });
+      fireEvent.change(secret, { target: { value: 'private-client-secret' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+      await waitFor(() =>
+        expect(mockedAuthorize).toHaveBeenLastCalledWith(
+          connection.id,
+          'registered-client',
+          'private-client-secret',
+        ),
+      );
+      expect(await screen.findByRole('status')).toHaveTextContent('authorized');
+      expect(screen.queryByLabelText('OAuth client secret')).not.toBeInTheDocument();
+      expect(screen.queryByText('private-client-secret')).not.toBeInTheDocument();
+    },
+  );
+
   it('disconnects a connection after confirming', async () => {
     mockedDisconnect.mockResolvedValue(undefined);
 

@@ -62,8 +62,13 @@ export function McpConnectionsSection({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<number>>(new Set());
   const [adding, setAdding] = useState<McpAddMode | null>(null);
-  const [clientIdFor, setClientIdFor] = useState<{ id: number; message: string } | null>(null);
+  const [clientIdFor, setClientIdFor] = useState<{
+    id: number;
+    message: string;
+    redirectUri?: string | null;
+  } | null>(null);
   const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
   const authorizationNoticeChecked = useRef(false);
 
   const load = useCallback(async () => {
@@ -148,7 +153,11 @@ export function McpConnectionsSection({
     };
   }, [load, check, authorizationResult]);
 
-  async function authorize(connection: McpConnectionApi, suppliedClientId?: string) {
+  async function authorize(
+    connection: McpConnectionApi,
+    suppliedClientId?: string,
+    suppliedClientSecret?: string,
+  ) {
     setBusy(new Set([connection.id]));
     setError(null);
     setNotice(null);
@@ -156,16 +165,25 @@ export function McpConnectionsSection({
       // The user explicitly chose Sign in after discovering that this URL
       // needs OAuth. Do not change static-token connections on their behalf.
       if (connection.auth_kind === 'none') await enableMcpOAuth(connection);
-      const result = await authorizeMcpConnection(connection.id, suppliedClientId);
+      const result = suppliedClientSecret
+        ? await authorizeMcpConnection(connection.id, suppliedClientId, suppliedClientSecret)
+        : await authorizeMcpConnection(connection.id, suppliedClientId);
       if (result.authorization_url) {
+        setClientSecret('');
         window.location.assign(validateMcpAuthorizationUrl(result.authorization_url));
         return;
       }
       if (result.needs_client_id) {
-        setClientIdFor({ id: connection.id, message: result.message });
+        setClientIdFor({
+          id: connection.id,
+          message: result.message,
+          redirectUri: result.redirect_uri,
+        });
         setClientId(suppliedClientId ?? '');
+        setClientSecret('');
       } else {
         setClientIdFor(null);
+        setClientSecret('');
         setNotice(result.message || `${connection.label} signed in.`);
       }
       await load();
@@ -214,7 +232,10 @@ export function McpConnectionsSection({
     setNotice(null);
     try {
       await disconnectMcpConnection(connection.id);
-      if (clientIdFor?.id === connection.id) setClientIdFor(null);
+      if (clientIdFor?.id === connection.id) {
+        setClientIdFor(null);
+        setClientSecret('');
+      }
       setNotice(`${connection.label} disconnected.`);
       await load();
     } catch (cause: unknown) {
@@ -427,27 +448,55 @@ export function McpConnectionsSection({
                   className="mt-4 rounded-xl border border-border bg-surface p-4"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    void authorize(connection, clientId.trim());
+                    void authorize(connection, clientId.trim(), clientSecret || undefined);
                   }}
                 >
                   <p className="break-words text-sm leading-6 text-muted">{clientIdFor.message}</p>
+                  {clientIdFor.redirectUri ? (
+                    <label className="mt-3 block text-sm font-medium text-foreground">
+                      Register this OAuth redirect URI with your provider
+                      <input
+                        aria-label="OAuth redirect URI"
+                        readOnly
+                        value={clientIdFor.redirectUri}
+                        className="ui-input mt-2 min-h-11 w-full font-mono text-xs"
+                      />
+                    </label>
+                  ) : null}
                   <label
                     className="mt-3 block text-sm font-medium text-foreground"
                     htmlFor={`mcp-client-id-${connection.id}`}
                   >
                     OAuth client ID
                   </label>
-                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <div className="mt-2">
                     <input
                       id={`mcp-client-id-${connection.id}`}
                       value={clientId}
+                      autoComplete="off"
+                      disabled={working}
                       onChange={(event) => setClientId(event.target.value)}
-                      className="ui-input min-h-11 min-w-0 flex-1"
+                      className="ui-input min-h-11 w-full"
                     />
+                    <label className="mt-3 block text-sm font-medium text-foreground">
+                      OAuth client secret
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={clientSecret}
+                        onChange={(event) => setClientSecret(event.target.value)}
+                        disabled={working}
+                        className="ui-input mt-2 min-h-11 w-full"
+                      />
+                    </label>
+                    <p className="mt-2 text-xs text-muted">
+                      Required for Slack and Google Drive. Leave blank if your provider uses a
+                      public client.
+                    </p>
                     <button
                       type="submit"
                       disabled={!clientId.trim() || busy.size > 0}
-                      className={BUTTON}
+                      className={`mt-3 ${BUTTON}`}
                     >
                       Continue
                     </button>

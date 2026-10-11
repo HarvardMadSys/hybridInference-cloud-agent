@@ -206,6 +206,24 @@ describe('mcp api', () => {
     );
   });
 
+  it('sends a confidential client secret with its client id for OAuth authorization', async () => {
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ authorization_url: null, needs_client_id: false, message: '' }),
+    );
+
+    await authorizeMcpConnection(7, 'client-abc', 'client-secret');
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/connections/7/authorize',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: 'client-abc', client_secret: 'client-secret' }),
+      },
+    );
+  });
+
   it('encodes a thread id in the bindings path', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ bindings: [] }));
 

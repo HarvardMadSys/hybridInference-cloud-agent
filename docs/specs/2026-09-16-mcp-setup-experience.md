@@ -12,14 +12,18 @@ action after adding a server or returning from OAuth.
 
 - Integrations lists MCP servers with a connection state and tool count. Protocol,
   runtime and credential metadata are available under Server details.
-- Add server opens Recommended: a small editorial shortlist of GitHub, Context7,
+- Add server opens built-in presets for GitHub, Slack, Google Drive, Linear,
+  Notion and Context7, available independently of the directory sync. Each preset
+  supplies the provider's remote endpoint and setup guidance. GitHub defaults to
+  a personal access token on its read-only endpoint and also offers OAuth.
+- MCP directory opens Recommended: a small editorial shortlist of GitHub, Context7,
   Playwright, Linear, Notion, Figma, Supabase and Sentry for common coding workflows.
   All servers opens the full synchronized directory; typing in search always searches
   the full directory, including when starting from Recommended. Cards show the
   publisher identifier as well as the display name.
   Select an endpoint or package, review its generated JSON, then add it. Remote
   endpoints can use automatic authorization discovery or a Bearer access token.
-  Linear, Notion, Context7 and GitHub presets remain available as a fallback when
+  Built-in presets remain available as a fallback when
   the directory has not synced or cannot be loaded.
 - Add with JSON opens a `mcp.json` editor. URL and command examples explain the
   accepted shape. Validation runs after typing stops and shows the servers that
@@ -27,7 +31,7 @@ action after adding a server or returning from OAuth.
 - Missing credentials are entered separately for each server, even when several
   servers use the same header or environment-variable name. Saving preserves the
   authentication scheme declared in the configuration.
-- JSON and preset tabs retain the JSON draft when switching. Saving adds the
+- JSON, preset and directory tabs retain the JSON draft when switching. Saving adds the
   displayed servers to existing connections; this is not a global config-file
   replacement or an editor for existing connections.
 - URL servers use the remote endpoint. Command servers require a choice of the
@@ -37,6 +41,17 @@ action after adding a server or returning from OAuth.
   OAuth also discovers tools, after checking that a credential was stored. A
   single newly added URL that requires OAuth starts sign-in. Existing connections
   still offer Sign in explicitly. Failed discovery remains an error and offers retry.
+- Servers without automatic OAuth client registration ask for a client ID and,
+  when required, a masked client secret. The form shows the deployment's exact
+  callback URI to register with the provider, including its public API prefix.
+  Slack needs a registered internal or Marketplace app. Google Drive needs
+  Workspace Developer Preview access, the Drive and Drive MCP APIs enabled in a
+  Google Cloud project, and a registered OAuth client. The setup guides explain
+  these provider requirements before connection creation.
+  Token exchange uses the authentication method advertised by the provider;
+  Slack uses `client_secret_post` and its published origin as the OAuth resource
+  while MCP requests use `/mcp`. Google authorization requests offline access
+  and consent so persistent connections can obtain refresh tokens.
 - Connected servers are available automatically in new and existing conversations.
   Every turn resolves the current account connections before configuring the agent;
   opening Tools is not required. All five supported runtimes use the same resolution.
@@ -62,6 +77,12 @@ client-specific config field or interpolation rule.
 
 ## References
 
+- [GitHub MCP server](https://github.com/github/github-mcp-server): hosted endpoint
+  and personal access tokens.
+- [Slack MCP](https://docs.slack.dev/ai/slack-mcp-server/): endpoint, app identity
+  and OAuth client requirements.
+- [Google Drive MCP setup](https://developers.google.com/workspace/drive/api/guides/configure-mcp-server):
+  preview access, APIs and OAuth client setup.
 - [Linear MCP](https://linear.app/docs/mcp): remote endpoint and OAuth.
 - [Notion client guide](https://developers.notion.com/guides/mcp/build-mcp-client):
   remote endpoint and OAuth.
@@ -74,6 +95,10 @@ Component tests cover JSON validation, stale responses, missing credentials,
 draft retention, save failures, preset authentication, callback discovery,
 connection failures and conversation permissions. Importer tests cover the new
 reference syntax and preserving the Bearer scheme.
+Provider setup tests cover presets with a synced directory, masked client-secret
+submission, callback registration guidance, confidential token exchange and
+Google offline authorization. These checks use isolated server responses;
+completing real account sign-in requires the user's provider credentials.
 
 Local browser checks exercise the real components with an isolated sample API:
 preset selection, JSON add/discovery, invalid input, tab switching, Escape,

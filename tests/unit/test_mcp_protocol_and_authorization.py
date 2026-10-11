@@ -346,6 +346,7 @@ class TestOAuth:
                 "token_endpoint": "https://auth.example.com/t",
                 "registration_endpoint": "https://auth.example.com/register",
                 "client_id_metadata_document_supported": True,
+                "token_endpoint_auth_methods_supported": ["none"],
             },
             expected_issuer="https://auth.example.com",
         )
