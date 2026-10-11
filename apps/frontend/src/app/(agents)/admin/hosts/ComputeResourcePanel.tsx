@@ -144,6 +144,12 @@ export default function ComputeResourcePanel({
                   : allocation.state}
               </dd>
             </div>
+            {allocation.sandbox_storage_path && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="shrink-0 text-gray-500 dark:text-gray-400">Sandbox storage path</dt>
+                <dd className="break-all text-right">{allocation.sandbox_storage_path}</dd>
+              </div>
+            )}
             {allocation.nodes.map((node) => (
               <div key={node.id} className="flex flex-wrap justify-between gap-2 px-4 py-3">
                 <dt className="text-gray-500 dark:text-gray-400">

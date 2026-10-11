@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pathlib
 import shlex
 import subprocess
@@ -89,8 +90,10 @@ class Machine:
         self.root = root
         self.calls: list[list[str]] = []
         self.mounted: set[str] = {"/mydata"}
+        self.bind_sources: dict[str, str] = {}
         self.containers: list[str] = []
         self.images: list[str] = []
+        self.volumes: list[str] = []
         self.runner: list[str] = []
         self.active = {"docker": True, "containerd": True}
         self.rsync_codes: list[int] = []
@@ -108,13 +111,18 @@ class Machine:
             code = 0 if args[2] in self.mounted else 1
         elif args[:2] == ["mount", "--bind"]:
             self.mounted.add(args[3])
+            self.bind_sources[args[3]] = args[2]
         elif args[:2] == ["docker", "ps"]:
+            if not self.active["docker"]:
+                return subprocess.CompletedProcess(args, 1, "", "daemon stopped")
             if "label=com.docker.compose.service=runner" in args:
                 out = "\n".join(self.runner)
             else:
                 out = "\n".join(self.containers)
         elif args[:3] == ["docker", "image", "ls"]:
             out = "\n".join(self.images)
+        elif args[:3] == ["docker", "volume", "ls"]:
+            out = "\n".join(self.volumes)
         elif args[:2] == ["docker", "stop"]:
             stopped = set(args[2:])
             self.runner = [c for c in self.runner if c not in stopped]
@@ -146,13 +154,21 @@ def machine(tmp_path, monkeypatch):
 
     def path(value="", *rest):
         value = str(value)
-        if value.startswith(("/var/lib", "/etc/fstab", "/mydata")):
+        if value.startswith(("/var/lib", "/etc/fstab", "/etc/systemd", "/mydata")):
             return original(str(node) + value, *rest)
         return original(value, *rest)
 
     monkeypatch.setattr("pathlib.Path", path)
     monkeypatch.setattr("subprocess.run", fake.run)
     monkeypatch.setattr("shutil.which", lambda name: None)
+    original_samefile = os.path.samefile
+
+    def samefile(source, target):
+        if fake.bind_sources.get(fake.logical(str(target))) == fake.logical(str(source)):
+            return True
+        return original_samefile(source, target)
+
+    monkeypatch.setattr("os.path.samefile", samefile)
     for directory in ("mydata", "etc", "var/lib"):
         (node / directory).mkdir(parents=True)
     return fake
@@ -222,6 +238,12 @@ def test_staging_mounts_state_on_the_data_disk_and_starts_nothing(
         "/mydata/docker /var/lib/docker none bind,nofail,x-systemd.requires-mounts-for=/mydata 0 0",
         "/mydata/containerd /var/lib/containerd none bind,nofail,x-systemd.requires-mounts-for=/mydata 0 0",
     ]
+    for name in ("docker", "containerd"):
+        dropin = machine.root / f"etc/systemd/system/{name}.service.d/cloud-agent-storage.conf"
+        assert machine.logical(dropin.read_text()) == (
+            f"[Unit]\nRequiresMountsFor=/mydata /var/lib/{name}\n"
+        )
+    assert machine.calls.index(["systemctl", "daemon-reload"]) < machine.calls.index(install)
     # A repeated stage neither mounts twice nor duplicates the fstab entries.
     run_remote(
         _DEPLOY,
@@ -251,6 +273,7 @@ def test_an_empty_initialised_store_is_replaced_by_the_data_disk(
     tmp_path, machine, monkeypatch, capsys
 ):
     (machine.root / "var/lib/docker/network").mkdir(parents=True)
+    (machine.root / "var/lib/containerd/io.containerd.metadata.v1.bolt").mkdir(parents=True)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
     run_remote(
         _DEPLOY,
@@ -261,7 +284,23 @@ def test_an_empty_initialised_store_is_replaced_by_the_data_disk(
     )
     assert ["systemctl", "stop", "docker.socket", "docker", "containerd"] in machine.calls
     assert not (machine.root / "var/lib/docker/network").exists()
+    assert not (machine.root / "var/lib/containerd/io.containerd.metadata.v1.bolt").exists()
+    assert machine.calls.count(["docker", "ps", "-aq"]) == 1
     assert ["mount", "--bind", "/mydata/docker", "/var/lib/docker"] in machine.calls
+
+
+def test_an_existing_volume_is_never_hidden_by_the_selected_disk(
+    tmp_path, machine, monkeypatch, capsys
+):
+    (machine.root / "var/lib/docker/volumes").mkdir(parents=True)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
+    machine.volumes = ["user-data"]
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert not [call for call in machine.calls if call[0] == "mount"]
+    assert (machine.root / "var/lib/docker/volumes").exists()
 
 
 def test_a_missing_data_disk_blocks_before_anything_is_installed(
@@ -273,6 +312,33 @@ def test_a_missing_data_disk_blocks_before_anything_is_installed(
     )
     assert result == {"ready": False, "blocked_reasons": ["data_mount_unavailable"]}
     assert not [call for call in machine.calls if call[0] == "apt-get"]
+
+
+def test_an_existing_mount_on_another_disk_blocks_setup(tmp_path, machine, monkeypatch, capsys):
+    (machine.root / "var/lib/docker").mkdir(parents=True)
+    (machine.root / "var/lib/docker/retained-data").write_text("keep")
+    machine.mounted.add("/var/lib/docker")
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert not [call for call in machine.calls if call[0] in {"mount", "apt-get"}]
+    assert (machine.root / "var/lib/docker/retained-data").read_text() == "keep"
+
+
+def test_a_storage_path_through_a_symlink_blocks_setup(tmp_path, machine, monkeypatch, capsys):
+    (machine.root / "mydata/real/disk").mkdir(parents=True)
+    (machine.root / "mydata/link").symlink_to(machine.root / "mydata/real")
+    machine.mounted.add("/mydata/link/disk")
+    result = run_remote(
+        _DEPLOY,
+        deploy_params(tmp_path / "deploy", data_mount="/mydata/link/disk"),
+        monkeypatch,
+        capsys,
+        stdin=payload(),
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_unavailable"]}
+    assert not [call for call in machine.calls if call[0] in {"mount", "apt-get"}]
 
 
 def test_reenrollment_spends_the_new_token_instead_of_a_revoked_credential(

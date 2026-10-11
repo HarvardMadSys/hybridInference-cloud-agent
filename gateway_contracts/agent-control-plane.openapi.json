@@ -190,6 +190,18 @@
             "title": "Request Id",
             "type": "string"
           },
+          "sandbox_storage_path": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Storage Path"
+          },
           "ssh_connection_id": {
             "anyOf": [
               {

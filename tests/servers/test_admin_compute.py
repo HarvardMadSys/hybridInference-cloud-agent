@@ -524,6 +524,120 @@ async def test_automatic_server_setup_replay_keeps_original_profile(compute_api)
 
 
 @pytest.mark.asyncio
+async def test_storage_path_is_persisted_per_server_and_replay_keeps_it(compute_api):
+    client, repo, app = compute_api
+    commands = app.state.compute_commands
+    original_profile = commands.configuration.profiles["kata"]
+    body = {
+        "name": "Storage configured",
+        "request_id": "storage-a",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+        "configuration": {"project": "research"},
+        "sandbox_storage_path": " /mnt/sandbox-data/ ",
+    }
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    operation = response.json()["operation"]
+    saved = repo.allocations[operation["allocation_id"]]["deployment_profile"]
+    assert saved["sandbox_storage_path"] == "/mnt/sandbox-data"
+    assert repo.operations[operation["id"]]["parameters"]["sandbox_storage_path"] == (
+        "/mnt/sandbox-data"
+    )
+    assert commands.configuration.profiles["kata"] is original_profile
+    assert original_profile.sandbox_storage_path is None
+    inventory = await client.get("/admin/agent/servers", headers=ADMIN)
+    assert inventory.status_code == 200
+    assert inventory.json()["allocations"][0]["sandbox_storage_path"] == "/mnt/sandbox-data"
+
+    commands.configuration.profiles.clear()
+    replay = await client.post(
+        "/admin/agent/servers",
+        headers=ADMIN,
+        json={**body, "sandbox_storage_path": "/mnt/sandbox-data"},
+    )
+    assert replay.status_code == 202
+    assert replay.json()["operation"]["id"] == operation["id"]
+    assert len(repo.allocations) == len(repo.operations) == 1
+    conflict = await client.post(
+        "/admin/agent/servers",
+        headers=ADMIN,
+        json={**body, "sandbox_storage_path": "/mnt/another-disk"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_storage_path_is_in_preflight_profile(compute_api):
+    client, repo, _ = compute_api
+    body = {
+        "name": "Preflight storage",
+        "request_id": "storage-preflight",
+        "provider_id": "cloudlab",
+        "mode": "attach",
+        "connection_id": await connection(client),
+        "sandbox_storage_path": "/mydata",
+    }
+    response = await client.post("/admin/agent/server-preflights", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    operation = repo.operations[response.json()["operation"]["id"]]
+    assert operation["parameters"]["profile"]["sandbox_storage_path"] == "/mydata"
+    assert not repo.allocations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "relative/storage",
+        "/",
+        "/mnt",
+        "/var/lib",
+        "/etc/storage",
+        "/var/lib/docker",
+        "/var/lib/containerd/data",
+        "/mnt/../data",
+        "/mnt/./data",
+        "/mnt//data",
+        "/mnt/data\nother",
+        "/mnt/data;command",
+        "/" + "x" * 4096,
+    ],
+)
+async def test_invalid_storage_path_is_rejected_before_any_operation(compute_api, path):
+    client, repo, _ = compute_api
+    body = {
+        "name": "Invalid storage",
+        "request_id": "storage-invalid",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+        "sandbox_storage_path": path,
+    }
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 422, response.text
+    assert not repo.allocations and not repo.operations
+
+
+@pytest.mark.asyncio
+async def test_omitted_storage_path_preserves_legacy_profile_mount(compute_api):
+    client, repo, app = compute_api
+    profiles = app.state.compute_commands.configuration.profiles
+    profiles["kata"] = profiles["kata"].model_copy(update={"data_mount": "/legacy-data"})
+    _, operation = await allocation(client)
+    saved = repo.allocations[operation["allocation_id"]]["deployment_profile"]
+    assert saved["sandbox_storage_path"] is None
+    assert saved["data_mount"] == "/legacy-data"
+    assert "sandbox_storage_path" not in repo.operations[operation["id"]]["parameters"]
+    inventory = await client.get("/admin/agent/servers", headers=ADMIN)
+    assert inventory.status_code == 200
+    assert inventory.json()["allocations"][0]["sandbox_storage_path"] == "/legacy-data"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changed_input", [False, True])
 async def test_concurrent_setup_selection_recovers_duplicate_before_capacity_refusal(
     compute_api, monkeypatch, changed_input

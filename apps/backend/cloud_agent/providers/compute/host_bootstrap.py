@@ -122,32 +122,48 @@ with open(lock_path, 'a') as lock:
         # Keep Docker's and containerd's default paths, but on the provider's
         # large local disk: a Host's whole state is what moves between nodes.
         base = Path(params['data_mount'])
-        if base.is_symlink() or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode:
+        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode:
             blocked('data_mount_unavailable')
         fstab = Path('/etc/fstab')
+        stores = []
         for name in ('docker', 'containerd'):
             source, target = base / name, Path('/var/lib') / name
-            if source.is_symlink() or target.is_symlink():
+            if source.is_symlink() or source.resolve() != source or target.is_symlink() or target.resolve() != target:
                 blocked('data_mount_conflict')
             source.mkdir(mode=0o711, exist_ok=True)
             target.mkdir(mode=0o711, exist_ok=True)
-            if subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode:
-                if any(target.iterdir()):
-                    # A daemon that already ran here may only have initialised
-                    # an empty store. Never mount over containers or images.
-                    if not shutil.which('docker') or listed(['docker', 'ps', '-aq']) or listed(['docker', 'image', 'ls', '-aq']):
-                        blocked('data_mount_conflict')
-                    subprocess.run(['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'], **quiet)
-                    for child in target.iterdir():
-                        if child.is_dir() and not child.is_symlink():
-                            shutil.rmtree(child)
-                        else:
-                            child.unlink()
+            mounted = subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode == 0
+            if mounted and not os.path.samefile(source, target):
+                # An already mounted daemon must use this Host's selected disk.
+                # Never accept or replace a different store on a retry.
+                blocked('data_mount_conflict')
+            stores.append((name, source, target, mounted))
+        unmounted = [target for _, _, target, mounted in stores if not mounted]
+        if any(any(target.iterdir()) for target in unmounted):
+            # Verify both stores once, while Docker is still running. Never
+            # hide containers, images or volumes beneath a new bind mount.
+            if not shutil.which('docker') or listed(['docker', 'ps', '-aq']) or listed(['docker', 'image', 'ls', '-aq']) or listed(['docker', 'volume', 'ls', '-q']):
+                blocked('data_mount_conflict')
+            run('data_mount_failed', ['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'])
+            for target in unmounted:
+                for child in target.iterdir():
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+        for name, source, target, mounted in stores:
+            if not mounted:
                 run('data_mount_failed', ['mount', '--bind', str(source), str(target)])
             entry = f'{source} {target} none bind,nofail,x-systemd.requires-mounts-for={base} 0 0'
             current = fstab.read_text() if fstab.exists() else ''
             if entry not in current.splitlines():
                 fstab.write_text((current.rstrip('\n') + '\n' if current.strip() else '') + entry + '\n')
+            # On reboot a missing disk must keep its daemon stopped rather
+            # than silently opening an empty store under the bare target.
+            dropin = Path('/etc/systemd/system') / (name + '.service.d')
+            dropin.mkdir(parents=True, exist_ok=True)
+            (dropin / 'cloud-agent-storage.conf').write_text(f'[Unit]\nRequiresMountsFor={base} {target}\n')
+        run('data_mount_failed', ['systemctl', 'daemon-reload'])
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
         run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables'])
@@ -303,13 +319,15 @@ class SshHostBootstrap:
             # Only a node that took a Host over records the namespace it
             # inherited, so markers written before rotation existed still match.
             identity["namespace"] = intent.namespace
+        if profile.sandbox_storage_path is not None:
+            identity["sandbox_storage_path"] = profile.sandbox_storage_path
         return {
             "root": profile.deploy_root,
             "sha": profile.deployment_sha,
             "install": profile.install_prerequisites if install is None else install,
             "activate": activate,
             "reenroll": reenroll,
-            "data_mount": profile.data_mount,
+            "data_mount": profile.sandbox_storage_path or profile.data_mount,
             "project": intent.project,
             "identity": identity,
         }
@@ -377,6 +395,10 @@ class SshHostBootstrap:
                 "AGENT_SANDBOX_BACKEND": "kata",
             }
         )
+        if profile.sandbox_storage_path is not None:
+            # Both daemon stores are bound from the selected disk to their
+            # standard paths. Broker and runner must attest that same daemon.
+            values["AGENT_RETAINED_DOCKER_DATA_ROOT"] = "/var/lib/docker"
         # A persisted runner credential takes precedence in the existing host
         # recipe. A retry never deletes that file to spend another token.
         if enrollment_token is not None:

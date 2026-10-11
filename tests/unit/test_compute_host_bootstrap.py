@@ -137,6 +137,35 @@ async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_ar
 
 
 @pytest.mark.asyncio
+async def test_selected_storage_path_is_used_by_bootstrap_and_daemon_attestation(tmp_path):
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    profile = profile.model_copy(
+        update={"data_mount": "/profile-disk", "sandbox_storage_path": "/sandbox-disk"}
+    )
+    secrets["deployment:env"] += "\nAGENT_RETAINED_DOCKER_DATA_ROOT=/profile-docker"
+    result = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("token"))
+    assert result.ready
+    params = json.loads(shlex.split(transport.run.call_args.args[1])[-1])
+    assert params["data_mount"] == "/sandbox-disk"
+    assert params["identity"]["sandbox_storage_path"] == "/sandbox-disk"
+    with tarfile.open(
+        fileobj=io.BytesIO(transport.run.call_args.kwargs["stdin"]), mode="r:gz"
+    ) as archive:
+        env = dotenv_values(
+            stream=io.StringIO(archive.extractfile(".env").read().decode()), interpolate=False
+        )
+    assert env["AGENT_RETAINED_DOCKER_DATA_ROOT"] == "/var/lib/docker"
+
+
+def test_bootstrap_keeps_the_legacy_profile_storage_when_no_path_is_selected(tmp_path):
+    _, profile, _, _ = setup(tmp_path)
+    profile = profile.model_copy(update={"data_mount": "/profile-disk"})
+    params = SshHostBootstrap._params(profile, INTENT)
+    assert params["data_mount"] == "/profile-disk"
+    assert "sandbox_storage_path" not in params["identity"]
+
+
+@pytest.mark.asyncio
 async def test_retry_without_enrollment_uses_persisted_host_credential(tmp_path):
     bootstrap, profile, transport, _ = setup(tmp_path)
     await bootstrap.deploy(NODE, profile, INTENT, None)

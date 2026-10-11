@@ -9,7 +9,17 @@ from __future__ import annotations
 import base64
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+
+from cloud_agent.ports.external.host_bootstrap import validate_sandbox_storage_path
 
 
 class ComputeRequest(BaseModel):
@@ -131,7 +141,14 @@ class AddServerRequest(ComputeRequest):
     ssh_connection_id: str | None = Field(default=None, min_length=1, max_length=128)
     configuration: dict[str, Any] = Field(default_factory=dict)
     deployment_profile: str | None = Field(default=None, min_length=1, max_length=120)
+    sandbox_storage_path: str | None = Field(default=None, max_length=4096)
     policy: RenewalPolicy = Field(default_factory=RenewalPolicy)
+
+    @field_validator("sandbox_storage_path")
+    @classmethod
+    def validate_storage_path(cls, value: str | None) -> str | None:
+        """An omitted value preserves the selected deployment profile's storage."""
+        return None if value is None else validate_sandbox_storage_path(value)
 
 
 class ImportComputeRequest(ComputeRequest):
