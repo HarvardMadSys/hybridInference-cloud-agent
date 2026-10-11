@@ -1186,10 +1186,17 @@ describe('transcript work details', () => {
     const anchors = events.map((event) =>
       document.querySelector(`[data-block-key="mixed:e${event.sourceEventId}"]`),
     );
-    for (const anchor of anchors) expect(anchor).toBeVisible();
+    const reasoning = anchors[0];
+    const reasoningSummary = reasoning?.querySelector(':scope > summary') ?? reasoning;
+    expect(reasoningSummary).toBeVisible();
+    for (const anchor of anchors.slice(1)) expect(anchor).toBeVisible();
+    if (reasoning?.tagName === 'DETAILS') {
+      expect(reasoning).not.toHaveAttribute('open');
+      expect(screen.getByText('Inspect the change.')).not.toBeVisible();
+    }
 
     rerender(<EventList {...props} presentation="compact" />);
-    expect(anchors[0]).not.toBeVisible();
+    expect(reasoningSummary).not.toBeVisible();
     expect(anchors[1]).not.toBeVisible();
     expect(anchors[2]).toBeVisible();
     expect(anchors[3]).not.toBeVisible();
@@ -1204,12 +1211,14 @@ describe('transcript work details', () => {
     }
 
     rerender(<EventList {...props} presentation="detailed" />);
+    expect(reasoningSummary).toBeVisible();
     expect(screen.getByText('Project documentation')).toBeVisible();
     for (const output of screen.getAllByText('Checks passed')) expect(output).toBeVisible();
     expect(
       screen.queryByRole('button', { name: /Show process|Hide process/ }),
     ).not.toBeInTheDocument();
     rerender(<EventList {...props} presentation="compact" />);
+    expect(reasoningSummary).not.toBeVisible();
     expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
     expect(anchors[3]).not.toBeVisible();
     expect(screen.getByText('The change is ready.')).toBeVisible();
