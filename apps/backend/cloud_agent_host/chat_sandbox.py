@@ -1777,7 +1777,19 @@ class ChatSandboxManager:
         relays = [[relay.host, relay.port] for relay in network.relays]
         result = self.exec_capture(
             spec,
-            ["python3", "-c", _GUEST_NETWORK_CHECK, expected_resolver, json.dumps(relays)],
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                _GUEST_NETWORK_CHECK,
+                expected_resolver,
+                json.dumps(relays),
+            ],
+            # The workspace is writable by the repository and every agent turn.
+            # Isolated Python from / never imports a planted json.py or
+            # socket.py in place of the standard library, so the check can
+            # neither be spoofed nor stall start-up behind its timeout.
+            workdir="/",
             timeout_s=45,
         )
         try:
