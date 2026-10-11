@@ -481,7 +481,7 @@ function SandboxesTable({
                     className="flex items-center gap-1 rounded py-1 text-left hover:text-gray-900 focus-visible:outline focus-visible:outline-2 dark:hover:text-gray-100"
                   >
                     {label}
-                    <span aria-hidden="true" className="text-gray-400">
+                    <span aria-hidden="true" className="text-gray-400 dark:text-gray-500">
                       {sort.key === key ? (sort.direction === 'asc' ? '↑' : '↓') : '↕'}
                     </span>
                   </button>
