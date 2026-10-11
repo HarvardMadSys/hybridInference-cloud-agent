@@ -442,16 +442,18 @@ export function MessageActionButton({
 /** Hover-revealed per-message actions; focus keeps them visible for keyboards. */
 export function MessageActions({
   align = 'start',
+  className = '',
   children,
 }: {
   align?: 'start' | 'end';
+  className?: string;
   children: ReactNode;
 }) {
   return (
     <div
       className={`mt-1 flex gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
         align === 'end' ? 'justify-end' : ''
-      }`}
+      } ${className}`}
     >
       {children}
     </div>
@@ -606,7 +608,7 @@ function UserMessage({
       <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
         <Markdown text={text} />
       </div>
-      <MessageActions align="end">
+      <MessageActions align="end" className="mt-0">
         <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
           <CopyIcon />
           Copy
