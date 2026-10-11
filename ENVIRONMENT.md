@@ -38,15 +38,15 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0050_host_drain_fence_epoch`) before
+Run `alembic upgrade head` (through `0051_host_drain_fence_epoch`) before
 starting this release. The updated worker claim query requires
 `agent_jobs.claim_retry_at`, and chat plugin selections require
 `agent_threads.plugins`; existing queued jobs remain immediately eligible and
 existing chats default to no plugins after the migrations. Migration 0049
 starts every existing host without a deployment drain owner or release receipt;
-0050 backfills a non-null drain-fence epoch for every host. The database rotates
+0051 backfills a non-null drain-fence epoch for every host. The database rotates
 that epoch whenever drain-relevant lifecycle, credential, placement, or
-ownership state changes. Once the V2 control plane is activated, 0050 and
+ownership state changes. Once the V2 control plane is activated, 0051 and
 `AGENT_DEPLOY_DRAIN_FENCE_V2` are the application and schema rollback floor.
 The V1 marker remains only so an older orchestrator can perform the bridge
 upgrade; it is not a post-activation rollback target. Rebuild the sandbox image

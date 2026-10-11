@@ -45,7 +45,7 @@ leaving the row untouched.
 
 On cancellation or an uncertain result, fail closed: leave the host draining
 and retry with the same verified owner. Queued work waits; an in-flight turn is
-never killed or replayed. Migration `0050_host_drain_fence_epoch` and the
+never killed or replayed. Migration `0051_host_drain_fence_epoch` and the
 `AGENT_DEPLOY_DRAIN_FENCE_V2` recipe marker are the rollback floor after V2
 activation. The V1 marker remains only for an older orchestrator performing the
 bridge upgrade.

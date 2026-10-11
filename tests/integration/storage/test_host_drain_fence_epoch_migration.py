@@ -11,8 +11,8 @@ from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
-_BEFORE = "0049_host_drain_fence"
-_THIS = "0050_host_drain_fence_epoch"
+_BEFORE = "0050_user_memory_edits"
+_THIS = "0051_host_drain_fence_epoch"
 
 
 async def _columns(conn) -> set[str]:

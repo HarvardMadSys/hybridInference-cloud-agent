@@ -2012,7 +2012,7 @@ async def test_the_pool_listing_carries_the_new_fields(client):
 @pytest.mark.parametrize(
     "row",
     [
-        # The optional phase-G fields may still be absent, but migration 0050
+        # The optional phase-G fields may still be absent, but migration 0051
         # backfills the protocol generation before this API starts.
         {
             "host": "legacy",
