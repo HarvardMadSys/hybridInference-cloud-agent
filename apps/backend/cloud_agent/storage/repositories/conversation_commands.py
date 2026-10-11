@@ -598,8 +598,19 @@ class PostgresConversationCommands:
         if normalize_generated_title(title) is None:
             return False
         async with self._pool.acquire() as conn, conn.transaction():
-            # Match follow-up/fork lock ordering: thread before job. Locking the
-            # source also makes a simultaneous manual rename win in either order.
+            # Attempt, then thread, then job. The attempt comes first because
+            # every reply its turn appends holds it while bumping this thread.
+            if (
+                await conn.fetchval(
+                    "SELECT id FROM agent_attempts WHERE id = $1 AND job_id = $2 FOR SHARE",
+                    attempt_id,
+                    job_id,
+                )
+                is None
+            ):
+                return False
+            # Locking the thread also makes a simultaneous manual rename win in
+            # either order.
             thread = await conn.fetchrow(
                 """
                 SELECT t.id, t.title, t.title_source FROM agent_threads t

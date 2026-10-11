@@ -18,10 +18,13 @@ from typing import TYPE_CHECKING
 import pytest
 from tests.integration.storage.test_agent_job_store import (
     _claim,
+    _create_job,
     _reserve_shared_chat,
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
+
+from cloud_agent.storage.repositories import attempt_commands as attempt_module
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
@@ -292,3 +295,105 @@ async def test_a_publication_record_takes_its_turns_before_their_group(pool, sto
             await _settle(publish)
     published = await store.conversation_queries.get_job(job["id"])
     assert published is not None and published["published_pr_url"] == pr_url
+
+
+async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
+    pool, store: Storage, monkeypatch
+):
+    """A cancel and the reply being appended both take the conversation first.
+
+    An assistant message is mirrored into the transcript, whose foreign key
+    locks the turn's job, and the append bumped the conversation only after
+    that. A cancel takes the conversation and then the job, so cancelling a
+    turn while it streamed deadlocked with it; an append that lost marked the
+    chat's retained context lost.
+    """
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    held, release = asyncio.Event(), asyncio.Event()
+    cancel_pid: list[int] = []
+    original = attempt_module.lock_conversation_by_job
+
+    async def hold_the_conversation(conn, *, job_id):
+        thread_id = await original(conn, job_id=job_id)
+        cancel_pid.append(await conn.fetchval("SELECT pg_backend_pid()"))
+        held.set()
+        await release.wait()
+        return thread_id
+
+    monkeypatch.setattr(attempt_module, "lock_conversation_by_job", hold_the_conversation)
+    cancel = append = None
+    try:
+        cancel = asyncio.create_task(store.attempt_commands.request_cancel(job_id=job["id"]))
+        await asyncio.wait_for(held.wait(), timeout=10)
+        append = asyncio.create_task(
+            store.attempt_commands.append_event(
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                event_type="message",
+                payload={"text": "Still reading the failing test."},
+            )
+        )
+        await _blocked_by(pool, cancel_pid[0])
+        release.set()
+        assert await asyncio.wait_for(cancel, timeout=10) == "running"
+        assert await asyncio.wait_for(append, timeout=10) is not None
+    finally:
+        release.set()
+        await _settle(cancel)
+        await _settle(append)
+
+
+async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
+    pool, store: Storage, monkeypatch
+):
+    """Title generation takes the attempt before the conversation, as an append does.
+
+    It took the conversation first and then checked the attempt it was asked
+    for under a share lock, the reverse of every reply its turn appends.
+    """
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["title_generation_pending"]
+    held, release = asyncio.Event(), asyncio.Event()
+    append_pid: list[int] = []
+    original = attempt_module.insert_event
+
+    async def hold_the_attempt(conn, **fields):
+        if fields["event_type"] == "message":
+            append_pid.append(await conn.fetchval("SELECT pg_backend_pid()"))
+            held.set()
+            await release.wait()
+        return await original(conn, **fields)
+
+    monkeypatch.setattr(attempt_module, "insert_event", hold_the_attempt)
+    append = title = None
+    try:
+        append = asyncio.create_task(
+            store.attempt_commands.append_event(
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                event_type="message",
+                payload={"text": "Reading the failing test."},
+            )
+        )
+        await asyncio.wait_for(held.wait(), timeout=10)
+        title = asyncio.create_task(
+            store.conversation_commands.set_generated_thread_title(
+                job_id=job["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                title="Flaky test fix",
+            )
+        )
+        await _blocked_by(pool, append_pid[0])
+        release.set()
+        assert await asyncio.wait_for(append, timeout=10) is not None
+        assert await asyncio.wait_for(title, timeout=10)
+    finally:
+        release.set()
+        await _settle(append)
+        await _settle(title)
+    saved = await store.conversation_queries.get_job(job["id"])
+    assert saved is not None and saved["title"] == "Flaky test fix"
