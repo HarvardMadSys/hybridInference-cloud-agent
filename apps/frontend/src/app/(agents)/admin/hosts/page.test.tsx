@@ -1614,6 +1614,7 @@ describe('runtime settings', () => {
       .closest('tr')!;
     expect(within(timeout).getByText('2 h')).toBeInTheDocument();
     expect(within(timeout).getByText('set for all servers')).toBeInTheDocument();
+    fireEvent.click(within(panel).getByText('Advanced'));
     const sessions = within(panel)
       .getByRole('rowheader', { name: 'Terminals per server' })
       .closest('tr')!;

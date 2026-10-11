@@ -11,6 +11,8 @@ import {
 } from '@/lib/api/compute';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
+import { SettingsSection } from '../SettingsSection';
+
 function AccessDenied() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
@@ -44,6 +46,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
   const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const fail = useCallback(
     (cause: unknown) => {
@@ -85,6 +88,11 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
     return () => controller.abort();
   }, [load]);
 
+  function updateDraft(update: Partial<CloudLabDefaults>) {
+    setDraft((current) => (current ? { ...current, ...update } : current));
+    setAdvancedOpen(false);
+  }
+
   async function submit() {
     if (!draft || busy) return;
     if (!Number.isInteger(draft.duration) || draft.duration < 1 || draft.duration > 168) {
@@ -92,6 +100,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
       return;
     }
     setBusy(true);
+    setAdvancedOpen(false);
     setError(null);
     setNotice(null);
     try {
@@ -100,6 +109,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
       setDraft(response.defaults);
       setNotice('CloudLab defaults saved. New server forms use them immediately.');
     } catch (cause) {
+      if (cause instanceof APIError && cause.statusCode === 422) setAdvancedOpen(true);
       fail(cause);
     } finally {
       setBusy(false);
@@ -156,104 +166,109 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
           }}
         >
           <fieldset disabled={busy} className="space-y-8">
-            <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
-              <h3
-                id="cloud-resource-heading"
-                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
-              >
-                Cloud resource
-              </h3>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">CloudLab project</span>
-                  <input
-                    aria-label="CloudLab project"
-                    className={inputClass}
-                    maxLength={128}
-                    value={draft.project}
-                    onChange={(event) => setDraft({ ...draft, project: event.target.value })}
-                  />
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">
-                    Project that will own new experiments.
-                  </span>
-                </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Initial duration (hours)</span>
-                  <input
-                    aria-label="Initial duration (hours)"
-                    className={inputClass}
-                    type="number"
-                    min={1}
-                    max={168}
-                    step={1}
-                    required
-                    value={draft.duration}
-                    onChange={(event) =>
-                      setDraft({ ...draft, duration: Number(event.target.value) })
-                    }
-                  />
-                </label>
-              </div>
-            </section>
+            <SettingsSection
+              title="Important"
+              description="Choose the project and initial lifetime for new CloudLab servers."
+            >
+              <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
+                <h3
+                  id="cloud-resource-heading"
+                  className="border-b border-border pb-3 text-sm font-semibold text-foreground"
+                >
+                  Cloud resource
+                </h3>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">CloudLab project</span>
+                    <input
+                      aria-label="CloudLab project"
+                      className={inputClass}
+                      maxLength={128}
+                      value={draft.project}
+                      onChange={(event) => updateDraft({ project: event.target.value })}
+                    />
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      Project that will own new experiments.
+                    </span>
+                  </label>
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">Initial duration (hours)</span>
+                    <input
+                      aria-label="Initial duration (hours)"
+                      className={inputClass}
+                      type="number"
+                      min={1}
+                      max={168}
+                      step={1}
+                      required
+                      value={draft.duration}
+                      onChange={(event) => updateDraft({ duration: Number(event.target.value) })}
+                    />
+                  </label>
+                </div>
+              </section>
+            </SettingsSection>
 
-            <section className="ui-card space-y-4 p-5" aria-labelledby="machine-template-heading">
-              <h3
-                id="machine-template-heading"
-                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
+            <SettingsSection
+              title="Advanced"
+              description="Customize the machine template and SSH access used for new servers."
+              open={advancedOpen}
+            >
+              <section
+                className="ui-card space-y-4 p-5"
+                aria-labelledby="machine-template-heading"
+                onInvalidCapture={(event) => {
+                  const section = event.currentTarget.closest('details');
+                  if (section) section.open = true;
+                }}
               >
-                Machine template
-              </h3>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Template project</span>
+                <h3
+                  id="machine-template-heading"
+                  className="border-b border-border pb-3 text-sm font-semibold text-foreground"
+                >
+                  Machine template and access
+                </h3>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">Template project</span>
+                    <input
+                      aria-label="Template project"
+                      className={inputClass}
+                      maxLength={128}
+                      value={draft.profile_project}
+                      onChange={(event) => updateDraft({ profile_project: event.target.value })}
+                    />
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      Project that publishes the CloudLab profile.
+                    </span>
+                  </label>
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">Template name</span>
+                    <input
+                      aria-label="Template name"
+                      className={inputClass}
+                      maxLength={128}
+                      value={draft.profile_name}
+                      onChange={(event) => updateDraft({ profile_name: event.target.value })}
+                    />
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      Name of the CloudLab profile to use.
+                    </span>
+                  </label>
+                </div>
+                <label className="block max-w-xl space-y-2 text-sm">
+                  <span className="font-medium">CloudLab SSH user</span>
                   <input
-                    aria-label="Template project"
+                    aria-label="CloudLab SSH user"
                     className={inputClass}
                     maxLength={128}
-                    value={draft.profile_project}
-                    onChange={(event) =>
-                      setDraft({ ...draft, profile_project: event.target.value })
-                    }
+                    autoComplete="off"
+                    value={draft.ssh_username}
+                    onChange={(event) => updateDraft({ ssh_username: event.target.value })}
                   />
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">
-                    Project that publishes the CloudLab profile.
-                  </span>
                 </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Template name</span>
-                  <input
-                    aria-label="Template name"
-                    className={inputClass}
-                    maxLength={128}
-                    value={draft.profile_name}
-                    onChange={(event) => setDraft({ ...draft, profile_name: event.target.value })}
-                  />
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">
-                    Name of the CloudLab profile to use.
-                  </span>
-                </label>
-              </div>
-            </section>
-
-            <section className="ui-card space-y-4 p-5" aria-labelledby="ssh-access-heading">
-              <h3
-                id="ssh-access-heading"
-                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
-              >
-                SSH access
-              </h3>
-              <label className="block max-w-xl space-y-2 text-sm">
-                <span className="font-medium">CloudLab SSH user</span>
-                <input
-                  aria-label="CloudLab SSH user"
-                  className={inputClass}
-                  maxLength={128}
-                  autoComplete="off"
-                  value={draft.ssh_username}
-                  onChange={(event) => setDraft({ ...draft, ssh_username: event.target.value })}
-                />
-              </label>
-            </section>
+              </section>
+            </SettingsSection>
 
             <div className="flex items-center justify-end">
               <button

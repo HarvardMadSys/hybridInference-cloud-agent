@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAgentAdminSettings,
   setAgentAdminSettings,
+  type AdminSettingDefinition,
   type AgentAdminSettings,
 } from '@/lib/api/adminSettings';
 import { APIError } from '@/lib/utils/errors';
@@ -120,6 +121,50 @@ function selectCategory(category: string) {
   fireEvent.click(within(navigation).getByRole('button', { name: category }));
 }
 
+function organizedSnapshot(): AgentAdminSettings {
+  const fields: [
+    string,
+    string,
+    string,
+    'string' | 'boolean' | 'integer',
+    string | number | boolean,
+  ][] = [
+    ['site.app_name', 'Appearance', 'Application name', 'string', 'Cloud Agent'],
+    [
+      'gateway_authorize_url',
+      'Sign-in',
+      'Sign-in authorization URL',
+      'string',
+      'https://gateway.example/authorize',
+    ],
+    ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses', 'boolean', false],
+    ['github_app_id', 'Source control', 'GitHub App ID', 'string', '123'],
+    ['publish_base_branch', 'Publication', 'Default pull request base branch', 'string', 'dev'],
+    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout', 'integer', 120],
+  ];
+  const definitions: AdminSettingDefinition[] = fields.map(
+    ([key, category, label, kind, value]) => ({
+      key,
+      category,
+      label,
+      kind,
+      default: value,
+      description: '',
+      secret: false,
+    }),
+  );
+  return snapshot({
+    definitions,
+    values: Object.fromEntries(fields.map(([key, , , , value]) => [key, value])),
+    secret_configured: {},
+    bootstrap: [],
+  });
+}
+
+function toggleAdvanced(field: HTMLElement) {
+  fireEvent.click(field.closest('details')!.querySelector('summary')!);
+}
+
 beforeEach(() => {
   window.history.replaceState(null, '', window.location.pathname);
   read.mockReset().mockResolvedValue(snapshot());
@@ -134,6 +179,135 @@ afterEach(() => {
 });
 
 describe('application settings', () => {
+  it('merges related categories while keeping settings from each original category', async () => {
+    const categoryFields = [
+      ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
+      ['session_cookie_secure', 'Security', 'Require HTTPS session cookies'],
+      ['github_app_id', 'Source control', 'GitHub App ID'],
+      ['publish_base_branch', 'Publication', 'Default pull request base branch'],
+      ['attachments.max_files', 'Attachments', 'Maximum upload file count'],
+      ['skills.max_selected', 'Skills', 'Maximum selected skills'],
+      ['task_titles.max_chars', 'Task titles', 'Maximum task title length'],
+      ['alert_webhook_url', 'Operations', 'Alert webhook URL'],
+      ['goals.stalled_after_seconds', 'Goals', 'Goal stall timeout'],
+      ['pgadmin_url', 'Database tools', 'Private pgAdmin URL'],
+      ['compute.cloudlab_api_url', 'Compute', 'CloudLab API URL'],
+      ['default_execution_profile', 'Execution', 'New session isolation policy'],
+    ];
+    read.mockResolvedValue(
+      snapshot({
+        definitions: categoryFields.map(([key, category, label]) => ({
+          key,
+          category,
+          label,
+          description: '',
+          kind: 'string',
+          default: '',
+          secret: false,
+        })),
+        values: Object.fromEntries(categoryFields.map(([key]) => [key, ''])),
+        secret_configured: {},
+        bootstrap: [],
+      }),
+    );
+    render(<ApplicationSettings />);
+    const navigation = await screen.findByRole('navigation', {
+      name: 'Application setting categories',
+    });
+    expect(
+      within(navigation)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Identity & access2', 'Source control2', 'Content3', 'Operations3', 'Compute2']);
+    expect(screen.getByRole('heading', { name: 'Sign-in', level: 4 })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Session security', level: 4 })).toBeVisible();
+    for (const [category, labels] of [
+      ['Identity & access', ['Sign-in authorization URL', 'Require HTTPS session cookies']],
+      ['Source control', ['GitHub App ID', 'Default pull request base branch']],
+      [
+        'Content',
+        ['Maximum upload file count', 'Maximum selected skills', 'Maximum task title length'],
+      ],
+      ['Operations', ['Alert webhook URL', 'Goal stall timeout']],
+      ['Compute', ['CloudLab API URL', 'New session isolation policy']],
+    ] as const) {
+      selectCategory(category);
+      for (const label of labels) expect(screen.getByLabelText(label)).toBeVisible();
+    }
+    expect(screen.getByLabelText('Private pgAdmin URL')).toBeInTheDocument();
+  });
+
+  it('keeps Important visible and preserves Advanced drafts when closed or switched to another category', async () => {
+    read.mockResolvedValue(organizedSnapshot());
+    render(<ApplicationSettings />);
+    await screen.findByLabelText('Application name');
+    selectCategory('Source control');
+    const appId = screen.getByLabelText('GitHub App ID');
+    const timeout = screen.getByLabelText('Publication Git timeout');
+    expect(appId).toBeVisible();
+    expect(screen.getByLabelText('Default pull request base branch')).toBeVisible();
+    expect(timeout).not.toBeVisible();
+    expect(timeout.closest('details')).not.toHaveAttribute('open');
+    fireEvent.change(appId, { target: { value: '456' } });
+    toggleAdvanced(timeout);
+    expect(timeout).toBeVisible();
+    fireEvent.change(timeout, { target: { value: '180' } });
+    toggleAdvanced(timeout);
+    expect(timeout).not.toBeVisible();
+    expect(appId).toHaveValue('456');
+    selectCategory('Appearance');
+    selectCategory('Source control');
+    toggleAdvanced(timeout);
+    expect(screen.getByLabelText('Publication Git timeout')).toBe(timeout);
+    expect(timeout).toHaveValue(180);
+    expect(appId).toHaveValue('456');
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('opens Advanced and focuses an initial deep link from a merged original category', async () => {
+    read.mockResolvedValue(organizedSnapshot());
+    window.history.replaceState(null, '', '#application-setting-publish_git_timeout_s');
+    render(<ApplicationSettings />);
+    const input = await screen.findByRole('spinbutton', { name: 'Publication Git timeout' });
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('region', { name: 'Source control' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Source control' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('opens Advanced in the merged category when a missing setup field is selected', async () => {
+    read.mockResolvedValue({
+      ...organizedSnapshot(),
+      setup: {
+        required: true,
+        groups: [
+          {
+            key: 'security',
+            label: 'Session security',
+            required: true,
+            configured: false,
+            needs_setup: true,
+            missing: [{ key: 'trust_proxy_headers', label: 'Trust forwarded client addresses' }],
+          },
+        ],
+        bootstrap_missing: [],
+      },
+    });
+    render(<ApplicationSettings />);
+    const link = await screen.findByRole('link', { name: 'Trust forwarded client addresses' });
+    const input = screen.getByLabelText('Trust forwarded client addresses');
+    expect(input).not.toBeVisible();
+    fireEvent.click(link);
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input).toBeVisible();
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
+    expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
+  });
+
   it('shows one category with accessible navigation and keeps other fields mounted', async () => {
     render(<ApplicationSettings />);
     const navigation = await screen.findByRole('navigation', {
@@ -440,7 +614,7 @@ describe('application settings', () => {
     expect(screen.getByLabelText('Registration')).toHaveValue('true');
     selectCategory('Limits');
     expect(screen.getByLabelText('Retry factor')).toHaveValue(1.5);
-    expect(screen.getByRole('heading', { name: 'Limits' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Limits', level: 3 })).toBeInTheDocument();
     selectCategory('Connections');
     expect(screen.getByLabelText('Service token')).toHaveValue('');
     expect(screen.getByText('Configured. Saved values are hidden.')).toBeInTheDocument();

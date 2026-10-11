@@ -11,6 +11,13 @@ import {
 } from '@/lib/api/adminSettings';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
+import { SettingsSection } from '../SettingsSection';
+import {
+  applicationCategory,
+  applicationSettingGroup,
+  applicationSettingPriority,
+} from './settingsOrganization';
+
 const INPUT_CLASS =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
@@ -324,7 +331,7 @@ export function useApplicationSettings({
       }
       const definition = snapshot.definitions.find((field) => field.key === key);
       if (!definition) return;
-      const category = definition.category || 'General';
+      const category = applicationCategory(definition);
       setSelectedCategory(category);
       onRevealCategory?.(category);
       setFocusField(key);
@@ -365,7 +372,7 @@ export function useApplicationSettings({
 
   const groups = new Map<string, AdminSettingDefinition[]>();
   for (const definition of snapshot?.definitions ?? []) {
-    const category = definition.category || 'General';
+    const category = applicationCategory(definition);
     groups.set(category, [...(groups.get(category) ?? []), definition]);
   }
   const currentCategory =
@@ -376,7 +383,7 @@ export function useApplicationSettings({
   const revealSetting = (key: string) => {
     const definition = snapshot?.definitions.find((field) => field.key === key);
     if (!definition) return;
-    const category = definition.category || 'General';
+    const category = applicationCategory(definition);
     setSelectedCategory(category);
     onRevealCategory?.(category);
     setFocusField(key);
@@ -532,9 +539,40 @@ export function ApplicationSettingsCategory({
   const definitions = groups.get(category);
   const id = `application-settings-category-${encodeURIComponent(category)}`;
 
+  const renderGroups = (priority: 'important' | 'advanced') => {
+    const related = new Map<string, AdminSettingDefinition[]>();
+    for (const definition of definitions ?? []) {
+      if (applicationSettingPriority(definition) !== priority) continue;
+      const group = applicationSettingGroup(definition);
+      related.set(group, [...(related.get(group) ?? []), definition]);
+    }
+    if (related.size === 0) {
+      return <p className="py-4 text-sm text-muted">No {priority} settings on this page.</p>;
+    }
+    return [...related].map(([group, fields]) => (
+      <div key={group} className="mt-4 first:mt-0">
+        <h4 className="border-b border-border py-3 text-sm font-semibold text-foreground">
+          {group}
+        </h4>
+        {fields.map((definition) => (
+          <SettingField
+            key={`${definition.key}:${saved[definition.key] ?? 0}`}
+            definition={definition}
+            value={snapshot?.values[definition.key]}
+            configured={snapshot?.secret_configured[definition.key] ?? false}
+            busy={busy}
+            onSave={(key, value) => void save(key, value)}
+          />
+        ))}
+      </div>
+    ));
+  };
+
   useEffect(() => {
     if (!active || !focusField || !definitions?.some((field) => field.key === focusField)) return;
     const input = document.getElementById(`application-setting-${focusField}`);
+    const advanced = input?.closest('details');
+    if (advanced) advanced.open = true;
     input?.focus();
     input?.scrollIntoView?.({ block: 'center' });
     clearFocusField();
@@ -556,16 +594,12 @@ export function ApplicationSettingsCategory({
         </h3>
       )}
       <div className={showHeading ? 'px-4 sm:px-5' : undefined}>
-        {definitions?.map((definition) => (
-          <SettingField
-            key={`${definition.key}:${saved[definition.key] ?? 0}`}
-            definition={definition}
-            value={snapshot?.values[definition.key]}
-            configured={snapshot?.secret_configured[definition.key] ?? false}
-            busy={busy}
-            onSave={(key, value) => void save(key, value)}
-          />
-        ))}
+        <SettingsSection title="Important" description="Main settings for this page.">
+          {renderGroups('important')}
+        </SettingsSection>
+        <SettingsSection title="Advanced" description="Connection details and operational tuning.">
+          {renderGroups('advanced')}
+        </SettingsSection>
       </div>
     </section>
   );

@@ -26,6 +26,7 @@ import {
 } from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
+import { applicationCategoryName } from './settingsOrganization';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
@@ -88,7 +89,8 @@ function SettingsView() {
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
   }, []);
   const revealCategory = useCallback(
-    (category: string) => selectUrlTab(categoryTabId(category)),
+    (category: string) =>
+      selectUrlTab(category === 'Sandbox archives' ? 'sandbox' : categoryTabId(category)),
     [selectUrlTab],
   );
 
@@ -112,7 +114,9 @@ function SettingsView() {
     onRevealCategory: revealCategory,
     enabled: !denied,
   });
-  const applicationCategories = [...applicationSettings.groups.keys()];
+  const applicationCategories = [...applicationSettings.groups.keys()].filter(
+    (category) => category !== 'Sandbox archives',
+  );
   const settingsTabs = [
     ...(applicationCategories.length
       ? applicationCategories.map((category) => ({ id: categoryTabId(category), label: category }))
@@ -121,7 +125,16 @@ function SettingsView() {
   ];
   // Preserve a requested category in the URL while its definitions are loading.
   // Missing, legacy, or unknown tabs display the first available category.
-  const selectedTab = settingsTabs.find(({ id }) => id === queryTab)?.id ?? settingsTabs[0].id;
+  let requestedTab = queryTab;
+  if (queryTab?.startsWith('application-')) {
+    try {
+      const category = applicationCategoryName(decodeURIComponent(queryTab.slice(12)));
+      requestedTab = category === 'Sandbox archives' ? 'sandbox' : categoryTabId(category);
+    } catch {
+      // A malformed category link falls back to the first available page.
+    }
+  }
+  const selectedTab = settingsTabs.find(({ id }) => id === requestedTab)?.id ?? settingsTabs[0].id;
   const activeCategory = applicationCategories.find(
     (category) => categoryTabId(category) === selectedTab,
   );
@@ -392,6 +405,28 @@ function SettingsView() {
             hidden={selectedTab !== 'sandbox'}
             tabIndex={0}
           >
+            {(applicationSettings.groups.has('Sandbox archives') ||
+              (!applicationSettings.snapshot &&
+                (applicationSettings.loading || applicationSettings.error))) && (
+              <section
+                className="ui-card mt-6 p-4 sm:p-6"
+                aria-label="Deletion archive destination"
+              >
+                <ApplicationSettingsHeader
+                  settings={applicationSettings}
+                  title="Deletion archive destination"
+                />
+                <ApplicationSettingsFeedback settings={applicationSettings} />
+                {applicationSettings.groups.has('Sandbox archives') && (
+                  <ApplicationSettingsCategory
+                    settings={applicationSettings}
+                    category="Sandbox archives"
+                    active={selectedTab === 'sandbox'}
+                    showHeading={false}
+                  />
+                )}
+              </section>
+            )}
             {pool &&
               (definitions.length > 0 ? (
                 <GlobalSettingsCard

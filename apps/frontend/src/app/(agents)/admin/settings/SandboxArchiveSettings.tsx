@@ -9,6 +9,8 @@ import type {
 } from '@/lib/api/adminArchiveSettings';
 import { SANDBOX_ARCHIVE_SETTINGS_CAPABILITY } from '@/lib/api/adminArchiveSettings';
 
+import { SettingsSection } from '../SettingsSection';
+
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const MAX_ARCHIVE_BYTES = 4 * GIB;
@@ -305,130 +307,166 @@ export default function SandboxArchiveSettingsCard({
           </div>
         )}
 
-        <label className="flex items-start gap-3 text-sm text-gray-800 dark:text-gray-200">
-          <input
-            type="checkbox"
-            aria-label="Enable sandbox archives"
-            aria-describedby="archive-enabled-description"
-            checked={draft.enabled}
-            disabled={busy}
-            onChange={(event) => set('enabled', event.target.checked)}
-            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-crimson focus:ring-crimson dark:border-white/20 dark:bg-gray-950"
-          />
-          <span>
-            <span className="block font-medium">Enable sandbox archives</span>
-            <span
-              id="archive-enabled-description"
-              className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400"
+        <SettingsSection
+          title="Important"
+          description="Enable archives and configure their destination, ownership, and encryption."
+        >
+          <div className="space-y-4" aria-labelledby="archive-storage-heading">
+            <h3
+              id="archive-storage-heading"
+              className="text-sm font-semibold text-gray-900 dark:text-gray-50"
             >
-              Enabling requires bucket versioning, the matching KMS key, and broker write access.
-            </span>
-          </span>
-        </label>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
-            S3 destination
-            <input
-              type="text"
-              value={settings.s3_uri}
-              readOnly
-              aria-label="S3 destination"
-              aria-describedby="archive-destination-description"
-              className={INPUT}
-            />
-            <span
-              id="archive-destination-description"
-              className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
-            >
-              Fixed by the deployment security policy and not included in update requests.
-            </span>
-          </label>
-
-          <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
-            AWS region
-            <input
-              type="text"
-              value={draft.region}
-              disabled={busy}
-              aria-label="AWS region"
-              aria-invalid={errors.region !== undefined}
-              aria-describedby={errors.region ? 'archive-region-error' : undefined}
-              onChange={(event) => set('region', event.target.value)}
-              placeholder="us-east-1"
-              className={INPUT}
-            />
-            <ErrorText id="archive-region-error" error={errors.region} />
-          </label>
-
-          <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
-            Expected bucket owner
-            <input
-              type="text"
-              inputMode="numeric"
-              value={draft.expectedBucketOwner}
-              disabled={busy}
-              aria-label="Expected bucket owner"
-              aria-invalid={errors.expectedBucketOwner !== undefined}
-              aria-describedby={
-                errors.expectedBucketOwner ? 'archive-bucket-owner-error' : undefined
-              }
-              onChange={(event) => set('expectedBucketOwner', event.target.value)}
-              placeholder="123456789012"
-              className={INPUT}
-            />
-            <ErrorText id="archive-bucket-owner-error" error={errors.expectedBucketOwner} />
-          </label>
-
-          <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
-            Customer-managed KMS key ARN
-            <input
-              type="text"
-              value={draft.kmsKeyArn}
-              disabled={busy}
-              aria-label="Customer-managed KMS key ARN"
-              aria-invalid={errors.kmsKeyArn !== undefined}
-              aria-describedby={errors.kmsKeyArn ? 'archive-kms-error' : undefined}
-              onChange={(event) => set('kmsKeyArn', event.target.value)}
-              placeholder="arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
-              className={INPUT}
-            />
-            <ErrorText id="archive-kms-error" error={errors.kmsKeyArn} />
-          </label>
-
-          {numericFields.map(({ key, label, description }) => (
-            <label key={key} className="text-sm font-medium text-gray-800 dark:text-gray-200">
-              {label}
+              Archive storage
+            </h3>
+            <label className="flex items-start gap-3 text-sm text-gray-800 dark:text-gray-200">
               <input
-                type="number"
-                inputMode="numeric"
-                step="1"
-                value={draft[key]}
+                type="checkbox"
+                aria-label="Enable sandbox archives"
+                aria-describedby="archive-enabled-description"
+                checked={draft.enabled}
                 disabled={busy}
-                aria-label={label}
-                aria-invalid={errors[key] !== undefined}
-                aria-describedby={`archive-${key}-description${
-                  errors[key] ? ` archive-${key}-error` : ''
-                }`}
-                onChange={(event) => set(key, event.target.value)}
-                className={INPUT}
+                onChange={(event) => set('enabled', event.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-crimson focus:ring-crimson dark:border-white/20 dark:bg-gray-950"
               />
-              <span
-                id={`archive-${key}-description`}
-                className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
-              >
-                {description} {formatBytes(draft[key]) && `Current: ${formatBytes(draft[key])}.`}
+              <span>
+                <span className="block font-medium">Enable sandbox archives</span>
+                <span
+                  id="archive-enabled-description"
+                  className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400"
+                >
+                  Enabling requires bucket versioning, the matching KMS key, and broker write
+                  access.
+                </span>
               </span>
-              <ErrorText id={`archive-${key}-error`} error={errors[key]} />
             </label>
-          ))}
-        </div>
 
-        {errors.form && (
-          <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-            {errors.form}
-          </p>
-        )}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
+                S3 destination
+                <input
+                  type="text"
+                  value={settings.s3_uri}
+                  readOnly
+                  aria-label="S3 destination"
+                  aria-describedby="archive-destination-description"
+                  className={INPUT}
+                />
+                <span
+                  id="archive-destination-description"
+                  className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
+                >
+                  Fixed by the deployment security policy and not included in update requests.
+                </span>
+              </label>
+
+              <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                AWS region
+                <input
+                  type="text"
+                  value={draft.region}
+                  disabled={busy}
+                  aria-label="AWS region"
+                  aria-invalid={errors.region !== undefined}
+                  aria-describedby={errors.region ? 'archive-region-error' : undefined}
+                  onChange={(event) => set('region', event.target.value)}
+                  placeholder="us-east-1"
+                  className={INPUT}
+                />
+                <ErrorText id="archive-region-error" error={errors.region} />
+              </label>
+
+              <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                Expected bucket owner
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={draft.expectedBucketOwner}
+                  disabled={busy}
+                  aria-label="Expected bucket owner"
+                  aria-invalid={errors.expectedBucketOwner !== undefined}
+                  aria-describedby={
+                    errors.expectedBucketOwner ? 'archive-bucket-owner-error' : undefined
+                  }
+                  onChange={(event) => set('expectedBucketOwner', event.target.value)}
+                  placeholder="123456789012"
+                  className={INPUT}
+                />
+                <ErrorText id="archive-bucket-owner-error" error={errors.expectedBucketOwner} />
+              </label>
+
+              <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
+                Customer-managed KMS key ARN
+                <input
+                  type="text"
+                  value={draft.kmsKeyArn}
+                  disabled={busy}
+                  aria-label="Customer-managed KMS key ARN"
+                  aria-invalid={errors.kmsKeyArn !== undefined}
+                  aria-describedby={errors.kmsKeyArn ? 'archive-kms-error' : undefined}
+                  onChange={(event) => set('kmsKeyArn', event.target.value)}
+                  placeholder="arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+                  className={INPUT}
+                />
+                <ErrorText id="archive-kms-error" error={errors.kmsKeyArn} />
+              </label>
+            </div>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Advanced"
+          description="Tune archive size limits and multipart uploads."
+          open={Boolean(
+            errors.maxArchiveBytes ||
+            errors.multipartThresholdBytes ||
+            errors.multipartPartBytes ||
+            errors.form,
+          )}
+        >
+          <div className="space-y-4" aria-labelledby="archive-upload-heading">
+            <h3
+              id="archive-upload-heading"
+              className="text-sm font-semibold text-gray-900 dark:text-gray-50"
+            >
+              Upload limits
+            </h3>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {numericFields.map(({ key, label, description }) => (
+                <label key={key} className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                  {label}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    step="1"
+                    value={draft[key]}
+                    disabled={busy}
+                    aria-label={label}
+                    aria-invalid={errors[key] !== undefined}
+                    aria-describedby={`archive-${key}-description${
+                      errors[key] ? ` archive-${key}-error` : ''
+                    }`}
+                    onChange={(event) => set(key, event.target.value)}
+                    className={INPUT}
+                  />
+                  <span
+                    id={`archive-${key}-description`}
+                    className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
+                  >
+                    {description}{' '}
+                    {formatBytes(draft[key]) && `Current: ${formatBytes(draft[key])}.`}
+                  </span>
+                  <ErrorText id={`archive-${key}-error`} error={errors[key]} />
+                </label>
+              ))}
+            </div>
+
+            {errors.form && (
+              <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+                {errors.form}
+              </p>
+            )}
+          </div>
+        </SettingsSection>
 
         <div className="flex items-center gap-3">
           <button

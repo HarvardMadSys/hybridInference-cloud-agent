@@ -142,6 +142,36 @@ function applicationSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdmin
   };
 }
 
+function organizedApplicationSnapshot(): AgentAdminSettings {
+  const fields = [
+    ['site.app_name', 'Appearance', 'Application name'],
+    ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
+    ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses'],
+    ['github_app_id', 'Source control', 'GitHub App ID'],
+    ['publish_base_branch', 'Publication', 'Default pull request base branch'],
+    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout'],
+    ['sandbox_archive.bucket', 'Sandbox archives', 'Sandbox archive S3 bucket'],
+    ['sandbox_archive.endpoint', 'Sandbox archives', 'Sandbox archive S3 endpoint'],
+  ];
+  return applicationSnapshot({
+    definitions: fields.map(([key, category, label]) => ({
+      key,
+      category,
+      label,
+      description: '',
+      kind: 'string',
+      default: '',
+      secret: false,
+    })),
+    values: Object.fromEntries(fields.map(([key]) => [key, ''])),
+  });
+}
+
+function openAdvancedForField(field: HTMLElement) {
+  const details = field.closest('details')!;
+  if (!details.open) fireEvent.click(details.querySelector('summary')!);
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -570,6 +600,156 @@ describe('admin Settings', () => {
 describe('application category tabs', () => {
   beforeEach(() => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(applicationSnapshot());
+  });
+
+  it.each([
+    ['Sign-in', 'Identity & access', 'Sign-in authorization URL'],
+    ['Publication', 'Source control', 'Default pull request base branch'],
+  ])(
+    'resolves an existing %s category URL to %s after definitions load',
+    async (legacy, merged, label) => {
+      const pending = deferred<AgentAdminSettings>();
+      vi.mocked(getAgentAdminSettings).mockReturnValueOnce(pending.promise);
+      window.history.replaceState(
+        null,
+        '',
+        `/admin/settings?context=keep&tab=${encodeURIComponent(categoryTabId(legacy))}`,
+      );
+      const query = window.location.search;
+      renderSettings();
+      expect(screen.getByRole('tab', { name: 'Application' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      await act(async () => pending.resolve(organizedApplicationSnapshot()));
+      expect(screen.getByRole('tab', { name: merged })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tabpanel', { name: merged })).toBeVisible();
+      expect(screen.getByLabelText(label)).toBeVisible();
+      expect(screen.queryByRole('tab', { name: legacy })).not.toBeInTheDocument();
+      expect(window.location.search).toBe(query);
+    },
+  );
+
+  it('opens Advanced and focuses a linked field from Publication in the merged Source control page', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
+    window.history.replaceState(
+      null,
+      '',
+      '/admin/settings#application-setting-publish_git_timeout_s',
+    );
+    renderSettings();
+    const input = await screen.findByRole('textbox', { name: 'Publication Git timeout' });
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
+    expect(screen.getByLabelText('GitHub App ID')).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe(
+      categoryTabId('Source control'),
+    );
+  });
+
+  it('expands Advanced for a missing Security field beside the merged Sign-in settings', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue({
+      ...organizedApplicationSnapshot(),
+      setup: {
+        required: true,
+        groups: [
+          {
+            key: 'security',
+            label: 'Session security',
+            required: true,
+            configured: false,
+            needs_setup: true,
+            missing: [{ key: 'trust_proxy_headers', label: 'Trust forwarded client addresses' }],
+          },
+        ],
+        bootstrap_missing: [],
+      },
+    });
+    renderSettings();
+    const link = await screen.findByRole('link', { name: 'Trust forwarded client addresses' });
+    const input = screen.getByLabelText('Trust forwarded client addresses');
+    expect(input).not.toBeVisible();
+    fireEvent.click(link);
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Identity & access' })).toBeVisible();
+    expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe(
+      categoryTabId('Identity & access'),
+    );
+  });
+
+  it('puts deletion archive storage in the existing Sandbox page and saves its own setting key', async () => {
+    const current = organizedApplicationSnapshot();
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(current);
+    vi.mocked(setAgentAdminSettings).mockResolvedValue({
+      ...current,
+      revision: 2,
+      values: { ...current.values, 'sandbox_archive.bucket': 'deletion-archive-bucket' },
+    });
+    window.history.replaceState(
+      null,
+      '',
+      `/admin/settings?tab=${encodeURIComponent(categoryTabId('Sandbox archives'))}`,
+    );
+    renderSettings();
+    const input = await screen.findByRole('textbox', { name: 'Sandbox archive S3 bucket' });
+    expect(screen.queryByRole('tab', { name: 'Sandbox archives' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Sandbox' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByRole('tabpanel')).toEqual([
+      screen.getByRole('tabpanel', { name: 'Sandbox' }),
+    ]);
+    expect(screen.getByRole('region', { name: 'Deletion archive destination' })).toContainElement(
+      input,
+    );
+    expect(await screen.findByLabelText('Enable sandbox archives')).toBeVisible();
+    expect(screen.getByLabelText('S3 destination')).toHaveValue(archiveSettings.s3_uri);
+    fireEvent.change(input, { target: { value: 'deletion-archive-bucket' } });
+    submit(input);
+    await waitFor(() =>
+      expect(setAgentAdminSettings).toHaveBeenCalledWith(
+        { 'sandbox_archive.bucket': 'deletion-archive-bucket' },
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(updateArchiveSettings).not.toHaveBeenCalled();
+  });
+
+  it('reveals an Advanced deletion archive link in the existing Sandbox tab', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
+    window.history.replaceState(
+      null,
+      '',
+      '/admin/settings#application-setting-sandbox_archive.endpoint',
+    );
+    renderSettings();
+    const input = await screen.findByRole('textbox', { name: 'Sandbox archive S3 endpoint' });
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe('sandbox');
+  });
+
+  it('keeps application settings errors and retry available on a legacy Sandbox archives URL', async () => {
+    vi.mocked(getAgentAdminSettings)
+      .mockRejectedValueOnce(new Error('Deletion archive settings unavailable'))
+      .mockResolvedValue(organizedApplicationSnapshot());
+    window.history.replaceState(
+      null,
+      '',
+      `/admin/settings?tab=${encodeURIComponent(categoryTabId('Sandbox archives'))}`,
+    );
+    renderSettings();
+    const panel = screen.getByRole('tabpanel', { name: 'Sandbox' });
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(
+      'Deletion archive settings unavailable',
+    );
+    fireEvent.click(within(panel).getByRole('button', { name: 'Retry application settings' }));
+    expect(await screen.findByRole('textbox', { name: 'Sandbox archive S3 bucket' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Sandbox' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(2);
   });
 
   it('places every API category beside the other settings tabs with one visible panel', async () => {
@@ -1058,6 +1238,17 @@ describe('agent versions', () => {
     await screen.findByText('No server has reported available versions yet.');
     expect(screen.getByRole('heading', { name: 'Agent versions' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Claude Code')).not.toBeInTheDocument();
+    const inventory = screen.getByRole('table', {
+      name: 'Agent versions installed on each server',
+      hidden: true,
+    });
+    expect(inventory).not.toBeVisible();
+    openAdvancedForField(inventory);
+    expect(inventory).toBeVisible();
+    const row = within(inventory).getByRole('row', {
+      name: 'runner-a Claude Code 2.1.220 Not reported',
+    });
+    expect(within(row).getByText('2.1.220')).toBeVisible();
   });
 
   it('keeps a single-version agent selectable', async () => {
@@ -1200,6 +1391,7 @@ describe('global limits', () => {
     list.mockResolvedValue(pool({ host_settings: { terminal_max_sessions: 16 } }));
     setLimit.mockResolvedValue(pool());
     renderSettings('Sandbox');
+    openAdvancedForField(await screen.findByLabelText('Terminals per server for all servers'));
     fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ terminal_max_sessions: null }));
   });
@@ -1213,6 +1405,7 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     await screen.findByLabelText('Turn time limit for all servers');
+    openAdvancedForField(screen.getByLabelText('Terminals per server for all servers'));
     const sandboxCard = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
     expect(within(sandboxCard).getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
@@ -1247,6 +1440,7 @@ describe('global limits', () => {
   it('warns before a shorter terminal lifetime closes open terminals', async () => {
     renderSettings('Sandbox');
     const input = await screen.findByLabelText('Terminal max lifetime for all servers');
+    openAdvancedForField(input);
     fireEvent.change(input, { target: { value: '4' } });
     expect(screen.getByText('Open terminals older than 4 h will close.')).toBeInTheDocument();
     fireEvent.change(input, { target: { value: '12' } });
@@ -1258,6 +1452,7 @@ describe('global limits', () => {
       pool({ hosts: [host({ settings_desired: { terminal_max_sessions: 128 } })] }),
     );
     renderSettings('Sandbox');
+    openAdvancedForField(await screen.findByLabelText('Terminals per server for all servers'));
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
   });
 
@@ -1304,8 +1499,9 @@ describe('global limits', () => {
       revision: 2,
     });
     renderSettings('Sandbox');
-
-    fireEvent.change(await screen.findByLabelText('Maximum archive bytes'), {
+    const maximum = await screen.findByLabelText('Maximum archive bytes');
+    openAdvancedForField(maximum);
+    fireEvent.change(maximum, {
       target: { value: '1073741824' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
@@ -1318,6 +1514,7 @@ describe('global limits', () => {
     renderSettings('Sandbox');
 
     const maximum = await screen.findByLabelText('Maximum archive bytes');
+    openAdvancedForField(maximum);
     fireEvent.change(maximum, { target: { value: '02147483648' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
