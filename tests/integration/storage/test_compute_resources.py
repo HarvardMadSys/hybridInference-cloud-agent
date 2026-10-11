@@ -91,6 +91,19 @@ def fence(op):
     return {"operation_id": op["id"], "generation": op["generation"], "worker_id": "worker"}
 
 
+async def test_provider_defaults_are_isolated_and_replace_atomically(store):
+    repo = store.compute_resources
+    assert await repo.provider_defaults("cloudlab") == {}
+
+    saved = {"project": "research", "duration": 12}
+    assert await repo.set_provider_defaults("cloudlab", saved) == saved
+    assert await repo.set_provider_defaults("future-provider", {"region": "test"}) == {
+        "region": "test"
+    }
+    assert await repo.provider_defaults("cloudlab") == saved
+    assert await repo.provider_defaults("future-provider") == {"region": "test"}
+
+
 async def test_concurrent_request_replay_creates_one_allocation_and_conflicts_on_changed_payload(
     store,
 ):

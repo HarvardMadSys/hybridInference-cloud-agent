@@ -60,9 +60,17 @@ class ComputeProviderRegistration:
             result["known_hosts_ref"] = f"{connection_id}:known_hosts"
         return result
 
-    def catalog(self) -> dict[str, Any]:
+    def catalog(self, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         """Describe supported operations without code or credentials in the form."""
         capabilities = self.provider.capabilities()
+        effective = defaults or {}
+        fields = tuple(
+            {
+                **field,
+                **({"default": effective[field["key"]]} if field["key"] in effective else {}),
+            }
+            for field in self.fields
+        )
         return {
             "id": self.id,
             "label": self.label,
@@ -72,7 +80,7 @@ class ComputeProviderRegistration:
                 "release": capabilities.can_release,
                 "import": self.can_import,
             },
-            "fields": self.fields,
+            "fields": fields,
             "connection_fields": self.connection_fields,
             "secret_label": self.secret_label,
             "requires_ssh_connection": self.ssh_credential_fields is not None,

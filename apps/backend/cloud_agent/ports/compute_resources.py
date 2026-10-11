@@ -29,6 +29,16 @@ class ComputeResourceRepository(Protocol):
         """Create one immutable profile; active allocations retain exact inputs."""
         ...
 
+    async def provider_defaults(self, provider_id: str) -> dict[str, Any]:
+        """Return the saved non-secret form defaults for one provider."""
+        ...
+
+    async def set_provider_defaults(
+        self, provider_id: str, defaults: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Replace one provider's defaults without disturbing other providers."""
+        ...
+
     async def list_connections(self) -> list[dict[str, Any]]:
         """Return metadata only; ciphertext is restricted to trusted get_connection."""
         ...

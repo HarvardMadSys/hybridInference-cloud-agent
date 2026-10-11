@@ -7498,6 +7498,46 @@
         "title": "BindingsResponse",
         "type": "object"
       },
+      "CloudLabDefaults": {
+        "additionalProperties": false,
+        "description": "Non-secret defaults applied to new CloudLab server requests.",
+        "properties": {
+          "duration": {
+            "default": 4,
+            "maximum": 168.0,
+            "minimum": 1.0,
+            "title": "Duration",
+            "type": "integer"
+          },
+          "profile_name": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Profile Name",
+            "type": "string"
+          },
+          "profile_project": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Profile Project",
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Project",
+            "type": "string"
+          },
+          "ssh_username": {
+            "default": "",
+            "maxLength": 128,
+            "pattern": "^(?:[a-zA-Z_][a-zA-Z0-9_.-]*)?$",
+            "title": "Ssh Username",
+            "type": "string"
+          }
+        },
+        "title": "CloudLabDefaults",
+        "type": "object"
+      },
       "ComputeOperationAction": {
         "additionalProperties": false,
         "description": "An explicit action whose current state is checked under the operation lock.",
@@ -16385,6 +16425,112 @@
           }
         },
         "summary": "Validate Connection"
+      }
+    },
+    "/admin/agent/compute-defaults/cloudlab": {
+      "get": {
+        "description": "Read non-secret defaults for new CloudLab servers.",
+        "operationId": "cloudlab_defaults_admin_agent_compute_defaults_cloudlab_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cloudlab Defaults Admin Agent Compute Defaults Cloudlab Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cloudlab Defaults"
+      },
+      "put": {
+        "description": "Replace non-secret defaults for new CloudLab servers.",
+        "operationId": "set_cloudlab_defaults_admin_agent_compute_defaults_cloudlab_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloudLabDefaults"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Set Cloudlab Defaults Admin Agent Compute Defaults Cloudlab Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Cloudlab Defaults"
       }
     },
     "/admin/agent/compute-deployment-profiles": {

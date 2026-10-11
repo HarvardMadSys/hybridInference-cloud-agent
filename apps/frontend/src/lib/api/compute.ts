@@ -45,6 +45,14 @@ export interface ComputeCatalog {
   secret_store_configured: boolean;
 }
 
+export interface CloudLabDefaults {
+  project: string;
+  duration: number;
+  profile_project: string;
+  profile_name: string;
+  ssh_username: string;
+}
+
 export interface ComputeConnection {
   id: string;
   name: string;
@@ -191,6 +199,10 @@ export const getComputeConnections = (signal?: AbortSignal) =>
   get<{ connections: ComputeConnection[] }>('/compute-connections', signal);
 export const saveComputeDeploymentProfile = (body: DeploymentProfileRequest) =>
   write<{ profile: { id: string; label: string } }>('/compute-deployment-profiles', body);
+export const getCloudLabDefaults = (signal?: AbortSignal) =>
+  get<{ defaults: CloudLabDefaults }>('/compute-defaults/cloudlab', signal);
+export const saveCloudLabDefaults = (defaults: CloudLabDefaults) =>
+  write<{ defaults: CloudLabDefaults }>('/compute-defaults/cloudlab', defaults, 'PUT');
 
 export interface ComputeServerSnapshot {
   allocations: ComputeAllocation[];

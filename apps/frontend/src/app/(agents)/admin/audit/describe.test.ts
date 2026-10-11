@@ -118,6 +118,9 @@ describe('describeAuditEntry', () => {
     expect(describeAuditEntry(entry('agent.compute.allocation.policy'))).toBe(
       "Changed a server's lease policy",
     );
+    expect(describeAuditEntry(entry('agent.compute.cloudlab_defaults.set'))).toBe(
+      'Changed CloudLab defaults',
+    );
   });
 
   it('says when someone read a user’s content, and reads an unknown action', () => {

@@ -99,6 +99,33 @@ class PostgresComputeResourceRepository:
             raise ValueError("deployment_profile_exists")
         return _row(row)
 
+    async def provider_defaults(self, provider_id: str) -> dict[str, Any]:
+        """Return the saved non-secret form defaults for one provider."""
+        async with self._pool.acquire() as conn:
+            stored = await conn.fetchval(
+                "SELECT compute_defaults FROM agent_runner_policy WHERE id"
+            )
+        defaults = load_json(stored) or {}
+        value = defaults.get(provider_id)
+        return dict(value) if isinstance(value, dict) else {}
+
+    async def set_provider_defaults(
+        self, provider_id: str, defaults: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Replace one provider's defaults without disturbing other providers."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            stored = await conn.fetchval(
+                "SELECT compute_defaults FROM agent_runner_policy WHERE id FOR UPDATE"
+            )
+            current = load_json(stored) or {}
+            current[provider_id] = defaults
+            await conn.execute(
+                """UPDATE agent_runner_policy
+                SET compute_defaults=$1::jsonb,updated_at=NOW() WHERE id""",
+                _json(current),
+            )
+        return dict(defaults)
+
     async def list_connections(self) -> list[dict[str, Any]]:
         """Return metadata only; ciphertext is restricted to trusted get_connection."""
         async with self._pool.acquire() as conn:

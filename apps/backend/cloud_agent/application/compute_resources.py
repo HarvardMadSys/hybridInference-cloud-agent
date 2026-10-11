@@ -27,7 +27,7 @@ from cloud_agent.domain.compute import (
 )
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas_compute import CloudLabDefaults, RenewalPolicy
 
 if TYPE_CHECKING:
     from cloud_agent.compute_config import ComputeConfiguration
@@ -72,8 +72,12 @@ class ComputeCommands:
     async def catalog(self) -> dict[str, Any]:
         """Return enabled implementations and public profile names only."""
         profiles = await self.deployment_profiles()
+        providers = []
+        for entry in self.registry.entries.values():
+            defaults = await self.cloudlab_defaults() if entry.id == "cloudlab" else {}
+            providers.append(entry.catalog(defaults))
         return {
-            "providers": [entry.catalog() for entry in self.registry.entries.values()],
+            "providers": providers,
             "deployment_profiles": [{"id": p.id, "label": p.label} for p in profiles.values()],
             "secret_store_configured": self.secrets.configured,
         }
@@ -196,6 +200,19 @@ class ComputeCommands:
             install_prerequisites=config.get("install_prerequisites", True),
             timeout_seconds=config.get("timeout_seconds", 3600),
             data_mount=config.get("data_mount"),
+        )
+
+    async def cloudlab_defaults(self) -> dict[str, Any]:
+        """Return validated effective defaults for the configured CloudLab adapter."""
+        self.registry.get("cloudlab")
+        stored = await self.repository.provider_defaults("cloudlab")
+        return CloudLabDefaults.model_validate(stored).model_dump(mode="json")
+
+    async def set_cloudlab_defaults(self, defaults: CloudLabDefaults) -> dict[str, Any]:
+        """Replace the non-secret defaults used for new CloudLab requests."""
+        self.registry.get("cloudlab")
+        return await self.repository.set_provider_defaults(
+            "cloudlab", defaults.model_dump(mode="json")
         )
 
     async def connections(self) -> dict[str, Any]:
@@ -727,7 +744,19 @@ class ComputeCommands:
             )
         if ssh_connection_id:
             await self._connection(ssh_connection_id, "existing_ssh")
-        config = entry.configuration(supplied, connection_id, ssh_connection_id)
+        effective = dict(supplied)
+        if provider_id == "cloudlab":
+            defaults = await self.cloudlab_defaults()
+            for field in entry.fields:
+                key = field["key"]
+                if field.get("modes") and mode not in field["modes"]:
+                    continue
+                if field.get("deployment_only") and not deploy:
+                    continue
+                value = defaults.get(key)
+                if key not in effective and value not in {"", None}:
+                    effective[key] = value
+        config = entry.configuration(effective, connection_id, ssh_connection_id)
         return entry, entry.provider.validate_config(mode, config)
 
     def _require_managed(self, row: dict[str, Any], capability: str) -> None:

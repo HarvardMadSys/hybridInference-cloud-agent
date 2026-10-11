@@ -244,6 +244,10 @@ Provider references:
 
 ## Day-to-day workflow
 
+Use **Admin → CloudLab** to set the project, initial duration, template project,
+template name and SSH user that new CloudLab server forms start with. These are
+non-secret defaults only; an administrator can change them for one allocation.
+
 1. In **Admin → Servers → Connections**, add the management SSH private key and
    verified node host keys. For CloudLab, separately add and validate the API
    token. Credential responses expose metadata only.

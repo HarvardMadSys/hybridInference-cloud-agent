@@ -124,6 +124,7 @@ async def test_a_filter_asks_only_for_its_own_actions(audit_api) -> None:
     assert "agent.runner_host.set_settings" in servers["excluded_actions"]
     assert "agent.runner_host.set_settings" in settings["actions"]
     assert "agent.runner_host.set_settings" not in settings["excluded_actions"]
+    assert "agent.compute.cloudlab_defaults.set" in settings["actions"]
 
 
 @pytest.mark.asyncio

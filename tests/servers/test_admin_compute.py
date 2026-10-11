@@ -34,6 +34,7 @@ class MemoryResources:
         self.connections: dict[str, dict[str, Any]] = {}
         self.allocations: dict[str, dict[str, Any]] = {}
         self.operations: dict[str, dict[str, Any]] = {}
+        self.defaults: dict[str, dict[str, Any]] = {}
         self.audit_rows: list[dict[str, Any]] = []
 
     async def list_deployment_profiles(self):
@@ -59,6 +60,13 @@ class MemoryResources:
 
     async def record_admin_action(self, **kwargs: Any) -> None:
         self.audit_rows.append(kwargs)
+
+    async def provider_defaults(self, provider_id):
+        return self.defaults.get(provider_id, {})
+
+    async def set_provider_defaults(self, provider_id, defaults):
+        self.defaults[provider_id] = defaults
+        return defaults
 
     async def list_connections(self):
         return list(self.connections.values())
@@ -202,7 +210,18 @@ async def compute_api(monkeypatch):
                 id="cloudlab",
                 label="CloudLab",
                 provider=NoProviderCalls(),
-                fields=({"key": "project", "label": "Project", "type": "text"},),
+                fields=(
+                    {"key": "project", "label": "Project", "type": "text"},
+                    {"key": "duration", "label": "Duration", "type": "number"},
+                    {"key": "profile_project", "label": "Profile project", "type": "text"},
+                    {"key": "profile_name", "label": "Profile name", "type": "text"},
+                    {
+                        "key": "ssh_username",
+                        "label": "SSH user",
+                        "type": "text",
+                        "deployment_only": True,
+                    },
+                ),
             )
         ]
     )
@@ -288,6 +307,69 @@ async def test_missing_runtime_is_unavailable_after_authentication(compute_api):
     response = await client.get("/admin/agent/compute-providers", headers=ADMIN)
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_defaults_are_saved_audited_and_exposed_in_the_catalog(compute_api):
+    client, repo, _ = compute_api
+    defaults = {
+        "project": "mad-cloudlab",
+        "duration": 12,
+        "profile_project": "cloud-agent",
+        "profile_name": "kata-node",
+        "ssh_username": "researcher",
+    }
+
+    initial = await client.get("/admin/agent/compute-defaults/cloudlab", headers=ADMIN)
+    assert initial.status_code == 200
+    assert initial.json()["defaults"]["duration"] == 4
+
+    saved = await client.put("/admin/agent/compute-defaults/cloudlab", headers=ADMIN, json=defaults)
+    assert saved.status_code == 200
+    assert saved.json() == {"defaults": defaults}
+    assert repo.defaults == {"cloudlab": defaults}
+    assert repo.audit_rows[-1]["action"] == "agent.compute.cloudlab_defaults.set"
+    assert repo.audit_rows[-1]["details"] == {}
+
+    catalog = (await client.get("/admin/agent/compute-providers", headers=ADMIN)).json()
+    fields = {field["key"]: field for field in catalog["providers"][0]["fields"]}
+    assert {key: fields[key]["default"] for key in defaults} == defaults
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_defaults_fill_omitted_request_values_but_explicit_values_win(compute_api):
+    client, repo, _ = compute_api
+    repo.defaults["cloudlab"] = {
+        "project": "default-project",
+        "duration": 12,
+        "profile_project": "default-profile-project",
+        "profile_name": "default-profile",
+        "ssh_username": "default-user",
+    }
+    connection_id = await connection(client)
+    response = await client.post(
+        "/admin/agent/servers",
+        headers=ADMIN,
+        json={
+            "name": "Experiment",
+            "request_id": "defaults-request",
+            "provider_id": "cloudlab",
+            "mode": "provision",
+            "connection_id": connection_id,
+            "configuration": {"duration": 24},
+            "deployment_profile": "kata",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    allocation = next(iter(repo.allocations.values()))
+    assert allocation["configuration"] == {
+        "project": "default-project",
+        "duration": 24,
+        "profile_project": "default-profile-project",
+        "profile_name": "default-profile",
+        "credential_ref": connection_id,
+    }
 
 
 @pytest.mark.asyncio

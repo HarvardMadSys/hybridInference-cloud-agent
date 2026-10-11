@@ -34,6 +34,7 @@ AUDIT_CATEGORIES: dict[AuditCategory, tuple[str, ...]] = {
         "agent.host_settings.",
         "agent.runtime_version.",
         "agent.runner_host.set_settings",
+        "agent.compute.cloudlab_defaults.set",
     ),
     "servers": ("agent.runner_host.", "agent.compute.", "agent.sandbox."),
     "measurements": ("agent.profiling.",),

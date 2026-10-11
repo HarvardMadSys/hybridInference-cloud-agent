@@ -26,6 +26,7 @@ from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request model
     AddComputeConnection,
     AddDeploymentProfile,
     AddServerRequest,
+    CloudLabDefaults,
     ComputeOperationAction,
     ExtendComputeRequest,
     ImportComputeRequest,
@@ -180,6 +181,28 @@ async def create_deployment_profile(
     profile = await commands.create_deployment_profile(payload)
     await _audit(request, actor, "profile.create", profile_id=profile["id"])
     return {"profile": profile}
+
+
+@router.get("/compute-defaults/cloudlab")
+async def cloudlab_defaults(
+    _actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Read non-secret defaults for new CloudLab servers."""
+    return {"defaults": await commands.cloudlab_defaults()}
+
+
+@router.put("/compute-defaults/cloudlab")
+async def set_cloudlab_defaults(
+    request: Request,
+    payload: CloudLabDefaults,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Replace non-secret defaults for new CloudLab servers."""
+    defaults = await commands.set_cloudlab_defaults(payload)
+    await _audit(request, actor, "cloudlab_defaults.set")
+    return {"defaults": defaults}
 
 
 @router.get("/compute-connections")

@@ -228,6 +228,38 @@ describe('server acquisition UI', () => {
     );
   });
 
+  it('prefills CloudLab fields from the provider catalog defaults', async () => {
+    const withDefaults: ComputeCatalog = {
+      ...catalog,
+      providers: catalog.providers.map((provider) => ({
+        ...provider,
+        fields: provider.fields.map((field) =>
+          field.key === 'project'
+            ? { ...field, default: 'FAST25-AE' }
+            : field.key === 'profile'
+              ? { ...field, default: 'small-lan' }
+              : field,
+        ),
+      })),
+    };
+    vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
+    renderAdd(vi.fn(), withDefaults);
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+
+    expect(screen.getByLabelText('Project')).toHaveValue('FAST25-AE');
+    expect(screen.getByLabelText('Profile')).toHaveValue('small-lan');
+    fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+
+    await waitFor(() =>
+      expect(api.createComputeServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          configuration: { project: 'FAST25-AE', profile: 'small-lan' },
+        }),
+      ),
+    );
+  });
+
   it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     const withAdvancedFields: ComputeCatalog = {

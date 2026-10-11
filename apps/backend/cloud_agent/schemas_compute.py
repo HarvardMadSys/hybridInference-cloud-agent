@@ -18,6 +18,18 @@ class ComputeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class CloudLabDefaults(ComputeRequest):
+    """Non-secret defaults applied to new CloudLab server requests."""
+
+    project: str = Field(default="", max_length=128)
+    duration: int = Field(default=4, ge=1, le=168)
+    profile_project: str = Field(default="", max_length=128)
+    profile_name: str = Field(default="", max_length=128)
+    ssh_username: str = Field(
+        default="", max_length=128, pattern=r"^(?:[a-zA-Z_][a-zA-Z0-9_.-]*)?$"
+    )
+
+
 class RenewalPolicy(ComputeRequest):
     """Independent resource deadlines, expressed in seconds.
 
