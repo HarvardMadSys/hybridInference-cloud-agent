@@ -520,7 +520,8 @@ class _TerminalSession:
         """Whether this session still owns a process, and with it a terminal slot.
 
         An exited shell keeps its output for replay until it is closed or
-        reaped, but runs nothing, so it does not count against either limit.
+        reaped, but runs nothing, so it never refuses a new terminal: the
+        oldest exited shells are unlisted to make room instead.
         """
         with self._condition:
             return not self._closed and self.state != "exited"
@@ -970,14 +971,7 @@ class _TerminalManager:
                     on_closed=on_closed,
                     limits=self._limits,
                 )
-                # Exited shells stay listed for their output, within the same
-                # bound: the oldest make room for the new terminal.
-                exited = sorted(
-                    (candidate for candidate in group.values() if candidate.has_exited),
-                    key=lambda candidate: candidate.created_at,
-                )
-                while exited and len(group) >= self._max_sessions_per_workspace:
-                    evicted.append(group.pop(exited.pop(0).id))
+                evicted.extend(self._unlist_exited_locked(workspace_id))
                 group[terminal_id] = session
         finally:
             for stale in evicted:
@@ -987,6 +981,50 @@ class _TerminalManager:
                     logger.exception("workspace_terminal_eviction_cleanup_failed")
         session.start()
         return session.descriptor()
+
+    def _unlist_exited_locked(self, workspace_id: str) -> list[_TerminalSession]:
+        """Unlist the oldest exited shells so one more terminal fits both limits.
+
+        An exited shell stays listed for its output and keeps up to a full
+        output buffer, so it still takes room under both limits, but only a
+        running shell can refuse a new terminal. The new terminal's workspace
+        gives up its own oldest exited shells while its list is full; then,
+        while the broker as a whole is full, the oldest anywhere go. The
+        caller closes the returned sessions once the lock is released.
+        """
+        group = self._sessions[workspace_id]
+        exited = sorted(
+            (
+                (owner, session)
+                for owner, sessions in self._sessions.items()
+                for session in sessions.values()
+                if session.has_exited
+            ),
+            key=lambda candidate: candidate[1].created_at,
+        )
+        unlisted: list[_TerminalSession] = []
+
+        def unlist(candidate: tuple[str, _TerminalSession]) -> None:
+            owner, session = candidate
+            sessions = self._sessions[owner]
+            unlisted.append(sessions.pop(session.id))
+            # The new terminal's own group is about to receive it.
+            if not sessions and owner != workspace_id:
+                self._sessions.pop(owner)
+
+        own = [candidate for candidate in exited if candidate[0] == workspace_id]
+        while own and len(group) >= self._max_sessions_per_workspace:
+            candidate = own.pop(0)
+            exited.remove(candidate)
+            unlist(candidate)
+        retained = sum(
+            not session.is_closed
+            for sessions in self._sessions.values()
+            for session in sessions.values()
+        )
+        for candidate in exited[: max(0, retained + 1 - self._max_sessions)]:
+            unlist(candidate)
+        return unlisted
 
     @staticmethod
     def _suspension_key(job_id: str | None) -> str:

@@ -1470,9 +1470,11 @@ def _wait_for(predicate, timeout: float = 5.0) -> None:
         time.sleep(0.01)
 
 
-def _state(terminals: _TerminalManager, terminal_id: str) -> str | None:
+def _state(
+    terminals: _TerminalManager, terminal_id: str, workspace_id: str = "athr_source"
+) -> str | None:
     return next(
-        (row["state"] for row in terminals.list("athr_source") if row["id"] == terminal_id), None
+        (row["state"] for row in terminals.list(workspace_id) if row["id"] == terminal_id), None
     )
 
 
@@ -1520,6 +1522,51 @@ def test_an_exited_shell_stays_listed_while_there_is_room():
         gone["id"]: "exited",
         live["id"]: "running",
     }
+    terminals.close()
+
+
+def test_exited_shells_across_workspaces_stay_within_the_broker_limit():
+    """Exited shells keep their output, so the broker-wide bound still holds them."""
+    terminals = _TerminalManager(
+        idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=2, max_sessions_per_workspace=2
+    )
+    oldest = _TerminalProcess()
+    spawner = _Spawner(
+        oldest,
+        _TerminalProcess(),
+        _RunningTerminalProcess(),
+        _RunningTerminalProcess(),
+        _RunningTerminalProcess(),
+    )
+
+    def create(workspace_id: str) -> dict:
+        return terminals.create(workspace_id, "/workspace", rows=24, cols=80, backend=spawner)
+
+    def listed() -> dict[str, list[str]]:
+        return {
+            workspace_id: [row["id"] for row in terminals.list(workspace_id)]
+            for workspace_id in ("athr_one", "athr_two", "athr_three")
+        }
+
+    first = create("athr_one")
+    second = create("athr_two")
+    _wait_for(lambda: _state(terminals, first["id"], "athr_one") == "exited")
+    _wait_for(lambda: _state(terminals, second["id"], "athr_two") == "exited")
+
+    # Neither exited shell refuses a third terminal, but together they would
+    # exceed the broker's bound: the oldest of them, in another chat, goes.
+    live = create("athr_three")
+    assert listed() == {"athr_one": [], "athr_two": [second["id"]], "athr_three": [live["id"]]}
+    assert oldest.killed
+    assert "athr_one" not in terminals._sessions
+
+    another = create("athr_three")
+    assert listed() == {"athr_one": [], "athr_two": [], "athr_three": [live["id"], another["id"]]}
+
+    # Running shells still refuse one past the limit.
+    with pytest.raises(HTTPException) as refused:
+        create("athr_one")
+    assert refused.value.status_code == 503
     terminals.close()
 
 
