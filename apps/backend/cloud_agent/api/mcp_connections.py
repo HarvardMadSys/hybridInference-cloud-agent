@@ -27,6 +27,7 @@ import json
 import secrets
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -41,7 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import config_import, launch, oauth
+from cloud_agent.mcp import config_import, github_oauth, launch, oauth
 from cloud_agent.mcp.authorization import binding_from_selection
 from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
@@ -101,6 +102,24 @@ router = APIRouter(prefix="/v1/agent/mcp", tags=["agent-mcp"])
 #: whatever host a request arrived on would produce a different value per
 #: proxy and fail the registration check.
 ENV_MCP_PUBLIC_BASE_URL = "AGENT_MCP_PUBLIC_BASE_URL"
+
+
+def _github_browser_client() -> tuple[str, str] | None:
+    """Read the service's app identity, never a user's access token."""
+    return github_oauth.client_credentials() if _public_base_url() else None
+
+
+def _templates() -> list[dict[str, Any]]:
+    """Offer browser sign-in only when the service can complete it."""
+    templates = [dict(template) for template in _TEMPLATES]
+    github = templates[0]
+    available = _github_browser_client() is not None
+    github["browser_sign_in_available"] = available
+    if available:
+        github["auth_kind"] = AuthKind.OAUTH.value
+        github["notes"] = ["Choose the GitHub account and repositories your agents can access."]
+    return templates
+
 
 #: Which template simplifications this deployment offers. Templates are a
 #: convenience, never a gate: a server with no template is added the same way.
@@ -652,7 +671,7 @@ async def list_templates(
     registry: adding a server with no template is the same code path.
     """
     del user
-    return [dict(template) for template in _TEMPLATES]
+    return _templates()
 
 
 @router.get("/connections", response_model=ConnectionsResponse)
@@ -664,9 +683,7 @@ async def list_connections(
     job_store = _require_store(store)
     rows = await job_store.mcp.list_mcp_connections(user_id=user["user_id"])
     views = [await _view(job_store, row) for row in rows]
-    return ConnectionsResponse(
-        connections=views, templates=[dict(template) for template in _TEMPLATES]
-    )
+    return ConnectionsResponse(connections=views, templates=_templates())
 
 
 @router.post("/connections", response_model=ConnectionView, status_code=201)
@@ -1206,10 +1223,48 @@ async def authorize_connection(
     settings = row.get("auth_config")
     configured = settings if isinstance(settings, Mapping) else {}
     client_id = str(configured.get("client_id") or "") or None
+    github_endpoint = github_oauth.is_endpoint(connection.config.url)
+    managed_client = (
+        _github_browser_client()
+        if github_endpoint and not (body is not None and body.client_id)
+        else None
+    )
     try:
         secret = None
-        if row.get("client_secret_ciphertext"):
+        if managed_client:
+            # Never send the shared secret to an endpoint supplied by discovery.
+            if (
+                metadata.issuer != "https://github.com/login/oauth"
+                or metadata.authorization_endpoint != "https://github.com/login/oauth/authorize"
+                or metadata.token_endpoint != "https://github.com/login/oauth/access_token"
+            ):
+                raise oauth.OAuthError("GitHub returned unexpected sign-in endpoints.")
+            client_id, secret = managed_client
+        elif configured.get("managed_github_oauth") and not (body is not None and body.client_id):
+            raise _bad_request(
+                "GitHub browser sign-in is unavailable. Ask the service administrator to enable it."
+            )
+        elif row.get("client_secret_ciphertext"):
             secret = oauth_cipher().decrypt(str(row["client_secret_ciphertext"]))
+        if github_endpoint and not client_id:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "message": "GitHub browser sign-in is not available yet. "
+                        "Use a personal access token or ask the service administrator to enable it."
+                    }
+                },
+            )
+        if (
+            github_endpoint
+            and metadata.token_endpoint == "https://github.com/login/oauth/access_token"
+        ):
+            # GitHub omits this field from metadata (RFC default: Basic), but
+            # documents client_secret in the form body for both app types.
+            metadata = replace(
+                metadata, token_endpoint_auth_methods_supported=("client_secret_post",)
+            )
         identity = oauth.choose_registration(
             metadata, preregistered_client_id=client_id, preregistered_client_secret=secret
         )
@@ -1230,6 +1285,9 @@ async def authorize_connection(
     scopes = oauth.default_scopes(
         resource_metadata, metadata, connection.auth.oauth.scopes if connection.auth.oauth else ()
     )
+    if managed_client:
+        # Avoid requesting every optional toolset scope in GitHub's metadata.
+        scopes = ("repo", "read:org")
     # The OAuth resource identifier can differ from the MCP transport URL.
     # Reauthorization may reuse the issuer without fetching resource metadata;
     # retain a saved resource only while it still describes the current URL.
@@ -1255,7 +1313,11 @@ async def authorize_connection(
         client=identity,
         metadata=metadata,
         resource=resource,
-        redirect_uri=_callback_url(base_url, connection_id),
+        redirect_uri=(
+            oauth.redirect_uri(base_url, "github")
+            if managed_client
+            else _callback_url(base_url, connection_id)
+        ),
         scopes=scopes,
     )
     try:
@@ -1416,7 +1478,12 @@ async def oauth_callback(
     """
     job_store = _require_store(store)
     if error:
-        return _callback_redirect(provider, ok=False, message=error)
+        message = (
+            "GitHub sign-in was cancelled. You can try again."
+            if provider == "github" and error == "access_denied"
+            else error
+        )
+        return _callback_redirect(provider, ok=False, message=message)
     if not state or not code:
         return _callback_redirect(provider, ok=False, message="missing state or code")
 
@@ -1425,11 +1492,20 @@ async def oauth_callback(
         return _callback_redirect(
             provider, ok=False, message="this authorization expired or was already used"
         )
-    if str(flow["connection_id"]) != str(provider):
+    uses_github_client = (
+        flow["issuer"] == github_oauth.ISSUER
+        and flow["token_endpoint"] == github_oauth.TOKEN_ENDPOINT
+        and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
+        and github_oauth.is_endpoint(str(flow["resource"]))
+    )
+    managed_github = provider == "github" and uses_github_client
+    if str(flow["connection_id"]) != str(provider) and not managed_github:
         # A state minted for one connection cannot complete another's flow.
         return _callback_redirect(
             provider, ok=False, message="this authorization is not for that connection"
         )
+    if managed_github:
+        provider = str(flow["connection_id"])
 
     row = await job_store.mcp.get_mcp_connection(connection_id=int(flow["connection_id"]))
     if row is None or row.get("deleted_at") is not None:
@@ -1489,6 +1565,9 @@ async def oauth_callback(
         return _callback_redirect(provider, ok=False, message=str(exc))
 
     credential_cipher = mcp_cipher()
+    auth_config_patch: dict[str, Any] = {"client_id": identity.client_id}
+    if uses_github_client or (row.get("auth_config") or {}).get("managed_github_oauth"):
+        auth_config_patch["managed_github_oauth"] = uses_github_client
     written = await job_store.mcp.set_mcp_credential(
         connection_id=int(flow["connection_id"]),
         expected_authorization_epoch=int(flow["authorization_epoch"]),
@@ -1522,12 +1601,16 @@ async def oauth_callback(
         # path: that one bumps the OAuth generation to invalidate a flow already
         # in flight, and this *is* the flow. Bumping it here would refuse the
         # write this same call is making.
-        auth_config_patch={"client_id": identity.client_id},
-        # The flow's own ciphertext, under the OAuth domain it was written with.
+        auth_config_patch=auth_config_patch,
+        # The managed app secret remains in encrypted settings, not the user's
+        # connection. Refresh resolves it there after checking GitHub's target.
+        # Otherwise retain the flow's ciphertext under its OAuth key domain.
         # For a public client it is absent and any earlier secret is left alone:
         # the authentication method written above is what decides whether one is
         # sent, so a leftover secret cannot be used by accident.
-        client_secret_ciphertext=flow.get("client_secret_ciphertext"),
+        client_secret_ciphertext=(
+            None if uses_github_client else flow.get("client_secret_ciphertext")
+        ),
         token_endpoint=metadata.token_endpoint,
         revocation_endpoint=metadata.revocation_endpoint,
         registration_endpoint=metadata.registration_endpoint,
@@ -1596,7 +1679,11 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
                     "POST",
                     endpoint.url,
                     data=request.form(),
-                    headers={**request.headers(), **IDENTITY_ENCODING_HEADERS},
+                    headers={
+                        "Accept": "application/json",
+                        **request.headers(),
+                        **IDENTITY_ENCODING_HEADERS,
+                    },
                 ),
                 stream=True,
             )

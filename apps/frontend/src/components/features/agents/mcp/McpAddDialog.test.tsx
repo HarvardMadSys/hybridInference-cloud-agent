@@ -115,6 +115,10 @@ describe('McpAddDialog', () => {
     expect(listMcpCatalog).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Docs' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Connect with')).toHaveValue('static');
+    expect(screen.getByRole('link', { name: 'Create a token on GitHub ↗' })).toHaveAttribute(
+      'href',
+      'https://github.com/settings/personal-access-tokens/new',
+    );
     expect(screen.getByText(template.notes[0])).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'GitHub setup guide ↗' })).toHaveAttribute(
       'href',
@@ -124,7 +128,7 @@ describe('McpAddDialog', () => {
     expect(screen.getByRole('button', { name: 'Connect GitHub' })).toBeDisabled();
     const input = screen.getByLabelText('Access token');
     expect(input).toHaveAttribute('type', 'password');
-    fireEvent.change(input, { target: { value: 'private-token' } });
+    fireEvent.change(input, { target: { value: '  private-token  ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub' }));
     await waitFor(() =>
       expect(createMcpConnection).toHaveBeenCalledWith({
@@ -142,18 +146,39 @@ describe('McpAddDialog', () => {
     expect(added).toHaveBeenCalledWith([{ id: 1, label: 'GitHub' }]);
   });
 
-  it('supports GitHub OAuth and shows its setup guidance instead of token instructions', async () => {
-    vi.mocked(createMcpConnection).mockResolvedValue({ id: 1, label: 'GitHub' } as never);
-    render(<McpAddDialog templates={[template]} onClose={vi.fn()} onAdded={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
-    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'oauth' } });
-    expect(screen.queryByText(template.notes[0])).not.toBeInTheDocument();
-    expect(screen.getByText(/Register a GitHub OAuth app/)).toHaveTextContent(
-      'client ID and client secret',
+  it('clears the token when switching connection methods', async () => {
+    render(
+      <McpAddDialog
+        templates={[{ ...template, browser_sign_in_available: true }]}
+        onClose={vi.fn()}
+        onAdded={vi.fn()}
+      />,
     );
-    expect(screen.getByText(/Register a GitHub OAuth app/)).toHaveTextContent('callback URL');
+    fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
+    fireEvent.change(screen.getByLabelText('Access token'), { target: { value: 'private-token' } });
+    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'oauth' } });
+    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'static' } });
+    expect(screen.getByLabelText('Access token')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Connect GitHub' })).toBeDisabled();
+  });
+
+  it('opens GitHub browser sign-in without requesting tokens or app credentials', async () => {
+    vi.mocked(createMcpConnection).mockResolvedValue({ id: 1, label: 'GitHub' } as never);
+    render(
+      <McpAddDialog
+        templates={[{ ...template, auth_kind: 'oauth', browser_sign_in_available: true }]}
+        onClose={vi.fn()}
+        onAdded={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
+    expect(screen.getByLabelText('Connect with')).toHaveValue('oauth');
+    expect(screen.getByText(/No token or app setup needed/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Access token')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub' }));
+    expect(
+      screen.queryByRole('link', { name: 'Create a token on GitHub ↗' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with GitHub' }));
     await waitFor(() =>
       expect(createMcpConnection).toHaveBeenCalledWith({
         label: 'GitHub',

@@ -273,6 +273,22 @@ describe('McpConnectionsSection', () => {
     },
   );
 
+  it('starts GitHub browser sign-in without asking for app credentials', async () => {
+    mockedList.mockResolvedValue({
+      ...api,
+      connections: [{ ...connection, template: 'github', label: 'GitHub' }],
+    });
+    mockedAuthorize.mockResolvedValue({
+      authorization_url: 'https://github.com/login/oauth/authorize?client_id=service-app',
+      needs_client_id: false,
+    });
+    render(<McpConnectionsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with GitHub' }));
+    await waitFor(() => expect(mockedAuthorize).toHaveBeenCalledWith(3, undefined));
+    expect(screen.queryByLabelText('OAuth client ID')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('OAuth client secret')).not.toBeInTheDocument();
+  });
+
   it('disconnects a connection after confirming', async () => {
     mockedDisconnect.mockResolvedValue(undefined);
 

@@ -55,9 +55,10 @@ export function McpAddDialog({
         auth_kind: authKind,
         template: selected.name,
         ...(authKind === 'static'
-          ? { secret, header_name: 'Authorization', header_scheme: 'Bearer' }
+          ? { secret: secret.trim(), header_name: 'Authorization', header_scheme: 'Bearer' }
           : {}),
       });
+      setSecret('');
       onAdded([connection]);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not add this server.');
@@ -70,9 +71,7 @@ export function McpAddDialog({
   let notes = selected?.notes ?? [];
   if (selected?.name === 'github' && selected.auth_kind !== authKind) {
     if (authKind === 'oauth') {
-      notes = [
-        'Register a GitHub OAuth app, then enter its client ID and client secret in the authorization step. Use the callback URL shown there.',
-      ];
+      notes = ['Choose the GitHub account and repositories your agents can access.'];
     } else {
       notes = [
         'Use a GitHub personal access token with access to the repositories your agents need.',
@@ -112,7 +111,9 @@ export function McpAddDialog({
       </div>
       {selected ? (
         <div className="mt-5 border-t border-gray-100 pt-4 dark:border-white/10">
-          <p className="break-all text-xs text-gray-500 dark:text-gray-400">{selected.url}</p>
+          {selected.name !== 'github' ? (
+            <p className="break-all text-xs text-gray-500 dark:text-gray-400">{selected.url}</p>
+          ) : null}
           {selected.documentation_url ? (
             <a
               href={selected.documentation_url}
@@ -129,13 +130,47 @@ export function McpAddDialog({
               <select
                 disabled={saving}
                 value={authKind}
-                onChange={(event) => setAuthKind(event.target.value as McpAuthKind)}
+                onChange={(event) => {
+                  setAuthKind(event.target.value as McpAuthKind);
+                  setSecret('');
+                  setError(null);
+                }}
                 className={FIELD}
               >
+                {selected.browser_sign_in_available ? (
+                  <option value="oauth">Sign in with GitHub (recommended)</option>
+                ) : null}
                 <option value="static">Personal access token</option>
-                <option value="oauth">GitHub OAuth app</option>
               </select>
             </label>
+          ) : null}
+          {selected.name === 'github' && authKind === 'static' ? (
+            <div className="mt-4 rounded-lg bg-gray-50 p-4 text-sm leading-6 text-gray-600 dark:bg-white/5 dark:text-gray-400">
+              <p className="font-medium text-gray-900 dark:text-gray-100">
+                Connect GitHub in three steps
+              </p>
+              <ol className="mt-2 list-decimal space-y-2 pl-5">
+                <li>
+                  <a
+                    href="https://github.com/settings/personal-access-tokens/new"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-600 underline dark:text-blue-400"
+                  >
+                    Create a token on GitHub ↗
+                  </a>
+                  . Choose the account or organization and repositories you want to connect.
+                </li>
+                <li>
+                  Give the token access to the repositories your agents need. To push changes and
+                  open pull requests, allow Contents and Pull requests read and write access.
+                </li>
+                <li>Copy the token, paste it below and select Connect GitHub.</li>
+              </ol>
+              <p className="mt-3 text-xs">
+                Organization repositories may require an administrator to approve the token.
+              </p>
+            </div>
           ) : null}
           {authKind === 'static' ? (
             <label className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300">
@@ -143,6 +178,8 @@ export function McpAddDialog({
               <input
                 type="password"
                 autoComplete="off"
+                spellCheck={false}
+                aria-describedby={selected.name === 'github' ? 'github-token-help' : undefined}
                 value={secret}
                 onChange={(event) => setSecret(event.target.value)}
                 disabled={saving}
@@ -151,9 +188,22 @@ export function McpAddDialog({
             </label>
           ) : (
             <p className="mt-3 text-sm text-gray-600 dark:text-gray-400">
-              Sign in to {selected.label} to choose what your agents can access.
+              {selected.name === 'github'
+                ? 'We’ll open GitHub so you can sign in and review access, then bring you back here. No token or app setup needed.'
+                : `Sign in to ${selected.label} to choose what your agents can access.`}
             </p>
           )}
+          {selected.name === 'github' && !selected.browser_sign_in_available ? (
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Browser sign-in is not available yet. You can use a token or ask the service
+              administrator to enable GitHub sign-in.
+            </p>
+          ) : null}
+          {selected.name === 'github' && authKind === 'static' ? (
+            <p id="github-token-help" className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              We’ll check the connection and discover available tools after you connect.
+            </p>
+          ) : null}
           {notes.map((note) => (
             <p key={note} className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               {note}
@@ -170,7 +220,11 @@ export function McpAddDialog({
             onClick={() => void connect()}
             className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
           >
-            {saving ? 'Connecting…' : `Connect ${selected.label}`}
+            {saving
+              ? 'Connecting…'
+              : selected.name === 'github' && authKind === 'oauth'
+                ? 'Sign in with GitHub'
+                : `Connect ${selected.label}`}
           </button>
         </div>
       ) : (

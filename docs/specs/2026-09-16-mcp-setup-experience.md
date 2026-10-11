@@ -15,11 +15,21 @@ action after adding a server or returning from OAuth.
 - Add server opens built-in presets for GitHub, Slack, Google Drive, Linear,
   Notion and Context7, available independently of the directory sync. Each preset
   supplies the provider's remote endpoint and setup guidance. GitHub defaults to
-  a personal access token on `https://api.githubcopilot.com/mcp/` and also offers
-  OAuth. Its setup guidance explains the Contents and Pull requests read and
-  write permissions needed to push file changes and create pull requests.
-  Existing connections using `/mcp/readonly` can be disconnected and added
-  again with the GitHub preset; stored endpoints are not automatically changed.
+  Sign in with GitHub when the administrator has configured the service's app in
+  Admin Settings → MCP. Users authorize their own GitHub account in the browser
+  and return to automatic tool discovery, without registering an app or entering
+  client credentials. The app uses one callback at
+  `<public API base>/v1/agent/mcp/oauth/callback/github`; the single-use state binds
+  it to the user's connection. The preset uses `https://api.githubcopilot.com/mcp/` and
+  offers a personal access token as an alternative, with three setup steps, a
+  direct creation link, and repository permission guidance. Without the managed
+  app, token setup remains available and explains that an administrator can enable
+  browser sign-in. Shared app credentials are restricted to GitHub's exact service
+  and OAuth endpoints; user tokens stay separate, and refresh reads the managed
+  secret from encrypted application settings rather than a user connection.
+  Token guidance includes Contents and Pull requests read and write permissions
+  for pushing file changes and opening pull requests. Existing `/mcp/readonly`
+  connections keep their stored endpoints; reconnect with the preset to enable writes.
 - MCP directory opens Recommended: a small editorial shortlist of GitHub, Context7,
   Playwright, Linear, Notion, Figma, Supabase and Sentry for common coding workflows.
   All servers opens the full synchronized directory; typing in search always searches

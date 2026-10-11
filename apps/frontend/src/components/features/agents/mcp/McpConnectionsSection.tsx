@@ -410,7 +410,9 @@ export function McpConnectionsSection({
                       {working
                         ? 'Connecting…'
                         : signIn
-                          ? 'Sign in'
+                          ? connection.template === 'github'
+                            ? 'Sign in with GitHub'
+                            : 'Sign in'
                           : active
                             ? 'Refresh tools'
                             : 'Retry connection'}

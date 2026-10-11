@@ -221,6 +221,9 @@ services:
       # Optional override; otherwise MCP reuses the public API prefix from
       # AGENT_SESSION_REDIRECT_URI, which this deployment already requires.
       AGENT_MCP_PUBLIC_BASE_URL: ${AGENT_MCP_PUBLIC_BASE_URL:-}
+      # Optional legacy import; configure the managed app in Admin Settings.
+      AGENT_MCP_GITHUB_CLIENT_ID: ${AGENT_MCP_GITHUB_CLIENT_ID:-}
+      AGENT_MCP_GITHUB_CLIENT_SECRET: ${AGENT_MCP_GITHUB_CLIENT_SECRET:-}
 
       # Both widen what a user-added MCP connection may dial, and both are off
       # by default. Private space is reachable only through a user connector;

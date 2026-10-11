@@ -384,6 +384,23 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
         )
     config = row.get("auth_config")
     settings = config if isinstance(config, Mapping) else {}
+    client_secret = None
+    if settings.get("managed_github_oauth"):
+        from cloud_agent.mcp import github_oauth
+
+        credentials = github_oauth.client_credentials()
+        if (
+            credentials is None
+            or credentials[0] != settings.get("client_id")
+            or not github_oauth.is_endpoint(str(row.get("url") or ""))
+            or not github_oauth.is_endpoint(str(row.get("resource") or ""))
+            or metadata.issuer != github_oauth.ISSUER
+            or metadata.token_endpoint != github_oauth.TOKEN_ENDPOINT
+        ):
+            raise RefreshRefused("GitHub sign-in settings changed. Sign in with GitHub again.")
+        client_secret = credentials[1]
+    else:
+        client_secret = _decrypt(_client_secret_cipher(), row.get("client_secret_ciphertext"))
     identity = oauth.ClientIdentity(
         client_id=str(settings.get("client_id") or ""),
         registration=str(row.get("registration") or "dcr"),  # type: ignore[arg-type]
@@ -391,7 +408,7 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
         # than taken from the caller: the token cipher is already constructed by
         # the time this runs, so passing it through would make the OAuth branch
         # below unreachable -- which is exactly what it was.
-        client_secret=_decrypt(_client_secret_cipher(), row.get("client_secret_ciphertext")),
+        client_secret=client_secret,
         auth_method=str(row.get("client_auth_method") or "none"),
     )
     return oauth.refresh_request(
@@ -550,7 +567,11 @@ async def _post(
                     "POST",
                     endpoint.url,
                     data=request.form(),
-                    headers={**request.headers(), **IDENTITY_ENCODING_HEADERS},
+                    headers={
+                        "Accept": "application/json",
+                        **request.headers(),
+                        **IDENTITY_ENCODING_HEADERS,
+                    },
                 ),
                 stream=True,
             )

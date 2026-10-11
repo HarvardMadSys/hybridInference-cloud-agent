@@ -612,6 +612,23 @@ SETTINGS: tuple[Setting, ...] = (
         url=True,
     ),
     Setting(
+        "mcp_github_client_id",
+        "GitHub MCP sign-in client ID",
+        "MCP",
+        "",
+        env="AGENT_MCP_GITHUB_CLIENT_ID",
+        description="Service-managed GitHub OAuth App or GitHub App used for MCP browser sign-in.",
+    ),
+    Setting(
+        "mcp_github_client_secret",
+        "GitHub MCP sign-in client secret",
+        "MCP",
+        "",
+        env="AGENT_MCP_GITHUB_CLIENT_SECRET",
+        secret=True,
+        description="Register <public API base>/v1/agent/mcp/oauth/callback/github on this app.",
+    ),
+    Setting(
         "alert_webhook_url",
         "Alert webhook URL",
         "Operations",
@@ -1170,6 +1187,12 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
                 "gitlab_redirect_uri",
                 "source_control_encryption_key",
             ),
+        ),
+        (
+            "mcp_github",
+            "GitHub MCP browser sign-in",
+            False,
+            ("mcp_github_client_id", "mcp_github_client_secret", "source_control_encryption_key"),
         ),
         ("compute", "Compute credential storage", False, ("compute_encryption_key",)),
     ):

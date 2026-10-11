@@ -75,6 +75,7 @@ export interface McpTemplateApi {
   auth_kind: McpAuthKind;
   notes: string[];
   documentation_url?: string;
+  browser_sign_in_available?: boolean;
 }
 
 /** Public metadata from the official MCP Registry, never an installed connection. */
