@@ -158,6 +158,13 @@ FIRST_SETTINGS_WAIT_S = 30.0
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
 _HEARTBEAT_TIMEOUT_S = 10.0
+#: How long one event upload keeps retrying an unreachable control plane, and
+#: the backoff ceiling between tries. Half the default lease: long enough to
+#: ride out a control-plane container being recreated, short enough that a
+#: turn the platform cannot record is not left running unseen.
+_EVENT_RETRY_BUDGET_S = 60.0
+_EVENT_RETRY_MAX_DELAY_S = 8.0
+_EVENT_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 #: How long a host polls before asking again for the wait endpoint a control
 #: plane did not have. Hosts deploy first, so this is the rest of a rollout.
 WORK_WAIT_RETRY_S = 300.0
@@ -435,14 +442,21 @@ class ControlPlane:
         return response.status_code, parsed if isinstance(parsed, dict) else {}
 
     def append_event(self, event: NormalizedEvent) -> None:
-        """Report one normalized event, retrying once now that replay is safe.
+        """Report one normalized event, retrying with backoff since replay is safe.
 
         The retry exists *because of* ``event_seq``: before it, a response
         lost on the wire left the runner unable to tell "never stored" from
         "stored, answer dropped", and re-sending risked a duplicate row in the
         owner's stream. With the number attached, the server answers a replay
-        with the already-stored id, so one transport error no longer kills an
-        otherwise healthy turn.
+        with the already-stored id.
+
+        One immediate retry was not enough: a control plane being recreated by
+        a deploy refuses connections, or its proxy answers 502, for longer
+        than that, and the escaping error ended an otherwise healthy turn and
+        marked its native context lost. Transport errors and transient statuses
+        are retried for a bounded time instead, well inside the lease the
+        heartbeat keeps renewing meanwhile; a lost lease (409) still ends the
+        turn at once.
         """
         self._event_seq += 1
         body = {
@@ -450,10 +464,22 @@ class ControlPlane:
             "payload": event.payload,
             "event_seq": self._event_seq,
         }
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
-        except httpx.TransportError:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
+        path = f"/v1/agent/worker/jobs/{self.job_id}/events"
+        give_up_at = time.monotonic() + _EVENT_RETRY_BUDGET_S
+        delay = 1.0
+        while True:
+            try:
+                self._post(path, body)
+                return
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code not in _EVENT_RETRY_STATUSES
+                ) or time.monotonic() + delay > give_up_at:
+                    raise
+                _log_control_failure("event_retry", self.job_id, exc)
+            time.sleep(delay)
+            delay = min(delay * 2, _EVENT_RETRY_MAX_DELAY_S)
 
     def _get(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
         """Read from the worker surface, with the same fencing as a write."""
