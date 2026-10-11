@@ -1096,9 +1096,8 @@ jobs:
           echo "--- rendered services ---"
           docker compose -f ${RUNNER_TEMP}/rendered.yml config --services
 
-      # The other machine. Same reasoning, different failure: a required
-      # secret that quietly became optional, or a variable renamed in code and
-      # not here, would otherwise be found by an operator at cutover.
+      # The control plane accepts legacy runtime values for a one-time import.
+      # Database/bootstrap requirements are still checked separately below.
       - name: Render the control-plane stack
         run: |
           set -euo pipefail
@@ -1109,6 +1108,8 @@ jobs:
           GATEWAY_JWKS_URL=https://gateway.invalid/v1/identity/jwks
           GATEWAY_GRANT_DISPATCH_TOKEN=ci-placeholder
           AGENT_SESSION_SECRET=ci-placeholder-value-not-a-real-secret
+          AGENT_SETTINGS_ENCRYPTION_KEY=ci-settings-root-key-not-a-real-secret
+          ADMIN_TOKEN=ci-administrator-recovery-not-a-real-secret
           AGENT_CONTROL_TOKEN_SECRET=ci-placeholder-value-not-a-real-secret
           AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=ci-placeholder-value-not-real
           AGENT_DEPLOYMENT_SHA=ci-deployment-sha
@@ -1136,16 +1137,11 @@ jobs:
             config > ${RUNNER_TEMP}/control-plane.yml
           docker compose -f ${RUNNER_TEMP}/control-plane.yml config --services
 
-      # The `:?` markers are the deployment's only defence against a service
-      # that starts with a signing key somebody left blank. This asserts they
-      # still bite, rather than that they are still spelled.
-      - name: A missing secret still refuses to render
+      # Runtime signing keys can be configured through administrator setup.
+      # Database access and the actual host's credentials/network stay bootstrap.
+      - name: Missing bootstrap configuration still refuses to render
         run: |
           set -euo pipefail
-          # Each fails for its own reason: a session secret left blank signs
-          # cookies with nothing; a missing broker token leaves the control
-          # plane unable to route files, terminals, Fork, snapshots or native
-          # session operations to an enrolled host.
           check() {
             local stack="$1" envfile="$2" required="$3"
             grep -v "^${required}=" "$envfile" > .env.missing
@@ -1158,12 +1154,34 @@ jobs:
 
           CP=deploy/control-plane/docker-compose.yml
           HOST=deploy/host/docker-compose.sandbox.yml
-          for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN AGENT_DEPLOYMENT_SHA GATEWAY_ISSUER; do
+          for required in AGENT_DATABASE_URL AGENT_POSTGRES_PASSWORD AGENT_DEPLOYMENT_SHA; do
             check "$CP" .env.control-plane "$required"
           done
           for required in AGENT_WORKSPACE_BROKER_TOKEN AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
             check "$HOST" .env "$required"
           done
+
+      - name: Missing runtime keys permit administrator setup without default secrets
+        run: |
+          set -euo pipefail
+          cp .env.control-plane .env.setup
+          for imported in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_WORKSPACE_BROKER_TOKEN GATEWAY_ISSUER GATEWAY_JWKS_URL; do
+            sed -i "/^${imported}=/d" .env.setup
+          done
+          docker compose -f deploy/control-plane/docker-compose.yml \
+            --env-file .env.setup config > "${RUNNER_TEMP}/setup.yml"
+          uv run --no-project --with pyyaml python - <<'PY'
+          import os, yaml
+          stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/setup.yml"))
+          for name in ("control-plane", "mcp-relay"):
+              env = stack["services"][name]["environment"]
+              for key in ("AGENT_SESSION_SECRET", "AGENT_CONTROL_TOKEN_SECRET",
+                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_WORKSPACE_BROKER_TOKEN",
+                          "GATEWAY_ISSUER", "GATEWAY_JWKS_URL"):
+                  assert not env.get(key), f"{name} supplied a default for {key}"
+              assert env["AGENT_SETTINGS_ENCRYPTION_KEY"]
+          print("setup can start without runtime keys; no default credentials are supplied")
+          PY
 
       - name: The rendered stack keeps its security properties
         run: |
