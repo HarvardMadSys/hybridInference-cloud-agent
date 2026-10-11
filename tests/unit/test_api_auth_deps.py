@@ -237,6 +237,17 @@ async def test_a_wrong_admin_token_is_refused(client: AsyncClient, monkeypatch) 
     assert response.status_code == 401
 
 
+async def test_a_non_ascii_admin_token_is_an_ordinary_refusal(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """Not a 500: comparing it must not raise for anybody's input."""
+    monkeypatch.setenv(deps.ENV_ADMIN_TOKEN, "the-admin-token")
+
+    response = await client.get("/admin", headers={"Authorization": b"Bearer caf\xe9"})
+
+    assert response.status_code == 401
+
+
 async def test_an_admin_session_opens_the_admin_door(client: AsyncClient) -> None:
     """The dashboard uses a session and the Gateway's current agent.admin grant."""
     client.cookies.set(identity.SESSION_COOKIE, _session(role="admin"))

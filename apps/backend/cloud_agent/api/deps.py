@@ -458,7 +458,9 @@ async def verify_admin_access(
     """
     presented = bearer_token(authorization)
     configured = (os.environ.get(ENV_ADMIN_TOKEN) or "").strip()
-    if configured and presented and hmac.compare_digest(presented, configured):
+    # Bytes, not str: compare_digest raises TypeError for a non-ASCII str, so
+    # any caller could turn this refusal into a 500.
+    if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
 
     token = session_token(request, authorization)

@@ -402,4 +402,6 @@ def state_matches(presented: str, expected: str) -> bool:
     """
     if not presented or not expected:
         return False
-    return hmac.compare_digest(presented, expected)
+    # Bytes, not str: ``presented`` is the callback's query value, and
+    # compare_digest raises TypeError for a non-ASCII str.
+    return hmac.compare_digest(presented.encode(), expected.encode())

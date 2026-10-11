@@ -426,6 +426,20 @@ async def test_a_callback_with_a_mismatched_state_is_refused_before_the_exchange
     assert not client.cookies.get(identity.SESSION_COOKIE)
 
 
+async def test_a_non_ascii_state_is_a_mismatch_not_a_server_error(client_and_gateway):
+    """The callback's query is anybody's input; comparing it must not raise."""
+    client, gateway = client_and_gateway
+    await _begin(client)
+
+    response = await client.get(
+        "/v1/session/callback", params={"code": "the-code", "state": "café"}
+    )
+
+    assert response.status_code == 303
+    assert "sign_in_error=expired" in response.headers["location"]
+    assert gateway.exchanged == []
+
+
 async def test_a_callback_with_no_parked_flow_is_refused(client_and_gateway):
     """A response to a request this service never made buys nothing."""
     client, gateway = client_and_gateway
