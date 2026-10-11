@@ -47,7 +47,9 @@ DOCKER_SELECTORS = (
 )
 
 
-def _docker(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _docker(
+    *arguments: str, check: bool = True, timeout_s: float = 10
+) -> subprocess.CompletedProcess[str]:
     """Address only the local daemon and retain registry/proxy configuration."""
     environment = os.environ.copy()
     for selector in DOCKER_SELECTORS:
@@ -58,7 +60,7 @@ def _docker(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[
         capture_output=True,
         text=True,
         check=check,
-        timeout=10,
+        timeout=timeout_s,
     )
 
 
@@ -163,7 +165,9 @@ def retained_command_container(tmp_path: Path):
         ]
     )
     try:
-        _docker(*create)
+        # A vfs daemon copies the complete cached image for every container.
+        # Allow that fixture work separately from the command cleanup deadline.
+        _docker(*create, timeout_s=30)
         deadline = time.monotonic() + 5
         while _docker(
             "exec", spec.container_name, "test", "-d", CHAT_WORKDIR, check=False
