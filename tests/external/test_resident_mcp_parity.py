@@ -558,10 +558,14 @@ async def test_resident_mcp_call_followup_resume_and_fork(
 
     relay_app = create_mcp_app()
     request_connections = []
+    request_transports = []
 
     async def traced_relay(scope, receive, send):
         if scope["type"] == "http" and scope["method"] == "POST":
             request_connections.append(tuple(scope["client"]))
+            # Uvicorn binds receive to its request cycle. Retain the transport
+            # itself so a closed connection's Python id cannot be recycled.
+            request_transports.append(receive.__self__.transport)
         await relay_app(scope, receive, send)
 
     server = uvicorn.Server(
@@ -713,10 +717,17 @@ async def test_resident_mcp_call_followup_resume_and_fork(
         assert "upstream-secret-token" not in model_transcript
         if runtime == "kilo":
             # Kilo's Bun HTTP pool can race a relay's idle socket closure.
-            # Check actual TCP connections, not just the generated config:
+            # Check actual TCP transports, not just the generated config:
             # each protocol request must use a fresh connection, with no
             # application retry that could repeat a dispatched tool write.
-            assert len(request_connections) == len(set(request_connections)), request_connections
+            # A fresh connection may recycle an earlier client's source port;
+            # its peer tuple alone does not identify the underlying connection.
+            assert len(request_transports) == len(
+                {id(transport) for transport in request_transports}
+            ), [
+                (peer, id(transport))
+                for peer, transport in zip(request_connections, request_transports, strict=True)
+            ]
         # Also exercise the resource protocol with the same member's current
         # token, through the actual relay, protocol host, upstream and DB.
         async with httpx.AsyncClient(timeout=20) as resource_client:

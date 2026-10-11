@@ -22,13 +22,15 @@ async def test_user_memory_upgrade_defaults_constraints_and_round_trip_preserve_
 ):
     job = await _create_job(store, user_id="alice", task_prompt="I prefer readable API tests.")
     config = _db_config()
-    async with pool.acquire() as conn:
-        sources = {
-            table: [dict(row) for row in await conn.fetch(f"SELECT * FROM {table} ORDER BY id")]
-            for table in ("agent_jobs", "agent_threads", "agent_thread_messages")
-        }
     try:
         downgrade_to(config, "0046_job_claim_retry")
+        # Compare the source tables in the historical schema under test;
+        # later migrations may add columns that this rollback removes.
+        async with pool.acquire() as conn:
+            sources = {
+                table: [dict(row) for row in await conn.fetch(f"SELECT * FROM {table} ORDER BY id")]
+                for table in ("agent_jobs", "agent_threads", "agent_thread_messages")
+            }
         for _ in range(2):
             apply_migrations(config, "0047_user_memory")
             async with pool.acquire() as conn:

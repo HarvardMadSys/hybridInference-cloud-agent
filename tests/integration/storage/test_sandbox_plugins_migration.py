@@ -12,8 +12,8 @@ from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
-_BEFORE = "0046_job_claim_retry"
-_THIS = "0047_sandbox_plugins"
+_BEFORE = "0047_user_memory"
+_THIS = "0048_sandbox_plugins"
 
 
 async def test_plugin_upgrade_defaults_and_rollback_preserve_existing_chats(store):
@@ -23,6 +23,15 @@ async def test_plugin_upgrade_defaults_and_rollback_preserve_existing_chats(stor
     downgrade_to(config, _BEFORE)
     conn = await asyncpg.connect(**config)
     try:
+        original_memory = dict(
+            await conn.fetchrow(
+                "INSERT INTO agent_user_memories (user_id, portrait, memories) "
+                "VALUES ($1, $2::jsonb, $3::jsonb) RETURNING *",
+                job["user_id"],
+                json.dumps({"summary": "Prefers readable API tests."}),
+                json.dumps([{"text": "Keep migration assertions precise."}]),
+            )
+        )
         original_thread = dict(
             await conn.fetchrow("SELECT * FROM agent_threads WHERE id = $1", job["thread_id"])
         )
@@ -35,6 +44,14 @@ async def test_plugin_upgrade_defaults_and_rollback_preserve_existing_chats(stor
     apply_migrations(config, _THIS)
     conn = await asyncpg.connect(**config)
     try:
+        assert (
+            dict(
+                await conn.fetchrow(
+                    "SELECT * FROM agent_user_memories WHERE user_id = $1", job["user_id"]
+                )
+            )
+            == original_memory
+        )
         upgraded_thread = dict(
             await conn.fetchrow("SELECT * FROM agent_threads WHERE id = $1", job["thread_id"])
         )
@@ -83,6 +100,14 @@ async def test_plugin_upgrade_defaults_and_rollback_preserve_existing_chats(stor
     downgrade_to(config, _BEFORE)
     conn = await asyncpg.connect(**config)
     try:
+        assert (
+            dict(
+                await conn.fetchrow(
+                    "SELECT * FROM agent_user_memories WHERE user_id = $1", job["user_id"]
+                )
+            )
+            == original_memory
+        )
         assert (
             dict(await conn.fetchrow("SELECT * FROM agent_threads WHERE id = $1", job["thread_id"]))
             == original_thread

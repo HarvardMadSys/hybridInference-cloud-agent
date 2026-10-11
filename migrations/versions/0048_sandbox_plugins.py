@@ -1,13 +1,13 @@
 """Keep sandbox plugin selections for the lifetime of their chat.
 
-Revision ID: 0047_sandbox_plugins
-Revises: 0046_job_claim_retry
+Revision ID: 0048_sandbox_plugins
+Revises: 0047_user_memory
 """
 
 from alembic import op
 
-revision = "0047_sandbox_plugins"
-down_revision = "0046_job_claim_retry"
+revision = "0048_sandbox_plugins"
+down_revision = "0047_user_memory"
 branch_labels = None
 depends_on = None
 
