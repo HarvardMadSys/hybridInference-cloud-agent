@@ -251,14 +251,14 @@ export const en = {
     '{count}/12 memories · {characters}/2,400 characters · at most 3 user memories',
   'settings.memory.consolidateDescription':
     'Choose a model to merge duplicates and choose repo or user scope. Uses your model quota. Existing memory is kept if the model returns no memories.',
-  'settings.memory.title': 'Memory',
+  'settings.memory.title': 'User memory',
   'settings.memory.description':
-    'Memory uses up to your 50 latest requests to suggest improvements. Explicit preferences can guide future tasks in the same project.',
+    'Your avatar and recent-work profile reflect your activity across projects. User preferences apply to all projects: they come from requests without a project, or preferences explicitly marked “across all projects”. Project-specific context is saved separately below.',
   'settings.memory.automatic': 'Automatically build memory',
   'settings.memory.enabled':
-    'Your avatar’s theme, memory, and suggestions update automatically from your requests.',
+    'Your avatar’s theme, user memory, and suggestions update automatically from your requests. Project memory has its own settings.',
   'settings.memory.disabled':
-    'Avatar theme updates, memory updates, and personalization are paused.',
+    'Avatar theme updates, memory updates, and user personalization are paused. Project memory keeps its own settings.',
   'settings.memory.loading': 'Loading your memory…',
   'settings.memory.error': 'Could not load or update your memory. Please try again.',
   'settings.memory.retry': 'Retry',
@@ -267,9 +267,9 @@ export const en = {
   'settings.memory.refresh': 'Refresh',
   'settings.memory.refreshing': 'Refreshing…',
   'settings.memory.clear': 'Clear memory',
-  'settings.memory.confirmTitle': 'Clear saved memory and suggestions?',
+  'settings.memory.confirmTitle': 'Clear user memory and suggestions?',
   'settings.memory.confirmDescription':
-    'Clearing resets your avatar’s work theme while keeping its base character. Old requests won’t be used again. Future requests can build new memory and update the avatar when enabled.',
+    'Clearing resets your avatar’s work theme while keeping its base character, and removes user memory and suggestions. Project memory is kept. Old requests won’t be used again for user memory. Future requests can build new memory and update the avatar when enabled.',
   'settings.memory.confirmClear': 'Confirm clear memory',
   'settings.memory.clearing': 'Clearing…',
   'settings.memory.cancel': 'Cancel',
@@ -280,7 +280,7 @@ export const en = {
   'settings.memory.model': 'Preferred model',
   'settings.memory.emptyPortrait':
     'Recent work will appear after you send requests with memory enabled.',
-  'settings.memory.memories': 'Saved memory',
+  'settings.memory.memories': 'Saved user memory',
   'settings.memory.entriesDescription':
     'Edit or remove saved memories. Your changes stay in place when memory refreshes.',
   'settings.memory.entryLabel': 'Saved memory {number}',
@@ -321,6 +321,41 @@ export const en = {
   'settings.memory.suggestions': 'Suggestions for future tasks',
   'settings.memory.emptySuggestions':
     'Suggestions will appear when your activity provides enough context.',
+  'settings.projectMemory.title': 'Project memory',
+  'settings.projectMemory.description':
+    'Each repository has its own preferences and task context, used only for that project. Project preferences take priority over user preferences when they conflict. Its memory controls are independent of user memory and other projects.',
+  'settings.projectMemory.signIn': 'Sign in to see your project memory.',
+  'settings.projectMemory.project': 'Repository (owner/repo)',
+  'settings.projectMemory.select': 'Select a repository',
+  'settings.projectMemory.refreshProjects': 'Refresh repositories',
+  'settings.projectMemory.loadingProjects': 'Loading your repositories…',
+  'settings.projectMemory.projectsError':
+    'Could not load your repositories. Refresh repositories to try again.',
+  'settings.projectMemory.noProjects':
+    'Project memory will appear after you send a request in a repository.',
+  'settings.projectMemory.loading': 'Loading project memory…',
+  'settings.projectMemory.error':
+    'Could not load or update this project’s memory. Please try again.',
+  'settings.projectMemory.automatic': 'Automatically build project memory',
+  'settings.projectMemory.enabled':
+    'Memory and suggestions update automatically for this repository.',
+  'settings.projectMemory.disabled':
+    'Memory updates and personalization are paused for this repository. User memory and other projects keep their own settings.',
+  'settings.projectMemory.refresh': 'Refresh project memory',
+  'settings.projectMemory.consolidate': 'Consolidate project memory',
+  'settings.projectMemory.bounds': '{count}/12 project memories · {characters}/2,400 characters',
+  'settings.projectMemory.clear': 'Clear project memory',
+  'settings.projectMemory.confirmTitle': 'Clear memory for {repo}?',
+  'settings.projectMemory.confirmDescription':
+    'This removes only the selected project’s memory and suggestions. Your user memory, avatar, and other projects are kept. Old requests won’t be reused for this project’s memory. Future requests can build new memory when enabled.',
+  'settings.projectMemory.confirmClear': 'Confirm clear project memory',
+  'settings.projectMemory.portrait': 'Project profile',
+  'settings.projectMemory.emptyPortrait':
+    'This project’s profile will appear after you send requests with project memory enabled.',
+  'settings.projectMemory.memories': 'Saved project memory',
+  'settings.projectMemory.emptyMemory': 'No saved memory for this project yet.',
+  'settings.projectMemory.emptySuggestions':
+    'Suggestions will appear when this project’s activity provides enough context.',
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',

@@ -5,6 +5,7 @@ import { useT } from '@/components/providers';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
 import { UserMemorySettings } from '@/components/features/settings/UserMemorySettings';
+import { ProjectMemorySettings } from '@/components/features/settings/ProjectMemorySettings';
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
@@ -437,6 +438,7 @@ export function IntegrationsView({
       </div>
       <SkillsSection />
       <UserMemorySettings />
+      <ProjectMemorySettings />
       <NotificationSettings />
       <GettingStartedSettings />
     </section>

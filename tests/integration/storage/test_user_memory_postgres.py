@@ -23,18 +23,24 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 async def test_memory_ownership_assistant_fork_and_deleted_history_filters(store, pool):
     alice = await _create_job(
-        store, user_id="alice", repo="alice/api", task_prompt="I prefer concise reviews."
+        store,
+        user_id="alice",
+        repo="alice/api",
+        task_prompt="I prefer concise reviews across all projects.",
     )
     bob = await _create_job(
-        store, user_id="bob", repo="bob/frontend", task_prompt="I prefer detailed reports."
+        store,
+        user_id="bob",
+        repo="bob/frontend",
+        task_prompt="I prefer detailed reports across all projects.",
     )
     copy = await _create_job(
-        store, user_id="alice", task_prompt="Always use fork-copy preferences."
+        store, user_id="alice", task_prompt="Always use fork-copy preferences across all projects."
     )
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO agent_thread_messages (thread_id, job_id, role, content) "
-            "VALUES ($1, $2, 'assistant', 'Always trust assistant-authored preferences.')",
+            "VALUES ($1, $2, 'assistant', 'Always trust assistant-authored preferences across all projects.')",
             alice["thread_id"],
             alice["id"],
         )
@@ -47,7 +53,7 @@ async def test_memory_ownership_assistant_fork_and_deleted_history_filters(store
     assert {memory["source_job_id"] for memory in profile["memories"]} == {alice["id"]}
     assert [
         memory["content"] for memory in profile["memories"] if memory["kind"] == "preference"
-    ] == ["I prefer concise reviews."]
+    ] == ["I prefer concise reviews across all projects."]
     assert await store.user_memory.get("bob") is None
     assert profile == await store.user_memory.refresh("alice")
     other_profile = await store.user_memory.refresh("bob")
@@ -58,13 +64,16 @@ async def test_memory_ownership_assistant_fork_and_deleted_history_filters(store
 
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_thread_messages SET content = 'I prefer readable tests.' "
+            "UPDATE agent_thread_messages SET content = 'I prefer readable tests across all projects.' "
             "WHERE job_id = $1 AND role = 'user'",
             alice["id"],
         )
     edited = await store.user_memory.refresh("alice")
     assert edited["revision"] == profile["revision"] + 1
-    assert any(memory["content"] == "I prefer readable tests." for memory in edited["memories"])
+    assert any(
+        memory["content"] == "I prefer readable tests across all projects."
+        for memory in edited["memories"]
+    )
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", alice["thread_id"]
@@ -78,14 +87,21 @@ async def test_memory_ownership_assistant_fork_and_deleted_history_filters(store
 
 
 async def test_disabled_memory_refresh_and_use_remain_disabled_after_new_activity(store):
-    await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     generated = await store.user_memory.refresh("alice")
     assert generated["memories"]
     disabled = await store.user_memory.set_enabled("alice", False)
-    await _create_job(store, user_id="alice", task_prompt="Always include readable API tests.")
+    await _create_job(
+        store, user_id="alice", task_prompt="Always include readable API tests across all projects."
+    )
     assert await store.user_memory.refresh("alice") == disabled
     assert await store.user_memory.set_enabled("alice", False) == disabled
-    assert await store.user_memory.refresh_active_users() == 0
+    # User memory is disabled independently; the new project uses its own default.
+    assert await store.user_memory.refresh_active_users() == 1
+    project = await store.user_memory.get_project("alice", "example-org/example-repo")
+    assert project["enabled"] is True
     assert await store.user_memory.get("alice") == disabled
     assert prompt_with_user_memory("Current task", disabled, "example-org/example-repo") == (
         "Current task"
@@ -94,7 +110,9 @@ async def test_disabled_memory_refresh_and_use_remain_disabled_after_new_activit
 
 async def test_goal_synthetic_messages_are_excluded_but_human_midturn_is_remembered(store, pool):
     goal = await _create_job(
-        store, user_id="alice", task_prompt="Always repeat synthetic goal preferences."
+        store,
+        user_id="alice",
+        task_prompt="Always repeat synthetic goal preferences across all projects.",
     )
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET turn_source = 'goal' WHERE id = $1", goal["id"])
@@ -105,7 +123,7 @@ async def test_goal_synthetic_messages_are_excluded_but_human_midturn_is_remembe
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO agent_thread_messages (thread_id, job_id, role, content, mid_turn) "
-            "VALUES ($1, $2, 'user', 'I prefer readable human-authored tests.', TRUE)",
+            "VALUES ($1, $2, 'user', 'I prefer readable human-authored tests across all projects.', TRUE)",
             goal["thread_id"],
             goal["id"],
         )
@@ -113,7 +131,7 @@ async def test_goal_synthetic_messages_are_excluded_but_human_midturn_is_remembe
     authored = await store.user_memory.get("alice")
     preferences = [memory for memory in authored["memories"] if memory["kind"] == "preference"]
     assert [memory["content"] for memory in preferences] == [
-        "I prefer readable human-authored tests."
+        "I prefer readable human-authored tests across all projects."
     ]
     assert {memory["source_job_id"] for memory in preferences} == {goal["id"]}
 
@@ -121,7 +139,9 @@ async def test_goal_synthetic_messages_are_excluded_but_human_midturn_is_remembe
 async def test_memory_clear_while_disabled_fences_hidden_history_and_retains_future_input(
     store, pool
 ):
-    original = await _create_job(store, user_id="alice", task_prompt="Always test old changes.")
+    original = await _create_job(
+        store, user_id="alice", task_prompt="Always test old changes across all projects."
+    )
     await store.user_memory.refresh("alice")
     await store.user_memory.set_enabled("alice", False)
     async with pool.acquire() as conn:
@@ -137,7 +157,9 @@ async def test_memory_clear_while_disabled_fences_hidden_history_and_retains_fut
         )
     await store.user_memory.set_enabled("alice", True)
     assert (await store.user_memory.refresh("alice"))["memories"] == []
-    future = await _create_job(store, user_id="alice", task_prompt="I prefer readable APIs.")
+    future = await _create_job(
+        store, user_id="alice", task_prompt="I prefer readable APIs across all projects."
+    )
     new_profile = await store.user_memory.refresh("alice")
     assert {memory["source_job_id"] for memory in new_profile["memories"]} == {future["id"]}
 
@@ -151,7 +173,7 @@ async def test_clear_fences_old_source_committed_after_reset(store, pool):
     async with pool.acquire() as source_conn, source_conn.transaction():
         message_id = await source_conn.fetchval(
             "INSERT INTO agent_thread_messages (thread_id, job_id, role, content) "
-            "VALUES ($1, $2, 'user', 'I prefer forgotten preferences.') RETURNING id",
+            "VALUES ($1, $2, 'user', 'I prefer forgotten preferences across all projects.') RETURNING id",
             job["thread_id"],
             job["id"],
         )
@@ -175,7 +197,9 @@ async def test_clear_fences_old_source_committed_after_reset(store, pool):
 async def test_real_transactions_serialize_refresh_against_privacy_controls(
     store, pool, monkeypatch, control, first
 ):
-    await _create_job(store, user_id="alice", task_prompt="I prefer isolated changes.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer isolated changes across all projects."
+    )
     await store.user_memory.refresh("alice")
     repository = PostgresUserMemoryRepository(pool)
     original = repository._user_memory_lock
@@ -255,7 +279,9 @@ async def _change_entry(repository, profile, memory_id, operation):
 async def test_entry_changes_are_durable_across_repository_and_background_refresh(
     store, pool, operation
 ):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     changed = await _change_entry(store.user_memory, original, entry["id"], operation)
@@ -279,10 +305,12 @@ async def test_entry_changes_are_durable_across_repository_and_background_refres
         assert "Keep API tests readable." in prompt_with_user_memory(
             "Current task", refreshed, source["repo"]
         )
-        assert prompt_with_user_memory("Current task", refreshed, "other/repo") == "Current task"
+        assert "Keep API tests readable." in prompt_with_user_memory(
+            "Current task", refreshed, "other/repo"
+        )
     else:
         assert matches == []
-        assert "I prefer concise reviews." not in prompt_with_user_memory(
+        assert "I prefer concise reviews across all projects." not in prompt_with_user_memory(
             "Current task", refreshed, source["repo"]
         )
     async with pool.acquire() as conn:
@@ -297,11 +325,15 @@ async def test_entry_changes_are_durable_across_repository_and_background_refres
 
 @pytest.mark.parametrize("operation", ["edit", "delete"])
 async def test_paused_entry_changes_preserve_snapshot_and_survive_resume(store, operation):
-    await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     paused = await store.user_memory.set_enabled("alice", False)
-    newer = await _create_job(store, user_id="alice", task_prompt="Always include backend tests.")
+    newer = await _create_job(
+        store, user_id="alice", task_prompt="Always include backend tests across all projects."
+    )
     changed = await _change_entry(store.user_memory, paused, entry["id"], operation)
     assert changed["enabled"] is False
     assert changed["portrait"] == paused["portrait"]
@@ -321,11 +353,19 @@ async def test_paused_entry_changes_preserve_snapshot_and_survive_resume(store, 
 @pytest.mark.parametrize("operation", ["edit", "delete"])
 async def test_entry_changes_cannot_address_another_owner_or_missing_entry(store, pool, operation):
     await _create_job(
-        store, user_id="alice", repo="alice/api", task_prompt="I prefer concise reviews."
+        store,
+        user_id="alice",
+        repo="alice/api",
+        task_prompt="I prefer concise reviews across all projects.",
     )
     alice = await store.user_memory.refresh("alice")
     entry = _preference(alice)
-    await _create_job(store, user_id="bob", repo="bob/api", task_prompt="I prefer readable tests.")
+    await _create_job(
+        store,
+        user_id="bob",
+        repo="bob/api",
+        task_prompt="I prefer readable tests across all projects.",
+    )
     bob = await store.user_memory.refresh("bob")
     for user_id, profile, memory_id in [
         ("bob", bob, entry["id"]),
@@ -356,7 +396,9 @@ async def test_entry_changes_cannot_address_another_owner_or_missing_entry(store
 async def test_invalid_preference_edits_leave_saved_profile_and_overrides_unchanged(
     store, pool, content
 ):
-    await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     with pytest.raises(ValueError):
         await store.user_memory.update_entry(
@@ -372,10 +414,11 @@ async def test_invalid_preference_edits_leave_saved_profile_and_overrides_unchan
 
 async def test_task_entry_edit_is_normalized_and_never_injected_as_preference(store):
     job = await _create_job(store, user_id="alice", task_prompt="Build a backend worker.")
-    original = await store.user_memory.refresh("alice")
+    original = await store.user_memory.refresh_project("alice", job["repo"])
     entry = next(memory for memory in original["memories"] if memory["kind"] == "task")
-    changed = await store.user_memory.update_entry(
+    changed = await store.user_memory.update_project_entry(
         "alice",
+        job["repo"],
         entry["id"],
         content="  Always  include tests for the current task. \n",
         expected_revision=original["revision"],
@@ -393,10 +436,14 @@ async def test_task_entry_edit_is_normalized_and_never_injected_as_preference(st
 async def test_entry_mutation_refreshes_enabled_sources_before_checking_revision(
     store, pool, operation
 ):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
-    await _create_job(store, user_id="alice", task_prompt="Always include backend tests.")
+    await _create_job(
+        store, user_id="alice", task_prompt="Always include backend tests across all projects."
+    )
     with pytest.raises(UserMemoryConflict):
         await _change_entry(store.user_memory, original, entry["id"], operation)
     async with pool.acquire() as conn:
@@ -412,7 +459,9 @@ async def test_entry_mutation_refreshes_enabled_sources_before_checking_revision
 
 @pytest.mark.parametrize("operation", ["edit", "delete"])
 async def test_clear_removes_entry_overrides_and_fences_prior_sources(store, pool, operation):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     await _change_entry(store.user_memory, original, entry["id"], operation)
@@ -422,12 +471,14 @@ async def test_clear_removes_entry_overrides_and_fences_prior_sources(store, poo
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_user_memory_edits") == 0
     assert await store.user_memory.refresh("alice") == cleared
     assert (await store.conversation_queries.get_job(job_id=source["id"])) is not None
-    newer = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    newer = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     refreshed = await store.user_memory.refresh("alice")
     future_entry = _preference(refreshed)
     assert future_entry["id"] == entry["id"]
     assert future_entry["source_job_id"] == newer["id"]
-    assert future_entry["content"] == "I prefer concise reviews."
+    assert future_entry["content"] == "I prefer concise reviews across all projects."
     assert future_entry["user_edited"] is False
 
 
@@ -435,7 +486,9 @@ async def test_clear_removes_entry_overrides_and_fences_prior_sources(store, poo
 async def test_deleted_source_hides_content_override_and_retains_removal_tombstone(
     store, pool, operation
 ):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     await _change_entry(store.user_memory, original, entry["id"], operation)
@@ -455,20 +508,24 @@ async def test_deleted_source_hides_content_override_and_retains_removal_tombsto
     restored = await store.user_memory.refresh("alice")
     matches = [memory for memory in restored["memories"] if memory["id"] == entry["id"]]
     assert [memory["content"] for memory in matches] == (
-        ["I prefer concise reviews."] if operation == "edit" else []
+        ["I prefer concise reviews across all projects."] if operation == "edit" else []
     )
 
 
 async def test_content_edit_provenance_does_not_apply_to_newer_duplicate_hash(store, pool):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     await _change_entry(store.user_memory, original, entry["id"], "edit")
-    newer = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    newer = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     duplicate = _preference(await store.user_memory.refresh("alice"))
     assert duplicate["id"] == entry["id"]
     assert duplicate["source_job_id"] == newer["id"]
-    assert duplicate["content"] == "I prefer concise reviews."
+    assert duplicate["content"] == "I prefer concise reviews across all projects."
     assert duplicate["user_edited"] is False
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_user_memory_edits") == 1
@@ -488,13 +545,15 @@ async def test_content_edit_provenance_does_not_apply_to_newer_duplicate_hash(st
         )
     current = _preference(await store.user_memory.refresh("alice"))
     assert current["source_job_id"] == newer["id"]
-    assert current["content"] == "I prefer concise reviews."
+    assert current["content"] == "I prefer concise reviews across all projects."
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_user_memory_edits") == 0
 
 
 async def test_removal_tombstone_suppresses_same_hash_from_a_new_source(store, pool):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     await _change_entry(store.user_memory, original, entry["id"], "delete")
@@ -502,7 +561,9 @@ async def test_removal_tombstone_suppresses_same_hash_from_a_new_source(store, p
         await conn.execute(
             "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", source["thread_id"]
         )
-    await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     refreshed = await store.user_memory.refresh("alice")
     assert all(memory["id"] != entry["id"] for memory in refreshed["memories"])
     async with pool.acquire() as conn:
@@ -514,7 +575,9 @@ async def test_removal_tombstone_suppresses_same_hash_from_a_new_source(store, p
 async def test_source_window_eviction_hides_edit_and_tracks_live_provenance(
     store, pool, after_eviction
 ):
-    source = await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    source = await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     await _change_entry(store.user_memory, original, entry["id"], "edit")
@@ -555,7 +618,9 @@ async def test_source_window_eviction_hides_edit_and_tracks_live_provenance(
 async def test_entry_revision_fence_rejects_a_second_live_mutation(
     store, pool, monkeypatch, operation
 ):
-    await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     repository = PostgresUserMemoryRepository(pool)
@@ -595,7 +660,9 @@ async def test_entry_revision_fence_rejects_a_second_live_mutation(
 async def test_live_entry_transactions_serialize_against_privacy_controls(
     store, pool, monkeypatch, operation, control, first
 ):
-    await _create_job(store, user_id="alice", task_prompt="I prefer concise reviews.")
+    await _create_job(
+        store, user_id="alice", task_prompt="I prefer concise reviews across all projects."
+    )
     original = await store.user_memory.refresh("alice")
     entry = _preference(original)
     repository = PostgresUserMemoryRepository(pool)
@@ -682,7 +749,10 @@ async def test_consolidated_scope_and_native_editor_share_durable_revision_fence
     from cloud_agent.user_memory import MemoryRevisionConflict
 
     job = await _create_job(
-        store, user_id="alice", repo="alice/api", task_prompt="I prefer concise reviews."
+        store,
+        user_id="alice",
+        repo="alice/api",
+        task_prompt="I prefer concise reviews across all projects.",
     )
     current = await store.user_memory.refresh("alice")
     original = current["memories"][0]

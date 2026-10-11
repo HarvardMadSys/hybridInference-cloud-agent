@@ -15,23 +15,45 @@ from cloud_agent.memory_consolidation import (
     parse_consolidation,
     validate_memory_edits,
 )
-from cloud_agent.user_memory import build_user_memory, prompt_with_user_memory
+from cloud_agent.user_memory import build_project_memory, build_user_memory, prompt_with_user_memory
 
 
 def profile():
-    return build_user_memory(
-        [
-            {
-                "job_id": "api-job",
-                "repo": "owner/api",
-                "model": "model-alias",
-                "content": "Always run API tests. I prefer concise replies.",
-                "title": "Build API",
-            },
-            {"job_id": "ui-job", "repo": "owner/ui", "content": "Always run UI tests."},
+    activity = [
+        {
+            "job_id": "api-job",
+            "repo": "owner/api",
+            "model": "model-alias",
+            "content": "Always run API tests. I prefer concise replies.",
+            "title": "Build API",
+        },
+        {"job_id": "ui-job", "repo": "owner/ui", "content": "Always run UI tests."},
+    ]
+    view = build_user_memory(activity, None)
+    memories = [
+        memory
+        for repo in ("owner/api", "owner/ui")
+        for memory in build_project_memory(activity, None, repo)["memories"]
+    ]
+    view["memories"] = sorted(memories, key=lambda memory: memory["kind"] != "preference")
+    return view
+
+
+def scoped_prompt(prompt, view, repo):
+    user = {
+        **view,
+        "memories": [memory for memory in view["memories"] if memory["scope"] == "user"],
+    }
+    project = {
+        **view,
+        "repo": repo,
+        "memories": [
+            memory
+            for memory in view["memories"]
+            if memory["scope"] == "repo" and memory["source_repo"] == repo
         ],
-        None,
-    )
+    }
+    return prompt_with_user_memory(prompt, user, repo, project_view=project)
 
 
 def completion(memories, finish_reason="stop"):
@@ -63,11 +85,11 @@ def test_consolidation_classifies_user_preferences_and_retains_repo_isolation():
         original["memories"],
     )
     view = {**original, "memories": result}
-    api_prompt = prompt_with_user_memory("Task", view, "owner/api")
+    api_prompt = scoped_prompt("Task", view, "owner/api")
     assert "Run API tests." in api_prompt and "Keep replies concise." in api_prompt
     assert "Run UI tests." not in api_prompt
-    assert "Run API tests." not in prompt_with_user_memory("Task", view, "owner/ui")
-    assert "Keep replies concise." in prompt_with_user_memory("Task", view, "unrelated/repo")
+    assert "Run API tests." not in scoped_prompt("Task", view, "owner/ui")
+    assert "Keep replies concise." in scoped_prompt("Task", view, "unrelated/repo")
     assert result[0]["source_job_id"] == "api-job"
     assert result[0]["source_ids"] == api["source_ids"]
 

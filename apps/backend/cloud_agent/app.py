@@ -189,6 +189,7 @@ def create_app() -> FastAPI:
     # must find no tool route at all, not one that merely refuses it.
     app.include_router(skills.router)
     app.include_router(user_memory.router)
+    app.include_router(user_memory.project_router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(hosts.router)
@@ -224,7 +225,10 @@ def create_app() -> FastAPI:
     # Read-only, and its own module: the audit trail is written by every admin
     # handler and read by this one page.
     app.include_router(admin_audit.router)
-    install_admin_no_store(app, prefixes=(*ADMIN_READ_PREFIXES, "/v1/agent/user-memory"))
+    install_admin_no_store(
+        app,
+        prefixes=(*ADMIN_READ_PREFIXES, "/v1/agent/user-memory", "/v1/agent/project-memory"),
+    )
     install_repository_access_errors(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a

@@ -46,7 +46,7 @@ export interface UserMemoryView {
   suggestions: UserMemorySuggestion[];
 }
 
-/** Reading refreshes the current user's profile from their recent activity. */
+/** Reading refreshes the current user's profile and cross-project preferences. */
 export async function getUserMemory(signal?: AbortSignal): Promise<UserMemoryView> {
   const response = await fetchWithAuth(config.apiBase, USER_MEMORY, {
     signal,

@@ -141,6 +141,11 @@ describe('memory settings', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Loading your memory');
     await screen.findByRole('switch');
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'User memory' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Saved user memory' })).toBeInTheDocument();
+    expect(screen.getByText(/User preferences apply to all projects/)).toHaveTextContent(
+      'preferences explicitly marked “across all projects”',
+    );
     expect(screen.getByRole('switch', { name: 'Automatically build memory' })).toBeChecked();
     expect(getUserMemory).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(screen.getByText(populated.portrait.summary)).toBeInTheDocument();
@@ -199,6 +204,7 @@ describe('memory settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Clear memory' }));
     expect(clearUserMemory).not.toHaveBeenCalled();
     expect(screen.getByText(/Old requests won’t be used again/)).toBeInTheDocument();
+    expect(screen.getByText(/Project memory is kept/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm clear memory' })).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('button', { name: 'Clear memory' })).toHaveFocus();
@@ -291,6 +297,8 @@ describe('memory settings', () => {
     render(panel());
     await screen.findByRole('switch', { name: '自动建立记忆' });
     expect(screen.getByRole('combobox', { name: '整合模型' })).toHaveValue('model-a');
+    expect(screen.getByRole('heading', { name: '用户记忆' })).toBeInTheDocument();
+    expect(screen.getByText(/用户偏好适用于所有项目/)).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: '自动建立记忆' })).toBeChecked();
     expect(screen.getByRole('heading', { name: '未来任务建议' })).toBeInTheDocument();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
@@ -475,7 +483,7 @@ describe('memory settings', () => {
       populated.revision,
       expect.any(AbortSignal),
     );
-    expect(screen.getByRole('heading', { name: 'Saved memory' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Saved user memory' })).toHaveFocus();
     expect(screen.getByText(populated.memories[1].content)).toBeInTheDocument();
   });
 
@@ -558,7 +566,7 @@ describe('memory settings', () => {
       expect(editUserMemoryEntry).toHaveBeenCalledTimes(1);
       fireEvent.click(within(first).getByRole('button', { name: 'Cancel' }));
       expect(first).not.toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: 'Saved memory' })).toHaveFocus();
+      expect(screen.getByRole('heading', { name: 'Saved user memory' })).toHaveFocus();
     },
   );
 
@@ -621,7 +629,7 @@ describe('memory settings', () => {
     expect(within(first).getByRole('textbox')).toBeEnabled();
     expect(within(first).getByRole('button', { name: '保存记忆' })).toBeDisabled();
     fireEvent.click(within(first).getByRole('button', { name: '取消' }));
-    expect(screen.getByRole('heading', { name: '已保存的记忆' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: '已保存的用户记忆' })).toHaveFocus();
   });
 
   it('aborts an entry edit and removes its draft immediately when the account changes', async () => {

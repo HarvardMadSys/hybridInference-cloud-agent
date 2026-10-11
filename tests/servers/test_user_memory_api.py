@@ -17,12 +17,15 @@ from cloud_agent.memory_consolidation import MemoryConsolidationError
 from cloud_agent.user_avatar import generate_user_avatar
 from cloud_agent.user_memory import (
     MemoryRevisionConflict,
+    ProjectMemoryView,
     UserMemoryConflict,
     UserMemoryNotFound,
+    build_project_memory,
     build_user_memory,
 )
 
 PATH = "/v1/agent/user-memory"
+PROJECT_PATH = "/v1/agent/project-memory"
 
 
 @pytest.fixture()
@@ -31,7 +34,8 @@ def app(monkeypatch):
     monkeypatch.setenv(identity.ENV_SESSION_SECRET, "memory-test-session-secret-long-enough")
     application = FastAPI()
     application.include_router(user_memory.router)
-    install_admin_no_store(application, prefixes=(PATH,))
+    application.include_router(user_memory.project_router)
+    install_admin_no_store(application, prefixes=(PATH, PROJECT_PATH))
     repository = AsyncMock()
     repository.refresh.side_effect = lambda **_: build_user_memory([], None)
     repository.set_enabled.side_effect = lambda **kw: {
@@ -39,6 +43,16 @@ def app(monkeypatch):
         "enabled": kw["enabled"],
     }
     repository.clear.side_effect = lambda **_: build_user_memory([], None)
+    repository.refresh_project.side_effect = lambda **kw: ProjectMemoryView(
+        repo=kw["repo"]
+    ).model_dump()
+    repository.set_project_enabled.side_effect = lambda **kw: ProjectMemoryView(
+        repo=kw["repo"], enabled=kw["enabled"]
+    ).model_dump()
+    repository.clear_project.side_effect = lambda **kw: ProjectMemoryView(
+        repo=kw["repo"]
+    ).model_dump()
+    repository.list_memory_projects.return_value = ["owner/name"]
     gateway = AsyncMock()
     gateway.agent_access.side_effect = lambda owner: {
         "user_id": owner,
@@ -192,6 +206,7 @@ async def test_nonowner_credentials_cannot_read_or_change_memory(
     app.state.repository.clear.assert_not_awaited()
     app.state.repository.update_entry.assert_not_awaited()
     app.state.repository.delete_entry.assert_not_awaited()
+    app.state.repository.replace_memories.assert_not_awaited()
 
 
 async def test_revoked_admission_and_invalid_settings_do_not_touch_memory(app):
@@ -216,10 +231,19 @@ async def test_revoked_admission_and_invalid_settings_do_not_touch_memory(app):
 
 
 def test_memory_routes_are_only_on_the_main_listener():
-    assert PATH in create_app().openapi()["paths"]
-    assert PATH not in create_mcp_app().openapi()["paths"]
-    assert PATH + "/entries/{memory_id}" in create_app().openapi()["paths"]
-    assert PATH + "/entries/{memory_id}" not in create_mcp_app().openapi()["paths"]
+    main_paths = create_app().openapi()["paths"]
+    mcp_paths = create_mcp_app().openapi()["paths"]
+    for path in (
+        PATH,
+        PATH + "/entries/{memory_id}",
+        PATH + "/consolidate",
+        PROJECT_PATH,
+        PROJECT_PATH + "/projects",
+        PROJECT_PATH + "/entries/{memory_id}",
+        PROJECT_PATH + "/consolidate",
+    ):
+        assert path in main_paths
+        assert path not in mcp_paths
 
 
 async def test_edit_normalizes_content_and_uses_authenticated_owner_revision(app):
@@ -408,7 +432,7 @@ async def test_revoked_admission_cannot_edit_or_delete_entries(app, method):
 
 
 async def test_owner_can_edit_content_scope_and_remove_entries(app):
-    current = build_user_memory(
+    current = build_project_memory(
         [
             {
                 "job_id": "owner-job",
@@ -418,6 +442,7 @@ async def test_owner_can_edit_content_scope_and_remove_entries(app):
             }
         ],
         {"revision": 7},
+        "owner/repo",
     )
     app.state.repository.refresh.side_effect = None
     app.state.repository.refresh.return_value = current
@@ -454,7 +479,7 @@ async def test_owner_can_edit_content_scope_and_remove_entries(app):
     "invalid", ["stale", "unknown", "provenance", "length", "empty", "duplicate", "total", "global"]
 )
 async def test_invalid_edits_do_not_mutate_saved_memory(app, invalid):
-    current = build_user_memory(
+    current = build_project_memory(
         [
             {
                 "job_id": f"job-{index}",
@@ -464,6 +489,7 @@ async def test_invalid_edits_do_not_mutate_saved_memory(app, invalid):
             for index in range(12)
         ],
         {"revision": 7},
+        "owner/repo",
     )
     app.state.repository.refresh.side_effect = None
     app.state.repository.refresh.return_value = current

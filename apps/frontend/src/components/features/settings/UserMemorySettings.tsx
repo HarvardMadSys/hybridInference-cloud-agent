@@ -15,6 +15,7 @@ import {
   type UserMemoryView,
 } from '@/lib/api/userMemory';
 import { APIError } from '@/lib/utils/errors';
+import { MemoryDetails } from './MemoryDetails';
 import { UserMemoryEntryCard, type UserMemoryRequestResult } from './UserMemoryEntryCard';
 
 type Operation = 'refresh' | 'toggle' | 'clear' | 'edit' | 'delete' | 'consolidate';
@@ -136,13 +137,6 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
     };
   }, [run]);
 
-  const hasPortrait =
-    view &&
-    (view.portrait.summary ||
-      view.portrait.projects.length ||
-      view.portrait.focus_areas.length ||
-      view.portrait.preferred_runtime ||
-      view.portrait.preferred_model);
   const updatedAt = view?.updated_at ? new Date(view.updated_at) : null;
   const savedIds = new Set(view?.memories.map((memory) => memory.id));
   // Keep keyed editor instances, and their local drafts, when a refresh removes
@@ -374,174 +368,90 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
                 </div>
               ) : null}
 
-              <div className="mt-5 grid gap-5 lg:grid-cols-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground">
-                    {t('settings.memory.portrait')}
-                  </h3>
-                  {hasPortrait ? (
-                    <>
-                      {view.portrait.summary ? (
-                        <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-muted">
-                          {view.portrait.summary}
-                        </p>
-                      ) : null}
-                      <dl className="mt-2 space-y-2 text-sm">
-                        {view.portrait.projects.length ? (
-                          <div>
-                            <dt className="font-medium text-foreground">
-                              {t('settings.memory.projects')}
-                            </dt>
-                            <dd className="break-words text-muted">
-                              {view.portrait.projects.join(', ')}
-                            </dd>
-                          </div>
-                        ) : null}
-                        {view.portrait.focus_areas.length ? (
-                          <div>
-                            <dt className="font-medium text-foreground">
-                              {t('settings.memory.focusAreas')}
-                            </dt>
-                            <dd className="break-words text-muted">
-                              {view.portrait.focus_areas.join(', ')}
-                            </dd>
-                          </div>
-                        ) : null}
-                        {view.portrait.preferred_runtime ? (
-                          <div>
-                            <dt className="font-medium text-foreground">
-                              {t('settings.memory.runtime')}
-                            </dt>
-                            <dd className="break-words text-muted">
-                              {view.portrait.preferred_runtime}
-                            </dd>
-                          </div>
-                        ) : null}
-                        {view.portrait.preferred_model ? (
-                          <div>
-                            <dt className="font-medium text-foreground">
-                              {t('settings.memory.model')}
-                            </dt>
-                            <dd className="break-words text-muted">
-                              {view.portrait.preferred_model}
-                            </dd>
-                          </div>
-                        ) : null}
-                      </dl>
-                    </>
-                  ) : (
-                    <p className="mt-2 text-sm leading-relaxed text-muted">
-                      {t('settings.memory.emptyPortrait')}
+              <MemoryDetails
+                view={view}
+                scope="user"
+                memoriesContent={
+                  <div>
+                    <h3
+                      ref={memoriesHeading}
+                      tabIndex={-1}
+                      className="text-sm font-semibold text-foreground outline-none"
+                    >
+                      {t('settings.memory.memories')}
+                    </h3>
+                    <p className="mt-2 text-xs leading-relaxed text-muted">
+                      {t('settings.memory.entriesDescription')}{' '}
+                      {t('settings.memory.bounds', {
+                        count: view.memories.length,
+                        characters: view.memories.reduce(
+                          (total, memory) => total + memory.content.length,
+                          0,
+                        ),
+                      })}
                     </p>
-                  )}
-                </div>
-
-                <div>
-                  <h3
-                    ref={memoriesHeading}
-                    tabIndex={-1}
-                    className="text-sm font-semibold text-foreground outline-none"
-                  >
-                    {t('settings.memory.memories')}
-                  </h3>
-                  <p className="mt-2 text-xs leading-relaxed text-muted">
-                    {t('settings.memory.entriesDescription')}{' '}
-                    {t('settings.memory.bounds', {
-                      count: view.memories.length,
-                      characters: view.memories.reduce(
-                        (total, memory) => total + memory.content.length,
-                        0,
-                      ),
-                    })}
-                  </p>
-                  {shownMemories.length ? (
-                    <ul className="mt-2 max-h-96 space-y-2 overflow-y-auto">
-                      {shownMemories.map((memory, index) => (
-                        <UserMemoryEntryCard
-                          key={memory.id}
-                          memory={memory}
-                          number={index + 1}
-                          pending={pending !== null}
-                          unavailable={!savedIds.has(memory.id)}
-                          onEditingChange={(editing) => {
-                            setEditingEntries((current) => {
-                              const next = new Map(current);
-                              if (editing) next.set(memory.id, memory);
-                              else next.delete(memory.id);
-                              return next;
-                            });
-                            if (!editing && !savedIds.has(memory.id))
-                              setRemovedEntries((count) => count + 1);
-                          }}
-                          onSave={(content, scope) =>
-                            run(
-                              'edit',
-                              (signal) => {
-                                const savedScope =
-                                  memory.scope ?? (memory.source_repo ? 'repo' : 'user');
-                                if (scope === savedScope)
-                                  return editUserMemoryEntry(
-                                    memory.id,
-                                    content,
-                                    view.revision,
-                                    signal,
-                                  );
-                                const memories = view.memories.map((entry) => ({
-                                  id: entry.id,
-                                  content: entry.id === memory.id ? content : entry.content,
-                                  scope:
-                                    entry.id === memory.id
-                                      ? scope
-                                      : (entry.scope ?? (entry.source_repo ? 'repo' : 'user')),
-                                }));
-                                return saveUserMemories(view.revision, memories, signal);
-                              },
-                              false,
-                            )
-                          }
-                          onRemove={() =>
-                            run(
-                              'delete',
-                              (signal) => deleteUserMemoryEntry(memory.id, view.revision, signal),
-                              false,
-                            )
-                          }
-                          onRefresh={() => run('refresh', getUserMemory, false, memory.id)}
-                        />
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mt-2 text-sm text-muted">{t('settings.memory.emptyMemory')}</p>
-                  )}
-                </div>
-
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground">
-                    {t('settings.memory.suggestions')}
-                  </h3>
-                  {view.suggestions.length ? (
-                    <ul className="mt-2 space-y-2">
-                      {view.suggestions.map((suggestion) => (
-                        <li key={suggestion.id} className="rounded-lg bg-surface-muted p-3">
-                          <p className="break-words text-sm font-medium text-foreground">
-                            {suggestion.title}
-                          </p>
-                          <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-muted">
-                            {suggestion.reason}
-                          </p>
-                          <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
-                            {suggestion.action}
-                          </p>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mt-2 text-sm leading-relaxed text-muted">
-                      {t('settings.memory.emptySuggestions')}
-                    </p>
-                  )}
-                </div>
-              </div>
+                    {shownMemories.length ? (
+                      <ul className="mt-2 max-h-96 space-y-2 overflow-y-auto">
+                        {shownMemories.map((memory, index) => (
+                          <UserMemoryEntryCard
+                            key={memory.id}
+                            memory={memory}
+                            number={index + 1}
+                            pending={pending !== null}
+                            unavailable={!savedIds.has(memory.id)}
+                            onEditingChange={(editing) => {
+                              setEditingEntries((current) => {
+                                const next = new Map(current);
+                                if (editing) next.set(memory.id, memory);
+                                else next.delete(memory.id);
+                                return next;
+                              });
+                              if (!editing && !savedIds.has(memory.id))
+                                setRemovedEntries((count) => count + 1);
+                            }}
+                            onSave={(content, scope) =>
+                              run(
+                                'edit',
+                                (signal) => {
+                                  const savedScope =
+                                    memory.scope ?? (memory.source_repo ? 'repo' : 'user');
+                                  if (scope === savedScope)
+                                    return editUserMemoryEntry(
+                                      memory.id,
+                                      content,
+                                      view.revision,
+                                      signal,
+                                    );
+                                  const memories = view.memories.map((entry) => ({
+                                    id: entry.id,
+                                    content: entry.id === memory.id ? content : entry.content,
+                                    scope:
+                                      entry.id === memory.id
+                                        ? scope
+                                        : (entry.scope ?? (entry.source_repo ? 'repo' : 'user')),
+                                  }));
+                                  return saveUserMemories(view.revision, memories, signal);
+                                },
+                                false,
+                              )
+                            }
+                            onRemove={() =>
+                              run(
+                                'delete',
+                                (signal) => deleteUserMemoryEntry(memory.id, view.revision, signal),
+                                false,
+                              )
+                            }
+                            onRefresh={() => run('refresh', getUserMemory, false, memory.id)}
+                          />
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-sm text-muted">{t('settings.memory.emptyMemory')}</p>
+                    )}
+                  </div>
+                }
+              />
             </>
           ) : null}
         </>

@@ -145,6 +145,25 @@ MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
 _USER_MEMORY_TIMEOUT_SECONDS = 2.0
 
 
+async def _refresh_claim_memory(
+    repository: UserMemoryRepository, user_id: str, *, repo: str | None = None
+) -> dict[str, Any] | None:
+    """Bound each scope independently so unavailable memory cannot block a claim."""
+    try:
+        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
+            if repo is None:
+                return await repository.refresh(user_id=user_id)
+            return await repository.refresh_project(user_id=user_id, repo=repo)
+    except Exception:
+        # Fixed log messages contain neither saved memory nor credentials.
+        logger.warning(
+            "agent_claim_user_memory_unavailable"
+            if repo is None
+            else "agent_claim_project_memory_unavailable"
+        )
+        return None
+
+
 class _BoundedTurnResourcesRoute(APIRoute):
     """Limit turn-resource reports before parsing, including chunked requests."""
 
@@ -868,14 +887,10 @@ async def worker_claim(
     thread_attachment_count = await job_store.attachments.count_thread_attachments(
         thread_id=str(claim["thread_id"])
     )
-    memory = None
-    try:
-        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
-            memory = await job_store.user_memory.refresh(user_id=claim["user_id"])
-    except Exception:
-        # A temporary personalization failure must not strand a claimed job.
-        # This fixed log message contains neither saved memory nor credentials.
-        logger.warning("agent_claim_user_memory_unavailable")
+    memory, project_memory = await asyncio.gather(
+        _refresh_claim_memory(job_store.user_memory, claim["user_id"]),
+        _refresh_claim_memory(job_store.user_memory, claim["user_id"], repo=claim["repo"]),
+    )
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
         turn_attachment_count=len(claim.get("attachments") or []),
@@ -898,6 +913,7 @@ async def worker_claim(
                     prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
                     memory,
                     repo=claim["repo"],
+                    project_view=project_memory,
                 ),
                 claim.get("skills"),
             ),

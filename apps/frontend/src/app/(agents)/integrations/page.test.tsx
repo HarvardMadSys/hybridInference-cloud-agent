@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import IntegrationsPage from './page';
 import type { McpConnectionApi } from '@/lib/api/mcp';
 import { getUserMemory } from '@/lib/api/userMemory';
+import { getMemoryProjects } from '@/lib/api/projectMemory';
 
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
@@ -28,6 +29,16 @@ vi.mock('@/lib/api/userMemory', () => ({
   clearUserMemory: vi.fn(),
   editUserMemoryEntry: vi.fn(),
   deleteUserMemoryEntry: vi.fn(),
+}));
+vi.mock('@/lib/api/projectMemory', () => ({
+  getMemoryProjects: vi.fn(),
+  getProjectMemory: vi.fn(),
+  updateProjectMemory: vi.fn(),
+  clearProjectMemory: vi.fn(),
+  editProjectMemoryEntry: vi.fn(),
+  deleteProjectMemoryEntry: vi.fn(),
+  saveProjectMemories: vi.fn(),
+  consolidateProjectMemory: vi.fn(),
 }));
 vi.mock('@/lib/api/mcp', () => ({
   listMcpConnections: vi.fn(),
@@ -71,6 +82,7 @@ const connection: McpConnectionApi = {
 };
 
 beforeEach(() => {
+  vi.mocked(getMemoryProjects).mockResolvedValue([]);
   vi.mocked(listSkills).mockResolvedValue([]);
   navigation.search = '';
   vi.mocked(getAgentConfig).mockResolvedValue({

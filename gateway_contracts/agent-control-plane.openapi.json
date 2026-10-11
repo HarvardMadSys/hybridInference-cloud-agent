@@ -11864,6 +11864,59 @@
         "title": "ProcessObservation",
         "type": "object"
       },
+      "ProjectMemoryView": {
+        "description": "An owner's independently controlled memory for one exact repository.",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/UserMemory"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "portrait": {
+            "$ref": "#/components/schemas/UserPortrait"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "suggestions": {
+            "items": {
+              "$ref": "#/components/schemas/UserSuggestion"
+            },
+            "title": "Suggestions",
+            "type": "array"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "title": "ProjectMemoryView",
+        "type": "object"
+      },
       "PromptRewriteAnswer": {
         "additionalProperties": false,
         "description": "One clarification and the user's optional answer.",
@@ -27007,6 +27060,496 @@
         ]
       }
     },
+    "/v1/agent/project-memory": {
+      "delete": {
+        "description": "Forget only this project's past activity, preserving its enabled setting.",
+        "operationId": "clear_project_memory_v1_agent_project_memory_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "maxLength": 140,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Project Memory",
+        "tags": [
+          "project-memory"
+        ]
+      },
+      "get": {
+        "description": "Refresh memory from this owner's activity in the requested repository.",
+        "operationId": "read_project_memory_v1_agent_project_memory_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "maxLength": 140,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Project Memory",
+        "tags": [
+          "project-memory"
+        ]
+      },
+      "patch": {
+        "description": "Change project settings or save revision-checked edits and scope changes.",
+        "operationId": "update_project_memory_v1_agent_project_memory_patch",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "maxLength": 140,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemorySettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Project Memory",
+        "tags": [
+          "project-memory"
+        ]
+      }
+    },
+    "/v1/agent/project-memory/consolidate": {
+      "post": {
+        "description": "Merge and classify durable preferences using the owner's available model.",
+        "operationId": "consolidate_project_memory_v1_agent_project_memory_consolidate_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "maxLength": 140,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsolidateMemoryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Consolidate Project Memory",
+        "tags": [
+          "project-memory"
+        ]
+      }
+    },
+    "/v1/agent/project-memory/entries/{memory_id}": {
+      "delete": {
+        "description": "Forget an entry and suppress it during subsequent automatic refreshes.",
+        "operationId": "delete_project_memory_entry_v1_agent_project_memory_entries__memory_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "maxLength": 140,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryEntryRevision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The owner has no such visible memory entry."
+          },
+          "409": {
+            "description": "Memory changed since the expected revision."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Project Memory Entry",
+        "tags": [
+          "project-memory"
+        ]
+      },
+      "patch": {
+        "description": "Save a durable correction to one of the owner's existing memories.",
+        "operationId": "edit_project_memory_entry_v1_agent_project_memory_entries__memory_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "maxLength": 140,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryEntry"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The owner has no such visible memory entry."
+          },
+          "409": {
+            "description": "Memory changed since the expected revision."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Project Memory Entry",
+        "tags": [
+          "project-memory"
+        ]
+      }
+    },
+    "/v1/agent/project-memory/projects": {
+      "get": {
+        "description": "List only repositories with activity or memory owned by this user.",
+        "operationId": "list_memory_projects_v1_agent_project_memory_projects_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Response List Memory Projects V1 Agent Project Memory Projects Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Memory Projects",
+        "tags": [
+          "project-memory"
+        ]
+      }
+    },
     "/v1/agent/projects": {
       "get": {
         "description": "Summarize the caller's projects for the sidebar's task tree.",
@@ -29167,7 +29710,7 @@
         ]
       },
       "get": {
-        "description": "Automatically create the owner's avatar and refresh their recent memory.",
+        "description": "Create the owner's avatar and refresh their preferences across projects.",
         "operationId": "read_user_memory_v1_agent_user_memory_get",
         "parameters": [
           {
