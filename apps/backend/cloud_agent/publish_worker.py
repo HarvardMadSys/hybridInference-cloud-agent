@@ -88,6 +88,14 @@ PUBLISH_IDLE_S = 30.0
 # `workflows`, so a patch touching `.github/` cannot be pushed even if both
 # gates were bypassed — the credential itself would refuse.
 _PUBLISH_SCOPE = {"contents": "write", "pull_requests": "write"}
+#: How long the publishing token must still live when a publish starts. A
+#: cached installation token is otherwise served until five minutes before it
+#: expires, and one publish runs several network-bound commands and PR API
+#: calls: a token with minutes left could expire after the branch was pushed.
+_PUBLISH_TOKEN_MIN_TTL_S = 1800.0
+#: How often a running publish renews its claim. The reaper fails a claim left
+#: unrenewed for fifteen minutes as a stopped publisher; a slow one is not.
+_PUBLISH_HEARTBEAT_S = 60.0
 
 # A PR base has to be a branch. `base_ref` is normally one (the composer offers
 # a branch picker), but the API accepts any ref it can resolve, and a caller
@@ -456,6 +464,7 @@ async def _retry_base_import(
                     snapshot["repo"],
                     permissions=_PUBLISH_SCOPE,
                     repository_scoped=True,
+                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
                 )
             )
         if credential is None:
@@ -538,6 +547,22 @@ async def _publish_due(
         )
 
 
+async def _keep_publish_claim(store: PublishStorage, snapshot_id: int) -> None:
+    """Renew one publishing claim until cancelled or no longer held.
+
+    The reaper fails a ``publishing`` row unrenewed for fifteen minutes. A
+    publish still working past that was failed under it, then pushed and
+    opened a PR the platform never recorded.
+    """
+    while True:
+        await asyncio.sleep(_PUBLISH_HEARTBEAT_S)
+        try:
+            if not await store.snapshot.touch_snapshot_publish(snapshot_id=snapshot_id):
+                return
+        except Exception:
+            logger.warning("agent snapshot publish heartbeat failed", exc_info=True)
+
+
 async def _publish_claimed(
     store: PublishStorage,
     job: dict[str, Any],
@@ -547,6 +572,34 @@ async def _publish_claimed(
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+) -> str | None:
+    """Publish one claimed snapshot, renewing its claim throughout."""
+    heartbeat = asyncio.create_task(_keep_publish_claim(store, int(job["snapshot_id"])))
+    try:
+        return await _publish_held(
+            store,
+            job,
+            credential=credential,
+            app_credentials=app_credentials,
+            grants=grants,
+            base_branch=base_branch,
+            allow_workflow_changes=allow_workflow_changes,
+        )
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+
+
+async def _publish_held(
+    store: PublishStorage,
+    job: dict[str, Any],
+    *,
+    credential: GitHubCredential | None,
+    app_credentials: Any | None,
+    grants: GrantClient | None,
+    base_branch: str,
+    allow_workflow_changes: bool,
 ) -> str | None:
     """Publish one claimed snapshot. Returns the PR URL, or ``None``."""
     job_id = job["job_id"]
@@ -588,7 +641,10 @@ async def _publish_claimed(
             # ever do — against a repository the *user* named.
             credential = GitHubCredential(
                 await app_credentials.token_for(
-                    job["repo"], permissions=_PUBLISH_SCOPE, repository_scoped=True
+                    job["repo"],
+                    permissions=_PUBLISH_SCOPE,
+                    repository_scoped=True,
+                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
                 )
             )
         except Exception as exc:
@@ -643,11 +699,12 @@ async def _publish_claimed(
         commit_sha=result.commit_sha,
     )
     if not recorded:
-        # Someone recorded a PR while we worked. The branch we pushed is
-        # harmless (it is the same one), but say so rather than pretend.
+        # The claim was no longer ours: the stalled-publish reaper failed it,
+        # or another publisher settled it. The branch is the same one, but
+        # this PR is recorded nowhere, so say so rather than pretend.
         logger.warning(
-            "agent_job_publish_raced",
-            extra={"event": "agent_job_publish_raced", "job_id": job_id, "pr_url": pr_url},
+            "agent_job_publish_claim_lost",
+            extra={"event": "agent_job_publish_claim_lost", "job_id": job_id, "pr_url": pr_url},
         )
         return None
 

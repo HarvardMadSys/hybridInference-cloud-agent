@@ -186,6 +186,33 @@ async def test_token_is_cached_but_not_past_its_life(config):
     assert calls["n"] == 2
 
 
+async def test_a_caller_can_ask_for_a_token_that_outlives_its_work(config):
+    """A token with twenty minutes left serves a quick caller, not a long publish."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        calls["n"] += 1
+        expires = time.gmtime(time.time() + (1200 if calls["n"] == 1 else 3600))
+        return httpx.Response(
+            201,
+            json={
+                "token": f"ghs_{calls['n']}",
+                "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", expires),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.token_for("o/n") == "ghs_1"
+        assert await credentials.token_for("o/n") == "ghs_1"
+        assert await credentials.token_for("o/n", min_ttl_s=1800) == "ghs_2"
+        assert await credentials.token_for("o/n", min_ttl_s=1800) == "ghs_2"
+
+    assert calls["n"] == 2
+
+
 async def test_a_long_lived_token_is_reused(config):
     """Within its window the token is served from cache, not re-minted."""
     calls = {"n": 0}

@@ -81,6 +81,10 @@ class SnapshotRepository(Protocol):
         """
         ...
 
+    async def touch_snapshot_publish(self, *, snapshot_id: int) -> bool:
+        """Renew a running publish's claim; ``False`` once it is no longer held."""
+        ...
+
     async def record_snapshot_publish(
         self, *, snapshot_id: int, pr_url: str, commit_sha: str
     ) -> bool:

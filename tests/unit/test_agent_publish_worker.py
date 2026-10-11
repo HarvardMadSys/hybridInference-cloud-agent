@@ -67,12 +67,17 @@ class FakeStore(AllCapabilities):
         self.snapshot_failed: tuple[int, str] | None = None
         self.import_failed: tuple[int, str] | None = None
         self.import_completed: tuple[int, str] | None = None
+        self.touched: list[int] = []
         self._record_ok = record_ok
 
     async def claim_for_publish(self):
         self.claims += 1
         job, self._job = self._job, None
         return job
+
+    async def touch_snapshot_publish(self, *, snapshot_id: int) -> bool:
+        self.touched.append(snapshot_id)
+        return self.snapshot_recorded is None and self.snapshot_failed is None
 
     async def record_snapshot_publish(
         self, *, snapshot_id: int, pr_url: str, commit_sha: str
@@ -580,6 +585,47 @@ async def test_lost_race_does_not_claim_success(monkeypatch):
     _patch_pr(monkeypatch)
 
     assert await publish_one(store, credential=GitHubCredential("t")) is None
+
+
+async def test_a_slow_publish_keeps_renewing_its_claim(monkeypatch):
+    """The reaper fails a claim unrenewed for 900s; a publish still working is not stopped."""
+    import asyncio
+    import time
+
+    monkeypatch.setattr(publish_worker, "_PUBLISH_HEARTBEAT_S", 0.01)
+    store = FakeStore(dict(_JOB))
+
+    def slow_publish(**kwargs):
+        time.sleep(0.2)
+        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+
+    monkeypatch.setattr(publish_worker, "publish_patch", slow_publish)
+    _patch_pr(monkeypatch)
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is not None
+    renewed = len(store.touched)
+    assert renewed >= 2 and set(store.touched) == {9}
+    await asyncio.sleep(0.05)
+    assert len(store.touched) == renewed, "the heartbeat must stop with the publish"
+
+
+async def test_publishing_asks_for_a_token_that_outlives_the_publish(monkeypatch):
+    """A cached token is served until five minutes before expiry; a publish can take longer."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    )
+    _patch_pr(monkeypatch)
+    asked: dict[str, Any] = {}
+
+    class App:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            asked.update(kwargs)
+            return "ghs_fresh"
+
+    await publish_one(store, app_credentials=App())
+
+    assert asked["min_ttl_s"] >= 900
 
 
 async def test_unexpected_failure_is_recorded_not_swallowed(monkeypatch):

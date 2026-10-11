@@ -863,6 +863,112 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
     assert snapshot_state == "failed"
 
 
+async def _settle_shared_turn(store: Storage, job: dict, claim: dict, reservation: dict) -> None:
+    """Run one claimed shared-live turn to a settled, succeeded boundary."""
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": reservation["generation"],
+        "activation_generation": reservation["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-publication",
+        context_status="new" if job["parent_job_id"] is None else "live",
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-publication",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+
+async def _follow_up_turn(store: Storage, parent: dict, sandbox: dict) -> tuple[dict, dict, dict]:
+    """Create, claim and reserve the next turn of a shared chat."""
+    child = await store.conversation_commands.create_follow_up(
+        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and the docs too"
+    )
+    assert child is not None
+    claim = await _claim(
+        store,
+        worker_id=f"worker-{child['id']}",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert claim is not None and claim["id"] == child["id"]
+    reservation = await store.sandbox.reserve_thread_sandbox(
+        thread_id=child["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name="freeinference-shared-test",
+        runtime_id="claude-code",
+        runtime_version=claim.get("runtime_version"),
+        sandbox_image_digest=claim.get("sandbox_image_digest"),
+        execution_profile=child["execution_profile"],
+    )
+    assert reservation is not None
+    return child, claim, reservation
+
+
+async def _captured_snapshot(store: Storage, patch: str) -> dict | None:
+    """Capture the group's due snapshot with ``patch``, or ``None`` if none is due."""
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    if capture is None:
+        return None
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+    return capture
+
+
+async def test_a_running_publish_renews_its_claim_past_the_stall_reaper(pool, store: Storage):
+    """The reaper judges a claim by its last renewal; a working publisher renews it."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _settle_shared_turn(store, job, claim, sandbox)
+    capture = await _captured_snapshot(store, "diff --git a/a.txt b/a.txt\n")
+    assert capture is not None
+    assert await store.snapshot.claim_for_publish() is not None
+    snapshot_id = capture["snapshot_id"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandbox_snapshots SET updated_at = NOW() - INTERVAL '1 hour' "
+            "WHERE id = $1",
+            snapshot_id,
+        )
+
+    assert await store.snapshot.touch_snapshot_publish(snapshot_id=snapshot_id) is True
+    assert await store.snapshot.reap_stalled_snapshot_publishes(stall_seconds=600) == []
+    assert await store.snapshot.record_snapshot_publish(
+        snapshot_id=snapshot_id, pr_url="https://example.test/pull/1", commit_sha="b" * 40
+    )
+    assert await store.snapshot.touch_snapshot_publish(snapshot_id=snapshot_id) is False
+
+
 @pytest.mark.parametrize(
     ("failure_mode", "expected_snapshot_state"),
     [

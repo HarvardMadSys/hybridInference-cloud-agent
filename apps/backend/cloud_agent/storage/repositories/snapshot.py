@@ -548,6 +548,24 @@ class PostgresSnapshotRepository:
                 }
             return None
 
+    async def touch_snapshot_publish(self, *, snapshot_id: int) -> bool:
+        """Renew a running publish's claim; ``False`` once it is no longer held.
+
+        The stalled-publish reaper judges a ``publishing`` row by when it last
+        changed, so a publish still working renews it rather than being failed
+        under it as a stopped one.
+        """
+        async with self._pool.acquire() as conn:
+            renewed = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots SET updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                RETURNING id
+                """,
+                snapshot_id,
+            )
+        return renewed is not None
+
     async def record_snapshot_publish(
         self,
         *,

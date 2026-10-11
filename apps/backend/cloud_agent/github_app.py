@@ -418,6 +418,7 @@ class GitHubAppCredentials:
         *,
         permissions: dict[str, str] | None = None,
         repository_scoped: bool = False,
+        min_ttl_s: float = 0.0,
     ) -> str:
         """Return a live installation token for one repository.
 
@@ -433,12 +434,16 @@ class GitHubAppCredentials:
         may have been installed again under a new id. If the installation
         GitHub then names is gone too, the App does not cover the repository —
         :class:`AppNotInstalled`, a settled answer rather than an outage.
+
+        ``min_ttl_s`` is how long the token must still live, for a caller whose
+        work outlasts the usual refresh margin: a cached token closer to its
+        expiry is replaced rather than handed out to fail midway.
         """
         installation_id = await self.installation_id_for(repo)
         scope = repo if repository_scoped else None
         try:
             token, minted = await self._token_in_scope(
-                installation_id, permissions=permissions, repository=scope
+                installation_id, permissions=permissions, repository=scope, min_ttl_s=min_ttl_s
             )
         except GitHubAppError as exc:
             if exc.status not in _STALE_INSTALLATION_STATUSES:
@@ -447,7 +452,10 @@ class GitHubAppCredentials:
             installation_id = await self.installation_id_for(repo)
             try:
                 token, minted = await self._token_in_scope(
-                    installation_id, permissions=permissions, repository=scope
+                    installation_id,
+                    permissions=permissions,
+                    repository=scope,
+                    min_ttl_s=min_ttl_s,
                 )
             except GitHubAppError as retry_exc:
                 if retry_exc.status == 404:
@@ -473,6 +481,7 @@ class GitHubAppCredentials:
         *,
         permissions: dict[str, str] | None = None,
         repository: str | None = None,
+        min_ttl_s: float = 0.0,
     ) -> tuple[str, bool]:
         """Return a token for one installation and scope, and whether it is new.
 
@@ -488,7 +497,8 @@ class GitHubAppCredentials:
         """
         scope_key = json_module.dumps({"p": permissions, "r": repository}, sort_keys=True)
         cached = self._tokens.get((installation_id, scope_key))
-        if cached and cached.expires_at - _TOKEN_REFRESH_MARGIN_S > time.time():
+        margin = max(_TOKEN_REFRESH_MARGIN_S, min_ttl_s)
+        if cached and cached.expires_at - margin > time.time():
             return cached.token, False
 
         payload: dict[str, Any] = {}
