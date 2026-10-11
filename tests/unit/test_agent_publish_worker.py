@@ -630,6 +630,50 @@ async def test_credential_never_appears_in_the_pr_body(monkeypatch):
     assert "super-secret-token" not in captured["title"]
 
 
+async def test_the_push_credential_never_rides_in_the_clone_url(monkeypatch):
+    """In the URL it reached the clone's .git/config and every git-remote-https argv."""
+    store = FakeStore(dict(_JOB))
+    called: dict[str, Any] = {}
+
+    def fake_publish(**kwargs):
+        called.update(kwargs)
+        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+
+    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
+    _patch_pr(monkeypatch)
+    await publish_one(store, credential=GitHubCredential("super-secret-token"))
+
+    assert called["clone_url"] == "https://github.com/o/n.git"
+    assert called["auth_env"] == GitHubCredential("super-secret-token").git_auth_env()
+
+
+async def test_the_git_credential_is_a_header_only_for_the_git_host(tmp_path):
+    """Git sends the token to the repository's host as a header, and nowhere else."""
+    import base64
+    import subprocess
+
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        **GitHubCredential("ghs_secret").git_auth_env(),
+    }
+
+    def header_for(url: str) -> str:
+        return subprocess.run(
+            ["git", "config", "--get-urlmatch", "http.extraHeader", url],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+
+    basic = base64.b64encode(b"x-access-token:ghs_secret").decode()
+    assert header_for("https://github.com/o/n.git") == f"Authorization: Basic {basic}"
+    assert header_for("https://elsewhere.example/o/n.git") == ""
+
+
 async def test_app_only_deployment_actually_publishes(monkeypatch):
     """An App-configured deployment with no static token must still publish.
 

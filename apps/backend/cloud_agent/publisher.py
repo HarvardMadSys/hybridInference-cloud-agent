@@ -143,17 +143,23 @@ class _StagedChangeSet:
     blobs: list[_StagedBlob]
 
 
-def _remote_branch_tip(repo: Path, branch: str) -> str | None:
+def _remote_branch_tip(
+    repo: Path, branch: str, auth_env: dict[str, str] | None = None
+) -> str | None:
     """Return the remote tip of ``branch``, or ``None`` when it does not exist."""
     raw = _run_git(
-        ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"], cwd=repo
+        ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"],
+        cwd=repo,
+        env_extra=auth_env,
     ).strip()
     if not raw:
         return None
     return raw.split()[0]
 
 
-def _check_branch_unmoved(repo: Path, branch: str, base_sha: str) -> None:
+def _check_branch_unmoved(
+    repo: Path, branch: str, base_sha: str, auth_env: dict[str, str] | None = None
+) -> None:
     """Refuse to publish onto a branch that has commits this run did not build on.
 
     A turn's commit is built on its pinned ``base_sha`` — for a follow-up,
@@ -165,7 +171,7 @@ def _check_branch_unmoved(repo: Path, branch: str, base_sha: str) -> None:
     recorded reason: "failed to push some refs" reads like an infrastructure
     fault, and this reads like what happened.
     """
-    tip = _remote_branch_tip(repo, branch)
+    tip = _remote_branch_tip(repo, branch, auth_env)
     if tip is None:
         return
     if tip.lower().startswith(base_sha.lower()):
@@ -288,11 +294,16 @@ def publish_patch(
     branch_id: str | None = None,
     allow_workflow_changes: bool = False,
     include_base_bundle: bool = False,
+    auth_env: dict[str, str] | None = None,
 ) -> PublishResult:
     """Validate and publish one run's patch on its stable thread branch.
 
-    ``clone_url`` should already carry whatever short-lived credential the
-    caller minted — it never leaves this process and never enters the sandbox.
+    ``clone_url`` names the repository and carries no credential. The
+    short-lived one the caller minted arrives as ``auth_env``, git
+    configuration in the environment of only the commands that reach the
+    remote: inside the URL it was written to the clone's ``.git/config`` and
+    passed in the arguments of every ``git-remote-https`` process, where any
+    process able to read ``/proc`` could see it. It never enters the sandbox.
     ``allow_workflow_changes`` is the explicit human release for patches that
     touch ``.github/``; it defaults to False so the gate holds by default.
     Actual staged files, including binary assets, are size-checked and scanned
@@ -320,7 +331,7 @@ def publish_patch(
         _run_git(["remote", "add", "origin", clone_url], cwd=repo)
         # Before any expensive work: a branch someone pushed to gets a clear
         # refusal naming their commits, not a late "failed to push some refs".
-        _check_branch_unmoved(repo, branch, base_sha)
+        _check_branch_unmoved(repo, branch, base_sha, auth_env)
         # `--end-of-options` plus the shape check above: git parses a leading
         # `--` argument as an option even after the remote name, so an
         # owner-supplied base_sha of `--upload-pack=/bin/sh -c ...` would run a
@@ -329,6 +340,7 @@ def publish_patch(
         _run_git(
             ["fetch", "--quiet", "--depth", "1", "origin", "--end-of-options", base_sha],
             cwd=repo,
+            env_extra=auth_env,
         )
         _run_git(["checkout", "--quiet", "-b", branch, "FETCH_HEAD"], cwd=repo)
 
@@ -370,6 +382,7 @@ def publish_patch(
         _run_git(
             ["push", "--quiet", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
             cwd=repo,
+            env_extra=auth_env,
         )
         logger.info(
             "agent_job_published",
@@ -399,10 +412,14 @@ def _head_parent(repo: Path) -> str:
     return _run_git(["rev-parse", "--verify", "HEAD^1"], cwd=repo).strip()
 
 
-def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
+def fetch_base_bundle(
+    *, clone_url: str, commit_sha: str, auth_env: dict[str, str] | None = None
+) -> bytes:
     """Fetch one published commit and return its bounded credential-free bundle.
 
-    Two commits deep, so the parent is at hand to leave out of the bundle.
+    Two commits deep, so the parent is at hand to leave out of the bundle. The
+    credential travels as in :func:`publish_patch`: in ``auth_env``, never in
+    ``clone_url``.
     """
     if not _COMMIT_SHA.fullmatch(commit_sha or ""):
         raise PublishError(f"commit_sha must be a full commit hash, got {commit_sha!r}")
@@ -414,6 +431,7 @@ def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
         _run_git(
             ["fetch", "--quiet", "--depth", "2", "origin", "--end-of-options", commit_sha],
             cwd=repo,
+            env_extra=auth_env,
         )
         _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo)
         try:

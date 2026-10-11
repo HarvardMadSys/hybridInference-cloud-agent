@@ -30,6 +30,7 @@ would either spam the repository or bury the rejection.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import re
 import unicodedata
@@ -77,6 +78,7 @@ class PublishStorage(Protocol):
 logger = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
+_GIT_BASE = "https://github.com"
 POLL_INTERVAL_S = 15.0
 #: The longest an idle publisher that is told about new work sleeps. It wakes
 #: sooner for a notification or the earliest base import retry.
@@ -128,16 +130,30 @@ class GitHubCredential:
 
     ``token`` is expected to be short-lived (a GitHub App installation token,
     which expires in an hour) and scoped to the repositories the user actually
-    installed the app on. It stays in this process: it is used to build the
-    push URL and the API call, and never reaches a sandbox.
+    installed the app on. It stays in this process: it is given to git through
+    the environment and to the API in a header, and never reaches a sandbox.
     """
 
     token: str
     api_base: str = field(default_factory=lambda: setting_env("AGENT_GITHUB_API") or GITHUB_API)
 
     def clone_url(self, repo: str) -> str:
-        """Return an authenticated clone URL for ``owner/name``."""
-        return f"https://x-access-token:{self.token}@github.com/{repo}.git"
+        """Return the credential-free clone URL for ``owner/name``."""
+        return f"{_GIT_BASE}/{repo}.git"
+
+    def git_auth_env(self) -> dict[str, str]:
+        """Carry the token in git's environment, never in its arguments or config.
+
+        ``GIT_CONFIG_COUNT`` sets the header for one command, the way the
+        host's runner fetches. Scoped to the Git host's URL, so a request git
+        makes anywhere else does not carry it.
+        """
+        basic = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
+        return {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"http.{_GIT_BASE}/.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        }
 
 
 async def create_draft_pull_request(
@@ -433,6 +449,7 @@ async def _retry_base_import(
             fetch_base_bundle,
             clone_url=credential.clone_url(snapshot["repo"]),
             commit_sha=commit_sha,
+            auth_env=credential.git_auth_env(),
         )
         return await _import_snapshot_base(
             store,
@@ -581,6 +598,7 @@ async def _publish_claimed(
             commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
             allow_workflow_changes=allow_workflow_changes,
             include_base_bundle=True,
+            auth_env=credential.git_auth_env(),
         )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
         pr_url = await ensure_draft_pull_request(

@@ -364,6 +364,59 @@ def test_publishes_branch_with_applied_patch(origin):
     assert "patched" not in main_content
 
 
+def test_the_push_credential_stays_out_of_argv_and_git_config(origin, monkeypatch):
+    """Only the environment of the commands that reach the remote carries it.
+
+    In the clone URL, the token was written to the clone's `.git/config` and
+    passed as an argument to every `git-remote-https`, readable in `/proc`.
+    """
+    from pathlib import Path
+
+    from cloud_agent import publisher
+
+    clone_url, base_sha = origin
+    secret = "publish-token-" + "s" * 24
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {secret}",
+    }
+    commands: list[tuple[list[str], bool]] = []
+    real_run = subprocess.run
+
+    def recording_run(args, **kwargs):
+        env = kwargs.get("env") or {}
+        commands.append((list(args), secret in env.get("GIT_CONFIG_VALUE_0", "")))
+        return real_run(args, **kwargs)
+
+    configs: list[str] = []
+    real_rmtree = publisher.shutil.rmtree
+
+    def inspect_then_remove(path, **kwargs):
+        config = Path(path) / "repo" / ".git" / "config"
+        configs.append(config.read_text(encoding="utf-8"))
+        real_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(publisher.subprocess, "run", recording_run)
+    monkeypatch.setattr(publisher.shutil, "rmtree", inspect_then_remove)
+    publish_patch(
+        job_id="ajob_credential",
+        patch=(
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+            "@@ -1,2 +1,3 @@\n def main():\n+    pass\n     return 0\n"
+        ),
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: patch app.py",
+        auth_env=auth_env,
+    )
+
+    assert commands and all(secret not in " ".join(args) for args, _ in commands)
+    assert len(configs) == 1 and secret not in configs[0]
+    assert {args[1] for args, carried in commands if carried} == {"ls-remote", "fetch", "push"}
+    assert _branches(clone_url) == ["agent/ajob_credential", "main"]
+
+
 def test_workflow_patch_is_refused_and_remote_untouched(origin):
     """A .github/ patch never reaches the remote without human release."""
     clone_url, base_sha = origin
