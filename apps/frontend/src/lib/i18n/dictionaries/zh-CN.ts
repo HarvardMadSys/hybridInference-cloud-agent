@@ -12,6 +12,15 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  'approvals.title': '审批',
+  'approvals.navCount': '审批（{count} 项待处理）',
+  'approvals.description': '查看所有会话中等待你决定的工具请求。',
+  'approvals.refresh': '刷新',
+  'approvals.refreshing': '正在刷新…',
+  'approvals.loading': '正在加载工具审批…',
+  'approvals.empty': '没有等待你审批的工具请求。',
+  'approvals.openConversation': '打开会话',
+  'approvals.loadMore': '加载更多审批',
   'rewrite.button': '改写提示词',
   'rewrite.clarify': '先询问几个澄清问题',
   'rewrite.questionsTitle': '补充一些细节',

@@ -531,7 +531,8 @@ The relay enforces these rules:
   description or schema changed goes back to the owner rather than being
   treated as an aged approval.
 - **`confirm` holds the original call.** The relay records a pending invocation
-  and waits for the owner's decision in the conversation's Tools panel. Approval
+  and waits for the owner's decision in the conversation's Tools panel or the
+  account's [Approvals inbox](mcp-approvals.md). Approval
   dispatches that request once under the current attempt and permission fence;
   the CLI receives the result without asking the model to retry. Denial, expiry
   or changed authorization prevents dispatch.

@@ -10,6 +10,16 @@
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  'approvals.title': 'Approvals',
+  'approvals.navCount': 'Approvals ({count} pending)',
+  'approvals.description':
+    'Review tool requests waiting for your decision across your conversations.',
+  'approvals.refresh': 'Refresh',
+  'approvals.refreshing': 'Refreshing…',
+  'approvals.loading': 'Loading tool approvals…',
+  'approvals.empty': 'No tool requests are waiting for your approval.',
+  'approvals.openConversation': 'Open conversation',
+  'approvals.loadMore': 'Load more approvals',
   'rewrite.button': 'Rewrite prompt',
   'rewrite.clarify': 'Ask clarification questions first',
   'rewrite.questionsTitle': 'Add a few details',

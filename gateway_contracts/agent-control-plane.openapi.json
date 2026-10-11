@@ -10605,6 +10605,17 @@
           "thread_id": {
             "title": "Thread Id",
             "type": "string"
+          },
+          "thread_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Title"
           }
         },
         "required": [
@@ -10620,14 +10631,30 @@
         "type": "object"
       },
       "InvocationsResponse": {
-        "description": "The calls waiting on this user, or the history of one job.",
+        "description": "A page of the owner's waiting calls or scoped history, newest first.",
         "properties": {
+          "has_more": {
+            "default": false,
+            "title": "Has More",
+            "type": "boolean"
+          },
           "invocations": {
             "items": {
               "$ref": "#/components/schemas/InvocationView"
             },
             "title": "Invocations",
             "type": "array"
+          },
+          "next_before_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before Id"
           }
         },
         "title": "InvocationsResponse",
@@ -25251,7 +25278,7 @@
     },
     "/v1/agent/mcp/invocations": {
       "get": {
-        "description": "Calls that needed a decision, for one job or one conversation.\n\nThe owner is part of the query, not a check after it. These rows carry the\ntool call's arguments decrypted for display -- code, documents, whatever the\nmodel was about to send -- so a listing that trusts the caller's ``job_id``\nis a way to read another user's calls by guessing an id. The named job is\nchecked first so a caller learns \"not yours\" the same way it learns \"does\nnot exist\": with a 404 that says nothing about which it was.",
+        "description": "Page one job's history, one conversation, or the owner's pending inbox.\n\nThe owner is part of the query, not a check after it. These rows carry the\ntool call's arguments decrypted for display -- code, documents, whatever the\nmodel was about to send -- so a listing that trusts the caller's ``job_id``\nis a way to read another user's calls by guessing an id. The named job is\nchecked first so a caller learns \"not yours\" the same way it learns \"does\nnot exist\": with a 404 that says nothing about which it was.",
         "operationId": "list_invocations_v1_agent_mcp_invocations_get",
         "parameters": [
           {
@@ -25294,6 +25321,36 @@
               "default": false,
               "title": "Pending Only",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9223372036854775807,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
             }
           },
           {

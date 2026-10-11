@@ -191,7 +191,7 @@ export function AgentsSidebar({
     const generation = sessionGeneration.current;
     setSelected(null);
     const id = /^\/([^/]+)$/.exec(pathname)?.[1];
-    if (!id || ['archived', 'integrations', 'admin', 'login'].includes(id)) return;
+    if (!id || ['archived', 'integrations', 'approvals', 'admin', 'login'].includes(id)) return;
     Promise.all([getAgentJob(id), getAgentJobThread(id)])
       .then(([job, thread]) => {
         if (cancelled || generation !== sessionGeneration.current) return;

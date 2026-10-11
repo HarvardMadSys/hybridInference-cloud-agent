@@ -55,6 +55,7 @@ class FakeStore(AllCapabilities):
         self.bindings: dict[str, list[dict[str, Any]]] = {}
         self.invocations: dict[int, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}
         self.created: list[dict[str, Any]] = []
         self.connectors: dict[int, dict[str, Any]] = {}
         self.connector_connections: dict[int, set[int]] = {}
@@ -402,17 +403,37 @@ class FakeStore(AllCapabilities):
 
     async def list_mcp_invocations(self, **kwargs: Any) -> list[dict[str, Any]]:
         rows = list(self.invocations.values())
+        if kwargs.get("user_id") is not None:
+            owned = []
+            for row in rows:
+                job = await self.get_job(row["job_id"])
+                if (
+                    job is not None
+                    and job.get("user_id") == kwargs["user_id"]
+                    and job.get("deleted_at") is None
+                ):
+                    owned.append(row)
+            rows = owned
         if kwargs.get("job_id") is not None:
             rows = [row for row in rows if row["job_id"] == kwargs["job_id"]]
+        if kwargs.get("thread_id") is not None:
+            rows = [row for row in rows if row["thread_id"] == kwargs["thread_id"]]
         if kwargs.get("statuses"):
             rows = [row for row in rows if row["status"] in kwargs["statuses"]]
-        return rows
+            rows = [
+                row
+                for row in rows
+                if row["status"] != "pending" or row["expires_at"] > datetime.now(timezone.utc)
+            ]
+        if kwargs.get("before_id") is not None:
+            rows = [row for row in rows if row["id"] < kwargs["before_id"]]
+        return sorted(rows, key=lambda row: row["id"], reverse=True)[: kwargs.get("limit", 50)]
 
     async def get_mcp_invocation(self, *, invocation_id: int) -> dict[str, Any] | None:
         return self.invocations.get(invocation_id)
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
-        return {"id": job_id, "user_id": _OWNER, "thread_id": "thread-1"}
+        return self.jobs.get(job_id, {"id": job_id, "user_id": _OWNER, "thread_id": "thread-1"})
 
     async def decide_mcp_invocation(
         self, *, invocation_id: int, approve: bool, decided_by: str
@@ -1485,10 +1506,190 @@ class TestInvocationDecisions:
         assert response.status_code == 404
         assert store.invocations[invocation_id]["status"] == "pending"
 
+    def test_deleted_conversation_history_is_not_accessible_by_job(self) -> None:
+        """A retained ledger row does not make a deleted conversation visible."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        self._pending(store, connection_id)
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "deleted_at": datetime.now(timezone.utc),
+        }
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("approve", [True, False])
+    def test_deleted_conversation_calls_cannot_be_decided(self, approve: bool) -> None:
+        """Neither an approval nor a denial may edit a deleted conversation."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "deleted_at": datetime.now(timezone.utc),
+        }
+        store.decide_mcp_invocation = AsyncMock(  # type: ignore[method-assign]
+            wraps=store.decide_mcp_invocation
+        )
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision", json={"approve": approve}
+            )
+        assert response.status_code == 404
+        store.decide_mcp_invocation.assert_not_awaited()
+        assert store.invocations[invocation_id]["status"] == "pending"
+
+    @pytest.mark.parametrize("scoped", [False, True])
+    def test_deleted_conversation_calls_are_omitted_from_inboxes(self, scoped: bool) -> None:
+        """Both the owner-wide and conversation inbox hide tombstoned calls."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "deleted_at": datetime.now(timezone.utc),
+        }
+        with _client(store) as client:
+            params: dict[str, Any] = {"pending_only": True}
+            if scoped:
+                params["thread_id"] = "thread-1"
+            response = client.get("/v1/agent/mcp/invocations", params=params)
+        assert response.status_code == 200
+        assert response.json()["invocations"] == []
+        assert response.json()["has_more"] is False
+        assert store.invocations[invocation_id]["status"] == "pending"
+
     def test_listing_requires_a_job_or_a_conversation(self) -> None:
-        """An unscoped list would be a way to enumerate other people's calls."""
+        """History remains scoped even though the pending inbox is account-wide."""
         with _client(FakeStore()) as client:
             assert client.get("/v1/agent/mcp/invocations").status_code == 400
+
+    def test_the_global_pending_inbox_is_scoped_to_the_owner(self) -> None:
+        """Foreign calls and their decrypted arguments never enter the inbox."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        mine = self._pending(store, connection_id)
+        store.threads["thread-1"] = {
+            "id": "thread-1",
+            "user_id": _OWNER,
+            "title": "Repair the integration",
+        }
+        store.invocations[2] = dict(
+            store.invocations[mine],
+            id=2,
+            job_id="other-job",
+            thread_id="other-thread",
+            arguments_ciphertext=mcp_connections.mcp_invocation_cipher().encrypt(
+                json.dumps({"private": "another owner's document"})
+            ),
+        )
+        store.jobs["other-job"] = {"id": "other-job", "user_id": _OTHER}
+        store.invocations[3] = dict(store.invocations[mine], id=3, status="completed")
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"pending_only": True})
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["invocations"]] == [mine]
+        assert response.json()["invocations"][0]["thread_title"] == "Repair the integration"
+        assert "another owner's document" not in response.text
+        assert response.json()["has_more"] is False
+        assert response.json()["next_before_id"] is None
+
+    def test_inbox_pagination_does_not_skip_calls_when_new_calls_arrive(self) -> None:
+        """A later insert must not shift the continuation page or repeat a call."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        first_id = self._pending(store, connection_id)
+        for invocation_id in (2, 3, 4):
+            store.invocations[invocation_id] = dict(store.invocations[first_id], id=invocation_id)
+        with _client(store) as client:
+            first = client.get(
+                "/v1/agent/mcp/invocations", params={"pending_only": True, "limit": 2}
+            ).json()
+            store.invocations[5] = dict(store.invocations[first_id], id=5)
+            second = client.get(
+                "/v1/agent/mcp/invocations",
+                params={"pending_only": True, "limit": 2, "before_id": first["next_before_id"]},
+            ).json()
+        assert [row["id"] for row in first["invocations"]] == [4, 3]
+        assert first["has_more"] is True
+        assert first["next_before_id"] == 3
+        assert [row["id"] for row in second["invocations"]] == [2, 1]
+        assert second["has_more"] is False
+        assert second["next_before_id"] is None
+
+    def test_history_pages_include_calls_older_than_the_default_window(self) -> None:
+        """Older history remains reachable past the previous fifty-call cutoff."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        first_id = self._pending(store, connection_id)
+        for invocation_id in range(2, 56):
+            store.invocations[invocation_id] = dict(
+                store.invocations[first_id], id=invocation_id, status="completed"
+            )
+        with _client(store) as client:
+            first = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"}).json()
+            second = client.get(
+                "/v1/agent/mcp/invocations",
+                params={"job_id": "job-1", "before_id": first["next_before_id"]},
+            ).json()
+        assert len(first["invocations"]) == 50
+        assert first["next_before_id"] == 6
+        assert [row["id"] for row in second["invocations"]] == [5, 4, 3, 2, 1]
+        assert second["has_more"] is False
+
+    @pytest.mark.parametrize(
+        "params", [{"limit": 0}, {"limit": 101}, {"before_id": 0}, {"before_id": 2**63}]
+    )
+    def test_invocation_pages_reject_invalid_bounds(self, params: dict[str, int]) -> None:
+        """Clients cannot request unbounded pages or an invalid continuation."""
+        with _client(FakeStore()) as client:
+            response = client.get(
+                "/v1/agent/mcp/invocations", params={"pending_only": True, **params}
+            )
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("status", ["pending", "approved"])
+    def test_history_displays_elapsed_deadlines_without_mutating_a_call(self, status: str) -> None:
+        """A lagging expiry worker must not leave an actionable-looking card."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(
+            status=status, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+        )
+        with _client(store) as client:
+            history = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"}).json()
+            inbox = client.get("/v1/agent/mcp/invocations", params={"pending_only": True}).json()
+        assert history["invocations"][0]["status"] == "expired"
+        assert "expired" in history["invocations"][0]["guidance"]
+        assert inbox["invocations"] == []
+        assert store.invocations[invocation_id]["status"] == status
+
+    def test_thread_titles_are_owned_and_cached_per_page(self) -> None:
+        """Metadata cannot leak a foreign title or require one query per call."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[2] = dict(store.invocations[invocation_id], id=2)
+        store.invocations[3] = dict(
+            store.invocations[invocation_id], id=3, thread_id="foreign-thread"
+        )
+        store.threads["thread-1"] = {"user_id": _OWNER, "title": "Owned conversation"}
+        store.threads["foreign-thread"] = {"user_id": _OTHER, "title": "Private title"}
+        store.get_thread = AsyncMock(wraps=store.get_thread)  # type: ignore[method-assign]
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"pending_only": True})
+        views = response.json()["invocations"]
+        assert views[0]["thread_title"] is None
+        assert [view["thread_title"] for view in views[1:]] == [
+            "Owned conversation",
+            "Owned conversation",
+        ]
+        assert store.get_thread.await_count == 2
 
     def _catalogue(self, store: FakeStore, connection_id: int, revision: int) -> None:
         """Store a discovered catalogue under ``revision``."""

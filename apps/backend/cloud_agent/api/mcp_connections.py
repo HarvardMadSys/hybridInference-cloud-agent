@@ -438,6 +438,7 @@ class InvocationView(BaseModel):
     id: int
     job_id: str
     thread_id: str
+    thread_title: str | None = None
     connection_id: int
     connection_label: str | None = None
     capability_name: str
@@ -460,9 +461,11 @@ class InvocationView(BaseModel):
 
 
 class InvocationsResponse(BaseModel):
-    """The calls waiting on this user, or the history of one job."""
+    """A page of the owner's waiting calls or scoped history, newest first."""
 
     invocations: list[InvocationView] = Field(default_factory=list)
+    has_more: bool = False
+    next_before_id: int | None = None
 
 
 class DecisionRequest(BaseModel):
@@ -1788,10 +1791,12 @@ async def list_invocations(
     job_id: str | None = Query(default=None),
     thread_id: str | None = Query(default=None),
     pending_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=100),
+    before_id: int | None = Query(default=None, gt=0, le=2**63 - 1),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _McpConnectionsStorage | None = Depends(get_storage),
 ) -> InvocationsResponse:
-    """Calls that needed a decision, for one job or one conversation.
+    """Page one job's history, one conversation, or the owner's pending inbox.
 
     The owner is part of the query, not a check after it. These rows carry the
     tool call's arguments decrypted for display -- code, documents, whatever the
@@ -1801,11 +1806,15 @@ async def list_invocations(
     not exist": with a 404 that says nothing about which it was.
     """
     job_store = _require_store(store)
-    if job_id is None and thread_id is None:
+    if job_id is None and thread_id is None and not pending_only:
         raise _bad_request("name a job or a conversation")
     if job_id is not None:
         job = await job_store.conversation_queries.get_job(job_id)
-        if job is None or str(job.get("user_id")) != user["user_id"]:
+        if (
+            job is None
+            or str(job.get("user_id")) != user["user_id"]
+            or job.get("deleted_at") is not None
+        ):
             raise _not_found("no such job")
     statuses = [InvocationStatus.PENDING.value] if pending_only else None
     rows = await job_store.mcp.list_mcp_invocations(
@@ -1813,12 +1822,22 @@ async def list_invocations(
         thread_id=thread_id,
         statuses=statuses,
         user_id=user["user_id"],
+        limit=limit + 1,
+        before_id=before_id,
     )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
     # One catalogue read per connection, not per row: a history page is mostly
     # calls to the same few servers, and a catalogue carries every schema.
     snapshots: dict[int, Mapping[str, Any] | None] = {}
+    threads: dict[str, Mapping[str, Any] | None] = {}
     return InvocationsResponse(
-        invocations=[await _invocation_view(job_store, row, snapshots) for row in rows]
+        invocations=[
+            await _invocation_view(job_store, row, user["user_id"], snapshots, threads)
+            for row in rows
+        ],
+        has_more=has_more,
+        next_before_id=int(rows[-1]["id"]) if has_more else None,
     )
 
 
@@ -1840,24 +1859,30 @@ async def decide_invocation(
     if existing is None:
         raise _not_found("no such MCP call")
     job = await job_store.conversation_queries.get_job(str(existing["job_id"]))
-    if job is None or str(job.get("user_id")) != user["user_id"]:
+    if (
+        job is None
+        or str(job.get("user_id")) != user["user_id"]
+        or job.get("deleted_at") is not None
+    ):
         raise _not_found("no such MCP call")
     decided = await job_store.mcp.decide_mcp_invocation(
         invocation_id=invocation_id, approve=body.approve, decided_by=user["user_id"]
     )
     if decided is None:
         raise _conflict("this call was already decided, or it expired")
-    return await _invocation_view(job_store, decided)
+    return await _invocation_view(job_store, decided, user["user_id"])
 
 
 async def _invocation_view(
     job_store: _McpConnectionsStorage,
     row: Mapping[str, Any],
+    user_id: str,
     snapshots: dict[int, Mapping[str, Any] | None] | None = None,
+    threads: dict[str, Mapping[str, Any] | None] | None = None,
 ) -> InvocationView:
     """Render one invocation, including the arguments the owner is approving.
 
-    ``snapshots`` caches catalogue reads by connection across one listing.
+    ``snapshots`` and ``threads`` cache metadata across one bounded page.
     """
     from cloud_agent.mcp.host import decode_arguments
     from cloud_agent.mcp.invocations import recovery_note
@@ -1881,21 +1906,43 @@ async def _invocation_view(
         )
     kind = str(row.get("capability_kind") or CapabilityKind.TOOL.value)
     capability = _held_capability(snapshots[connection_id], row, kind)
+    thread_id = str(row["thread_id"])
+    if threads is None:
+        threads = {}
+    if thread_id not in threads:
+        threads[thread_id] = await job_store.conversation_queries.get_thread(thread_id)
+    thread = threads[thread_id]
+    thread_title = (
+        str(thread["title"])
+        if thread is not None and str(thread.get("user_id")) == user_id and thread.get("title")
+        else None
+    )
+    status = Status(str(row["status"]))
+    expires_at = row.get("expires_at")
+    # A worker persists expiry asynchronously. Display an elapsed deadline
+    # immediately, without writing during a read or reviving any decision.
+    if isinstance(expires_at, datetime) and status in {Status.PENDING, Status.APPROVED}:
+        deadline = (
+            expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)
+        )
+        if deadline <= datetime.now(timezone.utc):
+            status = Status.EXPIRED
     invocation = Invocation(
         invocation_id=str(row["id"]),
         job_id=str(row["job_id"]),
         attempt_id=str(row.get("attempt_id") or ""),
         lease_generation=int(row.get("lease_generation") or 0),
-        thread_id=str(row["thread_id"]),
+        thread_id=thread_id,
         connection_id=str(row["connection_id"]),
         capability_name=str(row["capability_name"]),
         arguments_digest=str(row["arguments_digest"]),
-        status=Status(str(row["status"])),
+        status=status,
     )
     return InvocationView(
         id=int(row["id"]),
         job_id=str(row["job_id"]),
-        thread_id=str(row["thread_id"]),
+        thread_id=thread_id,
+        thread_title=thread_title,
         connection_id=int(row["connection_id"]),
         connection_label=str(connection["label"]) if connection else None,
         capability_name=str(row["capability_name"]),
@@ -1906,7 +1953,7 @@ async def _invocation_view(
         capability_annotations=(
             dict(capability.get("annotations") or {}) if capability is not None else {}
         ),
-        status=str(row["status"]),
+        status=status.value,
         arguments_digest=str(row["arguments_digest"]),
         arguments=arguments,
         created_at=row.get("created_at"),

@@ -109,6 +109,14 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('does not resolve the approval inbox route as a conversation job', async () => {
+    api.pathname = '/approvals';
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.thread).not.toHaveBeenCalled();
+  });
+
   it.each(['project', 'flat'] as const)(
     'keeps the %s sidebar steady while archiving, navigating and receiving the archive push',
     async (group) => {

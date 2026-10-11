@@ -290,6 +290,8 @@ export interface McpInvocationApi {
   id: number;
   job_id: string;
   thread_id: string;
+  /** Conversation title, absent on older control planes. */
+  thread_title?: string | null;
   connection_id: number;
   connection_label: string | null;
   capability_name: string;
@@ -312,6 +314,9 @@ export interface McpInvocationApi {
 
 export interface McpInvocationsApi {
   invocations: McpInvocationApi[];
+  /** Optional during rolling upgrades from the unpaginated response. */
+  has_more?: boolean;
+  next_before_id?: number | null;
 }
 
 /** Add one connection by hand. A secret here is written, never echoed back. */
@@ -342,6 +347,8 @@ export interface McpInvocationQuery {
   threadId?: string;
   /** Only calls still waiting on the owner. */
   pendingOnly?: boolean;
+  limit?: number;
+  beforeId?: number;
 }
 
 /** Every MCP connection this user has added, with the offered templates. */
@@ -560,12 +567,14 @@ export async function updateMcpThreadBinding(
   );
 }
 
-/** Calls that needed a decision, for one job or one conversation. */
+/** Calls for one conversation, or pending approvals across the owner's conversations. */
 export async function listMcpInvocations(query: McpInvocationQuery): Promise<McpInvocationsApi> {
   const params = new URLSearchParams();
   if (query.jobId) params.set('job_id', query.jobId);
   if (query.threadId) params.set('thread_id', query.threadId);
   if (query.pendingOnly) params.set('pending_only', 'true');
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.beforeId !== undefined) params.set('before_id', String(query.beforeId));
   return jsonOrThrow(
     await fetchWithAuth(API_BASE, `/v1/agent/mcp/invocations?${params.toString()}`),
   );

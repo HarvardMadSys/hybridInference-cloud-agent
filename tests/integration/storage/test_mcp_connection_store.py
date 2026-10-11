@@ -1577,6 +1577,95 @@ async def test_listing_calls_filters_by_job_and_state(store: Storage) -> None:
     assert await store.mcp.list_mcp_invocations(job_id=str(job["id"]), statuses=["approved"]) == []
 
 
+async def test_owner_pending_inbox_excludes_foreign_and_elapsed_calls_without_writes(
+    store: Storage,
+) -> None:
+    """The global inbox remains owner-scoped even before the expiry sweep."""
+    mine = await _create_job(store)
+    other = await _create_job(store, user_id=_OTHER)
+    connection = await _connect(store, _OWNER)
+    foreign_connection = await _connect(store, _OTHER)
+    pending = await _invocation(store, mine, connection)
+    elapsed = await _invocation(store, mine, connection, expires_in=timedelta(seconds=-1))
+    await _invocation(store, other, foreign_connection)
+
+    thread = await store.conversation_queries.get_thread(str(mine["thread_id"]))
+    assert thread is not None and thread["title"] == "fix the flaky test"
+    inbox = await store.mcp.list_mcp_invocations(user_id=_OWNER, statuses=["pending"])
+    assert [row["id"] for row in inbox] == [pending["id"]]
+    assert (
+        await store.mcp.list_mcp_invocations(
+            user_id=_OTHER, job_id=str(mine["id"]), statuses=["pending"]
+        )
+        == []
+    )
+    assert (
+        await store.mcp.list_mcp_invocations(
+            user_id=_OTHER, thread_id=str(mine["thread_id"]), statuses=["pending"]
+        )
+        == []
+    )
+    stored = await store.mcp.get_mcp_invocation(invocation_id=int(elapsed["id"]))
+    assert stored is not None and stored["status"] == "pending"
+    history = await store.mcp.list_mcp_invocations(user_id=_OWNER, job_id=str(mine["id"]))
+    assert [row["id"] for row in history] == [elapsed["id"], pending["id"]]
+
+
+async def test_invocation_keyset_continuation_is_stable_under_insertions(store: Storage) -> None:
+    """New calls cannot shift the owner's continuation or introduce duplicates."""
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    calls = [await _invocation(store, job, connection) for _ in range(4)]
+    first = await store.mcp.list_mcp_invocations(user_id=_OWNER, statuses=["pending"], limit=2)
+    assert [row["id"] for row in first] == [calls[3]["id"], calls[2]["id"]]
+    newest = await _invocation(store, job, connection)
+    second = await store.mcp.list_mcp_invocations(
+        user_id=_OWNER, statuses=["pending"], limit=2, before_id=int(first[-1]["id"])
+    )
+    assert [row["id"] for row in second] == [calls[1]["id"], calls[0]["id"]]
+    assert newest["id"] not in [row["id"] for row in first + second]
+
+
+async def test_deleted_conversation_invocations_are_hidden_from_owners_but_retained_for_audit(
+    store: Storage, pool: asyncpg.Pool
+) -> None:
+    """Soft deletion hides inbox and history rows without destroying the ledger."""
+    visible = await _create_job(store)
+    deleted = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    visible_call = await _invocation(store, visible, connection)
+    deleted_pending = await _invocation(store, deleted, connection)
+    deleted_completed = await _invocation(store, deleted, connection)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_mcp_invocations SET status = 'completed' WHERE id = $1",
+            int(deleted_completed["id"]),
+        )
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", str(deleted["thread_id"])
+        )
+
+    for statuses in (None, ["pending"]):
+        owned = await store.mcp.list_mcp_invocations(user_id=_OWNER, statuses=statuses)
+        assert [row["id"] for row in owned] == [visible_call["id"]]
+        assert (
+            await store.mcp.list_mcp_invocations(
+                user_id=_OWNER, job_id=str(deleted["id"]), statuses=statuses
+            )
+            == []
+        )
+        assert (
+            await store.mcp.list_mcp_invocations(
+                user_id=_OWNER, thread_id=str(deleted["thread_id"]), statuses=statuses
+            )
+            == []
+        )
+    audit = await store.mcp.list_mcp_invocations(job_id=str(deleted["id"]))
+    assert [row["id"] for row in audit] == [deleted_completed["id"], deleted_pending["id"]]
+    retained = await store.mcp.get_mcp_invocation(invocation_id=int(deleted_pending["id"]))
+    assert retained is not None and retained["status"] == "pending"
+
+
 async def test_capabilities_cannot_be_saved_for_a_disconnected_connection(
     store: Storage,
 ) -> None:

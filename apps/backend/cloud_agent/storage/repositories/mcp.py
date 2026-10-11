@@ -1074,6 +1074,7 @@ class PostgresMcpConnectionRepository:
         statuses: list[str] | None = None,
         user_id: str | None = None,
         limit: int = 50,
+        before_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Invocations filtered by job, thread, state or owner, newest first.
 
@@ -1082,13 +1083,23 @@ class PostgresMcpConnectionRepository:
         made it. Filtering the *list* is not a convenience: the rows carry the
         decrypted arguments, so a listing that does not scope by owner hands one
         user another user's tool call bodies. Callers that serve a request must
-        pass it.
+        pass it. Owner-scoped reads omit deleted conversations; unscoped
+        internal audit reads retain their invocation history.
+
+        ``before_id`` continues strictly below the previous page's last id,
+        so new calls cannot shift rows between pages. A pending state filter
+        omits calls whose deadline has passed, even before the expiry worker
+        persists that transition. Reads never change invocation state.
         """
         clauses: list[str] = []
         params: list[Any] = []
         if user_id is not None:
             params.append(user_id)
-            clauses.append(f"job_id IN (SELECT id FROM agent_jobs WHERE user_id = ${len(params)})")
+            clauses.append(
+                "job_id IN (SELECT j.id FROM agent_jobs j "
+                "JOIN agent_threads t ON t.id = j.thread_id "
+                f"WHERE j.user_id = ${len(params)} AND t.deleted_at IS NULL)"
+            )
         if job_id is not None:
             params.append(job_id)
             clauses.append(f"job_id = ${len(params)}")
@@ -1098,6 +1109,11 @@ class PostgresMcpConnectionRepository:
         if statuses:
             params.append(list(statuses))
             clauses.append(f"status = ANY(${len(params)})")
+            if "pending" in statuses:
+                clauses.append("(status <> 'pending' OR expires_at > NOW())")
+        if before_id is not None:
+            params.append(before_id)
+            clauses.append(f"id < ${len(params)}")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(max(1, min(limit, 200)))
         async with self._pool.acquire() as conn:
