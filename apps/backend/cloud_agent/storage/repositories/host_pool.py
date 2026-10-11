@@ -540,7 +540,7 @@ class PostgresHostPoolRepository:
                 return "invalid", None, current_epoch
             if current_token != expected_token or str(current_epoch) != expected_epoch:
                 return "stale", None, current_epoch
-            if row["status"] == HOST_DRAINING and current_token is None:
+            if row["status"] == HOST_DRAINING and not row["drain_fence_active"]:
                 return "manual", None, current_epoch
             if row["status"] not in (HOST_ONLINE, HOST_DRAINING):
                 return "invalid", None, current_epoch

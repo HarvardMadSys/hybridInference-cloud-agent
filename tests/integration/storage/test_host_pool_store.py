@@ -717,6 +717,40 @@ async def test_released_receipt_survives_old_writer_status_change(
     )
 
 
+async def test_inactive_receipt_does_not_turn_a_manual_drain_into_owned_drain(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    receipt_token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=receipt_token,
+    )
+    assert acquired[0] == "ok"
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=receipt_token)
+    assert released[0] == "ok"
+
+    async with db.acquire() as conn:
+        manual_epoch = await conn.fetchval(
+            "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1 RETURNING drain_fence_epoch",
+            "runner-a",
+            HOST_DRAINING,
+        )
+
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=receipt_token,
+        expected_fence_epoch=manual_epoch,
+        fence_token=uuid4(),
+    ) == ("manual", None, manual_epoch)
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] == receipt_token
+    assert row["drain_fence_active"] is False
+
+
 async def test_the_reaper_marks_a_silent_enrolled_host_offline(
     db, store, hosts: PostgresHostPoolRepository
 ):

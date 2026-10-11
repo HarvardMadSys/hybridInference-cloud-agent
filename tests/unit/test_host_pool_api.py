@@ -327,12 +327,12 @@ class FakeHostPoolStore(AllCapabilities):
         if row["drain_fence_token"] == fence_token:
             if row["drain_fence_active"] and row["status"] == HOST_DRAINING:
                 return "ok", row["drain_fence_status_before"], epoch
-            if not row["drain_fence_active"] and row["status"] == HOST_ONLINE:
+            if not row["drain_fence_active"]:
                 return "released", None, epoch
             return "invalid", None, epoch
         if row["drain_fence_token"] != expected_fence_token or epoch != expected_fence_epoch:
             return "stale", None, epoch
-        if row["status"] == HOST_DRAINING and row["drain_fence_token"] is None:
+        if row["status"] == HOST_DRAINING and not row["drain_fence_active"]:
             return "manual", None, epoch
         if row["status"] not in (HOST_ONLINE, HOST_DRAINING):
             return "invalid", None, epoch
@@ -362,7 +362,7 @@ class FakeHostPoolStore(AllCapabilities):
             row["drain_fence_active"] = False
             row["drain_fence_epoch"] = uuid4()
             return "ok", row["drain_fence_epoch"]
-        return ("ok", epoch) if row["status"] == HOST_ONLINE else ("invalid", epoch)
+        return "ok", epoch
 
     async def remove_host(self, *, host: str, force: bool = False) -> str:
         row = self.rows.get(host)
@@ -1757,6 +1757,42 @@ async def test_fenced_release_is_idempotent_but_late_acquire_is_rejected(client)
     assert row["drain_fence_token"] == token
     assert row["drain_fence_active"] is False
     assert row["drain_fence_epoch"] == released_epoch
+
+
+async def test_fenced_release_reconciles_after_a_lifecycle_status_change(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+            "fence_token": str(token),
+        },
+    )
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain",
+        headers=ADMIN,
+        json={"fence_token": str(token)},
+    )
+    lifecycle_epoch = uuid4()
+    store.rows["runner-a"]["status"] = HOST_OFFLINE
+    store.rows["runner-a"]["drain_fence_epoch"] = lifecycle_epoch
+
+    retry = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain",
+        headers=ADMIN,
+        json={"fence_token": str(token)},
+    )
+
+    assert retry.status_code == 200
+    returned = retry.json()["hosts"][0]
+    assert returned["status"] == HOST_OFFLINE
+    assert returned["drain_fence_token"] == str(token)
+    assert returned["drain_fence_active"] is False
+    assert returned["drain_fence_epoch"] == str(lifecycle_epoch)
 
 
 async def test_legacy_actions_preserve_active_drain_and_require_force_to_undrain(client):
