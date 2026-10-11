@@ -86,6 +86,7 @@ export default function ComputeResources({
   const [allocations, setAllocations] = useState<ComputeAllocation[]>([]);
   const [operations, setOperations] = useState<ComputeOperation[]>([]);
   const [panel, setPanel] = useState<OpenPanel>(null);
+  const [addSetupOpen, setAddSetupOpen] = useState(false);
   const [serverTab, setServerTab] = useState<
     'overview' | 'lease' | 'activity' | 'access' | 'retire'
   >('overview');
@@ -98,6 +99,9 @@ export default function ComputeResources({
   const [showAllOperations, setShowAllOperations] = useState(false);
   const generation = useRef(0);
   const mounted = useRef(true);
+  const addPanelTitle = useRef<HTMLHeadingElement>(null);
+  const configureSetupButton = useRef<HTMLButtonElement>(null);
+  const addReturnFocus = useRef<'configure' | 'title' | null>(null);
   const previousOperations = useRef<ComputeOperation[]>([]);
   const hostsChanged = useRef(onHostsChanged);
   hostsChanged.current = onHostsChanged;
@@ -171,6 +175,18 @@ export default function ComputeResources({
     };
   }, [refresh]);
 
+  useEffect(() => {
+    if (panel?.kind !== 'add') return;
+    if (addSetupOpen) {
+      addPanelTitle.current?.focus();
+      return;
+    }
+    const target = addReturnFocus.current;
+    addReturnFocus.current = null;
+    if (target === 'configure') configureSetupButton.current?.focus();
+    else if (target === 'title') addPanelTitle.current?.focus();
+  }, [addSetupOpen, panel]);
+
   const receiveOperation = (operation: ComputeOperation, submitted = true) => {
     generation.current += 1;
     setOperations((current) => [operation, ...current.filter((item) => item.id !== operation.id)]);
@@ -198,6 +214,10 @@ export default function ComputeResources({
   function closeServer() {
     setPanel(null);
     onHostControlsClosed?.();
+  }
+  function returnFromAddSetup() {
+    addReturnFocus.current = 'configure';
+    setAddSetupOpen(false);
   }
   function openOperation(id: string) {
     setOperationOrigin(panel);
@@ -272,7 +292,11 @@ export default function ComputeResources({
           <button
             className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/5"
             type="button"
-            onClick={() => setPanel({ kind: 'setup' })}
+            onClick={() => {
+              addReturnFocus.current = null;
+              setAddSetupOpen(false);
+              setPanel({ kind: 'setup' });
+            }}
           >
             Server setup
           </button>
@@ -291,7 +315,11 @@ export default function ComputeResources({
           <button
             className={primaryClass}
             type="button"
-            onClick={() => setPanel({ kind: 'add' })}
+            onClick={() => {
+              addReturnFocus.current = null;
+              setAddSetupOpen(false);
+              setPanel({ kind: 'add' });
+            }}
             aria-label="Add server"
             disabled={!catalog?.providers.length || !catalog.secret_store_configured}
           >
@@ -371,6 +399,8 @@ export default function ComputeResources({
         <Panel title="Server setup" onClose={() => setPanel(null)}>
           <ComputeSetup
             onSaved={() => {
+              addReturnFocus.current = 'title';
+              setAddSetupOpen(false);
               setPanel({ kind: 'add' });
               void refresh();
             }}
@@ -379,13 +409,35 @@ export default function ComputeResources({
       )}
 
       {panel?.kind === 'add' && catalog && (
-        <Panel title="Add server" onClose={() => setPanel(null)}>
-          <AddComputeServer
-            catalog={catalog}
-            connections={connections}
-            onOperation={receiveOperation}
-            onConnectionSaved={saveConnectionInList}
-          />
+        <Panel
+          title={addSetupOpen ? 'Server setup' : 'Add server'}
+          onClose={() => {
+            addReturnFocus.current = null;
+            setAddSetupOpen(false);
+            setPanel(null);
+          }}
+          onBack={addSetupOpen ? returnFromAddSetup : undefined}
+          titleRef={addPanelTitle}
+        >
+          <div hidden={addSetupOpen}>
+            <AddComputeServer
+              catalog={catalog}
+              connections={connections}
+              onOperation={receiveOperation}
+              onConnectionSaved={saveConnectionInList}
+              onConfigureSetup={() => setAddSetupOpen(true)}
+              configureSetupButtonRef={configureSetupButton}
+            />
+          </div>
+          {addSetupOpen && (
+            <ComputeSetup
+              onSaved={() => {
+                addReturnFocus.current = 'title';
+                setAddSetupOpen(false);
+                void refresh();
+              }}
+            />
+          )}
         </Panel>
       )}
       {panel?.kind === 'host' && (

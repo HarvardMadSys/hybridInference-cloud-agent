@@ -453,6 +453,10 @@ describe('server acquisition UI', () => {
     });
     renderAdd(vi.fn(), observedCatalog, [connections[1]]);
     fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'No server setup is configured. Configure it before this server can run sandboxes.',
+    );
+    expect(screen.getByRole('button', { name: 'Create server' })).toBeDisabled();
     fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
     fireEvent.change(screen.getByLabelText('Server name'), {
       target: { value: 'Observed experiment' },
@@ -463,8 +467,10 @@ describe('server acquisition UI', () => {
     fireEvent.click(
       screen.getByRole('checkbox', { name: 'Only track this resource (skip server setup)' }),
     );
+    expect(screen.queryByText(/No server setup is configured/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText('CloudLab SSH user')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('SSH private key')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import resource' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Import resource' }));
     await waitFor(() =>
       expect(api.importComputeResource).toHaveBeenCalledWith(
@@ -482,6 +488,7 @@ describe('server acquisition UI', () => {
     await waitFor(() => expect(screen.getByRole('radio', { name: 'Create new' })).toBeEnabled());
     fireEvent.click(screen.getByRole('radio', { name: 'Create new' }));
     expect(screen.getByRole('button', { name: 'Create server' })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('No server setup is configured.');
     expect(screen.queryByRole('button', { name: 'Import resource' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('SSH private key')).toBeInTheDocument();
   });
@@ -1128,6 +1135,47 @@ describe('resource dashboard', () => {
     const row = await screen.findByRole('listitem', { name: /CloudLab experiment/ });
     expect(within(row).getByText('Awaiting agent')).toBeInTheDocument();
     expect(within(row).queryByText('Online')).not.toBeInTheDocument();
+  });
+
+  it('opens server setup from the missing-profile CloudLab callout', async () => {
+    vi.mocked(api.getComputeProviders).mockResolvedValue({
+      ...catalog,
+      deployment_profiles: [],
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    const addServer = screen.getByRole('button', { name: 'Add server' });
+    await waitFor(() => expect(addServer).toBeEnabled());
+    fireEvent.click(addServer);
+    const addDialog = screen.getByRole('dialog', { name: 'Add server' });
+    fireEvent.click(within(addDialog).getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(within(addDialog).getByLabelText('Server name'), {
+      target: { value: 'Preserved CloudLab server' },
+    });
+    expect(within(addDialog).getByRole('button', { name: 'Create server' })).toBeDisabled();
+    expect(within(addDialog).getByRole('alert')).toHaveTextContent(
+      'No server setup is configured. Configure it before this server can run sandboxes.',
+    );
+    const configureSetup = within(addDialog).getByRole('button', {
+      name: 'Configure server setup',
+    });
+    fireEvent.click(configureSetup);
+    expect(screen.queryByRole('dialog', { name: 'Add server' })).not.toBeInTheDocument();
+    const setupDialog = screen.getByRole('dialog', { name: 'Server setup' });
+    await waitFor(() =>
+      expect(within(setupDialog).getByRole('heading', { name: 'Server setup' })).toHaveFocus(),
+    );
+    fireEvent.click(within(setupDialog).getByRole('button', { name: '← Back' }));
+    const restoredDialog = screen.getByRole('dialog', { name: 'Add server' });
+    const restoredConfigureSetup = within(restoredDialog).getByRole('button', {
+      name: 'Configure server setup',
+    });
+    expect(restoredConfigureSetup).toBe(configureSetup);
+    await waitFor(() => expect(restoredConfigureSetup).toHaveFocus());
+    expect(within(restoredDialog).getByRole('radio', { name: /CloudLab/ })).toBeChecked();
+    expect(within(restoredDialog).getByLabelText('Server name')).toHaveValue(
+      'Preserved CloudLab server',
+    );
+    expect(api.createComputeServer).not.toHaveBeenCalled();
   });
 
   it('adds a key inline and reuses it after a failed server request without losing the draft', async () => {

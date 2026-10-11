@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode, type Ref } from 'react';
 
 import type { BlockedReason, ComputeField, ComputeOperation } from '@/lib/api/compute';
 
@@ -15,12 +15,14 @@ export function Panel({
   title,
   onClose,
   onBack,
+  titleRef,
   actions,
   children,
 }: {
   title: string;
   onClose: () => void;
   onBack?: () => void;
+  titleRef?: Ref<HTMLHeadingElement>;
   actions?: ReactNode;
   children: ReactNode;
 }) {
@@ -50,7 +52,9 @@ export function Panel({
               ← Back
             </button>
           )}
-          <h2 className="text-lg font-semibold">{title}</h2>
+          <h2 ref={titleRef} tabIndex={titleRef ? -1 : undefined} className="text-lg font-semibold">
+            {title}
+          </h2>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {actions}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 
 import {
   createComputeServer,
@@ -22,6 +22,7 @@ import {
   type CredentialDraft,
 } from './ComputeCredentials';
 import {
+  buttonClass,
   ErrorNotice,
   Field,
   initialFields,
@@ -49,11 +50,15 @@ export default function AddComputeServer({
   connections,
   onOperation,
   onConnectionSaved,
+  onConfigureSetup,
+  configureSetupButtonRef,
 }: {
   catalog: ComputeCatalog;
   connections: ComputeConnection[];
   onOperation: (operation: ComputeOperation, submitted: boolean) => void;
   onConnectionSaved: (connection: ComputeConnection) => void;
+  onConfigureSetup?: () => void;
+  configureSetupButtonRef?: Ref<HTMLButtonElement>;
 }) {
   const form = useRef<HTMLFormElement>(null);
   const [newConnections, setNewConnections] = useState<ComputeConnection[]>([]);
@@ -148,7 +153,7 @@ export default function AddComputeServer({
     let submitted = false;
     try {
       if (!observeOnly && !deploymentConfigured) {
-        throw new Error('Server setup is not configured. Contact your administrator.');
+        throw new Error('Configure server setup before this server can run sandboxes.');
       }
       const configuration = parseFields(fields, values);
       if (needsSshKey && !observeOnly && !sshProvider) {
@@ -385,7 +390,22 @@ export default function AddComputeServer({
           </details>
         )}
         {!deploymentConfigured && !observeOnly && (
-          <ErrorNotice error="Server setup is not configured. Contact your administrator." />
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200"
+          >
+            <p>No server setup is configured. Configure it before this server can run sandboxes.</p>
+            {onConfigureSetup && (
+              <button
+                ref={configureSetupButtonRef}
+                className={`${buttonClass} mt-3 bg-white dark:bg-gray-900`}
+                type="button"
+                onClick={onConfigureSetup}
+              >
+                Configure server setup
+              </button>
+            )}
+          </div>
         )}
         <div className="flex flex-wrap items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-white/10">
           <p className="text-xs text-gray-500 dark:text-gray-400">
