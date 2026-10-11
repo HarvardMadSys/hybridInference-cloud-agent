@@ -394,10 +394,10 @@ class TurnPool:
         """Stop claiming and wait for every child, or stop them now.
 
         Graceful by default: each child already treats SIGTERM as "finish the
-        turn in hand, then exit", and this waits for exactly that. Docker's
-        ``stop_grace_period`` remains the ceiling — past it the container is
-        killed and the leases take over, as they always have. ``immediate`` is
-        Ctrl-C.
+        turn in hand, then exit", and this waits for exactly that. Supported
+        deployment asks Docker Engine to wait indefinitely; the configured
+        ``stop_grace_period`` is only the ceiling for direct, out-of-band
+        Compose operations. ``immediate`` is Ctrl-C.
         """
         self._stopping = True
         finished: list[FinishedTurn] = []

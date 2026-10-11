@@ -1539,12 +1539,14 @@ in parallel under the exact-SHA readiness fence described here. See
 #### Host and control-plane readiness
 
 The host prepares the replacement sandbox/runner artifacts and proves Kata
-before invalidating its ready marker. It then stops the old runner container
-and lets its five-minute grace
-drain admitted turns before replacing the broker; no new turn can be admitted
-in that interval. After the isolation, tunnel, runtime and retained Docker-root
-checks pass, it records `.deployed-sha` and only then publishes an exact
-`shared-sandbox-deployment:<sha>` capability. In parallel, the control-plane
+before invalidating its ready marker. It resolves the old runner's exact
+Compose container IDs, then asks Docker Engine for an unbounded graceful stop.
+The runner stops claiming and waits for every admitted turn; the broker and
+tunnels remain available until those turns settle. Only then does activation
+replace the broker and runner. After the isolation, tunnel, runtime and
+retained Docker-root checks pass, it records `.deployed-sha` and only then
+publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
+the control-plane
 deployment prepares its artifacts and migrates, then waits for a heartbeat newer than the start of that
 check and reverse-probes every new-chat placement broker before `compose up`
 can replace a running API. The claim route enforces that same exact deployment

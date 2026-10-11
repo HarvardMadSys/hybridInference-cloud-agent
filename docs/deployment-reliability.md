@@ -164,6 +164,11 @@ the same verified target. A failed host rollout remains a failed rollout even
 if it restored the recorded generation. Control-plane failure leaves compatible
 migrations in place; there is no automatic database downgrade.
 
+A hard-cancelled host activation may leave the readiness marker pending while
+Docker Engine continues the unbounded graceful runner stop. Running turns still
+finish; after the runner exits, the host remains unavailable until activation
+is rerun for the same verified target. Do not publish readiness by hand.
+
 If the host succeeds before the control plane fails, the exact-SHA gate can keep
 new work queued until the retry succeeds. The queue monitor detects this state.
 These checks protect and expose interrupted deployments; activation still spans

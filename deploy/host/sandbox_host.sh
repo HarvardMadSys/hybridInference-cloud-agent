@@ -1798,9 +1798,21 @@ cmd_activate() {
   # container that comes up before the checks finish report `unverified`
   # instead of the previous deployment's reading.
   prepare_storage_verdict
-  if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
-    log "draining existing runners before replacing their workspace broker"
-    compose stop runner
+  local -a runner_ids=()
+  local runner_ids_text
+  if ! runner_ids_text="$(compose ps -q runner)"; then
+    die "could not resolve the existing runner containers; refusing to replace the stack"
+  fi
+  if [[ -n "$runner_ids_text" ]]; then
+    mapfile -t runner_ids <<< "$runner_ids_text"
+  fi
+  if (( ${#runner_ids[@]} > 0 )); then
+    # The runner treats SIGTERM as a drain: it stops claiming, waits for every
+    # child turn, then exits. Ask the Engine to wait indefinitely so activation
+    # can never turn that graceful drain into SIGKILL. Resolve the IDs through
+    # Compose first so this cannot stop an unrelated container on the host.
+    log "draining existing runners without a forced-kill deadline before replacing their workspace broker"
+    docker stop --time=-1 "${runner_ids[@]}"
   fi
 
   log "starting the three purpose-scoped tunnels, broker, and the runner service"
