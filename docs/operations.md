@@ -235,6 +235,13 @@ Keep these credential boundaries intact:
   write the event log, upload a replacement patch, or move the job to a
   terminal state; the trusted runner holds the token that can.
 
+Resident inference grants use a mint identity that includes the member's durable
+residency generation. Retrying a mint for that generation recovers the same
+grant; replacing a process or retrying Fork with a new generation mints a fresh
+grant rather than recovering a revoked predecessor. Worker replacement revokes
+the previous grant best-effort, matching Fork cleanup; a gateway revocation
+outage does not prevent issuing the replacement.
+
 ### Automatic task titles
 
 New conversations initially use the first meaningful prompt line, shortened to

@@ -1174,6 +1174,10 @@ async def worker_establish_shared_sandbox_residency(
     )
     if row is None:
         raise _lease_lost()
+    previous_grant = row.get("previous_grant_id")
+    if previous_grant and grants is not None:
+        with contextlib.suppress(Exception):
+            await grants.revoke(previous_grant)
     credential = await _mint_residency_grant(job_store.grants, grants, row=row)
     if not credential:
         # Resident processes cannot safely outlive an attempt-scoped token, so
