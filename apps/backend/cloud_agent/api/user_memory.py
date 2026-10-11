@@ -33,7 +33,7 @@ class UpdateMemorySettings(BaseModel):
 
 def _view(values: dict[str, Any], user_id: str) -> UserMemoryView:
     view = UserMemoryView.model_validate(values)
-    view.avatar = generate_user_avatar(user_id)
+    view.avatar = generate_user_avatar(user_id, focus_areas=view.portrait.focus_areas)
     return view
 
 

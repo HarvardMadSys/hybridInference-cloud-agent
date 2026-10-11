@@ -22,11 +22,20 @@ vi.mock('@/lib/api/userMemory', () => ({
   clearUserMemory: vi.fn(),
 }));
 
+function illustratedAvatar(color: string): UserMemoryView['avatar'] {
+  return {
+    style: 'illustrated',
+    data_url: `data:image/svg+xml,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg"><rect width="80" height="80" fill="${color}"/></svg>`,
+    )}`,
+  };
+}
+
 const empty: UserMemoryView = {
   enabled: true,
   revision: 1,
   updated_at: null,
-  avatar: { data_url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', style: 'illustrated' },
+  avatar: illustratedAvatar('#98a3af'),
   portrait: {
     summary: '',
     projects: [],
@@ -40,6 +49,7 @@ const empty: UserMemoryView = {
 
 const populated: UserMemoryView = {
   ...empty,
+  avatar: illustratedAvatar('#527eb5'),
   updated_at: '2026-10-11T12:00:00Z',
   portrait: {
     summary: 'Working on useful developer tools.',
@@ -161,7 +171,48 @@ describe('avatar and memory settings', () => {
     expect(getUserMemory).toHaveBeenCalledTimes(2);
   });
 
-  it('requires explicit clear confirmation, supports cancellation, and retains the avatar after clearing', async () => {
+  it('replaces the avatar with the refreshed work theme, preserves the paused response, and resets the theme after clearing', async () => {
+    const refreshed: UserMemoryView = {
+      ...populated,
+      revision: 2,
+      avatar: illustratedAvatar('#ac7db5'),
+    };
+    const refresh = deferred<UserMemoryView>();
+    const paused = { ...refreshed, enabled: false };
+    const cleared = { ...empty, enabled: false };
+    vi.mocked(updateUserMemory).mockResolvedValueOnce(paused);
+    vi.mocked(clearUserMemory).mockResolvedValueOnce(cleared);
+    render(panel());
+    const avatar = await screen.findByRole('img');
+    expect(avatar).toHaveAttribute('src', populated.avatar.data_url);
+
+    vi.mocked(getUserMemory).mockReturnValueOnce(refresh.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(avatar).toHaveAttribute('src', populated.avatar.data_url);
+    await act(async () => refresh.resolve(refreshed));
+    expect(avatar).toHaveAttribute('src', refreshed.avatar.data_url);
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Automatically build memory' }));
+    await waitFor(() => expect(screen.getByRole('switch')).not.toBeChecked());
+    expect(avatar).toHaveAttribute('src', paused.avatar.data_url);
+    expect(screen.getByText(/Avatar theme updates, memory updates/)).toBeInTheDocument();
+    vi.mocked(getUserMemory).mockResolvedValueOnce(paused);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    expect(avatar).toHaveAttribute('src', paused.avatar.data_url);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear memory' }));
+    expect(
+      screen.getByText(/resets your avatar’s work theme while keeping its base character/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm clear memory' }));
+    await screen.findByText('No saved memory yet.');
+    expect(avatar).toHaveAttribute('src', cleared.avatar.data_url);
+    expect(avatar).not.toHaveAttribute('src', refreshed.avatar.data_url);
+    expect(screen.getByRole('switch')).not.toBeChecked();
+  });
+
+  it('requires explicit clear confirmation, supports cancellation, and displays the returned base avatar after clearing', async () => {
     render(panel());
     await screen.findByRole('img');
     fireEvent.click(screen.getByRole('button', { name: 'Clear memory' }));
@@ -178,7 +229,7 @@ describe('avatar and memory settings', () => {
     expect(screen.queryByText(populated.memories[0].content)).not.toBeInTheDocument();
     expect(screen.queryByText(populated.suggestions[0].title)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm clear memory' })).not.toBeInTheDocument();
-    expect(screen.getByRole('img')).toHaveAttribute('src', populated.avatar.data_url);
+    expect(screen.getByRole('img')).toHaveAttribute('src', empty.avatar.data_url);
     expect(screen.getByRole('button', { name: 'Clear memory' })).toHaveFocus();
   });
 
@@ -231,9 +282,12 @@ describe('avatar and memory settings', () => {
     expect(screen.queryByText(populated.portrait.summary)).not.toBeInTheDocument();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
     expect(oldSignal.aborted).toBe(true);
-    await act(async () => newRead.resolve({ ...empty, enabled: false }));
+    const otherAccount = { ...empty, enabled: false, avatar: illustratedAvatar('#8eaa68') };
+    await act(async () => newRead.resolve(otherAccount));
     await act(async () => oldClear.resolve(populated));
     expect(screen.getByRole('switch')).not.toBeChecked();
+    expect(screen.getByRole('img')).toHaveAttribute('src', otherAccount.avatar.data_url);
+    expect(screen.getByRole('img')).not.toHaveAttribute('src', populated.avatar.data_url);
     expect(screen.queryByText(populated.memories[0].content)).not.toBeInTheDocument();
   });
 
@@ -257,7 +311,11 @@ describe('avatar and memory settings', () => {
     expect(await screen.findByRole('img', { name: '为你自动生成的插画头像' })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: '自动建立记忆' })).toBeChecked();
     expect(screen.getByRole('heading', { name: '未来任务建议' })).toBeInTheDocument();
+    expect(
+      screen.getByText('头像的基础角色保持不变，配色与细节会随近期工作变化。'),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '清除记忆' }));
     expect(screen.getByRole('button', { name: '确认清除记忆' })).toBeInTheDocument();
+    expect(screen.getByText(/清除记忆会重置头像的工作主题，保留基础角色/)).toBeInTheDocument();
   });
 });

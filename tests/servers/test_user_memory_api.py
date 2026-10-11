@@ -13,6 +13,7 @@ from cloud_agent import identity
 from cloud_agent.api import user_memory
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.app import create_app, create_mcp_app, install_admin_no_store
+from cloud_agent.user_avatar import generate_user_avatar
 from cloud_agent.user_memory import build_user_memory
 
 PATH = "/v1/agent/user-memory"
@@ -80,6 +81,74 @@ async def test_settings_and_clear_keep_the_owner_avatar(app):
     assert cleared.json()["memories"] == cleared.json()["suggestions"] == []
     app.state.repository.set_enabled.assert_awaited_once_with(user_id="owner-1", enabled=False)
     app.state.repository.clear.assert_awaited_once_with(user_id="owner-1")
+
+
+def activity_profile(content, *, enabled=True):
+    return build_user_memory(
+        [{"job_id": "owner-job", "content": content, "title": "Recent work"}],
+        {"enabled": enabled},
+    )
+
+
+async def test_avatar_evolves_from_refreshed_work_areas_for_the_same_owner(app):
+    backend = activity_profile("Build a backend API endpoint.")
+    frontend = activity_profile("Build a frontend UI with React.")
+    app.state.repository.refresh.side_effect = [backend, backend, frontend, frontend]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        initial = await client.get(PATH, headers=session_headers())
+        unchanged = await client.get(PATH, headers=session_headers())
+        evolved = await client.get(PATH, headers=session_headers())
+        other_owner = await client.get(PATH, headers=session_headers("owner-2"))
+    assert (
+        initial.status_code
+        == unchanged.status_code
+        == evolved.status_code
+        == other_owner.status_code
+        == 200
+    )
+    assert initial.json()["avatar"] == unchanged.json()["avatar"]
+    assert initial.json()["avatar"] != evolved.json()["avatar"]
+    assert evolved.json()["avatar"] != other_owner.json()["avatar"]
+    assert initial.json()["portrait"]["focus_areas"] == ["Backend and APIs"]
+    assert evolved.json()["portrait"]["focus_areas"] == ["Frontend and UI"]
+    assert [call.kwargs for call in app.state.repository.refresh.await_args_list] == [
+        {"user_id": "owner-1"},
+        {"user_id": "owner-1"},
+        {"user_id": "owner-1"},
+        {"user_id": "owner-2"},
+    ]
+
+
+async def test_paused_avatar_uses_saved_activity_clear_resets_and_resume_updates(app):
+    backend = activity_profile("Build a backend API endpoint.")
+    paused_backend = {**backend, "enabled": False}
+    frontend = activity_profile("Build a frontend UI with React.")
+    app.state.repository.refresh.side_effect = [backend, paused_backend]
+    app.state.repository.set_enabled.side_effect = [paused_backend, frontend]
+    app.state.repository.clear.side_effect = None
+    app.state.repository.clear.return_value = build_user_memory([], {"enabled": False})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        initial = await client.get(PATH, headers=session_headers())
+        disabled = await client.patch(PATH, json={"enabled": False}, headers=session_headers())
+        paused_read = await client.get(PATH, headers=session_headers())
+        cleared = await client.delete(PATH, headers=session_headers())
+        resumed = await client.patch(PATH, json={"enabled": True}, headers=session_headers())
+    assert all(
+        response.status_code == 200
+        for response in (initial, disabled, paused_read, cleared, resumed)
+    )
+    assert initial.json()["avatar"] == disabled.json()["avatar"] == paused_read.json()["avatar"]
+    assert cleared.json()["avatar"] == generate_user_avatar("owner-1").model_dump()
+    assert cleared.json()["avatar"] != initial.json()["avatar"]
+    assert cleared.json()["enabled"] is False
+    assert cleared.json()["portrait"]["focus_areas"] == []
+    assert resumed.json()["avatar"] != initial.json()["avatar"]
+    assert resumed.json()["avatar"] != cleared.json()["avatar"]
+    assert resumed.json()["enabled"] is True
 
 
 @pytest.mark.parametrize("method", ["GET", "PATCH", "DELETE"])

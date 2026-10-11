@@ -236,14 +236,16 @@ export const en = {
   'settings.description': 'Manage your connections, skills, memory, and notifications.',
   'settings.memory.title': 'Avatar & memory',
   'settings.memory.description':
-    'Your account gets an illustrated avatar automatically. Memory uses up to your 50 latest requests to suggest improvements. Explicit preferences can guide future tasks in the same project.',
+    'Your illustrated avatar is generated automatically and evolves with recent work. Memory uses up to your 50 latest requests to suggest improvements. Explicit preferences can guide future tasks in the same project.',
   'settings.memory.avatar': 'Your avatar',
   'settings.memory.avatarAlt': 'Your automatically generated illustrated avatar',
   'settings.memory.avatarDescription':
-    'A unique illustration for your account that stays the same when memory is cleared.',
+    'Your base character stays the same while colors and details reflect your recent work.',
   'settings.memory.automatic': 'Automatically build memory',
-  'settings.memory.enabled': 'Memory and suggestions update automatically from your requests.',
-  'settings.memory.disabled': 'Automatic memory updates and personalization are paused.',
+  'settings.memory.enabled':
+    'Your avatar’s theme, memory, and suggestions update automatically from your requests.',
+  'settings.memory.disabled':
+    'Avatar theme updates, memory updates, and personalization are paused.',
   'settings.memory.loading': 'Loading your avatar and memory…',
   'settings.memory.error': 'Could not load or update your memory. Please try again.',
   'settings.memory.retry': 'Retry',
@@ -254,7 +256,7 @@ export const en = {
   'settings.memory.clear': 'Clear memory',
   'settings.memory.confirmTitle': 'Clear saved memory and suggestions?',
   'settings.memory.confirmDescription':
-    'Your avatar stays the same. Old requests won’t be used again. Future requests can build new memory when enabled.',
+    'Clearing resets your avatar’s work theme while keeping its base character. Old requests won’t be used again. Future requests can build new memory and update the avatar when enabled.',
   'settings.memory.confirmClear': 'Confirm clear memory',
   'settings.memory.clearing': 'Clearing…',
   'settings.memory.cancel': 'Cancel',
