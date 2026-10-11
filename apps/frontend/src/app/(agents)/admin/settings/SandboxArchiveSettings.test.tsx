@@ -19,6 +19,8 @@ function settings(over: Partial<SandboxArchiveSettings> = {}): SandboxArchiveSet
     region: 'us-east-1',
     kms_key_arn: KMS_ARN,
     expected_bucket_owner: '123456789012',
+    aws_access_key_id: '',
+    aws_secret_access_key_configured: false,
     max_archive_bytes: 2_147_483_648,
     multipart_threshold_bytes: 8_388_608,
     multipart_part_bytes: 8_388_608,
@@ -31,7 +33,7 @@ function settings(over: Partial<SandboxArchiveSettings> = {}): SandboxArchiveSet
 afterEach(cleanup);
 
 describe('sandbox archive settings card', () => {
-  it('shows the fixed destination read-only and never asks for AWS credentials', () => {
+  it('shows the fixed destination and an access key instead of requiring a KMS key', () => {
     render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={vi.fn()} />);
 
     expect(screen.getByLabelText('S3 destination')).toHaveValue(
@@ -41,8 +43,9 @@ describe('sandbox archive settings card', () => {
     expect(screen.getByLabelText('S3 destination')).toHaveAccessibleDescription(
       'Fixed by the deployment security policy and not included in update requests.',
     );
-    expect(screen.queryByLabelText(/access key/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/secret/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('AWS access key ID')).toBeInTheDocument();
+    expect(screen.getByLabelText('AWS secret access key')).toHaveAttribute('type', 'password');
+    expect(screen.getByLabelText('AWS access key ID').closest('details')).toBeNull();
     expect(screen.getByRole('button', { name: 'Save archive settings' })).toBeDisabled();
     expect(screen.getByLabelText('Maximum archive bytes')).toHaveAccessibleDescription(
       'Maximum compressed size of one archive. Hard limit: 4 GiB. Current: 2 GiB.',
@@ -117,12 +120,48 @@ describe('sandbox archive settings card', () => {
       region: 'us-east-1',
       kms_key_arn: KMS_ARN,
       expected_bucket_owner: '123456789012',
+      aws_access_key_id: '',
+      aws_secret_access_key: '',
       max_archive_bytes: 2_147_483_648,
       multipart_threshold_bytes: 8_388_608,
       multipart_part_bytes: 8_388_608,
       revision: 7,
     });
     expect(onSave.mock.calls[0][0]).not.toHaveProperty('s3_uri');
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty('aws_secret_access_key_configured');
+  });
+
+  it('saves an access key without a bucket owner or KMS key', () => {
+    const onSave = vi.fn();
+    render(
+      <SandboxArchiveSettingsCard
+        settings={settings({ region: 'us-east-1', kms_key_arn: '', expected_bucket_owner: '' })}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('AWS access key ID'), {
+      target: { value: 'AKIAIOSFODNN7EXAMPLE' },
+    });
+    fireEvent.change(screen.getByLabelText('AWS secret access key'), {
+      target: { value: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' },
+    });
+    fireEvent.click(screen.getByLabelText('Enable sandbox archives'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      enabled: true,
+      region: 'us-east-1',
+      kms_key_arn: '',
+      expected_bucket_owner: '',
+      aws_access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      aws_secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      max_archive_bytes: 2_147_483_648,
+      multipart_threshold_bytes: 8_388_608,
+      multipart_part_bytes: 8_388_608,
+      revision: 7,
+    });
   });
 
   it('preserves collapsed upload edits and saves them with important settings', () => {
@@ -148,6 +187,8 @@ describe('sandbox archive settings card', () => {
       region: 'us-east-1',
       kms_key_arn: KMS_ARN,
       expected_bucket_owner: '123456789012',
+      aws_access_key_id: '',
+      aws_secret_access_key: '',
       max_archive_bytes: 1_073_741_824,
       multipart_threshold_bytes: 8_388_608,
       multipart_part_bytes: 8_388_608,

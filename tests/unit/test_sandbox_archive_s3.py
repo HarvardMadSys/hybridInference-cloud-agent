@@ -962,3 +962,63 @@ def test_numeric_tuning_is_loaded_from_policy_without_an_sdk_dependency() -> Non
     assert config.max_archive_bytes == 2 * MIN_MULTIPART_PART_BYTES
     assert config.multipart_threshold_bytes == 1024
     assert config.multipart_part_bytes == MIN_MULTIPART_PART_BYTES
+
+
+_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+
+def test_access_key_upload_uses_sse_s3_and_omits_the_bucket_owner() -> None:
+    client = RecordingS3Client()
+    config = _config(
+        kms_key_arn="",
+        expected_bucket_owner="",
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+    uploader = SandboxArchiveS3Uploader(config, client=client)
+    payload = b"access-key archive"
+
+    _upload(uploader, phase="final", body=io.BytesIO(payload), size=len(payload))
+
+    request = client.one_call("put_object")
+    assert request["ServerSideEncryption"] == "AES256"
+    assert "SSEKMSKeyId" not in request
+    assert "ExpectedBucketOwner" not in request
+    assert "aws_access_key_id" not in request
+    versioning = client.one_call("get_bucket_versioning")
+    assert "ExpectedBucketOwner" not in versioning
+
+
+def test_access_key_is_passed_only_to_the_sdk_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = RecordingS3Client()
+    calls: list[dict[str, Any]] = []
+
+    class FakeConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    def make_client(service: str, **kwargs: Any) -> RecordingS3Client:
+        calls.append(kwargs)
+        return client
+
+    monkeypatch.setattr(
+        archive_s3.importlib,
+        "import_module",
+        lambda name: (
+            SimpleNamespace(client=make_client)
+            if name == "boto3"
+            else SimpleNamespace(Config=FakeConfig)
+        ),
+    )
+    uploader = SandboxArchiveS3Uploader(
+        _config(
+            aws_access_key_id=_ACCESS_KEY_ID,
+            aws_secret_access_key=_SECRET_ACCESS_KEY,
+        )
+    )
+    _upload(uploader, phase="final", body=io.BytesIO(b"x"), size=1)
+
+    assert calls[0]["aws_access_key_id"] == _ACCESS_KEY_ID
+    assert calls[0]["aws_secret_access_key"] == _SECRET_ACCESS_KEY
+    assert "aws_access_key_id" not in uploader.config.as_policy().as_dict()

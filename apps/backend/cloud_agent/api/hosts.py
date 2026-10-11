@@ -36,9 +36,9 @@ from cloud_agent.schemas import (
     HostHeartbeatResponse,
     HostRegisterRequest,
     HostRegisterResponse,
+    HostSandboxArchiveSettings,
     ResidencyBeat,
     RetainedSandboxStop,
-    SandboxArchiveSettingsResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
@@ -414,7 +414,7 @@ async def heartbeat_host(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
         ),
-        sandbox_archive_settings=SandboxArchiveSettingsResponse.model_validate(
+        sandbox_archive_settings=HostSandboxArchiveSettings.model_validate(
             await job_store.host_pool.sandbox_archive_settings()
         ),
         residencies_lost=lost,

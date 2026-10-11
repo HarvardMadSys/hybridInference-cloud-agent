@@ -33,6 +33,7 @@ from cloud_agent.execution_profiles import (
     shared_sandbox_claim_attested,
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
+from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
@@ -53,7 +54,6 @@ from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
-    SandboxArchivePolicy,
     SandboxArchivePolicyError,
 )
 
@@ -208,7 +208,7 @@ class PostgresAttemptCommands:
                 }
             )
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(archive_raw)
+                archive_policy = load_stored_archive_policy(archive_raw)
             except SandboxArchivePolicyError:
                 return None
             archive_required = archive_policy.enabled

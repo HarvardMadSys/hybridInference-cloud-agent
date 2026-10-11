@@ -10408,7 +10408,7 @@
             "type": "array"
           },
           "sandbox_archive_settings": {
-            "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+            "$ref": "#/components/schemas/HostSandboxArchiveSettings"
           },
           "settings": {
             "additionalProperties": {
@@ -10608,6 +10608,83 @@
           "ttl_seconds"
         ],
         "title": "HostResidencyEstablishResponse",
+        "type": "object"
+      },
+      "HostSandboxArchiveSettings": {
+        "description": "Archive policy delivered to a broker. Empty access-key fields are omitted.",
+        "properties": {
+          "aws_access_key_id": {
+            "default": "",
+            "title": "Aws Access Key Id",
+            "type": "string"
+          },
+          "aws_secret_access_key": {
+            "default": "",
+            "description": "Included only when an access key is configured.",
+            "title": "Aws Secret Access Key",
+            "type": "string"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_bucket_owner": {
+            "default": "",
+            "title": "Expected Bucket Owner",
+            "type": "string"
+          },
+          "kms_key_arn": {
+            "default": "",
+            "title": "Kms Key Arn",
+            "type": "string"
+          },
+          "max_archive_bytes": {
+            "default": 2147483648,
+            "title": "Max Archive Bytes",
+            "type": "integer"
+          },
+          "multipart_part_bytes": {
+            "default": 8388608,
+            "title": "Multipart Part Bytes",
+            "type": "integer"
+          },
+          "multipart_threshold_bytes": {
+            "default": 8388608,
+            "title": "Multipart Threshold Bytes",
+            "type": "integer"
+          },
+          "region": {
+            "default": "",
+            "title": "Region",
+            "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "s3_uri": {
+            "const": "s3://freeinference/cloud-agent/sandbox",
+            "default": "s3://freeinference/cloud-agent/sandbox",
+            "title": "S3 Uri",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "title": "HostSandboxArchiveSettings",
         "type": "object"
       },
       "HostSettingDefinition": {
@@ -12580,8 +12657,18 @@
         "type": "object"
       },
       "SandboxArchiveSettingsResponse": {
-        "description": "The revisioned archive policy stored for every sandbox host.",
+        "description": "The revisioned archive policy stored for every sandbox host.\n\nThe secret access key is write-only. ``aws_secret_access_key_configured``\ntells the editor whether a blank secret keeps the stored one.",
         "properties": {
+          "aws_access_key_id": {
+            "default": "",
+            "title": "Aws Access Key Id",
+            "type": "string"
+          },
+          "aws_secret_access_key_configured": {
+            "default": false,
+            "title": "Aws Secret Access Key Configured",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -13133,6 +13220,18 @@
         "additionalProperties": false,
         "description": "Replace the whole archive policy if the displayed revision is current.",
         "properties": {
+          "aws_access_key_id": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Aws Access Key Id",
+            "type": "string"
+          },
+          "aws_secret_access_key": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Aws Secret Access Key",
+            "type": "string"
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -21305,7 +21404,7 @@
         "summary": "Get Sandbox Archive Settings"
       },
       "put": {
-        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code and credentials are intentionally\nabsent. Brokers authenticate to AWS with their workload identity; this\nroute stores only the non-secret region, KMS key identity, owner fence and\nbounded transfer limits.",
+        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code. A saved access key is encrypted\nat rest and is not returned. With no key, brokers authenticate with their\nworkload identity and still require the bucket owner and KMS key.",
         "operationId": "set_sandbox_archive_settings_admin_agent_sandbox_archive_settings_put",
         "parameters": [
           {

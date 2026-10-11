@@ -1564,11 +1564,14 @@ Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to st
 the deployment-wide archive policy in the Agent database. The destination is
 fixed at `s3://freeinference/cloud-agent/sandbox`; it is displayed read-only and
 is never accepted from the browser. An administrator atomically saves the
-enabled state, AWS region, customer-managed KMS key ARN, expected 12-digit
-bucket owner, maximum compressed archive size, multipart threshold, and part
-size. Updates use the revision returned by the last read, so two administrators
-cannot silently overwrite each other. Every change is recorded in the Audit
-log.
+enabled state, AWS region, maximum compressed archive size, multipart
+threshold, and part size. Authentication is either an AWS access key or the
+workload-identity pair: a customer-managed KMS key ARN and the expected
+12-digit bucket owner. An access key makes that pair optional; uploads then
+use SSE-S3 unless a KMS key is also set. The secret is write-only, encrypted
+at rest, and omitted from the audit row. Updates use the revision returned by
+the last read, so two administrators cannot silently overwrite each other.
+Every change is recorded in the Audit log.
 
 The dashboard uses admin-only `GET` and `PUT`
 `/admin/agent/sandbox-archive-settings`. To inspect the same policy and host
@@ -1587,13 +1590,19 @@ FROM agent_runner_hosts
 ORDER BY host;
 ```
 
-Do not put AWS access keys, archive policy, or the destination in `.env`. The
-workspace broker uses the host's AWS workload identity and the ordinary SDK
-credential chain. That identity needs the narrow S3 multipart/write and exact
-object-metadata permissions for the fixed prefix, plus encrypt access to the
-configured KMS key. The bucket must have versioning enabled. Configure lifecycle
-retention and access logging on the bucket itself; neither the runner nor a
-sandbox receives AWS credentials.
+Do not put archive policy, the destination, or an AWS access key in `.env`.
+Enter an access key on the Sandbox archives card when the broker has no
+workload identity. The control plane encrypts the secret before storing it
+and sends it to the broker on the authenticated heartbeat channel. The broker
+keeps it in memory for S3. Sandbox markers do not contain it, so it does not
+enter the container. A broker that predates access-key support rejects that
+heartbeat payload and does not confirm the revision; upgrade those brokers
+before relying on the key. With no access key, the workspace broker uses the
+host's AWS workload identity and the ordinary SDK credential chain. That
+identity needs the narrow S3 multipart/write and exact object-metadata
+permissions for the fixed prefix, plus encrypt access to the configured KMS
+key. The bucket must have versioning enabled. Configure lifecycle retention
+and access logging on the bucket itself.
 
 Concretely, grant the broker role `s3:GetBucketVersioning` on
 `arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
@@ -1602,7 +1611,8 @@ missing immutable initial object from an authorization failure); and
 `s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
 `arn:aws:s3:::freeinference/cloud-agent/sandbox/*`. The configured KMS key
 policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
-multipart uploads. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
+multipart uploads. An access key needs those same S3 actions; SSE-S3 uploads
+do not call KMS. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
 rule as defense in depth for a host that disappears before its bounded abort
 request completes.
 

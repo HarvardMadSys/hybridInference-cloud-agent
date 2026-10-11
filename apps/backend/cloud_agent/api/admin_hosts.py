@@ -63,6 +63,10 @@ from cloud_agent.schemas import (
     host_setting_definitions,
 )
 from cloud_agent_shared.host_settings import admin_values, reported_values
+from cloud_agent_shared.sandbox_archive_settings import (
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -348,7 +352,7 @@ async def get_sandbox_archive_settings(
 
 def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | str]:
     """Keep a complete, non-secret policy snapshot in the admin audit row."""
-    return {
+    snapshot: dict[str, bool | int | str] = {
         key: values[key]
         for key in (
             "enabled",
@@ -360,6 +364,12 @@ def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | st
             "multipart_part_bytes",
         )
     }
+    snapshot["aws_access_key_id"] = str(values.get("aws_access_key_id") or "")
+    configured = values.get("aws_secret_access_key_configured")
+    if configured is None:
+        configured = bool(values.get("aws_secret_access_key"))
+    snapshot["aws_secret_access_key_configured"] = bool(configured)
+    return snapshot
 
 
 @router.put(
@@ -374,24 +384,50 @@ async def set_sandbox_archive_settings(
 ) -> SandboxArchiveSettingsResponse:
     """Atomically replace the archive policy; hosts apply it on their next beat.
 
-    The destination is fixed in server code and credentials are intentionally
-    absent. Brokers authenticate to AWS with their workload identity; this
-    route stores only the non-secret region, KMS key identity, owner fence and
-    bounded transfer limits.
+    The destination is fixed in server code. A saved access key is encrypted
+    at rest and is not returned. With no key, brokers authenticate with their
+    workload identity and still require the bucket owner and KMS key.
     """
     job_store = _require_store(store)
     previous = await job_store.host_pool.sandbox_archive_settings()
     settings = payload.model_dump(exclude={"revision"})
-    updated = await job_store.host_pool.set_sandbox_archive_settings(
-        expected_revision=payload.revision,
-        settings=settings,
-    )
+    if (
+        settings["aws_access_key_id"]
+        and not settings["aws_secret_access_key"]
+        and previous.get("aws_access_key_id") == settings["aws_access_key_id"]
+        and previous.get("aws_secret_access_key")
+    ):
+        settings["aws_secret_access_key"] = previous["aws_secret_access_key"]
+    try:
+        SandboxArchivePolicy(
+            enabled=settings["enabled"],
+            region=settings["region"],
+            kms_key_arn=settings["kms_key_arn"],
+            expected_bucket_owner=settings["expected_bucket_owner"],
+            aws_access_key_id=settings["aws_access_key_id"],
+            aws_secret_access_key=settings["aws_secret_access_key"],
+            max_archive_bytes=settings["max_archive_bytes"],
+            multipart_threshold_bytes=settings["multipart_threshold_bytes"],
+            multipart_part_bytes=settings["multipart_part_bytes"],
+            revision=payload.revision,
+        )
+    except SandboxArchivePolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        updated = await job_store.host_pool.set_sandbox_archive_settings(
+            expected_revision=payload.revision,
+            settings=settings,
+        )
+    except SandboxArchivePolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(
             status_code=409,
             detail="Sandbox archive settings changed since this page loaded; reload and retry.",
         )
     changed = updated.pop("_changed", False) is True
+    if "aws_secret_access_key_configured" not in updated:
+        updated["aws_secret_access_key_configured"] = bool(updated.get("aws_secret_access_key"))
     if changed:
         await log_admin_action(
             job_store,
@@ -406,6 +442,7 @@ async def set_sandbox_archive_settings(
             },
             actor_id=_admin_id,
         )
+    updated.pop("aws_secret_access_key", None)
     return SandboxArchiveSettingsResponse.model_validate(updated)
 
 

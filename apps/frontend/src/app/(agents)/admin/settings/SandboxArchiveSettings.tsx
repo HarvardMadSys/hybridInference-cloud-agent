@@ -20,12 +20,16 @@ const MAX_MULTIPART_PART_BYTES = 64 * MIB;
 const MAX_MULTIPART_PARTS = 10_000;
 
 const KMS_KEY_ARN = /^arn:([^:]+):kms:([a-z0-9-]+):([0-9]{12}):key\/([A-Za-z0-9-]+)$/;
+const ACCESS_KEY_ID = /^[A-Z0-9]{20}$/;
+const SECRET_ACCESS_KEY = /^[A-Za-z0-9/+=]{40}$/;
 
 interface Draft {
   enabled: boolean;
   region: string;
   kmsKeyArn: string;
   expectedBucketOwner: string;
+  awsAccessKeyId: string;
+  awsSecretAccessKey: string;
   maxArchiveBytes: string;
   multipartThresholdBytes: string;
   multipartPartBytes: string;
@@ -45,6 +49,8 @@ function initialDraft(settings: SandboxArchiveSettings): Draft {
     region: settings.region,
     kmsKeyArn: settings.kms_key_arn,
     expectedBucketOwner: settings.expected_bucket_owner,
+    awsAccessKeyId: settings.aws_access_key_id,
+    awsSecretAccessKey: '',
     maxArchiveBytes: String(settings.max_archive_bytes),
     multipartThresholdBytes: String(settings.multipart_threshold_bytes),
     multipartPartBytes: String(settings.multipart_part_bytes),
@@ -70,25 +76,51 @@ function wholeNumber(
 export function validateSandboxArchiveSettings(
   draft: Draft,
   revision: number,
+  saved: { accessKeyId: string; secretConfigured: boolean } = {
+    accessKeyId: '',
+    secretConfigured: false,
+  },
 ): { update: SandboxArchiveSettingsUpdate } | { errors: DraftErrors } {
   const errors: DraftErrors = {};
   const region = draft.region;
   const kmsKeyArn = draft.kmsKeyArn;
   const expectedBucketOwner = draft.expectedBucketOwner;
+  const awsAccessKeyId = draft.awsAccessKeyId;
+  const awsSecretAccessKey = draft.awsSecretAccessKey;
+  const keepingSecret =
+    saved.secretConfigured &&
+    awsAccessKeyId !== '' &&
+    awsAccessKeyId === saved.accessKeyId &&
+    awsSecretAccessKey === '';
+  const usingAccessKey =
+    ACCESS_KEY_ID.test(awsAccessKeyId) &&
+    (keepingSecret || SECRET_ACCESS_KEY.test(awsSecretAccessKey));
 
   if (draft.enabled && region === '') errors.region = 'Enter the AWS region.';
   else if (region !== '' && region.trim() !== region)
     errors.region = 'Remove leading or trailing spaces.';
   else if (region.length > 128) errors.region = 'Enter a region of at most 128 characters.';
 
-  if (draft.enabled && expectedBucketOwner === '') {
+  if (awsAccessKeyId !== '' && !ACCESS_KEY_ID.test(awsAccessKeyId)) {
+    errors.awsAccessKeyId = 'Enter a 20-character AWS access key ID.';
+  }
+  if ((awsAccessKeyId !== '' || awsSecretAccessKey !== '') && !keepingSecret) {
+    if (!SECRET_ACCESS_KEY.test(awsSecretAccessKey)) {
+      errors.awsSecretAccessKey = 'Enter the AWS secret access key.';
+    }
+  }
+  if (awsSecretAccessKey !== '' && awsAccessKeyId === '') {
+    errors.awsAccessKeyId = 'Enter the AWS access key ID.';
+  }
+
+  if (draft.enabled && !usingAccessKey && expectedBucketOwner === '') {
     errors.expectedBucketOwner = 'Enter the expected bucket owner.';
   } else if (expectedBucketOwner !== '' && !/^[0-9]{12}$/.test(expectedBucketOwner)) {
     errors.expectedBucketOwner = 'Enter a 12-digit AWS account ID.';
   }
 
   const kmsMatch = KMS_KEY_ARN.exec(kmsKeyArn);
-  if (draft.enabled && kmsKeyArn === '') {
+  if (draft.enabled && !usingAccessKey && kmsKeyArn === '') {
     errors.kmsKeyArn = 'Enter the customer-managed KMS key ARN.';
   } else if (kmsKeyArn.length > 2048) {
     errors.kmsKeyArn = 'Enter a KMS key ARN of at most 2048 characters.';
@@ -145,6 +177,8 @@ export function validateSandboxArchiveSettings(
       region,
       kms_key_arn: kmsKeyArn,
       expected_bucket_owner: expectedBucketOwner,
+      aws_access_key_id: awsAccessKeyId,
+      aws_secret_access_key: awsSecretAccessKey,
       max_archive_bytes: (maxArchive as { value: number }).value,
       multipart_threshold_bytes: (threshold as { value: number }).value,
       multipart_part_bytes: (part as { value: number }).value,
@@ -271,8 +305,9 @@ export default function SandboxArchiveSettingsCard({
         Sandbox archives
       </h2>
       <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-        Save the initial workspace and each broker-managed clean-stop state. AWS credentials are not
-        stored here; brokers use their workload identity.
+        Save the initial workspace and each broker-managed clean-stop state. An AWS access key is
+        stored encrypted for the workspace broker. Leave it blank to use each broker&apos;s workload
+        identity.
       </p>
       <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
         {rolloutText}
@@ -284,7 +319,10 @@ export default function SandboxArchiveSettingsCard({
         className="mt-5 space-y-5"
         onSubmit={(event) => {
           event.preventDefault();
-          const result = validateSandboxArchiveSettings(draft, editor.revision);
+          const result = validateSandboxArchiveSettings(draft, editor.revision, {
+            accessKeyId: editor.saved.awsAccessKeyId,
+            secretConfigured: settings.aws_secret_access_key_configured,
+          });
           if ('errors' in result) {
             setErrors(result.errors);
             return;
@@ -334,8 +372,9 @@ export default function SandboxArchiveSettingsCard({
                   id="archive-enabled-description"
                   className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400"
                 >
-                  Enabling requires bucket versioning, the matching KMS key, and broker write
-                  access.
+                  With an access key, uploads use that key. Without one, brokers use their workload
+                  identity and need the bucket owner and KMS key. Bucket versioning is required
+                  either way.
                 </span>
               </span>
             </label>
@@ -373,6 +412,64 @@ export default function SandboxArchiveSettingsCard({
                   className={INPUT}
                 />
                 <ErrorText id="archive-region-error" error={errors.region} />
+              </label>
+
+              <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                AWS access key ID
+                <input
+                  type="text"
+                  value={draft.awsAccessKeyId}
+                  disabled={busy}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label="AWS access key ID"
+                  aria-invalid={errors.awsAccessKeyId !== undefined}
+                  aria-describedby={
+                    errors.awsAccessKeyId ? 'archive-access-key-error' : 'archive-access-key-hint'
+                  }
+                  onChange={(event) => set('awsAccessKeyId', event.target.value)}
+                  placeholder="AKIAIOSFODNN7EXAMPLE"
+                  className={INPUT}
+                />
+                <span
+                  id="archive-access-key-hint"
+                  className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
+                >
+                  Use this instead of the bucket owner and KMS key.
+                </span>
+                <ErrorText id="archive-access-key-error" error={errors.awsAccessKeyId} />
+              </label>
+
+              <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                AWS secret access key
+                <input
+                  type="password"
+                  value={draft.awsSecretAccessKey}
+                  disabled={busy}
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  aria-label="AWS secret access key"
+                  aria-invalid={errors.awsSecretAccessKey !== undefined}
+                  aria-describedby={
+                    errors.awsSecretAccessKey
+                      ? 'archive-secret-key-error'
+                      : 'archive-secret-key-hint'
+                  }
+                  onChange={(event) => set('awsSecretAccessKey', event.target.value)}
+                  placeholder={
+                    settings.aws_secret_access_key_configured
+                      ? 'Leave blank to keep the saved secret'
+                      : 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+                  }
+                  className={INPUT}
+                />
+                <span
+                  id="archive-secret-key-hint"
+                  className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
+                >
+                  Write-only. It is not shown again after saving.
+                </span>
+                <ErrorText id="archive-secret-key-error" error={errors.awsSecretAccessKey} />
               </label>
 
               <label className="text-sm font-medium text-gray-800 dark:text-gray-200">

@@ -82,12 +82,14 @@ never reactivates an old environment value.
 Configure sandbox archives only in **Admin → Settings → Sandbox**. Cloud
 Agent stores them as one revisioned policy in the Agent database. There is no
 `AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
-`s3://freeinference/cloud-agent/sandbox`; the saved policy contains enablement,
-region, KMS key ARN, expected bucket owner, and bounded upload sizes, but no AWS
-credential. Workspace brokers authenticate with their deployment workload
-identity through the standard AWS SDK credential chain. See
-[Sandbox archives](docs/operations.md#sandbox-archives) for IAM, bucket
-versioning, rollout, and lifecycle semantics.
+`s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
+region, bounded upload sizes, and either an AWS access key or the workload
+identity fields (customer-managed KMS key ARN and expected bucket owner). The
+secret access key is encrypted with the settings encryption key and is not
+returned by the admin API. With no access key, workspace brokers authenticate
+with their deployment workload identity through the standard AWS SDK credential
+chain. See [Sandbox archives](docs/operations.md#sandbox-archives) for IAM,
+bucket versioning, rollout, and lifecycle semantics.
 
 The database also stores the control-plane runtime identity, signing/encryption
 keys, broker credentials, cookie/proxy policy, MCP target policy, and default

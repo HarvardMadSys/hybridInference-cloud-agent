@@ -25,6 +25,11 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.sandbox_archive_credentials import (
+    archive_settings_payload,
+    load_stored_archive_policy,
+    seal_archive_storage,
+)
 from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,
@@ -884,7 +889,7 @@ class PostgresHostPoolRepository:
                 """
             )
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(
+                archive_policy = load_stored_archive_policy(
                     {}
                     if archive_row is None
                     else {
@@ -1073,12 +1078,11 @@ class PostgresHostPoolRepository:
         if row is None:
             # The baseline normally creates the singleton. Keep a missing row
             # readable during restore/bootstrap; the first write recreates it.
-            policy = SandboxArchivePolicy()
-            return {**policy.as_dict(), "updated_at": None}
+            return archive_settings_payload(SandboxArchivePolicy(), None)
         raw = dict(load_json(row["sandbox_archive_settings"]) or {})
         raw["revision"] = row["sandbox_archive_revision"]
-        policy = SandboxArchivePolicy.from_mapping(raw)
-        return {**policy.as_dict(), "updated_at": row["sandbox_archive_updated_at"]}
+        policy = load_stored_archive_policy(raw)
+        return archive_settings_payload(policy, row["sandbox_archive_updated_at"])
 
     async def set_sandbox_archive_settings(
         self,
@@ -1101,15 +1105,15 @@ class PostgresHostPoolRepository:
             assert current is not None
             current_raw = dict(load_json(current["sandbox_archive_settings"]) or {})
             current_raw["revision"] = current["sandbox_archive_revision"]
-            current_policy = SandboxArchivePolicy.from_mapping(current_raw)
+            current_policy = load_stored_archive_policy(current_raw)
             requested = SandboxArchivePolicy.from_mapping(
                 {**dict(settings), "revision": current_policy.revision}
             )
-            current_response = {
-                **current_policy.as_dict(),
-                "updated_at": current["sandbox_archive_updated_at"],
-                "_changed": False,
-            }
+            current_response = archive_settings_payload(
+                current_policy,
+                current["sandbox_archive_updated_at"],
+                _changed=False,
+            )
             if expected_revision > current_policy.revision:
                 return None
             if requested.as_storage_dict() == current_policy.as_storage_dict():
@@ -1131,10 +1135,10 @@ class PostgresHostPoolRepository:
                 WHERE id
                 RETURNING sandbox_archive_updated_at
                 """,
-                json.dumps(policy.as_storage_dict()),
+                json.dumps(seal_archive_storage(policy.as_storage_dict())),
                 policy.revision,
             )
-        return {**policy.as_dict(), "updated_at": updated_at, "_changed": True}
+        return archive_settings_payload(policy, updated_at, _changed=True)
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:
         """Pin new-chat placement to one host, or unpin with ``None``.

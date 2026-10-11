@@ -1922,9 +1922,10 @@ def create_app(
     ) -> dict[str, object]:
         """Apply one complete DB policy and confirm its exact revision.
 
-        This authenticated runner-to-broker channel never transports AWS
-        credentials. The fixed destination and broker workload identity remain
-        the only S3 authority.
+        This authenticated runner-to-broker channel may carry one saved AWS
+        access key. The broker keeps it in memory for S3 and never writes it
+        into a sandbox marker. With no key, the broker's workload identity
+        remains the S3 authority. The destination stays fixed.
         """
         if archive_controller is None:
             raise HTTPException(

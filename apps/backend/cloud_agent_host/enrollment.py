@@ -407,7 +407,7 @@ def heartbeat(
             archive_policy = SandboxArchivePolicy.from_mapping(raw_archive_settings)
         except SandboxArchivePolicyError as exc:
             raise EnrollmentError("heartbeat returned invalid sandbox archive settings") from exc
-        archive_settings = archive_policy.as_dict()
+        archive_settings = archive_policy.as_broker_dict()
         updated_at = raw_archive_settings.get("updated_at")
         if isinstance(updated_at, str):
             archive_settings["updated_at"] = updated_at

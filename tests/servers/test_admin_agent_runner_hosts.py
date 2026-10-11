@@ -9,6 +9,7 @@ actually opens.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -710,8 +711,11 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
     assert response.json() | {"updated_at": None} == {
         **_archive_policy(revision=1),
         "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+        "aws_access_key_id": "",
+        "aws_secret_access_key_configured": False,
         "updated_at": None,
     }
+    assert "aws_secret_access_key" not in response.json()
     assert store.audit[-1]["action"] == "agent.sandbox_archive_settings.set"
     assert store.audit[-1]["details"] == {
         "old_revision": 0,
@@ -721,13 +725,16 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
             "region": "",
             "kms_key_arn": "",
             "expected_bucket_owner": "",
+            "aws_access_key_id": "",
+            "aws_secret_access_key_configured": False,
             "max_archive_bytes": 2 * 1024**3,
             "multipart_threshold_bytes": 8 * 1024**2,
             "multipart_part_bytes": 8 * 1024**2,
         },
         "new_settings": {
             key: value for key, value in _archive_policy().items() if key != "revision"
-        },
+        }
+        | {"aws_access_key_id": "", "aws_secret_access_key_configured": False},
     }
 
     no_op = await client.put(
@@ -813,6 +820,48 @@ async def test_archive_policy_rejects_stale_or_unsafe_writes(admin_client):
     )
     assert bool_enabled.status_code == 422
     assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_stores_an_access_key_without_returning_the_secret(admin_client):
+    client, store = admin_client
+    secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    access_key = "AKIAIOSFODNN7EXAMPLE"
+    saved = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            kms_key_arn="",
+            expected_bucket_owner="",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret,
+        ),
+        headers=ADMIN,
+    )
+
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["aws_access_key_id"] == access_key
+    assert body["aws_secret_access_key_configured"] is True
+    assert "aws_secret_access_key" not in body
+    assert body["kms_key_arn"] == ""
+    assert body["expected_bucket_owner"] == ""
+    assert store.archive_settings["aws_secret_access_key"] == secret
+    assert secret not in json.dumps(store.audit[-1])
+
+    kept = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            revision=1,
+            kms_key_arn="",
+            expected_bucket_owner="",
+            aws_access_key_id=access_key,
+            aws_secret_access_key="",
+        ),
+        headers=ADMIN,
+    )
+    assert kept.status_code == 200
+    assert kept.json()["revision"] == 1
+    assert store.archive_settings["aws_secret_access_key"] == secret
 
 
 @pytest.mark.asyncio

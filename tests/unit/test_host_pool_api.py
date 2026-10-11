@@ -1101,8 +1101,12 @@ async def test_a_heartbeat_delivers_archive_policy_and_tracks_exact_broker_revis
     )
 
     assert response.status_code == 200
-    assert response.json()["sandbox_archive_settings"]["revision"] == 4
-    assert response.json()["sandbox_archive_settings"]["enabled"] is True
+    delivered = response.json()["sandbox_archive_settings"]
+    assert delivered["revision"] == 4
+    assert delivered["enabled"] is True
+    assert "aws_access_key_id" not in delivered
+    assert "aws_secret_access_key" not in delivered
+    assert "aws_secret_access_key_configured" not in delivered
     listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
     assert listed["hosts"][0]["sandbox_archive_settings_applied_revision"] == 4
 
