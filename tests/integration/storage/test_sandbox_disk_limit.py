@@ -55,7 +55,7 @@ async def test_disk_limit_upgrade_keeps_legacy_groups_unlimited_and_preserves_ev
         async with pool.acquire() as conn:
             before = [dict(row) for row in await conn.fetch("SELECT * FROM agent_sandboxes")]
         assert before
-        apply_migrations(config)
+        apply_migrations(config, "0041_sandbox_disk_limit")
         async with pool.acquire() as conn:
             after = [dict(row) for row in await conn.fetch("SELECT * FROM agent_sandboxes")]
             assert after == [{**row, "disk_limit_mib": 0} for row in before]
