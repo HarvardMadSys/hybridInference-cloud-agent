@@ -97,6 +97,15 @@ class Machine:
         self.runner: list[str] = []
         self.active = {"docker": True, "containerd": True}
         self.rsync_codes: list[int] = []
+        self.environments: list[dict[str, str]] = []
+        self.units = {
+            service: {
+                "LoadState": "loaded",
+                "ExecStart": f"{{ path=/usr/bin/{daemon} ; argv[]=/usr/bin/{daemon} ; ignore_errors=no ; }}",
+                "MainPID": "0",
+            }
+            for service, daemon in (("docker", "dockerd"), ("containerd", "containerd"))
+        }
 
     def logical(self, value: str) -> str:
         """Map redirected paths back to the node paths they stand for."""
@@ -105,6 +114,8 @@ class Machine:
     def run(self, args, **kwargs):
         args = [self.logical(str(arg)) for arg in args]
         self.calls.append(args)
+        if "env" in kwargs:
+            self.environments.append(kwargs["env"].copy())
         out = ""
         code = 0
         if args[:2] == ["mountpoint", "-q"]:
@@ -133,6 +144,8 @@ class Machine:
             self.active = {"docker": True, "containerd": True}
         elif args[:3] == ["systemctl", "is-active", "--quiet"]:
             code = 0 if self.active.get(args[3]) else 3
+        elif args[:2] == ["systemctl", "show"]:
+            out = "\n".join(f"{key}={value}" for key, value in self.units[args[2]].items())
         elif args[:2] == ["pgrep", "-x"]:
             code = 1
         elif args[0] == "rsync":
@@ -154,7 +167,7 @@ def machine(tmp_path, monkeypatch):
 
     def path(value="", *rest):
         value = str(value)
-        if value.startswith(("/var/lib", "/etc/fstab", "/etc/systemd", "/mydata")):
+        if value.startswith(("/var/lib", "/etc/", "/mydata", "/proc")):
             return original(str(node) + value, *rest)
         return original(value, *rest)
 
@@ -283,7 +296,11 @@ def test_initial_docker_metadata_is_preserved_and_requires_operator_cleanup(
     )
     assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
     assert (machine.root / "var/lib/docker/network").exists()
-    assert not [call for call in machine.calls if call[0] in {"docker", "mount", "systemctl"}]
+    assert not [
+        call
+        for call in machine.calls
+        if call[0] in {"docker", "mount", "systemctl"} and call[:2] != ["systemctl", "show"]
+    ]
 
 
 def test_non_docker_containerd_state_is_preserved_even_when_docker_is_empty(
@@ -300,7 +317,11 @@ def test_non_docker_containerd_state_is_preserved_even_when_docker_is_empty(
     assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
     assert state.read_bytes() == b"k8s.io workload state"
     assert (machine.root / "var/lib/docker/network").exists()
-    assert not [call for call in machine.calls if call[0] in {"mount", "systemctl", "apt-get"}]
+    assert not [
+        call
+        for call in machine.calls
+        if call[0] in {"mount", "systemctl", "apt-get"} and call[:2] != ["systemctl", "show"]
+    ]
 
 
 @pytest.mark.parametrize("store", ["docker", "containerd"])
@@ -356,7 +377,11 @@ def test_nonempty_unbound_store_never_activates_or_queries_an_unrelated_daemon(
     assert state.read_bytes() == b"retained sandbox data"
     assert not activations
     assert machine.active["docker"] is docker_active
-    assert not [call for call in machine.calls if call[0] in {"docker", "systemctl", "mount"}]
+    assert not [
+        call
+        for call in machine.calls
+        if call[0] in {"docker", "systemctl", "mount"} and call[:2] != ["systemctl", "show"]
+    ]
 
 
 def test_correctly_bound_existing_stores_are_retained_without_inventory(

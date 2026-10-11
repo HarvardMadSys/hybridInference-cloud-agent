@@ -280,7 +280,7 @@ describe('server acquisition UI', () => {
   it.each([
     '',
     'data/sandboxes',
-    '/',
+    '////',
     '/mnt/data//sandboxes',
     '/mnt/./data',
     '/mnt/../data',
@@ -312,6 +312,28 @@ describe('server acquisition UI', () => {
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.getComputeOperations).not.toHaveBeenCalled();
   });
+
+  it.each(['/', ' / '])(
+    'rejects root storage path %j without falling back to defaults',
+    async (path) => {
+      renderAdd(vi.fn(), catalog, []);
+      fillSshForm();
+      const storage = screen.getByLabelText('Sandbox storage path');
+      fireEvent.change(storage, { target: { value: path } });
+      fireEvent.change(screen.getByLabelText('SSH private key'), {
+        target: { value: 'unsaved-private-key' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Sandbox storage path must point to a dedicated mounted data disk outside system and service directories.',
+      );
+      expect(storage).toHaveAttribute('aria-invalid', 'true');
+      expect(storage).toHaveFocus();
+      expect(api.saveComputeConnection).not.toHaveBeenCalled();
+      expect(api.createComputeServer).not.toHaveBeenCalled();
+      expect(api.getComputeOperations).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });

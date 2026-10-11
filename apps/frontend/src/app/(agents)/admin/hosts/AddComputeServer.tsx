@@ -54,13 +54,14 @@ function parseSandboxStoragePath(value: string): string {
   if (path.length > 4096) {
     return invalid('Sandbox storage path must be 4096 characters or fewer.');
   }
-  if (!/^\/[A-Za-z0-9/_-]+$/.test(path) || path.includes('//')) {
+  if (!/^\/[A-Za-z0-9/_-]*$/.test(path) || path.includes('//')) {
     return invalid(
       'Sandbox storage path must be an absolute path using letters, numbers, /, _ or - with no repeated separators.',
     );
   }
-  const normalized = path.replace(/\/$/, '');
+  const normalized = path.replace(/\/$/, '') || '/';
   const systemRoots = [
+    '/',
     '/home',
     '/media',
     '/mnt',
@@ -93,7 +94,7 @@ function parseSandboxStoragePath(value: string): string {
     protectedTrees.some((root) => normalized === root || normalized.startsWith(`${root}/`))
   ) {
     return invalid(
-      'Sandbox storage path must point to a mounted data disk outside system and service directories.',
+      'Sandbox storage path must point to a dedicated mounted data disk outside system and service directories.',
     );
   }
   return normalized;

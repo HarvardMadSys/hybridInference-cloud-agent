@@ -19,7 +19,7 @@ from cloud_agent.providers.compute.host_bootstrap import _PREFLIGHT
 @pytest.fixture
 def disk(tmp_path, monkeypatch):
     root = tmp_path / "node"
-    for directory in ("etc", "dev", "var/lib", "mydata"):
+    for directory in ("etc/docker", "etc/containerd", "dev", "var/lib", "mydata", "proc"):
         (root / directory).mkdir(parents=True)
     (root / "etc/os-release").write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
     (root / "etc/machine-id").write_text("stable-node")
@@ -35,6 +35,14 @@ def disk(tmp_path, monkeypatch):
         socket_active=True,
         daemon_root="/var/lib/docker",
         readonly=set(),
+        units={
+            service: {
+                "LoadState": "loaded",
+                "ExecStart": f"{{ path=/usr/bin/{daemon} ; argv[]=/usr/bin/{daemon} ; ignore_errors=no ; }}",
+                "MainPID": "0",
+            }
+            for service, daemon in (("docker", "dockerd"), ("containerd", "containerd"))
+        },
     )
     original_path = pathlib.Path
     original_samefile = os.path.samefile
@@ -45,7 +53,7 @@ def disk(tmp_path, monkeypatch):
 
     def isolated_path(value="", *rest):
         value = str(value)
-        if value.startswith(("/etc/", "/dev/", "/var/lib", "/mydata", "/alias")):
+        if value.startswith(("/etc/", "/dev/", "/var/lib", "/mydata", "/alias", "/proc")):
             return original_path(str(root) + value, *rest)
         return original_path(value, *rest)
 
@@ -75,6 +83,9 @@ def disk(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(command, 0)
         if command[:2] == ["mountpoint", "-q"]:
             return subprocess.CompletedProcess(command, 0 if command[2] in machine.mounted else 1)
+        if command[:2] == ["systemctl", "show"]:
+            output = "\n".join(f"{key}={value}" for key, value in machine.units[command[2]].items())
+            return subprocess.CompletedProcess(command, 0, output, "")
         if command in (
             ["docker", "ps", "-aq"],
             ["docker", "image", "ls", "-aq"],
@@ -110,9 +121,12 @@ def snapshot(root):
     }
 
 
-def inspect(disk, monkeypatch, capsys, *, selected="/mydata"):
+def inspect(disk, monkeypatch, capsys, *, selected="/mydata", install=True):
     before = snapshot(disk.root)
-    monkeypatch.setattr("sys.argv", ["preflight", json.dumps({"data_mount": selected})])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["preflight", json.dumps({"data_mount": selected, "install_prerequisites": install})],
+    )
     exec(_PREFLIGHT, {})
     assert snapshot(disk.root) == before
     result = json.loads(capsys.readouterr().out)

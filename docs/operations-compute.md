@@ -75,7 +75,10 @@ nodes, where the same mount must exist. A missing or read-only mount, symlink or
 conflicting existing store blocks setup. Any nonempty Docker or containerd store
 outside the selected mount also blocks setup. Preflight does not query or start
 these daemons, and bootstrap never deletes or moves existing sandbox data to a
-different disk. Daemon startup requires the configured disk and bind mount after
+different disk. Docker and containerd must use their default `/var/lib/docker`
+and `/var/lib/containerd` data directories. Setup rejects custom daemon storage
+configuration before restarting services.
+Daemon startup requires the configured disk and bind mount after
 a reboot. Older API clients that omit `sandbox_storage_path` continue to
 use the operator profile's `data_mount` configuration.
 

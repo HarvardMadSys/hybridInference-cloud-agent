@@ -233,7 +233,10 @@ async def test_storage_preflight_uses_effective_disk_and_preserves_failure_codes
     command = shlex.split(transport.run.call_args.args[1])
     assert command[:2] == ["python3", "-c"]
     assert command[2] == _PREFLIGHT
-    assert json.loads(command[3]) == {"data_mount": selected_path or "/profile-disk"}
+    assert json.loads(command[3]) == {
+        "data_mount": selected_path or "/profile-disk",
+        "install_prerequisites": True,
+    }
     assert result.ready is (blocked is None)
     assert result.blocked_reasons == (() if blocked is None else (blocked,))
 
