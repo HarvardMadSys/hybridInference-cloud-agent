@@ -262,6 +262,11 @@ export interface McpInvocationApi {
   connection_id: number;
   connection_label: string | null;
   capability_name: string;
+  capability_kind: McpCapabilityKind;
+  /** Null once a newer discovery replaced the catalogue the call was held under. */
+  capability_description: string | null;
+  /** Server-supplied hints (title, readOnlyHint, ...): untrusted, display only. */
+  capability_annotations: Record<string, unknown>;
   status: McpInvocationStatus;
   arguments_digest: string;
   /** Null when the platform could not decode the stored body. */

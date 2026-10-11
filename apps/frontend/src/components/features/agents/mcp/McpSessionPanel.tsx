@@ -108,10 +108,143 @@ function uniqueBindingAliases(bindings: McpBindingApi[]): McpBindingApi[] {
   });
 }
 
-/** A short, human phrase for a held call's arguments. */
-function formatArguments(invocation: McpInvocationApi): string {
-  if (!invocation.arguments) return 'The arguments are not readable on this deployment.';
-  return JSON.stringify(invocation.arguments, null, 2);
+/** What a held call does to its capability, as the card's sentence puts it. */
+const INVOCATION_VERBS: Record<McpCapabilityKind, string> = {
+  tool: 'call',
+  prompt: 'use the prompt',
+  resource: 'read',
+  resource_template: 'read',
+};
+
+/** The name a held call's server goes by on its card. */
+function connectionName(invocation: McpInvocationApi): string {
+  return invocation.connection_label ?? `Connection ${invocation.connection_id}`;
+}
+
+/** What the held call does, in the sentence its card and notices use. */
+function invocationAction(invocation: McpInvocationApi): string {
+  return `${INVOCATION_VERBS[invocation.capability_kind] ?? 'call'} ${invocation.capability_name}`;
+}
+
+/**
+ * The server's own hints about a capability, phrased for the person deciding.
+ *
+ * Only hints the server stated are shown: the protocol's defaults would label
+ * every unannotated tool destructive, which says nothing about the tool.
+ */
+function capabilityHints(annotations: Record<string, unknown>): string[] {
+  const hints: string[] = [];
+  if (annotations.readOnlyHint === true) hints.push('Read-only');
+  else if (
+    annotations.destructiveHint === true ||
+    (annotations.readOnlyHint === false && annotations.destructiveHint !== false)
+  )
+    hints.push('May modify or delete data');
+  else if (annotations.readOnlyHint === false) hints.push('Makes changes');
+  if (annotations.openWorldHint === true) hints.push('Reaches external services');
+  return hints;
+}
+
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+
+/** A short duration: `45 s`, `4 min`, `2 h`. */
+function duration(ms: number, round: (value: number) => number): string {
+  if (ms < MINUTE) return `${Math.max(1, round(ms / SECOND))} s`;
+  if (ms < HOUR) return `${round(ms / MINUTE)} min`;
+  return `${round(ms / HOUR)} h`;
+}
+
+/** The reader's local date and time for a hover title, or the raw value. */
+function localTime(iso: string): string {
+  const time = Date.parse(iso);
+  return Number.isFinite(time) ? new Date(time).toLocaleString() : iso;
+}
+
+/** When a held call was made and how long it has left, kept current while it waits. */
+function HeldCallTiming({
+  createdAt,
+  expiresAt,
+}: {
+  createdAt: string | null;
+  expiresAt: string | null;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), SECOND);
+    return () => clearInterval(timer);
+  }, []);
+  const created = Date.parse(createdAt ?? '');
+  const expires = Date.parse(expiresAt ?? '');
+  const parts: React.ReactNode[] = [];
+  if (createdAt && Number.isFinite(created)) {
+    const elapsed = now - created;
+    parts.push(
+      <time key="created" dateTime={createdAt} title={localTime(createdAt)}>
+        Requested {elapsed < 10 * SECOND ? 'just now' : `${duration(elapsed, Math.floor)} ago`}
+      </time>,
+    );
+  }
+  if (expiresAt && Number.isFinite(expires)) {
+    const left = expires - now;
+    parts.push(
+      <time key="expires" dateTime={expiresAt} title={localTime(expiresAt)}>
+        {left > 0 ? `Expires in ${duration(left, Math.ceil)}` : 'Expired'}
+      </time>,
+    );
+  }
+  if (!parts.length) return null;
+  return (
+    <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
+      {parts.flatMap((part, index) => (index ? [' · ', part] : [part]))}
+    </p>
+  );
+}
+
+/** What the server says the held capability is, and its hints. Untrusted text. */
+function HeldCapabilityDetails({ invocation }: { invocation: McpInvocationApi }) {
+  const annotations = invocation.capability_annotations ?? {};
+  const title = typeof annotations.title === 'string' ? annotations.title.trim() : '';
+  const description = invocation.capability_description?.trim() ?? '';
+  const hints = capabilityHints(annotations);
+  if (!description && !hints.length && (!title || title === invocation.capability_name)) {
+    return null;
+  }
+  return (
+    <div className="mt-2 text-xs text-gray-700 dark:text-gray-300">
+      {title && title !== invocation.capability_name ? (
+        <p className="font-medium">{title}</p>
+      ) : null}
+      {description ? (
+        <p className="mt-0.5 max-h-24 overflow-y-auto whitespace-pre-line">{description}</p>
+      ) : null}
+      {hints.length ? (
+        <p className="mt-1 text-gray-500 dark:text-gray-400">Server hints: {hints.join(' · ')}</p>
+      ) : null}
+    </div>
+  );
+}
+
+/** The arguments a held call would be sent with, or why there are none to show. */
+function HeldCallArguments({ invocation }: { invocation: McpInvocationApi }) {
+  const { arguments: args } = invocation;
+  return (
+    <>
+      <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-amber-800 dark:text-amber-300">
+        Arguments
+      </p>
+      {args && Object.keys(args).length ? (
+        <pre className="mt-1 max-h-48 overflow-auto rounded-lg bg-white/70 dark:bg-black/20 p-2 font-mono text-xs text-gray-800 dark:text-gray-200">
+          {JSON.stringify(args, null, 2)}
+        </pre>
+      ) : (
+        <p className="mt-1 text-xs text-gray-700 dark:text-gray-300">
+          {args ? 'No arguments.' : 'The arguments are not readable on this deployment.'}
+        </p>
+      )}
+    </>
+  );
 }
 
 const INVOCATION_PROGRESS: Record<McpInvocationStatus, number> = {
@@ -277,6 +410,13 @@ function McpSessionPanelContent({
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const selectionOperation = useRef(false);
+  // Calls approved with "Always allow" whose rule is not saved yet. Saving a
+  // server's rules expires every call still waiting on it, the approved one
+  // included, so each rule waits until nothing on its server is in flight.
+  const alwaysAllow = useRef(new Map<number, McpInvocationApi>());
+  // Each save reads the rules and writes them back; one at a time, so two
+  // rules for the same server cannot overwrite each other.
+  const alwaysAllowSaves = useRef(Promise.resolve());
 
   const load = useCallback(async () => {
     if (selectionOperation.current) return;
@@ -438,12 +578,15 @@ function McpSessionPanelContent({
     );
   }
 
-  async function decide(invocation: McpInvocationApi, approve: boolean) {
+  async function decide(invocation: McpInvocationApi, approve: boolean, always = false) {
     reviewedInvocations.current.add(invocation.id);
     setDecidingId(invocation.id);
     setError(null);
+    setNotice(null);
     try {
       const result = await decideMcpInvocation(invocation.id, approve);
+      if (always && result.status === 'approved')
+        alwaysAllow.current.set(invocation.id, invocation);
       setInvocations((current) => mergeInvocations(current, [result]));
     } catch (cause: unknown) {
       // A lost race (the call expired or another tab decided it) is reported
@@ -453,6 +596,63 @@ function McpSessionPanelContent({
       setDecidingId(null);
     }
   }
+
+  /** Stop asking for this capability in this conversation. */
+  const allowFromNowOn = useCallback(
+    async (invocation: McpInvocationApi) => {
+      const key = selectionKey(invocation.capability_kind ?? 'tool');
+      const name = invocation.capability_name;
+      try {
+        // Read the rules fresh: the panel may not have loaded them, and a
+        // stale copy would undo a change made since.
+        const { bindings: current } = await getMcpThreadBindings(threadId);
+        const binding = current.find((item) => item.connection_id === invocation.connection_id);
+        if (!binding) {
+          throw new Error(`${connectionName(invocation)} is no longer in this conversation.`);
+        }
+        const payload: McpBindingRequest = {
+          connection_id: binding.connection_id,
+          alias: binding.alias,
+          enabled: binding.enabled,
+          use_defaults: binding.selection_pending,
+          tools: binding.tools,
+          resources: binding.resources,
+          prompts: binding.prompts,
+        };
+        payload[key] = { ...binding[key], [name]: 'allow' };
+        const response = await updateMcpThreadBinding(threadId, payload);
+        setBindings(response.bindings);
+        // Keep unsaved edits to other capabilities; only this one changed.
+        setSelections((drafts) => {
+          const draft = drafts[invocation.connection_id];
+          if (!draft) return drafts;
+          return {
+            ...drafts,
+            [invocation.connection_id]: { ...draft, [key]: { ...draft[key], [name]: 'allow' } },
+          };
+        });
+        setNotice(
+          `${connectionName(invocation)} can now ${invocationAction(invocation)} without asking in this conversation.`,
+        );
+      } catch (cause: unknown) {
+        setError(cause instanceof Error ? cause.message : 'Could not save the permission.');
+      }
+    },
+    [threadId],
+  );
+
+  useEffect(() => {
+    for (const [id, invocation] of alwaysAllow.current) {
+      const inFlight = invocations.some(
+        (call) =>
+          call.connection_id === invocation.connection_id &&
+          (call.status === 'pending' || call.status === 'approved'),
+      );
+      if (inFlight) continue;
+      alwaysAllow.current.delete(id);
+      alwaysAllowSaves.current = alwaysAllowSaves.current.then(() => allowFromNowOn(invocation));
+    }
+  }, [invocations, allowFromNowOn]);
 
   if (!active && !loaded) {
     if (approvalsOnly) return null;
@@ -466,6 +666,11 @@ function McpSessionPanelContent({
       {approvalsOnly && error ? (
         <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">
           {error}
+        </p>
+      ) : null}
+      {approvalsOnly && notice ? (
+        <p role="status" className="mb-3 text-sm text-emerald-700 dark:text-emerald-400">
+          {notice}
         </p>
       ) : null}
       {pending.length || decided.length ? (
@@ -485,18 +690,12 @@ function McpSessionPanelContent({
               className="mt-3 rounded-xl border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 p-3"
             >
               <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-                {invocation.connection_label ?? `Connection ${invocation.connection_id}`} wants to
-                call {invocation.capability_name}
+                {connectionName(invocation)} wants to {invocationAction(invocation)}
               </p>
-              {invocation.expires_at ? (
-                <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
-                  Expires {invocation.expires_at}
-                </p>
-              ) : null}
-              <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-white/70 dark:bg-black/20 p-2 font-mono text-xs text-gray-800 dark:text-gray-200">
-                {formatArguments(invocation)}
-              </pre>
-              <div className="mt-3 flex gap-2">
+              <HeldCallTiming createdAt={invocation.created_at} expiresAt={invocation.expires_at} />
+              <HeldCapabilityDetails invocation={invocation} />
+              <HeldCallArguments invocation={invocation} />
+              <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
                   disabled={decidingId === invocation.id}
@@ -504,6 +703,15 @@ function McpSessionPanelContent({
                   className="rounded-lg bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-sm font-medium text-white dark:text-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Approve
+                </button>
+                <button
+                  type="button"
+                  disabled={decidingId === invocation.id}
+                  onClick={() => void decide(invocation, true, true)}
+                  title={`Approve, and let ${connectionName(invocation)} ${invocationAction(invocation)} without asking in this conversation`}
+                  className="rounded-lg border border-gray-300 dark:border-white/20 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Always allow
                 </button>
                 <button
                   type="button"

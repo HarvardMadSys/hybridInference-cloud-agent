@@ -1447,6 +1447,69 @@ class TestInvocationDecisions:
         with _client(FakeStore()) as client:
             assert client.get("/v1/agent/mcp/invocations").status_code == 400
 
+    def _catalogue(self, store: FakeStore, connection_id: int, revision: int) -> None:
+        """Store a discovered catalogue under ``revision``."""
+        store.capabilities[connection_id] = {
+            "connection_id": connection_id,
+            "capability_revision": revision,
+            "tools": [
+                {
+                    "name": "create_issue",
+                    "description": "Open an issue in a repository.",
+                    "input_schema": {"type": "object"},
+                    "annotations": {"title": "Create issue", "destructiveHint": False},
+                }
+            ],
+            "resources": [],
+            "resource_templates": [],
+            "prompts": [
+                {"name": "create_issue", "description": "A prompt of the same name."},
+            ],
+        }
+
+    def test_a_held_call_carries_what_the_server_says_it_does(self) -> None:
+        """The owner decides on the tool's own description, not only its name."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(capability_kind="tool", capability_revision=3)
+        self._catalogue(store, connection_id, revision=3)
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
+        assert response.status_code == 200
+        view = response.json()["invocations"][0]
+        assert view["capability_kind"] == "tool"
+        assert view["capability_description"] == "Open an issue in a repository."
+        assert view["capability_annotations"] == {"title": "Create issue", "destructiveHint": False}
+
+    def test_a_replaced_catalogue_does_not_describe_an_older_call(self) -> None:
+        """A newer discovery may describe a different tool under the same name."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(capability_kind="tool", capability_revision=2)
+        self._catalogue(store, connection_id, revision=3)
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
+        view = response.json()["invocations"][0]
+        assert view["capability_description"] is None
+        assert view["capability_annotations"] == {}
+
+    def test_a_held_call_is_described_from_its_own_surface(self) -> None:
+        """A prompt and a tool may share a name; the call's kind picks which."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(capability_kind="prompt", capability_revision=3)
+        self._catalogue(store, connection_id, revision=3)
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision", json={"approve": True}
+            )
+        view = response.json()
+        assert view["capability_kind"] == "prompt"
+        assert view["capability_description"] == "A prompt of the same name."
+
 
 class TestConnectors:
     """Registering the user's own machine, and what may be routed to it."""

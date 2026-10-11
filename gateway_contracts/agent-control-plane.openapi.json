@@ -9730,6 +9730,27 @@
             "title": "Arguments Digest",
             "type": "string"
           },
+          "capability_annotations": {
+            "additionalProperties": true,
+            "title": "Capability Annotations",
+            "type": "object"
+          },
+          "capability_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability Description"
+          },
+          "capability_kind": {
+            "default": "tool",
+            "title": "Capability Kind",
+            "type": "string"
+          },
           "capability_name": {
             "title": "Capability Name",
             "type": "string"

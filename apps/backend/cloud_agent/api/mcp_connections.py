@@ -441,6 +441,14 @@ class InvocationView(BaseModel):
     connection_id: int
     connection_label: str | None = None
     capability_name: str
+    capability_kind: str = CapabilityKind.TOOL.value
+    #: What the server says the capability does, from the catalogue the call
+    #: was held under. ``None`` once a newer discovery has replaced it, so a
+    #: card never explains a call with a description it was not made against.
+    capability_description: str | None = None
+    #: The server's hints (title, read-only, destructive, ...). Untrusted and
+    #: for display only; they never decide authorization.
+    capability_annotations: dict[str, Any] = Field(default_factory=dict)
     status: str
     arguments_digest: str
     arguments: dict[str, Any] | None = None
@@ -526,6 +534,15 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
+
+
+#: Where each capability kind is kept in a stored snapshot, in display order.
+_SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
+    ("tools", CapabilityKind.TOOL),
+    ("resources", CapabilityKind.RESOURCE),
+    ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
+    ("prompts", CapabilityKind.PROMPT),
+)
 
 
 def _capability_view(entry: Mapping[str, Any], kind: CapabilityKind) -> dict[str, Any]:
@@ -947,12 +964,7 @@ async def get_capabilities(
     if snapshot is None:
         return []
     rendered: list[dict[str, Any]] = []
-    for key, kind in (
-        ("tools", CapabilityKind.TOOL),
-        ("resources", CapabilityKind.RESOURCE),
-        ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
-        ("prompts", CapabilityKind.PROMPT),
-    ):
+    for key, kind in _SNAPSHOT_SURFACES:
         rendered.extend(_capability_view(item, kind) for item in snapshot.get(key) or [])
     return rendered
 
@@ -1798,7 +1810,12 @@ async def list_invocations(
         statuses=statuses,
         user_id=user["user_id"],
     )
-    return InvocationsResponse(invocations=[await _invocation_view(job_store, row) for row in rows])
+    # One catalogue read per connection, not per row: a history page is mostly
+    # calls to the same few servers, and a catalogue carries every schema.
+    snapshots: dict[int, Mapping[str, Any] | None] = {}
+    return InvocationsResponse(
+        invocations=[await _invocation_view(job_store, row, snapshots) for row in rows]
+    )
 
 
 @router.post("/invocations/{invocation_id}/decision", response_model=InvocationView)
@@ -1830,9 +1847,14 @@ async def decide_invocation(
 
 
 async def _invocation_view(
-    job_store: _McpConnectionsStorage, row: Mapping[str, Any]
+    job_store: _McpConnectionsStorage,
+    row: Mapping[str, Any],
+    snapshots: dict[int, Mapping[str, Any] | None] | None = None,
 ) -> InvocationView:
-    """Render one invocation, including the arguments the owner is approving."""
+    """Render one invocation, including the arguments the owner is approving.
+
+    ``snapshots`` caches catalogue reads by connection across one listing.
+    """
     from cloud_agent.mcp.host import decode_arguments
     from cloud_agent.mcp.invocations import recovery_note
     from cloud_agent.mcp.models import Invocation, InvocationStatus as Status
@@ -1845,7 +1867,16 @@ async def _invocation_view(
             )
         except Exception:
             arguments = None
-    connection = await job_store.mcp.get_mcp_connection(connection_id=int(row["connection_id"]))
+    connection_id = int(row["connection_id"])
+    connection = await job_store.mcp.get_mcp_connection(connection_id=connection_id)
+    if snapshots is None:
+        snapshots = {}
+    if connection_id not in snapshots:
+        snapshots[connection_id] = await job_store.mcp.get_mcp_capabilities(
+            connection_id=connection_id
+        )
+    kind = str(row.get("capability_kind") or CapabilityKind.TOOL.value)
+    capability = _held_capability(snapshots[connection_id], row, kind)
     invocation = Invocation(
         invocation_id=str(row["id"]),
         job_id=str(row["job_id"]),
@@ -1864,6 +1895,13 @@ async def _invocation_view(
         connection_id=int(row["connection_id"]),
         connection_label=str(connection["label"]) if connection else None,
         capability_name=str(row["capability_name"]),
+        capability_kind=kind,
+        capability_description=(
+            str(capability.get("description") or "") if capability is not None else None
+        ),
+        capability_annotations=(
+            dict(capability.get("annotations") or {}) if capability is not None else {}
+        ),
         status=str(row["status"]),
         arguments_digest=str(row["arguments_digest"]),
         arguments=arguments,
@@ -1873,6 +1911,28 @@ async def _invocation_view(
         result_summary=row.get("result_summary"),
         guidance=recovery_note(invocation),
     )
+
+
+def _held_capability(
+    snapshot: Mapping[str, Any] | None, row: Mapping[str, Any], kind: str
+) -> Mapping[str, Any] | None:
+    """The catalogue entry a held call names, if it is still the one it was held under.
+
+    A discovery that changed anything moves the capability revision, and a
+    call held under an older one cannot be dispatched on this approval. Its
+    entry in the newer catalogue may describe something else, so none is
+    returned rather than a description the call was not made against.
+    """
+    if snapshot is None or snapshot.get("capability_revision") != row.get("capability_revision"):
+        return None
+    key = next((key for key, surface in _SNAPSHOT_SURFACES if surface.value == kind), None)
+    if key is None:
+        return None
+    name = str(row["capability_name"])
+    for entry in snapshot.get(key) or []:
+        if isinstance(entry, Mapping) and str(entry.get("name") or "") == name:
+            return entry
+    return None
 
 
 def mcp_invocation_cipher() -> Any:
