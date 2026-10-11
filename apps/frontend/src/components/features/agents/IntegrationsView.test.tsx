@@ -30,6 +30,8 @@ vi.mock('@/lib/api/userMemory', () => ({
   getUserMemory: vi.fn(),
   updateUserMemory: vi.fn(),
   clearUserMemory: vi.fn(),
+  editUserMemoryEntry: vi.fn(),
+  deleteUserMemoryEntry: vi.fn(),
 }));
 
 // The MCP section loads its own connections; mocked empty so this file stays
@@ -77,6 +79,8 @@ const memory: UserMemoryView = {
       kind: 'preference',
       content: 'Use small pull requests.',
       source_job_id: 'job_memory_source',
+      source_repo: 'alice/toolbox',
+      user_edited: false,
       created_at: null,
     },
   ],

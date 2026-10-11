@@ -1,16 +1,20 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
 import { useAuth, useLocale } from '@/components/providers';
 import {
   clearUserMemory,
+  deleteUserMemoryEntry,
+  editUserMemoryEntry,
   getUserMemory,
   updateUserMemory,
+  type UserMemoryEntry,
   type UserMemoryView,
 } from '@/lib/api/userMemory';
+import { APIError } from '@/lib/utils/errors';
+import { UserMemoryEntryCard, type UserMemoryRequestResult } from './UserMemoryEntryCard';
 
-type Operation = 'refresh' | 'toggle' | 'clear';
+type Operation = 'refresh' | 'toggle' | 'clear' | 'edit' | 'delete';
 
 export function UserMemorySettings() {
   const { state } = useAuth();
@@ -25,11 +29,20 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
   const [pending, setPending] = useState<Operation | null>(null);
   const [error, setError] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [editingEntries, setEditingEntries] = useState(() => new Map<string, UserMemoryEntry>());
+  const editingEntriesRef = useRef(editingEntries);
+  editingEntriesRef.current = editingEntries;
   const request = useRef<AbortController | null>(null);
   const mounted = useRef(false);
   const clearButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const wasConfirming = useRef(false);
+  const memoriesHeading = useRef<HTMLHeadingElement>(null);
+  const [removedEntries, setRemovedEntries] = useState(0);
+
+  useEffect(() => {
+    if (removedEntries) memoriesHeading.current?.focus();
+  }, [removedEntries]);
 
   useEffect(() => {
     if (confirmClear) confirmButton.current?.focus();
@@ -38,25 +51,49 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
   }, [confirmClear]);
 
   const run = useCallback(
-    async (operation: Operation, enabled?: boolean) => {
-      if (!userId) return;
+    async (
+      operation: Operation,
+      perform: (signal: AbortSignal) => Promise<UserMemoryView>,
+      showGlobalError = true,
+      refreshedEntryId?: string,
+    ): Promise<UserMemoryRequestResult> => {
+      if (!userId) return 'aborted';
       request.current?.abort();
       const controller = new AbortController();
       request.current = controller;
       setPending(operation);
       setError(false);
       try {
-        const next =
-          operation === 'toggle'
-            ? await updateUserMemory(enabled!, controller.signal)
-            : operation === 'clear'
-              ? await clearUserMemory(controller.signal)
-              : await getUserMemory(controller.signal);
-        if (!mounted.current || controller.signal.aborted) return;
+        const next = await perform(controller.signal);
+        if (!mounted.current || controller.signal.aborted) return 'aborted';
         setView(next);
+        setEditingEntries((current) => {
+          if (operation === 'clear') return new Map();
+          return new Map(
+            [...current].map(([id, snapshot]) => [
+              id,
+              next.memories.find((memory) => memory.id === id) ?? snapshot,
+            ]),
+          );
+        });
         if (operation === 'clear') setConfirmClear(false);
-      } catch {
-        if (mounted.current && !controller.signal.aborted) setError(true);
+        if (
+          operation === 'delete' ||
+          (refreshedEntryId &&
+            !next.memories.some((memory) => memory.id === refreshedEntryId) &&
+            !editingEntriesRef.current.has(refreshedEntryId))
+        )
+          setRemovedEntries((count) => count + 1);
+        return 'saved';
+      } catch (cause) {
+        if (!mounted.current || controller.signal.aborted) return 'aborted';
+        if (showGlobalError) setError(true);
+        if (cause instanceof APIError) {
+          if (cause.statusCode === 409) return 'conflict';
+          if (cause.statusCode === 400 || cause.statusCode === 422) return 'invalid';
+          if (cause.statusCode === 404) return 'missing';
+        }
+        return 'error';
       } finally {
         if (mounted.current && !controller.signal.aborted) setPending(null);
       }
@@ -66,7 +103,7 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
 
   useEffect(() => {
     mounted.current = true;
-    void run('refresh');
+    void run('refresh', getUserMemory);
     return () => {
       mounted.current = false;
       request.current?.abort();
@@ -81,6 +118,13 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
       view.portrait.preferred_runtime ||
       view.portrait.preferred_model);
   const updatedAt = view?.updated_at ? new Date(view.updated_at) : null;
+  const savedIds = new Set(view?.memories.map((memory) => memory.id));
+  // Keep keyed editor instances, and their local drafts, when a refresh removes
+  // their source. These owner-scoped snapshots never become saved memories.
+  const shownMemories = [
+    ...(view?.memories ?? []),
+    ...[...editingEntries.values()].filter((memory) => !savedIds.has(memory.id)),
+  ];
 
   return (
     <section
@@ -107,7 +151,7 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
               <p className="text-sm text-status-error">{t('settings.memory.error')}</p>
               <button
                 type="button"
-                onClick={() => void run('refresh')}
+                onClick={() => void run('refresh', getUserMemory)}
                 disabled={pending !== null}
                 className="ui-button ui-button-secondary mt-2 min-h-11"
               >
@@ -142,7 +186,10 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
                   type="checkbox"
                   role="switch"
                   checked={view.enabled}
-                  onChange={(event) => void run('toggle', event.target.checked)}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    void run('toggle', (signal) => updateUserMemory(enabled, signal));
+                  }}
                   disabled={pending !== null}
                   className="h-4 w-4 accent-crimson"
                 />
@@ -164,7 +211,7 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => void run('refresh')}
+                  onClick={() => void run('refresh', getUserMemory)}
                   disabled={pending !== null}
                   className="ui-button ui-button-secondary min-h-11"
                 >
@@ -201,7 +248,7 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
                     <button
                       ref={confirmButton}
                       type="button"
-                      onClick={() => void run('clear')}
+                      onClick={() => void run('clear', clearUserMemory)}
                       disabled={pending !== null}
                       className="ui-button ui-button-secondary min-h-11 text-status-error"
                     >
@@ -286,30 +333,52 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
                 </div>
 
                 <div>
-                  <h3 className="text-sm font-semibold text-foreground">
+                  <h3
+                    ref={memoriesHeading}
+                    tabIndex={-1}
+                    className="text-sm font-semibold text-foreground outline-none"
+                  >
                     {t('settings.memory.memories')}
                   </h3>
-                  {view.memories.length ? (
+                  <p className="mt-2 text-xs leading-relaxed text-muted">
+                    {t('settings.memory.entriesDescription')}
+                  </p>
+                  {shownMemories.length ? (
                     <ul className="mt-2 space-y-2">
-                      {view.memories.map((memory) => (
-                        <li key={memory.id} className="rounded-lg border border-border p-3">
-                          <span className="text-xs font-medium text-muted">
-                            {t(
-                              memory.kind === 'preference'
-                                ? 'settings.memory.preference'
-                                : 'settings.memory.task',
-                            )}
-                          </span>
-                          <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
-                            {memory.content}
-                          </p>
-                          <Link
-                            href={`/${encodeURIComponent(memory.source_job_id)}`}
-                            className="mt-2 inline-flex min-h-8 items-center text-xs font-medium text-accent hover:underline"
-                          >
-                            {t('settings.memory.source')}
-                          </Link>
-                        </li>
+                      {shownMemories.map((memory, index) => (
+                        <UserMemoryEntryCard
+                          key={memory.id}
+                          memory={memory}
+                          number={index + 1}
+                          pending={pending !== null}
+                          unavailable={!savedIds.has(memory.id)}
+                          onEditingChange={(editing) => {
+                            setEditingEntries((current) => {
+                              const next = new Map(current);
+                              if (editing) next.set(memory.id, memory);
+                              else next.delete(memory.id);
+                              return next;
+                            });
+                            if (!editing && !savedIds.has(memory.id))
+                              setRemovedEntries((count) => count + 1);
+                          }}
+                          onSave={(content) =>
+                            run(
+                              'edit',
+                              (signal) =>
+                                editUserMemoryEntry(memory.id, content, view.revision, signal),
+                              false,
+                            )
+                          }
+                          onRemove={() =>
+                            run(
+                              'delete',
+                              (signal) => deleteUserMemoryEntry(memory.id, view.revision, signal),
+                              false,
+                            )
+                          }
+                          onRefresh={() => run('refresh', getUserMemory, false, memory.id)}
+                        />
                       ))}
                     </ul>
                   ) : (

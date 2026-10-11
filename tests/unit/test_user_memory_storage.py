@@ -13,6 +13,7 @@ import pytest
 
 from cloud_agent.storage.repositories import user_memory as memory_storage
 from cloud_agent.storage.repositories.user_memory import PostgresUserMemoryRepository
+from cloud_agent.user_memory import UserMemoryConflict, UserMemoryNotFound
 
 NOW = datetime(2026, 10, 11, tzinfo=timezone.utc)
 
@@ -40,6 +41,9 @@ class MemoryPool:
         self.activity = {}
         self.locks = {}
         self.queries = []
+        self.edits = {}
+        self.sources = {}
+        self.deleted_sources = set()
         self.pause_owner = None
         self.read_started = asyncio.Event()
         self.read_release = asyncio.Event()
@@ -63,12 +67,46 @@ class MemoryConnection:
             if self.lock is not None:
                 self.lock.release()
 
-    async def execute(self, sql, user_id):
-        assert "pg_advisory_xact_lock" in sql
-        self.lock = self.pool.locks.setdefault(user_id, asyncio.Lock())
-        await self.lock.acquire()
-        self.owner = user_id
-        self.pool.queries.append((sql, (user_id,)))
+    async def execute(self, sql, *params):
+        user_id = params[0]
+        self.pool.queries.append((sql, params))
+        if "pg_advisory_xact_lock" in sql:
+            self.lock = self.pool.locks.setdefault(user_id, asyncio.Lock())
+            await self.lock.acquire()
+            self.owner = user_id
+            return
+        assert self.owner == user_id
+        if "INSERT INTO agent_user_memory_edits" in sql:
+            self.pool.edits[user_id, params[1]] = {
+                "memory_id": params[1],
+                "source_job_id": params[2],
+                "content": params[3],
+            }
+        elif "DELETE FROM agent_user_memory_edits" in sql:
+            for key, edit in list(self.pool.edits.items()):
+                if key[0] == user_id and (
+                    "NOT EXISTS" not in sql
+                    or (
+                        edit["content"] is not None
+                        and (user_id, edit["source_job_id"]) in self.pool.deleted_sources
+                    )
+                ):
+                    del self.pool.edits[key]
+        else:
+            raise AssertionError(sql)
+
+    async def fetchval(self, sql, user_id, source_job_id):
+        self.pool.queries.append((sql, (user_id, source_job_id)))
+        assert self.owner == user_id
+        assert "t.deleted_at IS NULL" in sql and "j.user_id = $1" in sql
+        return (
+            source_job_id in self.pool.sources.get(user_id, set())
+            and (
+                user_id,
+                source_job_id,
+            )
+            not in self.pool.deleted_sources
+        )
 
     async def fetchrow(self, sql, *params):
         self.pool.queries.append((sql, params))
@@ -94,6 +132,8 @@ class MemoryConnection:
         assert current is not None
         if "SET enabled" in sql:
             current["enabled"] = params[1]
+        elif "SET memories" in sql:
+            current["memories"] = params[1]
         else:
             current.update(
                 portrait=params[1],
@@ -112,9 +152,22 @@ class MemoryConnection:
 
     async def fetch(self, sql, *params):
         self.pool.queries.append((sql, params))
+        if "FROM agent_user_memory_edits" in sql:
+            user_id, memory_ids = params
+            assert self.owner == user_id
+            return copy.deepcopy(
+                [
+                    edit
+                    for (owner, memory_id), edit in self.pool.edits.items()
+                    if owner == user_id and memory_id in memory_ids
+                ]
+            )
         if "SELECT m.id" in sql:
             user_id, watermark, cleared_at = params
             assert self.owner == user_id, "source reads must share the privacy-control lock"
+            self.pool.sources.setdefault(user_id, set()).update(
+                row["job_id"] for row in self.pool.activity.get(user_id, [])
+            )
             if self.pool.pause_owner == user_id:
                 self.pool.pause_owner = None
                 self.pool.read_started.set()
@@ -335,3 +388,185 @@ async def test_source_query_scopes_both_owners_and_bounds_only_authored_live_mes
     clear_sql = next(sql for sql, _ in pool.queries if "cleared_message_id =" in sql)
     assert "j.user_id = $1" in clear_sql and "t.user_id = $1" in clear_sql
     assert "t.deleted_at IS NULL" not in clear_sql, "reset must fence hidden histories too"
+
+
+def preference(view):
+    return next(memory for memory in view["memories"] if memory["kind"] == "preference")
+
+
+@pytest.mark.asyncio
+async def test_entry_edit_preserves_provenance_and_survives_activity_refresh():
+    pool = MemoryPool()
+    pool.activity["alice"] = [activity()]
+    repository = PostgresUserMemoryRepository(pool)
+    original = await repository.refresh("alice")
+    entry = preference(original)
+    edited = await repository.update_entry(
+        "alice",
+        entry["id"],
+        content="  Use\nfull type annotations.  ",
+        expected_revision=original["revision"],
+    )
+    correction = preference(edited)
+    assert correction == {**entry, "content": "Use full type annotations.", "user_edited": True}
+    assert edited["revision"] == original["revision"] + 1
+    assert edited == await repository.get("alice")
+    assert edited == await repository.update_entry(
+        "alice", entry["id"], content=correction["content"], expected_revision=edited["revision"]
+    )
+    pool.activity["alice"].insert(0, activity(2, "Build an API and test the change."))
+    refreshed = await repository.refresh("alice")
+    assert preference(refreshed) == correction
+    override_queries = [params for sql, params in pool.queries if "memory_id = ANY" in sql]
+    assert override_queries and all(
+        owner == "alice" and len(ids) <= 20 for owner, ids in override_queries
+    )
+
+
+@pytest.mark.asyncio
+async def test_removal_tombstone_survives_refresh_and_same_id_from_a_new_source():
+    pool = MemoryPool()
+    pool.activity["alice"] = [activity()]
+    repository = PostgresUserMemoryRepository(pool)
+    original = await repository.refresh("alice")
+    entry = preference(original)
+    removed = await repository.delete_entry(
+        "alice", entry["id"], expected_revision=original["revision"]
+    )
+    assert all(memory["id"] != entry["id"] for memory in removed["memories"])
+    assert removed == await repository.refresh("alice")
+    pool.activity["alice"].insert(0, activity(2))
+    refreshed = await repository.refresh("alice")
+    assert all(memory["id"] != entry["id"] for memory in refreshed["memories"])
+    assert pool.edits["alice", entry["id"]]["content"] is None
+
+
+@pytest.mark.asyncio
+async def test_content_edit_does_not_rebind_to_same_id_from_a_new_job_and_deleted_source_is_purged():
+    pool = MemoryPool()
+    pool.activity["alice"] = [activity()]
+    repository = PostgresUserMemoryRepository(pool)
+    original = await repository.refresh("alice")
+    entry = preference(original)
+    await repository.update_entry(
+        "alice",
+        entry["id"],
+        content="Use full type annotations.",
+        expected_revision=original["revision"],
+    )
+    pool.activity["alice"].insert(0, activity(2))
+    newer = await repository.refresh("alice")
+    replacement = preference(newer)
+    assert replacement["id"] == entry["id"]
+    assert replacement["source_job_id"] == "job-2"
+    assert replacement["content"] == entry["content"]
+    assert replacement["user_edited"] is False
+    assert pool.edits["alice", entry["id"]]["source_job_id"] == "job-1"
+    pool.deleted_sources.add(("alice", "job-1"))
+    pool.activity["alice"] = [activity(2)]
+    await repository.refresh("alice")
+    assert ("alice", entry["id"]) not in pool.edits
+
+
+@pytest.mark.asyncio
+async def test_paused_entries_can_be_edited_removed_and_cleared_before_resume():
+    pool = MemoryPool()
+    pool.activity["alice"] = [activity()]
+    repository = PostgresUserMemoryRepository(pool)
+    original = await repository.refresh("alice")
+    paused = await repository.set_enabled("alice", False)
+    entry = preference(original)
+    edited = await repository.update_entry(
+        "alice",
+        entry["id"],
+        content="Use full type annotations.",
+        expected_revision=paused["revision"],
+    )
+    task_entry = next(memory for memory in edited["memories"] if memory["kind"] == "task")
+    removed = await repository.delete_entry(
+        "alice", task_entry["id"], expected_revision=edited["revision"]
+    )
+    assert removed["enabled"] is False
+    pool.activity["alice"].insert(0, activity(2, "Build an API and test it."))
+    resumed = await repository.set_enabled("alice", True)
+    assert preference(resumed)["content"] == "Use full type annotations."
+    assert all(memory["id"] != task_entry["id"] for memory in resumed["memories"])
+    await repository.set_enabled("alice", False)
+    cleared = await repository.clear("alice")
+    assert cleared["enabled"] is False and cleared["memories"] == []
+    assert not pool.edits
+    assert (await repository.set_enabled("alice", True))["memories"] == []
+
+
+@pytest.mark.asyncio
+async def test_entry_mutations_are_owned_revision_fenced_and_validate_content():
+    pool = MemoryPool()
+    pool.activity = {
+        owner: [activity(message_id)] for owner, message_id in [("alice", 1), ("bob", 2)]
+    }
+    repository = PostgresUserMemoryRepository(pool)
+    alice = await repository.refresh("alice")
+    bob = await repository.refresh("bob")
+    entry = preference(alice)
+    assert preference(bob)["id"] == entry["id"]
+    with pytest.raises(UserMemoryConflict):
+        await repository.update_entry(
+            "alice", entry["id"], content="Use types.", expected_revision=0
+        )
+    with pytest.raises(UserMemoryNotFound):
+        await repository.delete_entry("alice", "missing", expected_revision=alice["revision"])
+    for content in ["", " ", "x" * 501, "password=private", "Use this task's style."]:
+        with pytest.raises(ValueError):
+            await repository.update_entry(
+                "alice", entry["id"], content=content, expected_revision=alice["revision"]
+            )
+    assert not pool.edits
+    changed = await repository.update_entry(
+        "bob", entry["id"], content="Use detailed reviews.", expected_revision=bob["revision"]
+    )
+    assert preference(changed)["source_job_id"] == "job-2"
+    assert (await repository.get("alice")) == alice
+    assert set(pool.edits) == {("bob", entry["id"])}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_entry_edits_cannot_overwrite_a_newer_revision():
+    pool = MemoryPool()
+    pool.activity["alice"] = [activity()]
+    repository = PostgresUserMemoryRepository(pool)
+    original = await repository.refresh("alice")
+    entry = preference(original)
+    results = await asyncio.gather(
+        repository.update_entry(
+            "alice", entry["id"], content="Use types.", expected_revision=original["revision"]
+        ),
+        repository.delete_entry("alice", entry["id"], expected_revision=original["revision"]),
+        return_exceptions=True,
+    )
+    assert len([result for result in results if isinstance(result, dict)]) == 1
+    assert len([result for result in results if isinstance(result, UserMemoryConflict)]) == 1
+    persisted = await repository.get("alice")
+    assert persisted["revision"] == original["revision"] + 1
+
+
+@pytest.mark.asyncio
+async def test_entry_edit_and_clear_share_the_owner_lock_and_cannot_restore_an_override():
+    pool = MemoryPool()
+    pool.activity["alice"] = [activity()]
+    repository = PostgresUserMemoryRepository(pool)
+    original = await repository.refresh("alice")
+    entry = preference(original)
+    pool.pause_owner = "alice"
+    editing = asyncio.create_task(
+        repository.update_entry(
+            "alice", entry["id"], content="Use types.", expected_revision=original["revision"]
+        )
+    )
+    await asyncio.wait_for(pool.read_started.wait(), timeout=1)
+    clearing = asyncio.create_task(repository.clear("alice"))
+    await asyncio.sleep(0)
+    assert not clearing.done()
+    pool.read_release.set()
+    await asyncio.gather(editing, clearing)
+    assert (await repository.refresh("alice"))["memories"] == []
+    assert not pool.edits

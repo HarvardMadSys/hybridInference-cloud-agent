@@ -271,6 +271,39 @@ export const en = {
   'settings.memory.emptyPortrait':
     'Recent work will appear after you send requests with memory enabled.',
   'settings.memory.memories': 'Saved memory',
+  'settings.memory.entriesDescription':
+    'Edit or remove saved memories. Your changes stay in place when memory refreshes.',
+  'settings.memory.entryLabel': 'Saved memory {number}',
+  'settings.memory.edited': 'Edited',
+  'settings.memory.entryProject': 'Project: {project}',
+  'settings.memory.noProject': 'No project',
+  'settings.memory.entryDate': 'Created {date}',
+  'settings.memory.noDate': 'Date unavailable',
+  'settings.memory.savedText': 'Currently saved text',
+  'settings.memory.lastSavedText': 'Last saved text',
+  'settings.memory.editEntry': 'Edit memory',
+  'settings.memory.editContent': 'Memory content',
+  'settings.memory.entryLimit': '{count}/500 characters',
+  'settings.memory.saveEntry': 'Save memory',
+  'settings.memory.removeEntry': 'Remove memory',
+  'settings.memory.removeTitle': 'Remove this memory?',
+  'settings.memory.removeDescription':
+    'This memory won’t return when memory refreshes. Its source task remains available.',
+  'settings.memory.confirmRemove': 'Confirm remove memory',
+  'settings.memory.refreshEntry': 'Refresh memory',
+  'settings.memory.entryConflict':
+    'Saved memory changed. Refresh to review the latest saved text, then save your draft again.',
+  'settings.memory.entryInvalid':
+    'Could not save this memory. Use nonempty text up to 500 characters and leave out credentials. Preferences must apply to future tasks.',
+  'settings.memory.entryMissing':
+    'This memory is no longer available. Refresh to review your saved memories.',
+  'settings.memory.entryUnavailable':
+    'This memory is no longer saved. Your draft is kept for copying. Cancel to close it.',
+  'settings.memory.entryError':
+    'Could not update this memory. Your draft is kept. Please try again.',
+  'settings.memory.removeConflict':
+    'Saved memory changed. Refresh to review the latest memory, then confirm removal again.',
+  'settings.memory.removeError': 'Could not remove this memory. Please try again.',
   'settings.memory.preference': 'Preference',
   'settings.memory.task': 'Task context',
   'settings.memory.source': 'View source task',

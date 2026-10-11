@@ -11483,6 +11483,22 @@
         "title": "McpIntegrationResponse",
         "type": "object"
       },
+      "MemoryEntryRevision": {
+        "additionalProperties": false,
+        "description": "Require the version the owner examined before changing an entry.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "MemoryEntryRevision",
+        "type": "object"
+      },
       "MessageRequestDetail": {
         "description": "A request matched by response identity inside one owner's execution.",
         "properties": {
@@ -14419,6 +14435,29 @@
         "title": "UpdateConnectorRequest",
         "type": "object"
       },
+      "UpdateMemoryEntry": {
+        "additionalProperties": false,
+        "description": "Edit content while retaining the entry's original kind and project.",
+        "properties": {
+          "content": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "content"
+        ],
+        "title": "UpdateMemoryEntry",
+        "type": "object"
+      },
       "UpdateMemorySettings": {
         "additionalProperties": false,
         "description": "Enable or pause automatic memory creation and use.",
@@ -14581,6 +14620,11 @@
               }
             ],
             "title": "Source Repo"
+          },
+          "user_edited": {
+            "default": false,
+            "title": "User Edited",
+            "type": "boolean"
           }
         },
         "required": [
@@ -29074,6 +29118,154 @@
           }
         },
         "summary": "Update User Memory",
+        "tags": [
+          "user-memory"
+        ]
+      }
+    },
+    "/v1/agent/user-memory/entries/{memory_id}": {
+      "delete": {
+        "description": "Forget an entry and suppress it during subsequent automatic refreshes.",
+        "operationId": "delete_user_memory_entry_v1_agent_user_memory_entries__memory_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryEntryRevision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The owner has no such visible memory entry."
+          },
+          "409": {
+            "description": "Memory changed since the expected revision."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete User Memory Entry",
+        "tags": [
+          "user-memory"
+        ]
+      },
+      "patch": {
+        "description": "Save a durable correction to one of the owner's existing memories.",
+        "operationId": "edit_user_memory_entry_v1_agent_user_memory_entries__memory_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryEntry"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The owner has no such visible memory entry."
+          },
+          "409": {
+            "description": "Memory changed since the expected revision."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit User Memory Entry",
         "tags": [
           "user-memory"
         ]

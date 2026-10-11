@@ -16,6 +16,8 @@ export interface UserMemoryEntry {
   kind: 'preference' | 'task';
   content: string;
   source_job_id: string;
+  source_repo: string | null;
+  user_edited: boolean;
   created_at: string | null;
 }
 
@@ -63,5 +65,42 @@ export async function clearUserMemory(signal?: AbortSignal): Promise<UserMemoryV
     method: 'DELETE',
     signal,
   });
+  return jsonOrThrow<UserMemoryView>(response);
+}
+
+export async function editUserMemoryEntry(
+  id: string,
+  content: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+): Promise<UserMemoryView> {
+  const response = await fetchWithAuth(
+    config.apiBase,
+    `${USER_MEMORY}/entries/${encodeURIComponent(id)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, expected_revision: expectedRevision }),
+      signal,
+    },
+  );
+  return jsonOrThrow<UserMemoryView>(response);
+}
+
+export async function deleteUserMemoryEntry(
+  id: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+): Promise<UserMemoryView> {
+  const response = await fetchWithAuth(
+    config.apiBase,
+    `${USER_MEMORY}/entries/${encodeURIComponent(id)}`,
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+      signal,
+    },
+  );
   return jsonOrThrow<UserMemoryView>(response);
 }

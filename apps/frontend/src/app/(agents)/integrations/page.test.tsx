@@ -25,6 +25,8 @@ vi.mock('@/lib/api/userMemory', () => ({
   getUserMemory: vi.fn(),
   updateUserMemory: vi.fn(),
   clearUserMemory: vi.fn(),
+  editUserMemoryEntry: vi.fn(),
+  deleteUserMemoryEntry: vi.fn(),
 }));
 vi.mock('@/lib/api/mcp', () => ({
   listMcpConnections: vi.fn(),

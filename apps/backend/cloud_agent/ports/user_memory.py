@@ -24,6 +24,18 @@ class UserMemoryRepository(Protocol):
         """Forget saved knowledge and exclude messages predating this reset."""
         ...
 
+    async def update_entry(
+        self, user_id: str, memory_id: str, *, content: str, expected_revision: int
+    ) -> dict[str, Any]:
+        """Correct an existing owned entry at the profile revision the user read."""
+        ...
+
+    async def delete_entry(
+        self, user_id: str, memory_id: str, *, expected_revision: int
+    ) -> dict[str, Any]:
+        """Remove an existing entry durably at the profile revision the user read."""
+        ...
+
     async def refresh_active_users(self, limit: int = 100) -> int:
         """Visit a bounded, fair batch of eligible owners and return its size."""
         ...

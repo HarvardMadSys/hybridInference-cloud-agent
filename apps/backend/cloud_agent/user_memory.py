@@ -56,6 +56,14 @@ _REPRODUCTION = re.compile(r"\b(?:reproduc\w*|steps|expected|actual|traceback)\b
 _REVIEW_REQUEST = re.compile(r"\b(?:review|audit)\b", re.I)
 
 
+class UserMemoryConflict(ValueError):
+    """A memory write made against a revision the owner has already changed."""
+
+
+class UserMemoryNotFound(ValueError):
+    """An entry is absent from the owner's current memory view."""
+
+
 class UserPortrait(BaseModel):
     """Observed work areas and commonly used agent settings."""
 
@@ -75,6 +83,7 @@ class UserMemory(BaseModel):
     source_job_id: str
     source_repo: str | None = None
     created_at: datetime | None = None
+    user_edited: bool = False
 
 
 class UserSuggestion(BaseModel):
@@ -98,16 +107,41 @@ class UserMemoryView(BaseModel):
     suggestions: list[UserSuggestion] = Field(default_factory=list)
 
 
-def _clean(value: Any, *, limit: int) -> str:
-    if not isinstance(value, str):
-        return ""
-    value = " ".join(
+def _normalize_text(value: str) -> str:
+    return " ".join(
         "".join(
             char
             for char in value
             if char.isspace() or not unicodedata.category(char).startswith("C")
         ).split()
     )
+
+
+def normalize_memory_edit(content: str) -> str:
+    """Normalize a user edit and reject empty, credential, or oversized content."""
+    if not isinstance(content, str):
+        raise ValueError("Memory content must be text.")
+    content = _normalize_text(content)
+    if not content:
+        raise ValueError("Memory content must not be empty.")
+    if _CREDENTIAL.search(content):
+        raise ValueError("Memory content must not contain credentials.")
+    if len(content) > 500:
+        raise ValueError("Memory content must be at most 500 characters.")
+    return content
+
+
+def validate_memory_preference_edit(content: str) -> None:
+    """Reject temporary task scope in an explicitly edited preference."""
+    content = normalize_memory_edit(content)
+    if _TEMPORARY_SCOPE.search(content.replace("`", "")):
+        raise ValueError("Preference edits must not be limited to a temporary task.")
+
+
+def _clean(value: Any, *, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = _normalize_text(value)
     # Check normalized, untruncated text: stripping format characters must not
     # turn an obfuscated credential field into a displayed secret.
     if _CREDENTIAL.search(value):
@@ -159,9 +193,13 @@ def _memory_key(kind: str, content: str, source_repo: str) -> str:
     return hashlib.sha256(f"{source_repo}:{kind}:{normalized}".encode()).hexdigest()[:20]
 
 
-def _is_preference(content: str) -> bool:
+def _is_preference(content: str, *, user_edited: bool = False) -> bool:
     scope_text = content.replace("`", "")
-    return bool(_EXPLICIT_PREFERENCE.search(content)) and not _TEMPORARY_SCOPE.search(scope_text)
+    return (
+        bool(content)
+        and (user_edited or bool(_EXPLICIT_PREFERENCE.search(content)))
+        and not _TEMPORARY_SCOPE.search(scope_text)
+    )
 
 
 def _most_used(values: list[str]) -> str | None:
@@ -335,9 +373,9 @@ def prompt_with_user_memory(
 ) -> str:
     """Prepend at most 4000 context characters while preserving the current prompt.
 
-    Only enduring, explicitly stated preferences are eligible. Preferences
-    from a repository apply only to that repository. Task history is never
-    injected, including for matching repositories.
+    Only enduring, explicitly stated or user-edited preferences are eligible.
+    Preferences from a repository apply only to that repository. Task history
+    is never injected, including for matching repositories.
     """
     if not view or view.get("enabled") is not True:
         return prompt
@@ -362,7 +400,10 @@ def prompt_with_user_memory(
         if memory.get("source_repo") and memory["source_repo"] != repo:
             continue
         content = _clean(memory.get("content"), limit=500)
-        if not _is_preference(content) or content.casefold() in seen:
+        if (
+            not _is_preference(content, user_edited=memory.get("user_edited") is True)
+            or content.casefold() in seen
+        ):
             continue
         candidate = [*preferences, content]
         encoded = json.dumps(candidate, ensure_ascii=False)

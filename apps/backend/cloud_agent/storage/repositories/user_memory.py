@@ -8,7 +8,13 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.user_memory import build_user_memory
+from cloud_agent.user_memory import (
+    UserMemoryConflict,
+    UserMemoryNotFound,
+    build_user_memory,
+    normalize_memory_edit,
+    validate_memory_preference_edit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -40,6 +46,22 @@ def _memory_activity_digest(activity: list[dict[str, Any]]) -> str:
     """Detect edits, deletions and relevant context changes, including long text."""
     encoded = json.dumps(activity, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _apply_memory_edits(
+    memories: list[dict[str, Any]], edits: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Apply corrections only to their original generated source, in source order."""
+    by_id = {edit["memory_id"]: edit for edit in edits}
+    result = []
+    for memory in memories:
+        edit = by_id.get(memory["id"])
+        if edit is not None and edit["content"] is None:
+            continue
+        if edit is not None and edit["source_job_id"] == memory["source_job_id"]:
+            memory = {**memory, "content": edit["content"], "user_edited": True}
+        result.append(memory)
+    return result
 
 
 _ACTIVE_MEMORY_USERS = """
@@ -102,6 +124,21 @@ class PostgresUserMemoryRepository:
         """Rebuild once when visible input changes, inside the privacy-control lock."""
         if not current["enabled"]:
             return _public_memory(current)
+        # Corrections belong to their original source. Forget their saved
+        # content when that source is deleted; removal tombstones remain valid
+        # if the same generated ID occurs in another source later.
+        await conn.execute(
+            """
+            DELETE FROM agent_user_memory_edits e
+            WHERE e.user_id = $1 AND e.content IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM agent_jobs j
+                JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id
+                WHERE j.id = e.source_job_id AND j.user_id = $1 AND t.user_id = $1
+                  AND t.deleted_at IS NULL
+            )
+            """,
+            user_id,
+        )
         rows = await conn.fetch(
             """
             SELECT m.id, m.id AS message_id, m.job_id, left(m.content, 8000) AS content,
@@ -131,6 +168,17 @@ class PostgresUserMemoryRepository:
         for item in activity:
             item.pop("content_digest")
         profile = build_user_memory(activity, _public_memory(current))
+        memory_ids = [memory["id"] for memory in profile["memories"]]
+        if memory_ids:
+            edits = await conn.fetch(
+                "SELECT memory_id, source_job_id, content FROM agent_user_memory_edits "
+                "WHERE user_id = $1 AND memory_id = ANY($2::text[])",
+                user_id,
+                memory_ids,
+            )
+            profile["memories"] = _apply_memory_edits(
+                profile["memories"], [dict(edit) for edit in edits]
+            )
         updated = await conn.fetchrow(
             """
             UPDATE agent_user_memories
@@ -191,6 +239,7 @@ class PostgresUserMemoryRepository:
             await self._user_memory_lock(conn, user_id)
             current = await self._ensure_user_memory(conn, user_id)
             empty = build_user_memory([], _public_memory(current))
+            await conn.execute("DELETE FROM agent_user_memory_edits WHERE user_id = $1", user_id)
             row = await conn.fetchrow(
                 """
                 UPDATE agent_user_memories
@@ -214,6 +263,90 @@ class PostgresUserMemoryRepository:
                 _memory_activity_digest([]),
             )
         return _public_memory(row)
+
+    async def _change_user_memory_entry(
+        self, user_id: str, memory_id: str, *, content: str | None, expected_revision: int
+    ) -> dict[str, Any]:
+        """Fence an owned entry mutation and its overlay against all profile writes."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._user_memory_lock(conn, user_id)
+            current = await self._ensure_user_memory(conn, user_id)
+            profile = await self._refresh_user_memory_locked(conn, user_id, current)
+            if profile["revision"] != expected_revision:
+                raise UserMemoryConflict("Memory changed. Refresh before saving.")
+            entry = next(
+                (memory for memory in profile["memories"] if memory["id"] == memory_id), None
+            )
+            if entry is None:
+                raise UserMemoryNotFound("Memory entry was not found.")
+            if content is not None:
+                if entry["kind"] == "preference":
+                    validate_memory_preference_edit(content)
+                source_live = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM agent_jobs j
+                        JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id
+                        WHERE j.id = $2 AND j.user_id = $1 AND t.user_id = $1
+                          AND t.deleted_at IS NULL
+                    )
+                    """,
+                    user_id,
+                    entry["source_job_id"],
+                )
+                if not source_live:
+                    raise UserMemoryNotFound("Memory entry was not found.")
+                if entry["content"] == content and entry.get("user_edited") is True:
+                    return profile
+            await conn.execute(
+                """
+                INSERT INTO agent_user_memory_edits (user_id, memory_id, source_job_id, content)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, memory_id) DO UPDATE
+                SET source_job_id = EXCLUDED.source_job_id, content = EXCLUDED.content,
+                    updated_at = clock_timestamp()
+                """,
+                user_id,
+                memory_id,
+                entry["source_job_id"],
+                content,
+            )
+            memories = [
+                {**memory, "content": content, "user_edited": True}
+                if memory["id"] == memory_id
+                else memory
+                for memory in profile["memories"]
+                if memory["id"] != memory_id or content is not None
+            ]
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_user_memories
+                SET memories = $2::jsonb, revision = revision + 1, updated_at = clock_timestamp()
+                WHERE user_id = $1 RETURNING *
+                """,
+                user_id,
+                json.dumps(memories),
+            )
+        return _public_memory(row)
+
+    async def update_entry(
+        self, user_id: str, memory_id: str, *, content: str, expected_revision: int
+    ) -> dict[str, Any]:
+        """Correct one existing entry without changing its identity or provenance."""
+        return await self._change_user_memory_entry(
+            user_id,
+            memory_id,
+            content=normalize_memory_edit(content),
+            expected_revision=expected_revision,
+        )
+
+    async def delete_entry(
+        self, user_id: str, memory_id: str, *, expected_revision: int
+    ) -> dict[str, Any]:
+        """Save a removal tombstone so automatic refresh cannot restore the entry."""
+        return await self._change_user_memory_entry(
+            user_id, memory_id, content=None, expected_revision=expected_revision
+        )
 
     async def refresh_active_users(self, limit: int = 100) -> int:
         """Visit enabled owners fairly, including profiles whose history was deleted."""

@@ -14,7 +14,7 @@ from cloud_agent.api import user_memory
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.app import create_app, create_mcp_app, install_admin_no_store
 from cloud_agent.user_avatar import generate_user_avatar
-from cloud_agent.user_memory import build_user_memory
+from cloud_agent.user_memory import UserMemoryConflict, UserMemoryNotFound, build_user_memory
 
 PATH = "/v1/agent/user-memory"
 
@@ -151,16 +151,31 @@ async def test_paused_avatar_uses_saved_activity_clear_resets_and_resume_updates
     assert resumed.json()["enabled"] is True
 
 
-@pytest.mark.parametrize("method", ["GET", "PATCH", "DELETE"])
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", PATH, None),
+        ("PATCH", PATH, {"enabled": False}),
+        ("DELETE", PATH, None),
+        (
+            "PATCH",
+            PATH + "/entries/memory-1",
+            {"content": "Prefer concise replies.", "expected_revision": 0},
+        ),
+        ("DELETE", PATH + "/entries/memory-1", {"expected_revision": 0}),
+    ],
+)
 @pytest.mark.parametrize("credential", [None, "ajt.worker-token", "agr.inference-token"])
-async def test_nonowner_credentials_cannot_read_or_change_memory(app, method, credential):
+async def test_nonowner_credentials_cannot_read_or_change_memory(
+    app, method, path, body, credential
+):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as client:
         response = await client.request(
             method,
-            PATH,
-            json={"enabled": False} if method == "PATCH" else None,
+            path,
+            json=body,
             headers={"Authorization": f"Bearer {credential}"} if credential else {},
         )
     assert response.status_code in (401, 403)
@@ -168,6 +183,8 @@ async def test_nonowner_credentials_cannot_read_or_change_memory(app, method, cr
     app.state.repository.refresh.assert_not_awaited()
     app.state.repository.set_enabled.assert_not_awaited()
     app.state.repository.clear.assert_not_awaited()
+    app.state.repository.update_entry.assert_not_awaited()
+    app.state.repository.delete_entry.assert_not_awaited()
 
 
 async def test_revoked_admission_and_invalid_settings_do_not_touch_memory(app):
@@ -194,3 +211,190 @@ async def test_revoked_admission_and_invalid_settings_do_not_touch_memory(app):
 def test_memory_routes_are_only_on_the_main_listener():
     assert PATH in create_app().openapi()["paths"]
     assert PATH not in create_mcp_app().openapi()["paths"]
+    assert PATH + "/entries/{memory_id}" in create_app().openapi()["paths"]
+    assert PATH + "/entries/{memory_id}" not in create_mcp_app().openapi()["paths"]
+
+
+async def test_edit_normalizes_content_and_uses_authenticated_owner_revision(app):
+    profile = activity_profile("I prefer concise replies.")
+    original = profile["memories"][0]
+    edited = {**original, "content": "Prefer detailed replies.", "user_edited": True}
+    app.state.repository.update_entry.return_value = {
+        **profile,
+        "memories": [edited],
+        "revision": 4,
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.patch(
+            PATH + "/entries/" + original["id"] + "?user_id=owner-2",
+            json={"content": "  Prefer\n detailed replies.  ", "expected_revision": 3},
+            headers=session_headers(),
+        )
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json()["revision"] == 4
+    assert response.json()["memories"] == [edited]
+    assert response.json()["avatar"] == generate_user_avatar("owner-1").model_dump()
+    app.state.repository.update_entry.assert_awaited_once_with(
+        user_id="owner-1",
+        memory_id=original["id"],
+        content="Prefer detailed replies.",
+        expected_revision=3,
+    )
+
+
+async def test_delete_uses_authenticated_owner_and_returns_updated_snapshot(app):
+    app.state.repository.delete_entry.return_value = {**build_user_memory([], None), "revision": 5}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.request(
+            "DELETE",
+            PATH + "/entries/memory-1?user_id=owner-2",
+            json={"expected_revision": 4},
+            headers=session_headers(),
+        )
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json()["memories"] == []
+    assert response.json()["revision"] == 5
+    app.state.repository.delete_entry.assert_awaited_once_with(
+        user_id="owner-1", memory_id="memory-1", expected_revision=4
+    )
+
+
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+@pytest.mark.parametrize(
+    ("error", "status"), [(UserMemoryConflict, 409), (UserMemoryNotFound, 404)]
+)
+async def test_entry_errors_are_private_and_have_stable_status(app, method, error, status):
+    operation = (
+        app.state.repository.update_entry
+        if method == "PATCH"
+        else app.state.repository.delete_entry
+    )
+    operation.side_effect = error("private storage details")
+    body = {"expected_revision": 0}
+    if method == "PATCH":
+        body["content"] = "Prefer concise replies."
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.request(
+            method, PATH + "/entries/memory-1", json=body, headers=session_headers()
+        )
+    assert response.status_code == status
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "private storage details" not in response.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"content": "", "expected_revision": 0},
+        {"content": " \n\t", "expected_revision": 0},
+        {"content": "a" * 501, "expected_revision": 0},
+        {"content": 5, "expected_revision": 0},
+        {"content": "Prefer concise replies."},
+        {"content": "Prefer concise replies.", "expected_revision": -1},
+        {"content": "Prefer concise replies.", "expected_revision": True},
+        {"content": "Prefer concise replies.", "expected_revision": "0"},
+        {"content": "Prefer concise replies.", "expected_revision": 0, "user_id": "owner-2"},
+        {"content": "Prefer concise replies.", "expected_revision": 0, "kind": "task"},
+        {"content": "Prefer concise replies.", "expected_revision": 0, "source_repo": "other/repo"},
+    ],
+)
+async def test_invalid_edits_do_not_reach_storage(app, body):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.patch(
+            PATH + "/entries/memory-1", json=body, headers=session_headers()
+        )
+    assert response.status_code == 422
+    assert response.headers["Cache-Control"] == "no-store"
+    app.state.repository.update_entry.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["credential", "overlong", "missing_revision", "unexpected_field"])
+async def test_credential_edits_are_rejected_without_reflecting_content(app, mode):
+    content = "Remember that password=private-test-value"
+    body = {"content": content, "expected_revision": 0}
+    if mode == "overlong":
+        body["content"] = content + "x" * 500
+    elif mode == "missing_revision":
+        del body["expected_revision"]
+    elif mode == "unexpected_field":
+        body["password"] = "private-test-value"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.patch(
+            PATH + "/entries/memory-1",
+            json=body,
+            headers=session_headers(),
+        )
+    assert response.status_code == 422
+    assert "private-test-value" not in response.text
+    app.state.repository.update_entry.assert_not_awaited()
+
+
+async def test_invalid_preference_scope_returns_validation_error(app):
+    app.state.repository.update_entry.side_effect = ValueError("private storage details")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.patch(
+            PATH + "/entries/memory-1",
+            json={"content": "Use short replies for this task.", "expected_revision": 0},
+            headers=session_headers(),
+        )
+    assert response.status_code == 422
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "private storage details" not in response.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"expected_revision": -1},
+        {"expected_revision": True},
+        {"expected_revision": 0, "user_id": "owner-2"},
+    ],
+)
+async def test_invalid_delete_does_not_reach_storage(app, body):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.request(
+            "DELETE", PATH + "/entries/memory-1", json=body, headers=session_headers()
+        )
+    assert response.status_code == 422
+    assert response.headers["Cache-Control"] == "no-store"
+    app.state.repository.delete_entry.assert_not_awaited()
+
+
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+async def test_revoked_admission_cannot_edit_or_delete_entries(app, method):
+    app.state.gateway.agent_access.side_effect = None
+    app.state.gateway.agent_access.return_value = {
+        "user_id": "owner-1",
+        "allowed": False,
+        "permissions": [],
+    }
+    body = {"expected_revision": 0}
+    if method == "PATCH":
+        body["content"] = "Prefer concise replies."
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.request(
+            method, PATH + "/entries/memory-1", json=body, headers=session_headers()
+        )
+    assert response.status_code == 403
+    assert response.headers["Cache-Control"] == "no-store"
+    app.state.repository.update_entry.assert_not_awaited()
+    app.state.repository.delete_entry.assert_not_awaited()

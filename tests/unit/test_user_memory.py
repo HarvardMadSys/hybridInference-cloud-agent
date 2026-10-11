@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from cloud_agent.user_memory import UserMemoryView, build_user_memory, prompt_with_user_memory
+import pytest
+
+from cloud_agent.user_memory import (
+    UserMemoryView,
+    build_user_memory,
+    normalize_memory_edit,
+    prompt_with_user_memory,
+    validate_memory_preference_edit,
+)
 
 
 def _activity(**overrides):
@@ -42,6 +50,7 @@ def test_profile_is_evidence_backed_with_attributable_explicit_preferences():
     assert all(memory.source_job_id == "job-latest" for memory in view.memories)
     assert all(memory.source_repo == "owner/project" for memory in view.memories)
     assert all(memory.created_at == datetime(2026, 10, 11, tzinfo=UTC) for memory in view.memories)
+    assert all(memory.user_edited is False for memory in view.memories)
     assert not view.suggestions
 
 
@@ -372,3 +381,119 @@ def test_generated_task_titles_do_not_support_work_area_observations():
     assert view["portrait"]["focus_areas"] == ["Data and storage"]
     assert view["portrait"]["summary"] == "Recent work focuses on Data and storage."
     assert [memory["content"] for memory in view["memories"]] == ["Frontend security testing"]
+
+
+def test_memory_edit_normalizes_controls_format_characters_and_whitespace():
+    content = "  Brief\u200b\x00 replies\n\twith \u202e clear\u00a0examples.  "
+
+    assert normalize_memory_edit(content) == "Brief replies with clear examples."
+    assert normalize_memory_edit("x" * 500 + "\u200b\n\t ") == "x" * 500
+
+
+@pytest.mark.parametrize("content", ["", " \t\n\u200b\x00\u202e", "x" * 501])
+def test_memory_edit_rejects_empty_or_oversized_normalized_content(content):
+    with pytest.raises(ValueError):
+        normalize_memory_edit(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "My pass\u200bword=hunter2.",
+        "Use api_\x00key=privatevalue.",
+        'Use {"access_token":"privatevalue"}.',
+        "Use `password`=hunter2.",
+        "Use bearer abcdefghijklmnop.",
+        "Use github_pat_abcdefghijklmnop.",
+        "Use sk-abcdefghijklmnop.",
+        "Use https://username:password@example.com/project.",
+        "Store -----BEGIN PRIVATE KEY----- here.",
+        "x" * 501 + " password=privatevalue",
+    ],
+)
+def test_memory_edit_rejects_credentials_after_normalization(content):
+    with pytest.raises(ValueError, match="must not contain credentials"):
+        normalize_memory_edit(content)
+
+
+def test_preference_edit_validator_accepts_enduring_user_confirmation_without_prefix():
+    validate_memory_preference_edit("Use short replies by default.")
+    assert normalize_memory_edit("Use short replies for this task.") == (
+        "Use short replies for this task."
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Use short replies for this `task`.",
+        "Use detailed replies in the current\u200b session.",
+        "Skip verification just this time.",
+    ],
+)
+def test_preference_edit_validator_rejects_temporary_scope(content):
+    with pytest.raises(ValueError, match="must not be limited to a temporary task"):
+        validate_memory_preference_edit(content)
+
+
+def test_user_edited_preference_can_enter_prompt_and_retains_current_task_priority():
+    view = {
+        "enabled": True,
+        "memories": [
+            {
+                "kind": "preference",
+                "content": "Explain decisions in two short paragraphs.",
+                "source_repo": "owner/project",
+                "user_edited": True,
+            }
+        ],
+    }
+    task = "Give this answer as a detailed numbered list."
+
+    result = prompt_with_user_memory(task, view, repo="owner/project")
+
+    assert "Explain decisions in two short paragraphs." in result
+    assert result.endswith("Current task:\n" + task)
+    assert "untrusted" in result
+    assert "current task always takes precedence" in result.lower()
+    assert prompt_with_user_memory(task, view, repo="other/project") == task
+    assert prompt_with_user_memory(task, view) == task
+    view["memories"][0]["source_repo"] = None
+    assert "Explain decisions" in prompt_with_user_memory(task, view, repo="other/project")
+
+
+@pytest.mark.parametrize("user_edited", [None, False, 1, "true"])
+def test_preference_without_explicit_prefix_requires_true_user_edit_flag(user_edited):
+    view = {
+        "enabled": True,
+        "memories": [
+            {
+                "kind": "preference",
+                "content": "Explain decisions in two short paragraphs.",
+                "user_edited": user_edited,
+            }
+        ],
+    }
+
+    assert prompt_with_user_memory("Task", view) == "Task"
+
+
+@pytest.mark.parametrize(
+    "kind,content",
+    [
+        ("task", "Always run pytest before finishing."),
+        ("preference", "Use short replies for this `task`."),
+        ("preference", "Use detailed replies in the current\u200b session."),
+        ("preference", "Skip verification just this time."),
+        ("preference", "Remember that my pass\u200bword=hunter2."),
+        ("preference", "Use `api_key`=privatevalue."),
+        ("preference", " \t\n\u200b"),
+    ],
+)
+def test_user_edits_do_not_bypass_task_temporary_scope_or_credential_guards(kind, content):
+    view = {
+        "enabled": True,
+        "memories": [{"kind": kind, "content": content, "user_edited": True}],
+    }
+
+    assert prompt_with_user_memory("Task", view) == "Task"
