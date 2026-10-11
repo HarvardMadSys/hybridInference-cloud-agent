@@ -727,30 +727,62 @@ export function MessageActions({
   );
 }
 
+/** Compact messages keep Copy beside the content without reserving an action row. */
+export function MessageContent({
+  text,
+  presentation,
+}: {
+  text: string;
+  presentation?: TranscriptPresentation;
+}) {
+  if (presentation !== 'compact') return <Markdown text={text} />;
+  return (
+    <div className="flex items-start gap-2">
+      <div className="min-w-0 flex-1">
+        <Markdown text={text} />
+      </div>
+      <button
+        type="button"
+        aria-label="Copy message"
+        title="Copy message"
+        onClick={() => void copyMessage(text)}
+        className="ui-focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-500 transition-opacity hover:bg-gray-100 hover:text-gray-700 md:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200 [@media(hover:none)]:!opacity-100 [@media(pointer:coarse)]:!opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+      >
+        <CopyIcon />
+      </button>
+    </div>
+  );
+}
+
 function AssistantMessage({
   text,
   extraActions,
   footer,
   blockKey,
+  presentation,
 }: {
   text: string;
   extraActions?: ReactNode;
   footer?: ReactNode;
   /** Stable row identity, so a layout change never moves a reader off it. */
   blockKey?: string;
+  presentation?: TranscriptPresentation;
 }) {
-  const actions = (
-    <MessageActions>
-      <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-        <CopyIcon />
-        Copy
-      </MessageActionButton>
-      {extraActions}
-    </MessageActions>
-  );
+  const actions =
+    presentation !== 'compact' || extraActions ? (
+      <MessageActions>
+        {presentation !== 'compact' ? (
+          <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
+            <CopyIcon />
+            Copy
+          </MessageActionButton>
+        ) : null}
+        {extraActions}
+      </MessageActions>
+    ) : null;
   return (
     <div data-block-key={blockKey} className="group py-3 text-gray-800 dark:text-gray-200">
-      <Markdown text={text} />
+      <MessageContent text={text} presentation={presentation} />
       {footer ? (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           {footer}
@@ -771,6 +803,7 @@ export function ThreadTurn({
   footer,
   blockKey,
   goalTurn,
+  presentation,
 }: {
   message: AgentThreadMessage;
   footer?: ReactNode;
@@ -780,6 +813,7 @@ export function ThreadTurn({
   blockKey?: string;
   /** How this turn came to exist, and what it reported about the goal. */
   goalTurn?: GoalTurn;
+  presentation?: TranscriptPresentation;
 }) {
   const t = useT();
   if (message.role === 'assistant') {
@@ -788,6 +822,7 @@ export function ThreadTurn({
         text={message.content}
         footer={footer}
         blockKey={blockKey}
+        presentation={presentation}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -837,7 +872,7 @@ export function ThreadTurn({
       </div>
     );
   }
-  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind }} />;
+  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind, presentation }} />;
 }
 
 /**
@@ -864,22 +899,26 @@ function UserMessage({
   blockKey,
   busy,
   onRewind,
+  presentation,
 }: {
   text: string;
   blockKey?: string;
   busy?: boolean;
   onRewind?: () => void;
+  presentation?: TranscriptPresentation;
 }) {
   return (
     <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
       <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
-        <Markdown text={text} />
-        <MessageActions align="end" className="mt-0">
-          <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-            <CopyIcon />
-            Copy
-          </MessageActionButton>
-        </MessageActions>
+        <MessageContent text={text} presentation={presentation} />
+        {presentation !== 'compact' ? (
+          <MessageActions align="end" className="mt-0">
+            <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
+              <CopyIcon />
+              Copy
+            </MessageActionButton>
+          </MessageActions>
+        ) : null}
       </div>
       {onRewind ? (
         <MessageActions align="end" className="mt-0">
@@ -974,6 +1013,7 @@ export function EventRow({
         text={event.text}
         footer={footer}
         blockKey={blockKey}
+        presentation={presentation}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -985,7 +1025,8 @@ export function EventRow({
       />
     );
   }
-  if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
+  if (event.kind === 'user_message')
+    return <UserMessage text={event.text} blockKey={blockKey} presentation={presentation} />;
   if (event.kind === 'tool_use')
     return (
       <RichToolActivity
@@ -1069,7 +1110,11 @@ export function HistoryTurn({
   return (
     <section aria-label={`Turn ${turn.displayNo}`} data-turn-key={turn.key}>
       {turn.promptCard !== null ? (
-        <UserMessage text={turn.promptCard} blockKey={`${jobId}:prompt`} />
+        <UserMessage
+          text={turn.promptCard}
+          blockKey={`${jobId}:prompt`}
+          presentation={presentation}
+        />
       ) : null}
       {/* The prompt opens the turn; a message sent into it reads where it arrived. */}
       {turn.messages
@@ -1079,6 +1124,7 @@ export function HistoryTurn({
             key={message.id}
             message={message}
             goalTurn={turn.goalTurn}
+            presentation={presentation}
             blockKey={messageBlockKey(jobId, message.id)}
             busy={busy}
             onRewind={
@@ -1117,6 +1163,7 @@ export function HistoryTurn({
             key={message.id}
             message={message}
             blockKey={messageBlockKey(jobId, message.id)}
+            presentation={presentation}
             busy={busy}
             onFork={
               message.id === lastFallbackMessageId && onFork ? () => onFork(turn.jobId) : undefined

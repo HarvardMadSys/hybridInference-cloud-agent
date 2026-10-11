@@ -15,7 +15,7 @@ import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import toast from 'react-hot-toast';
 
-import { Markdown, WorkspaceLinkProvider } from '@/components/ui/Markdown';
+import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
@@ -109,6 +109,7 @@ import {
   copyMessage,
   MessageActionButton,
   MessageActions,
+  MessageContent,
   ThreadTurn,
   EventRow,
   EventList,
@@ -2058,6 +2059,7 @@ export function JobDetail({
                           key={message.id}
                           message={message}
                           goalTurn={currentTurn.goalTurn}
+                          presentation={presentation}
                           blockKey={messageBlockKey(message.jobId, message.id)}
                           footer={
                             lastVisibleMessageIndex < 0 && message.id === currentReplyId
@@ -2087,28 +2089,35 @@ export function JobDetail({
                         data-block-key={`${job.id}:prompt`}
                         className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle"
                       >
-                        <Markdown text={job.prompt || job.title} />
-                        <MessageActions align="end">
-                          <MessageActionButton
-                            label="Copy message"
-                            onClick={() => void copyMessage(job.prompt || job.title)}
-                          >
-                            <CopyIcon />
-                            Copy
-                          </MessageActionButton>
-                          {currentRewindAnchor && canForkWorkspace ? (
-                            <MessageActionButton
-                              label="Edit & rewind"
-                              onClick={() =>
-                                void forkFrom(currentRewindAnchor, job.prompt || job.title)
-                              }
-                              disabled={forking}
-                            >
-                              <RewindIcon />
-                              Edit & rewind
-                            </MessageActionButton>
-                          ) : null}
-                        </MessageActions>
+                        <MessageContent
+                          text={job.prompt || job.title}
+                          presentation={presentation}
+                        />
+                        {presentation !== 'compact' || (currentRewindAnchor && canForkWorkspace) ? (
+                          <MessageActions align="end">
+                            {presentation !== 'compact' ? (
+                              <MessageActionButton
+                                label="Copy message"
+                                onClick={() => void copyMessage(job.prompt || job.title)}
+                              >
+                                <CopyIcon />
+                                Copy
+                              </MessageActionButton>
+                            ) : null}
+                            {currentRewindAnchor && canForkWorkspace ? (
+                              <MessageActionButton
+                                label="Edit & rewind"
+                                onClick={() =>
+                                  void forkFrom(currentRewindAnchor, job.prompt || job.title)
+                                }
+                                disabled={forking}
+                              >
+                                <RewindIcon />
+                                Edit & rewind
+                              </MessageActionButton>
+                            ) : null}
+                          </MessageActions>
+                        ) : null}
                       </div>
                     )}
 
