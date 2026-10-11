@@ -1050,6 +1050,42 @@ describe('toDisplayJob', () => {
     expect(job.prUrl).toBe('https://github.com/o/n/pull/44');
     expect(job.prLabel).toBe('draft PR 44');
   });
+
+  it('opens the latest session PR when an earlier turn has the closed PR URL', () => {
+    const previous = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 1,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const current = {
+      ...previous,
+      id: 'ajob_2',
+      turn_no: 2,
+      published_pr_url: 'https://github.com/o/n/pull/45',
+    };
+    const job = toDisplayJob(previous, {
+      thread: { thread_id: 'thread_1', jobs: [previous, current], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/45');
+    expect(job.prLabel).toBe('draft PR 45');
+  });
+
+  it('keeps a fresh PR update while the thread read still has the earlier URL', () => {
+    const stale = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 2,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const fresh = { ...stale, published_pr_url: 'https://github.com/o/n/pull/45' };
+    const job = toDisplayJob(fresh, {
+      thread: { thread_id: 'thread_1', jobs: [stale], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/45');
+  });
 });
 
 describe('patch parsing', () => {

@@ -9,6 +9,7 @@ opening a PR that is not a draft.
 from __future__ import annotations
 
 import contextlib
+import json
 from typing import Any
 
 import httpx
@@ -19,9 +20,9 @@ from cloud_agent import publish_worker
 from cloud_agent.publish_worker import (
     GitHubCredential,
     create_draft_pull_request,
+    ensure_draft_pull_request,
     publish_loop,
     publish_one,
-    pull_request_is_closed,
 )
 from cloud_agent.publisher import PublishError, PublishResult
 
@@ -116,48 +117,8 @@ def _patch_pr(monkeypatch, url: str = "https://github.com/o/n/pull/7"):
         captured.update(kwargs)
         return url
 
-    monkeypatch.setattr(publish_worker, "create_draft_pull_request", fake)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", fake)
     return captured
-
-
-def _patch_pr_state(monkeypatch, *, closed: bool) -> list[str]:
-    """Stand in for the lookup of a prior PR's state, recording what it asked."""
-    asked: list[str] = []
-
-    async def fake(*, repo: str, pr_url: str, credential: GitHubCredential) -> bool:
-        asked.append(pr_url)
-        return closed
-
-    monkeypatch.setattr(publish_worker, "pull_request_is_closed", fake)
-    return asked
-
-
-async def _pr_state_from(response: httpx.Response | Exception, *, pr_url: str) -> tuple[bool, list]:
-    """Ask :func:`pull_request_is_closed` with GitHub answering ``response``."""
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    transport = httpx.MockTransport(handler)
-    original = httpx.AsyncClient
-
-    class PatchedClient(original):
-        def __init__(self, *args, **kwargs):
-            kwargs["transport"] = transport
-            super().__init__(*args, **kwargs)
-
-    httpx.AsyncClient = PatchedClient
-    try:
-        closed = await pull_request_is_closed(
-            repo="o/n", pr_url=pr_url, credential=GitHubCredential("t")
-        )
-    finally:
-        httpx.AsyncClient = original
-    return closed, requests
 
 
 async def test_empty_queue_is_a_no_op():
@@ -372,7 +333,7 @@ async def test_a_base_ref_that_cannot_be_a_pr_base_falls_back(monkeypatch):
 
 
 async def test_follow_up_fast_forwards_the_thread_branch_without_opening_another_pr(monkeypatch):
-    """One conversation owns one branch and one draft PR across its turns."""
+    """Follow-ups refresh the branch's open PR and its session summary."""
     job = {
         **_JOB,
         "job_id": "ajob_2",
@@ -391,95 +352,157 @@ async def test_follow_up_fast_forwards_the_thread_branch_without_opening_another
 
     monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
     pr_called = _patch_pr(monkeypatch)
-    asked = _patch_pr_state(monkeypatch, closed=False)
 
     url = await publish_one(store, credential=GitHubCredential("t"))
 
     assert url == "https://github.com/o/n/pull/7"
     assert captured_publish["branch_id"] == "athr_1"
-    assert asked == ["https://github.com/o/n/pull/7"]
-    assert pr_called == {}
+    assert pr_called["head_branch"] == "agent/athr_1"
+    assert pr_called["title"] == "[agent] Stabilize test retries"
     assert store.snapshot_recorded == (9, url, "next-sha")
 
 
-async def test_follow_up_opens_a_new_draft_pr_once_the_old_one_was_closed(monkeypatch):
-    """A closed draft takes no new commits, so the next snapshot opens another.
+@pytest.mark.parametrize("prior_state", ["open", "closed", "merged", "missing", "invalid_link"])
+async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_state):
+    """A closed or merged PR cannot trap the next publication on its old URL."""
+    requests = []
+    old_url = "https://github.com/o/n/pull/7"
+    new_url = "https://github.com/o/n/pull/8"
 
-    Reusing the closed PR's link pushed the branch and left the owner with a
-    button to a PR that shows none of the new work.
-    """
-    job = {
-        **_JOB,
-        "job_id": "ajob_2",
-        "anchor_job_id": "ajob_2",
-        "included_job_ids": ["ajob_2"],
-        "parent_job_id": "ajob_1",
-        "parent_pr_url": "https://github.com/o/n/pull/7",
-    }
-    store = FakeStore(job)
+    def handle(request):
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer t"
+        if request.method == "GET":
+            assert dict(request.url.params) == {
+                "state": "open",
+                "head": "o:agent/athr_1",
+                "base": "dev",
+            }
+            return httpx.Response(
+                200,
+                json=[{"number": 7, "state": "open", "html_url": old_url}]
+                if prior_state == "open"
+                else [],
+            )
+        if request.method == "PATCH":
+            assert request.url.path == "/repos/o/n/pulls/7"
+            assert (
+                json.loads(request.content)["title"] == "[agent] Fix retries and document backoff"
+            )
+            return httpx.Response(200, json={"state": "open", "html_url": old_url})
+        assert request.method == "POST"
+        assert json.loads(request.content)["draft"] is True
+        return httpx.Response(201, json={"html_url": new_url})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
     _patch_publish(
-        monkeypatch,
-        PublishResult(branch="agent/athr_1", commit_sha="next-sha", changed_files=["x"]),
-    )
-    captured = _patch_pr(monkeypatch, url="https://github.com/o/n/pull/8")
-    asked = _patch_pr_state(monkeypatch, closed=True)
-
-    url = await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
-
-    assert asked == ["https://github.com/o/n/pull/7"]
-    assert url == "https://github.com/o/n/pull/8"
-    assert captured["head_branch"] == "agent/athr_1"
-    assert captured["base_branch"] == "dev"
-    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/8", "next-sha")
-
-
-@pytest.mark.parametrize(
-    ("payload", "closed"),
-    [
-        ({"state": "open", "merged": False}, False),
-        ({"state": "closed", "merged": False}, True),
-        ({"state": "closed", "merged": True}, True),
-    ],
-)
-async def test_pr_state_reads_github_answer(payload, closed):
-    """Closed and merged both mean the branch's new commits need a new PR."""
-    result, requests = await _pr_state_from(
-        httpx.Response(200, json=payload), pr_url="https://github.com/o/n/pull/7"
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
     )
 
-    assert result is closed
-    assert [(request.method, request.url.path) for request in requests] == [
-        ("GET", "/repos/o/n/pulls/7")
+    async def generated(*args, **kwargs):
+        return "[agent] Fix retries and document backoff"
+
+    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
+    prior_url = (
+        "https://example.test/somewhere"
+        if prior_state == "invalid_link"
+        else old_url
+        if prior_state != "missing"
+        else None
+    )
+    store = FakeStore({**_JOB, "parent_pr_url": prior_url})
+    url = await publish_one(store, credential=GitHubCredential("t"))
+
+    assert url == (old_url if prior_state == "open" else new_url)
+    assert store.snapshot_recorded == (9, url, "next")
+    assert [request.method for request in requests] == [
+        "GET",
+        "PATCH" if prior_state == "open" else "POST",
     ]
-    assert requests[0].headers["Authorization"] == "Bearer t"
 
 
+async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
+    requests = []
+
+    def handle(request):
+        requests.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[{"number": 7, "state": "open", "html_url": "https://github.com/o/n/pull/7"}],
+            )
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"state": "closed"})
+        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    url = await ensure_draft_pull_request(
+        repo="o/n",
+        head_branch="agent/athr_1",
+        base_branch="dev",
+        title="[agent] Fix retries",
+        body="Summary",
+        credential=GitHubCredential("t"),
+    )
+    assert url == "https://github.com/o/n/pull/8"
+    assert requests == ["GET", "PATCH", "POST"]
+
+
+@pytest.mark.parametrize("failure", ["lookup", "update"])
 @pytest.mark.parametrize(
     "response",
     [
         httpx.Response(404, json={"message": "Not Found"}),
         httpx.Response(502, text="bad gateway"),
+        httpx.Response(503, text="unavailable"),
         httpx.Response(200, text="not json"),
-        httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"unexpected": "object"}),
+        httpx.Response(200, json=["not", "a", "PR"]),
         httpx.ConnectError("unreachable"),
     ],
 )
-async def test_pr_state_that_cannot_be_read_keeps_the_existing_pr(response):
-    """Only a definite "closed" opens another PR; anything else keeps the link."""
-    result, requests = await _pr_state_from(response, pr_url="https://github.com/o/n/pull/7")
+async def test_pr_api_failure_does_not_record_the_stale_url(monkeypatch, failure, response):
+    """Unknown PR state must neither create duplicates nor record a stale link."""
+    requests = []
 
-    assert result is False
-    assert len(requests) == 1
+    def handle(request):
+        requests.append(request.method)
+        assert request.method != "POST"
+        if request.method == "GET" and failure == "update":
+            return httpx.Response(
+                200,
+                json=[{"number": 7, "state": "open", "html_url": "https://github.com/o/n/pull/7"}],
+            )
+        if isinstance(response, Exception):
+            raise response
+        return response
 
-
-async def test_pr_state_of_an_unrecognised_link_is_not_looked_up():
-    """A link with no PR number has nothing to ask GitHub about."""
-    result, requests = await _pr_state_from(
-        httpx.Response(200, json={"state": "closed"}), pr_url="https://example.test/somewhere"
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
     )
-
-    assert result is False
-    assert requests == []
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
+    )
+    store = FakeStore({**_JOB, "parent_pr_url": "https://github.com/o/n/pull/7"})
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_recorded is None
+    assert store.snapshot_failed is not None
+    if isinstance(response, httpx.Response) and response.status_code >= 400:
+        assert str(response.status_code) in store.snapshot_failed[1]
+    assert requests == (["GET", "PATCH"] if failure == "update" else ["GET"])
 
 
 async def test_gate_rejection_fails_the_job_and_never_pushes(monkeypatch):
@@ -686,7 +709,7 @@ async def test_the_running_loop_waits_out_an_unloaded_app_and_then_publishes_onc
         opened.append(kwargs)
         return "https://github.com/o/n/pull/7"
 
-    monkeypatch.setattr(publish_worker, "create_draft_pull_request", fake_pr)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", fake_pr)
 
     class LoadedApp:
         async def token_for(self, repo: str, **kwargs: Any) -> str:
@@ -793,6 +816,10 @@ async def test_a_created_pr_with_no_usable_url_fails_instead_of_recording(
     async def _post(*_args, **_kwargs):
         return httpx.Response(201, json=payload)
 
+    async def _get(*_args, **_kwargs):
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(publish_worker.httpx.AsyncClient, "get", _get)
     monkeypatch.setattr(publish_worker.httpx.AsyncClient, "post", _post)
 
     await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")

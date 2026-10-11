@@ -33,7 +33,11 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.shared_protocol import FORK_HELPER, mid_turn_input_capability
+from cloud_agent_shared.shared_protocol import (
+    FORK_HELPER,
+    USER_MESSAGE_EVENT,
+    mid_turn_input_capability,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -479,9 +483,11 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert await store.snapshot.pending_snapshot_base_import() is None
 
 
+@pytest.mark.parametrize("publish_parent", [False, True])
 async def test_snapshot_publication_uses_latest_current_attempt_replies_from_included_turns(
     pool,
     store: Storage,
+    publish_parent,
 ):
     """Publication summaries follow the captured turns, not the newest chat activity."""
     from cloud_agent.storage._sql.events import insert_event
@@ -509,6 +515,13 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
                 event_type="message",
                 payload={"text": reply},
             )
+            if reply == "Investigating retry behavior.":
+                assert await store.attempt_commands.append_event(
+                    attempt_id=claim["attempt_id"],
+                    lease_generation=claim["lease_generation"],
+                    event_type=USER_MESSAGE_EVENT,
+                    payload={"text": "Use exponential backoff."},
+                )
         assert await store.sandbox.settle_thread_sandbox(
             **fence,
             job_id=job["id"],
@@ -527,6 +540,30 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
 
     parent_summary = "Fixed retry handling. " + "Result details. " * 400
     await settle(parent, parent_claim, sandbox, ["Investigating retry behavior.", parent_summary])
+    if publish_parent:
+        prior_capture = await store.snapshot.claim_due_sandbox_snapshot()
+        assert prior_capture is not None
+        prior_patch = "diff --git a/retry.py b/retry.py\n"
+        assert await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=prior_capture["snapshot_id"],
+            sandbox_id=prior_capture["sandbox_id"],
+            sandbox_generation=prior_capture["generation"],
+            container_id=prior_capture["container_id"],
+            workspace_epoch=prior_capture["workspace_epoch"],
+            base_sha=prior_capture["base_sha"],
+            patch=prior_patch,
+            content_sha256=hashlib.sha256(prior_patch.encode()).hexdigest(),
+        )
+        assert await store.snapshot.claim_for_publish() is not None
+        assert await store.snapshot.record_snapshot_publish(
+            snapshot_id=prior_capture["snapshot_id"],
+            pr_url="https://github.com/o/n/pull/7",
+            commit_sha="b" * 40,
+        )
+        assert await store.snapshot.complete_snapshot_base_import(
+            snapshot_id=prior_capture["snapshot_id"],
+            commit_sha="b" * 40,
+        )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id=parent["user_id"], prompt="also update the docs"
     )
@@ -616,8 +653,40 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
 
     publication = await store.snapshot.claim_for_publish()
     assert publication is not None
-    assert publication["included_job_ids"] == [parent["id"], child["id"]]
-    assert publication["session_summaries"] == [parent_summary[:4000], child_summary]
+    assert publication["included_job_ids"] == (
+        [child["id"]] if publish_parent else [parent["id"], child["id"]]
+    )
+    assert publication["session_summaries"] == (
+        [child_summary] if publish_parent else [parent_summary[:4000], child_summary]
+    )
+    assert [
+        (message["role"], message["content"]) for message in publication["session_messages"]
+    ] == [
+        ("user", parent["task_prompt"]),
+        ("assistant", "Investigating retry behavior."),
+        ("user", "Use exponential backoff."),
+        ("assistant", parent_summary),
+        ("user", "also update the docs"),
+        ("assistant", "Reading the docs."),
+        ("assistant", child_summary),
+    ]
+    assert publication["model"] == child["model"]
+    # A copied turn, or a later snapshot including an already-published turn,
+    # can carry a prior URL. The newest publication must replace that value.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET published_pr_url = $2 WHERE id = $1",
+            child["id"],
+            "https://github.com/o/n/pull/7",
+        )
+    assert await store.snapshot.record_snapshot_publish(
+        snapshot_id=publication["snapshot_id"],
+        pr_url="https://github.com/o/n/pull/8",
+        commit_sha="c" * 40,
+    )
+    published_child = await store.conversation_queries.get_job(child["id"])
+    assert published_child["published_pr_url"] == "https://github.com/o/n/pull/8"
+    assert published_child["published_commit_sha"] == "c" * 40
 
 
 async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(

@@ -19,8 +19,8 @@ Order of operations is load-bearing:
    with a pinned refspec.
 4. Open a **draft** PR against the branch the job was started from, so a human
    reviews before anything can merge and the diff is the agent's own work. A
-   later snapshot reuses the conversation's draft PR while it is open, and
-   opens a new one once someone has closed or merged it.
+   later snapshot refreshes the branch's open PR and opens a new draft once
+   someone has closed or merged it.
 
 A rejected patch marks the snapshot/group dirty without rewriting successful
 Agent turns. Gate violations are human-review situations, and a retry loop
@@ -41,6 +41,7 @@ import httpx
 
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.pr_titles import generate_pr_title
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent.settings import number_setting, setting_env
@@ -50,6 +51,7 @@ from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
+    from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
         HostPoolRepository,
         SnapshotRepository,
@@ -94,9 +96,6 @@ _PUBLISH_SCOPE = {"contents": "write", "pull_requests": "write"}
 # accept `abcdef1\n` — reachable only if the `.strip()` above ever goes away.
 # A branch called `deadbee-release` is not affected either way.
 _LOOKS_LIKE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
-
-# The number at the end of a recorded PR link, `https://github.com/o/n/pull/7`.
-_PR_NUMBER = re.compile(r"/pull/(\d+)/?$")
 
 
 def _pr_base_branch(job: dict[str, Any], fallback: str) -> str:
@@ -187,56 +186,66 @@ async def create_draft_pull_request(
     return url
 
 
-async def pull_request_is_closed(
+async def ensure_draft_pull_request(
     *,
     repo: str,
-    pr_url: str,
+    head_branch: str,
+    base_branch: str,
+    title: str,
+    body: str,
     credential: GitHubCredential,
-    timeout_s: float | None = None,
-) -> bool:
-    """Whether GitHub says the PR at ``pr_url`` is closed, merged or not.
+) -> str:
+    """Refresh an open branch PR, or create a new draft after closure/merge.
 
-    A conversation keeps one draft PR across its turns, but the owner can close
-    or merge it. Commits pushed afterwards land on the branch and appear in no
-    open PR, so the conversation needs a new one rather than the old link.
-
-    Only a definite "closed" counts. An unreadable link, a failed request or an
-    unexpected answer reads as still open: the branch is already pushed, and
-    keeping the existing link is the old behaviour, where guessing wrong the
-    other way would open a duplicate PR.
+    Look up the branch even on the first publication: a previous create may
+    have reached GitHub before its URL could be recorded locally. Never infer
+    that a saved URL still denotes an open PR.
     """
-    match = _PR_NUMBER.search(pr_url)
-    if match is None:
-        return False
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout_s
-            if timeout_s is not None
-            else number_setting("publish_pr_timeout_s", 30.0)
-        ) as client:
-            response = await client.get(
-                f"{credential.api_base}/repos/{repo}/pulls/{match.group(1)}",
-                headers=_github_headers(credential),
-            )
-        payload = response.json() if response.status_code < 400 else None
-    except (httpx.HTTPError, ValueError):
-        logger.warning(
-            "agent_job_pr_state_unknown",
-            extra={"event": "agent_job_pr_state_unknown", "pr_url": pr_url},
-            exc_info=True,
-        )
-        return False
-    if not isinstance(payload, dict):
-        logger.warning(
-            "agent_job_pr_state_unknown",
-            extra={
-                "event": "agent_job_pr_state_unknown",
-                "pr_url": pr_url,
-                "status_code": response.status_code,
+    headers = _github_headers(credential)
+    endpoint = f"{credential.api_base}/repos/{repo}/pulls"
+    async with httpx.AsyncClient(timeout=number_setting("publish_pr_timeout_s", 30.0)) as client:
+        response = await client.get(
+            endpoint,
+            headers=headers,
+            params={
+                "state": "open",
+                "head": f"{repo.split('/')[0]}:{head_branch}",
+                "base": base_branch,
             },
         )
-        return False
-    return payload.get("state") == "closed"
+        if response.status_code >= 400:
+            raise PublishError(f"GitHub refused the PR lookup ({response.status_code})")
+        pulls = response.json()
+        if not isinstance(pulls, list):
+            raise PublishError("GitHub returned an invalid PR list")
+        for pull in pulls:
+            if not isinstance(pull, dict):
+                raise PublishError("GitHub returned an invalid PR list entry")
+            if pull.get("state") != "open":
+                continue
+            number, url = pull.get("number"), pull.get("html_url")
+            if not isinstance(number, int) or not isinstance(url, str) or not url.strip():
+                raise PublishError("GitHub returned an open PR without its number or URL")
+            updated = await client.patch(
+                f"{endpoint}/{number}", headers=headers, json={"title": title, "body": body}
+            )
+            if updated.status_code >= 400:
+                raise PublishError(f"GitHub refused the PR update ({updated.status_code})")
+            payload = updated.json()
+            if not isinstance(payload, dict) or payload.get("state") not in {"open", "closed"}:
+                raise PublishError("GitHub returned an invalid PR update")
+            if payload["state"] == "closed":
+                # The owner can close/merge while publication is updating it.
+                break
+            return url
+    return await create_draft_pull_request(
+        repo=repo,
+        head_branch=head_branch,
+        base_branch=base_branch,
+        title=title,
+        body=body,
+        credential=credential,
+    )
 
 
 def _github_headers(credential: GitHubCredential) -> dict[str, str]:
@@ -444,6 +453,7 @@ async def publish_one(
     *,
     credential: GitHubCredential | None = None,
     app_credentials: Any | None = None,
+    grants: GrantClient | None = None,
     base_branch: str | None = None,
     allow_workflow_changes: bool = False,
 ) -> str | None:
@@ -463,6 +473,7 @@ async def publish_one(
         job,
         credential=credential,
         app_credentials=app_credentials,
+        grants=grants,
         base_branch=base_branch
         if base_branch is not None
         else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",
@@ -475,6 +486,7 @@ async def _publish_due(
     *,
     credential: GitHubCredential | None,
     app_credentials: Any | None,
+    grants: GrantClient | None = None,
     base_branch: str,
 ) -> None:
     """Publish every captured snapshot, past any that fails.
@@ -488,6 +500,7 @@ async def _publish_due(
             job,
             credential=credential,
             app_credentials=app_credentials,
+            grants=grants,
             base_branch=base_branch,
         )
 
@@ -498,6 +511,7 @@ async def _publish_claimed(
     *,
     credential: GitHubCredential | None,
     app_credentials: Any | None,
+    grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
 ) -> str | None:
@@ -568,24 +582,15 @@ async def _publish_claimed(
             allow_workflow_changes=allow_workflow_changes,
             include_base_bundle=True,
         )
-        pr_url = job.get("parent_pr_url")
-        if pr_url and await pull_request_is_closed(
-            repo=job["repo"], pr_url=pr_url, credential=credential
-        ):
-            logger.info(
-                "agent_job_pr_closed",
-                extra={"event": "agent_job_pr_closed", "job_id": job_id, "pr_url": pr_url},
-            )
-            pr_url = None
-        if not pr_url:
-            pr_url = await create_draft_pull_request(
-                repo=job["repo"],
-                head_branch=result.branch,
-                base_branch=pr_base,
-                title=_pr_title(job, result.changed_files),
-                body=_pr_body(job, result.changed_files),
-                credential=credential,
-            )
+        title = await generate_pr_title(job, result.changed_files, grants=grants)
+        pr_url = await ensure_draft_pull_request(
+            repo=job["repo"],
+            head_branch=result.branch,
+            base_branch=pr_base,
+            title=title or _pr_title(job, result.changed_files),
+            body=_pr_body(job, result.changed_files),
+            credential=credential,
+        )
     except PublishError as exc:
         logger.warning(
             "agent_job_publish_rejected",
@@ -637,6 +642,7 @@ async def publish_loop(
     *,
     credential_provider: Any = None,
     github_app: GitHubAppSource | None = None,
+    grants: GrantClient | None = None,
     base_branch: str | None = None,
     interval_seconds: float | None = None,
     wake: BackgroundWake | None = None,
@@ -699,6 +705,7 @@ async def publish_loop(
                 store,
                 credential=credential,
                 app_credentials=app_credentials,
+                grants=grants,
                 base_branch=base_branch
                 if base_branch is not None
                 else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",

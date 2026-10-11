@@ -931,10 +931,13 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       .filter((message) => message.job_id === job.id)
       .map(mapMessage);
   }
-  const threadPrUrl = [...(options.thread?.jobs ?? [])]
+  const threadPrJob = [...(options.thread?.jobs ?? [])]
     .reverse()
-    .find((threadJob) => threadJob.published_pr_url)?.published_pr_url;
-  const publishedPrUrl = job.published_pr_url ?? threadPrUrl ?? null;
+    .find((threadJob) => threadJob.published_pr_url);
+  const publishedPrUrl =
+    threadPrJob && (threadPrJob.turn_no ?? 1) > (job.turn_no ?? 1)
+      ? threadPrJob.published_pr_url
+      : (job.published_pr_url ?? threadPrJob?.published_pr_url ?? null);
 
   return {
     id: job.id,

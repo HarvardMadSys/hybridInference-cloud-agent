@@ -86,6 +86,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             store,
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
+            grants=app.state.grants,
             wake=getattr(app.state, "background_wake", None),
         )
     )

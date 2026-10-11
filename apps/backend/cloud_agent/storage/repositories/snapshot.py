@@ -399,6 +399,38 @@ class PostgresSnapshotRepository:
                            ) summary ON TRUE
                            WHERE included.snapshot_id = s.id
                        ), '[]'::jsonb) AS session_summaries,
+                       COALESCE((
+                           SELECT jsonb_agg(
+                               jsonb_build_object(
+                                   'thread_id', message.thread_id,
+                                   'job_id', message.job_id,
+                                   'role', message.role,
+                                   'content', message.content
+                               ) ORDER BY history.thread_id, history.turn_no,
+                                   CASE WHEN message.role = 'user' AND NOT message.mid_turn
+                                        THEN 0 ELSE 1 END,
+                                   message.id
+                           )
+                           FROM (
+                               SELECT included_job.thread_id, MAX(included_job.turn_no) AS turn_no
+                               FROM agent_sandbox_snapshots captured
+                               JOIN agent_snapshot_jobs included ON included.snapshot_id = captured.id
+                               JOIN agent_jobs included_job ON included_job.id = included.job_id
+                               WHERE captured.sandbox_id = s.sandbox_id
+                                 AND captured.workspace_epoch <= s.workspace_epoch
+                               GROUP BY included_job.thread_id
+                           ) boundary
+                           JOIN agent_jobs history ON history.thread_id = boundary.thread_id
+                               AND history.turn_no <= boundary.turn_no
+                           JOIN agent_thread_messages message ON message.job_id = history.id
+                               AND message.thread_id = history.thread_id
+                           LEFT JOIN agent_job_events event ON event.id = message.source_event_id
+                           WHERE message.role = 'user'
+                              OR (message.role = 'assistant' AND (
+                                  message.source_event_id IS NULL
+                                  OR event.attempt_id = history.current_attempt_id
+                              ))
+                       ), '[]'::jsonb) AS session_messages,
                        g.origin_thread_id,
                        g.generation, g.container_id, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
@@ -423,7 +455,7 @@ class PostgresSnapshotRepository:
                              AND member.resident_slot_id IS NOT NULL
                        ), '[]'::jsonb) AS members,
                        j.thread_id, j.parent_job_id, j.user_id, t.repo,
-                       j.task_prompt, j.metadata,
+                       j.task_prompt, j.metadata, j.model,
                        prior.published_pr_url AS parent_pr_url
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
@@ -485,6 +517,7 @@ class PostgresSnapshotRepository:
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
                     "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
                     "session_summaries": load_json(snapshot["session_summaries"]) or [],
+                    "session_messages": load_json(snapshot["session_messages"]) or [],
                     "job_id": snapshot["id"],
                     "anchor_job_id": snapshot["id"],
                     "thread_id": snapshot["thread_id"],
@@ -506,6 +539,7 @@ class PostgresSnapshotRepository:
                     "repo": snapshot["repo"],
                     "base_sha": snapshot["base_sha"],
                     "task_prompt": snapshot["task_prompt"],
+                    "model": snapshot["model"],
                     "metadata": load_json(snapshot["metadata"]),
                     "patch": snapshot["patch"],
                 }
@@ -562,8 +596,8 @@ class PostgresSnapshotRepository:
             await conn.execute(
                 """
                 UPDATE agent_jobs
-                SET published_pr_url = COALESCE(published_pr_url, $2),
-                    published_commit_sha = COALESCE(published_commit_sha, $3),
+                SET published_pr_url = $2,
+                    published_commit_sha = $3,
                     updated_at = NOW()
                 WHERE id IN (
                     SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1
