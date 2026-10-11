@@ -210,6 +210,8 @@ class PostgresPendingMessageRepository:
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as
         seen, so older waiting messages go first and this one follows them.
+        Normal submissions also lock their membership then group before writing
+        the queue, if present, so they cannot race an idle-only group's check.
         """
         check_client_request(client_request_id, client_request_fingerprint)
         message_id = new_pending_message_id()
@@ -233,12 +235,13 @@ class PostgresPendingMessageRepository:
                 if thread["archived_at"] is not None:
                     return {"error": "session_archived"}
                 if require_idle:
-                    # The helper creating a turn takes thread -> latest job ->
-                    # own membership -> group. Acquire the job before taking
-                    # the shared admission boundary, not while holding it.
+                    # The thread lock freezes the newest turn. Do not lock its
+                    # job before the group: snapshot publication locks group
+                    # then included jobs, and must be able to finish while this
+                    # guarded action waits at its admission boundary.
                     latest_job_id = await conn.fetchval(
                         "SELECT id FROM agent_jobs WHERE thread_id = $1 "
-                        "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
+                        "ORDER BY turn_no DESC LIMIT 1",
                         thread_id,
                     )
                     if expected_latest_job_id is None or latest_job_id != expected_latest_job_id:
@@ -294,6 +297,9 @@ class PostgresPendingMessageRepository:
                         or current["workspace_publication_state"] != "published"
                     ):
                         return {"error": "conversation_changed"}
+                    # Every group member is idle and this thread is fenced, so
+                    # the helper can now lock its terminal parent under the
+                    # group, matching publication's group -> included job order.
                     job = await insert_follow_up(
                         conn,
                         parent_job_id=expected_latest_job_id,
@@ -319,6 +325,20 @@ class PostgresPendingMessageRepository:
                         expected_latest_job_id,
                     )
                     return {"job_id": str(job["id"])}
+                # Queue insertion shares the idle-only admission fence too:
+                # a sibling cannot insert waiting work after its empty-queue
+                # check but before the guarded turn commits. Legacy threads
+                # without a membership keep their ordinary enqueue behavior.
+                membership = await conn.fetchrow(
+                    "SELECT sandbox_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE",
+                    thread_id,
+                )
+                if membership is not None:
+                    await conn.fetchval(
+                        "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                        membership["sandbox_id"],
+                    )
                 await _continue_if_idle(conn, thread_id=thread_id)
                 await conn.execute(
                     """

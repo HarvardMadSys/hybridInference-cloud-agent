@@ -44,6 +44,7 @@ from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -1422,6 +1423,173 @@ async def test_guarded_submit_waits_for_actual_sibling_admission_at_the_group_lo
     assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
     assert await api.queue(thread_id) == before
     assert len(await api.turns(thread_id)) == 1
+
+
+async def test_ordinary_sibling_submit_waits_for_watch_to_commit_after_its_empty_group_check(
+    api: Api, monkeypatch
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    checked_empty_group = asyncio.Event()
+    release_watch = asyncio.Event()
+    watch_pid = None
+    original_insert = pending_message_storage.insert_follow_up
+
+    async def hold_watch(conn: Any, **fields: Any) -> dict[str, Any] | None:
+        nonlocal watch_pid
+        if fields["prompt"] == "Watch the PR and merge":
+            # The guarded transaction has read the group's empty queue and
+            # still owns its thread, membership and group locks.
+            watch_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            checked_empty_group.set()
+            await release_watch.wait()
+        return await original_insert(conn, **fields)
+
+    monkeypatch.setattr(pending_message_storage, "insert_follow_up", hold_watch)
+    watch = asyncio.create_task(
+        api.send(
+            thread_id,
+            "Watch the PR and merge",
+            require_idle=True,
+            expected_latest_job_id=job["id"],
+        )
+    )
+    ordinary = None
+    try:
+        await asyncio.wait_for(checked_empty_group.wait(), timeout=10)
+        ordinary = asyncio.create_task(api.send(sibling["thread_id"], "ordinary sibling follow-up"))
+        async with asyncio.timeout(10), api.pool.acquire() as observer:
+            while not await observer.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                watch_pid,
+            ):
+                await asyncio.sleep(0.01)
+            assert (
+                await observer.fetchval(
+                    "SELECT count(*) FROM agent_pending_messages WHERE thread_id = $1",
+                    sibling["thread_id"],
+                )
+                == 0
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT count(*) FROM agent_jobs WHERE thread_id = $1", sibling["thread_id"]
+                )
+                == 1
+            )
+        assert not ordinary.done()
+        release_watch.set()
+        accepted_watch, accepted_ordinary = await asyncio.wait_for(
+            asyncio.gather(watch, ordinary), timeout=10
+        )
+    finally:
+        release_watch.set()
+        for task in (watch, ordinary):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    assert accepted_watch.status_code == accepted_ordinary.status_code == 201
+    assert accepted_watch.json()["job"]["task_prompt"] == "Watch the PR and merge"
+    assert accepted_ordinary.json()["job"]["task_prompt"] == "ordinary sibling follow-up"
+    assert accepted_watch.json()["pending"] is accepted_ordinary.json()["pending"] is None
+    assert len(await api.turns(thread_id)) == len(await api.turns(sibling["thread_id"])) == 2
+    assert (await api.queue(thread_id))["messages"] == []
+    assert (await api.queue(sibling["thread_id"]))["messages"] == []
+
+
+async def test_ordinary_submit_without_a_retained_membership_still_queues_and_replays(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    # The first turn has not reached a host, so no membership or group exists.
+    assert await api.store.sandbox.thread_sandbox(thread_id=thread_id) is None
+
+    first = await api.send(thread_id, "ordinary legacy queue", key="no-membership-queue")
+    again = await api.send(thread_id, "ordinary legacy queue", key="no-membership-queue")
+
+    assert first.status_code == again.status_code == 201
+    assert first.json()["job"] is again.json()["job"] is None
+    assert first.json()["pending"]["id"] == again.json()["pending"]["id"]
+    assert [row["prompt"] for row in (await api.queue(thread_id))["messages"]] == [
+        "ordinary legacy queue"
+    ]
+    assert len(await api.turns(thread_id)) == 1
+
+
+async def test_guarded_submit_does_not_hold_an_included_job_while_waiting_for_publication(
+    api: Api,
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    group = await api.store.sandbox.thread_sandbox(thread_id=thread_id)
+    assert group is not None
+    watch = None
+    try:
+        async with api.pool.acquire() as publisher:
+            snapshot_id = await publisher.fetchval(
+                "UPDATE agent_sandbox_snapshots SET state = 'publishing' "
+                "WHERE sandbox_id = $1 RETURNING id",
+                group["sandbox_id"],
+            )
+            assert snapshot_id is not None
+            async with publisher.transaction():
+                # record_snapshot_publish locks snapshot -> group -> included
+                # jobs. Pause at its group boundary before the included write.
+                await publisher.execute(
+                    "UPDATE agent_sandbox_snapshots SET state = 'published', "
+                    "published_commit_sha = $2, published_at = NOW() WHERE id = $1",
+                    snapshot_id,
+                    "a" * 40,
+                )
+                await publisher.fetchval(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                    group["sandbox_id"],
+                )
+                publisher_pid = await publisher.fetchval("SELECT pg_backend_pid()")
+                watch = asyncio.create_task(
+                    api.send(
+                        thread_id,
+                        "Watch the PR and merge",
+                        require_idle=True,
+                        expected_latest_job_id=job["id"],
+                    )
+                )
+                async with asyncio.timeout(10), api.pool.acquire() as observer:
+                    while not await observer.fetchval(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                        publisher_pid,
+                    ):
+                        await asyncio.sleep(0.01)
+                # If Watch locked its parent before waiting for the group,
+                # this real included-job update would form a PostgreSQL cycle.
+                async with asyncio.timeout(10):
+                    updated = await publisher.execute(
+                        "UPDATE agent_jobs SET published_pr_url = $2, "
+                        "published_commit_sha = $3 WHERE id IN ("
+                        "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1)",
+                        snapshot_id,
+                        "https://github.com/owner/name/pull/1",
+                        "a" * 40,
+                    )
+                    assert updated == "UPDATE 1"
+                assert not watch.done()
+        accepted = await asyncio.wait_for(watch, timeout=10)
+    finally:
+        if watch is not None and not watch.done():
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["job"]["task_prompt"] == "Watch the PR and merge"
+    assert accepted.json()["pending"] is None
+    assert (await api.queue(thread_id))["messages"] == []
+    assert len(await api.turns(thread_id)) == 2
 
 
 async def test_guarded_submit_rolls_back_the_turn_if_a_prepared_upload_disappears(

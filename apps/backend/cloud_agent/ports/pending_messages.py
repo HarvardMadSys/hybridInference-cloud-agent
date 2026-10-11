@@ -57,6 +57,8 @@ class PendingMessageRepository(Protocol):
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as
         seen, so older waiting messages go first and this one follows them.
+        Normal submissions also lock their membership then group before writing
+        the queue, if present, so they cannot race an idle-only group's check.
         """
         ...
 
