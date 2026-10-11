@@ -266,52 +266,57 @@ function ToolActivity({
           tabIndex={0}
           className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto rounded-md focus-visible:outline-crimson"
         >
-          {tools.map(({ event, blockKey }, index) => (
-            <li
-              key={blockKey ?? index}
-              data-block-key={blockKey}
-              title={`${toolSummary(event)} · ${toolResultLabel(event, t)}`}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-white/5"
-            >
-              <ToolIcon tool={event.tool} />
-              {event.parentToolUseId ? (
-                <span
-                  title={`Delegated by ${event.parentToolUseId}`}
-                  className="text-[10px] text-violet-700 dark:text-violet-300"
-                >
-                  Subagent tool
-                </span>
-              ) : null}
-              {onInspectEvent && jobId ? (
-                <button
-                  type="button"
-                  onClick={() => onInspectEvent(event, jobId)}
-                  aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
-                  className="ui-focus-ring max-w-80 truncate rounded text-left font-medium text-gray-700 hover:text-crimson dark:text-gray-300"
-                >
-                  {toolSummary(event)}
-                </button>
-              ) : (
-                <span className="max-w-80 truncate font-medium text-gray-700 dark:text-gray-300">
-                  {toolSummary(event)}
-                </span>
-              )}
-              {event.diffStat ? (
-                <span className="max-w-20 truncate font-mono" title={event.diffStat}>
-                  {event.diffStat}
-                </span>
-              ) : null}
-              <span
-                className={
-                  event.outputIsError || event.resultState === 'failed'
-                    ? 'text-rose-600 dark:text-rose-400'
-                    : 'text-gray-500 dark:text-gray-400'
-                }
+          {tools.map(({ event, blockKey }, index) => {
+            // Compact shows the tool alone; richer views add what it ran on.
+            const label =
+              presentation === 'compact' ? event.tool : toolSummary(event);
+            return (
+              <li
+                key={blockKey ?? index}
+                data-block-key={blockKey}
+                title={`${toolSummary(event)} · ${toolResultLabel(event, t)}`}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-white/5"
               >
-                {toolResultLabel(event, t)}
-              </span>
-            </li>
-          ))}
+                <ToolIcon tool={event.tool} />
+                {event.parentToolUseId ? (
+                  <span
+                    title={`Delegated by ${event.parentToolUseId}`}
+                    className="text-[10px] text-violet-700 dark:text-violet-300"
+                  >
+                    Subagent tool
+                  </span>
+                ) : null}
+                {onInspectEvent && jobId ? (
+                  <button
+                    type="button"
+                    onClick={() => onInspectEvent(event, jobId)}
+                    aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
+                    className="ui-focus-ring max-w-80 truncate rounded text-left font-medium text-gray-700 hover:text-crimson dark:text-gray-300"
+                  >
+                    {label}
+                  </button>
+                ) : (
+                  <span className="max-w-80 truncate font-medium text-gray-700 dark:text-gray-300">
+                    {label}
+                  </span>
+                )}
+                {event.diffStat ? (
+                  <span className="max-w-20 truncate font-mono" title={event.diffStat}>
+                    {event.diffStat}
+                  </span>
+                ) : null}
+                <span
+                  className={
+                    event.outputIsError || event.resultState === 'failed'
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-gray-500 dark:text-gray-400'
+                  }
+                >
+                  {toolResultLabel(event, t)}
+                </span>
+              </li>
+            );
+          })}
         </ul>
         <button
           type="button"
