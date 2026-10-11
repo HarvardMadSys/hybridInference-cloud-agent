@@ -3166,6 +3166,111 @@ def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -
     assert all(event[0] != "thaw" for event in manager.events)
 
 
+def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None:
+    class BlockingStopManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stop_entered = threading.Event()
+            self.stop_release = threading.Event()
+
+        def stop(self, spec, **kwargs):
+            self.stop_entered.set()
+            assert self.stop_release.wait(timeout=5)
+            return super().stop(spec, **kwargs)
+
+    manager = BlockingStopManager()
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda *_args: None,
+        stopped_archive_hook=lambda *_args: None,
+    )
+    fresh_members = [
+        SharedMemberManifest(
+            thread_id="athr_source",
+            context_status="new",
+            resident_slot_id=0,
+        )
+    ]
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=fresh_members,
+    )
+    capture_entered = threading.Event()
+    preservation_collided = threading.Event()
+    capture_finished = threading.Event()
+    capture_errors: list[BaseException] = []
+    guard_errors: list[BaseException] = []
+    stop_if_idle = supervisor.stop_if_idle
+
+    def observed_stop_if_idle(*args, **kwargs):
+        try:
+            return stop_if_idle(*args, **kwargs)
+        except SessionBusy:
+            if kwargs.get("reason") == "orphaned_attempt":
+                preservation_collided.set()
+            raise
+
+    supervisor.stop_if_idle = observed_stop_if_idle  # type: ignore[method-assign]
+
+    def capture(*_args):
+        manager.initial_archive_marker = b"prepared-initial-marker"
+        capture_entered.set()
+        assert manager.stop_entered.wait(timeout=5)
+        raise RuntimeError("initial upload failed")
+
+    def run_capture() -> None:
+        try:
+            supervisor.capture_initial_archive(
+                "athr_source",
+                lease.token,
+                capture=capture,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            capture_errors.append(exc)
+        finally:
+            capture_finished.set()
+
+    def run_guard_stop() -> None:
+        try:
+            supervisor.stop_if_idle(
+                "athr_source",
+                generation=1,
+                reason="unguarded",
+                defer_archive=True,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            guard_errors.append(exc)
+
+    capture_thread = threading.Thread(target=run_capture)
+    guard_thread = threading.Thread(target=run_guard_stop)
+    capture_thread.start()
+    assert capture_entered.wait(timeout=2)
+    guard_thread.start()
+    assert manager.stop_entered.wait(timeout=2)
+    assert preservation_collided.wait(timeout=2)
+    # The preservation cleanup must wait for the already-owned stop instead of
+    # sampling RUNNING and permanently retaining the snapshot barrier.
+    assert capture_finished.wait(timeout=0.2) is False
+    manager.stop_release.set()
+    capture_thread.join(timeout=2)
+    guard_thread.join(timeout=2)
+
+    assert not capture_thread.is_alive()
+    assert not guard_thread.is_alive()
+    assert guard_errors == []
+    assert len(capture_errors) == 1
+    assert isinstance(capture_errors[0], SessionBusy)
+    status = supervisor.status("athr_source")
+    assert status.running is False
+    assert status.snapshotting is False
+    assert supervisor.has_pending_archive_work() is True
+    assert all(event[0] != "thaw" for event in manager.events)
+
+
 def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws() -> None:
     manager = _Manager()
     prepared: list[bool] = []
@@ -3214,11 +3319,18 @@ def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws() -> None:
         supervisor.operation_opened("athr_source")
 
 
-def test_failed_initial_preservation_stop_keeps_the_snapshot_barrier() -> None:
+def test_failed_initial_preservation_stop_releases_barrier_after_exact_retry() -> None:
     class StopFailureManager(_Manager):
-        def stop(self, spec, **_kwargs):
-            self.stop_count += 1
-            raise SandboxError("docker stop failed")
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_stop_once = True
+
+        def stop(self, spec, **kwargs):
+            if self.fail_stop_once:
+                self.fail_stop_once = False
+                self.stop_count += 1
+                raise SandboxError("docker stop failed")
+            return super().stop(spec, **kwargs)
 
     manager = StopFailureManager()
     archive_calls: list[object] = []
@@ -3227,13 +3339,20 @@ def test_failed_initial_preservation_stop_keeps_the_snapshot_barrier() -> None:
         stopped_archive_prepare_hook=lambda *_args: None,
         stopped_archive_hook=lambda *args: archive_calls.append(args),
     )
+    fresh_members = [
+        SharedMemberManifest(
+            thread_id="athr_source",
+            context_status="new",
+            resident_slot_id=0,
+        )
+    ]
     lease = supervisor.acquire(
         _spec(),
         thread_id="athr_source",
         owner="attempt:1",
         activation_generation=1,
-        has_settled_context=True,
-        manifest=_members(),
+        has_settled_context=False,
+        manifest=fresh_members,
     )
     initial_failure = RuntimeError("initial upload failed")
 
@@ -3258,6 +3377,34 @@ def test_failed_initial_preservation_stop_keeps_the_snapshot_barrier() -> None:
     assert all(event[0] != "thaw" for event in manager.events)
     with pytest.raises(SessionBusy, match="snapshot capture"):
         supervisor.operation_opened("athr_source")
+
+    stopped = supervisor.stop_if_idle(
+        "athr_source",
+        generation=1,
+        reason="orphaned_attempt",
+    )
+
+    assert stopped.running is False
+    assert stopped.snapshotting is False
+    assert manager.stop_count == 3
+    assert len(archive_calls) == 1
+    assert supervisor.has_pending_archive_work() is False
+    assert all(event[0] != "thaw" for event in manager.events)
+
+    replacement = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=False,
+        manifest=fresh_members,
+        expected_container_id="container-shared",
+    )
+
+    assert replacement.token
+    assert supervisor.status("athr_source").running is True
+    assert supervisor.status("athr_source").snapshotting is False
+    supervisor.abandon("athr_source", replacement.token, lost=False)
 
 
 def test_failed_initial_archive_before_marker_thaws_without_stopping() -> None:

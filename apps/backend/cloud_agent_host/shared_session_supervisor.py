@@ -319,6 +319,10 @@ class _Group:
     terminal_tokens: dict[str, str] = field(default_factory=dict)
     operation_tokens: dict[str, str] = field(default_factory=dict)
     snapshotting: bool = False
+    # A failed initial archive observed (or could not rule out) its durable
+    # preparation marker, but the exact container could not yet be stopped.
+    # Only a later accepted STOPPED inspection may release this snapshot fence.
+    initial_archive_preservation_pending: bool = False
     starting: bool = False
     stopping: bool = False
     stop_archive_pending: bool = False
@@ -750,6 +754,10 @@ class SharedChatSessionSupervisor:
         if group.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         group.inspection = inspection
+        if group.initial_archive_preservation_pending and not inspection.running:
+            group.initial_archive_preservation_pending = False
+            group.snapshotting = False
+            self._condition.notify_all()
         return inspection
 
     def _require_current_inspection(self, group: _Group) -> ChatSandboxInspection:
@@ -3087,6 +3095,8 @@ class SharedChatSessionSupervisor:
             else:
                 preserve_frozen_writers = initial_marker is not None
             if preserve_frozen_writers:
+                with self._lock:
+                    group.initial_archive_preservation_pending = True
                 try:
                     stopped = self.stop_if_idle(
                         thread_id,
@@ -3096,6 +3106,15 @@ class SharedChatSessionSupervisor:
                     )
                 except BaseException as exc:
                     preservation_error = exc
+                    # A network fail-stop or shutdown can already own the same
+                    # group. Do not sample its still-running pre-stop state and
+                    # leave the snapshot fence orphaned after that exact stop
+                    # completes. Every stop path clears ``stopping`` and
+                    # notifies this condition; retain the frozen-writer barrier
+                    # until the owning transition has a stable result to inspect.
+                    with self._condition:
+                        while group.stopping:
+                            self._condition.wait(timeout=0.5)
                     try:
                         current = self._require_current_inspection(group)
                     except BaseException as inspection_exc:
@@ -3143,9 +3162,22 @@ class SharedChatSessionSupervisor:
                 and group.lifecycle_generation == lifecycle_generation
                 and member.lease_token == token
             )
+            # A concurrent exact stop can land after the inspection above but
+            # before this bookkeeping lock. Honour that accepted STOPPED state
+            # instead of recording a stale preservation barrier. Otherwise mark
+            # this specific snapshot fence for release by a later exact stop.
+            if (
+                not release_snapshot_barrier
+                and preserve_frozen_writers
+                and not group.inspection.running
+            ):
+                release_snapshot_barrier = True
             if release_snapshot_barrier:
+                group.initial_archive_preservation_pending = False
                 group.snapshotting = False
                 self._arm_idle_if_quiescent(group)
+            elif preserve_frozen_writers:
+                group.initial_archive_preservation_pending = True
             self._condition.notify_all()
         if preservation_error is not None:
             preservation_error.add_note(
