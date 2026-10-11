@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
 
+vi.mock('@/components/providers/AuthProvider', () => ({
+  useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
+}));
+
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 
@@ -93,7 +97,7 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView connectedProvider="github" />);
 
-    expect(screen.getByRole('heading', { level: 1, name: 'Integrations' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Setting' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
     expect(
@@ -108,6 +112,12 @@ describe('IntegrationsView', () => {
     expect(screen.getAllByText('Coming soon')).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Add server' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Agent questions' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Turn completions' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import IntegrationsPage from './page';
 import type { McpConnectionApi } from '@/lib/api/mcp';
 
+vi.mock('@/components/providers/AuthProvider', () => ({
+  useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
+}));
+
 const navigation = vi.hoisted(() => ({ search: '' }));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(navigation.search),

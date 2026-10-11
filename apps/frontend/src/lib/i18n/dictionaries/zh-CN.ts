@@ -204,7 +204,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.moved': '顺序已更新',
   'sidebar.newTask': '新建任务',
   'sidebar.archived': '已归档',
-  'sidebar.integrations': '集成',
   'sidebar.noJobs': '还没有任务。',
   'sidebar.resize': '调整任务列表宽度',
   'sidebar.showMore': '显示另外 {count} 条',
@@ -218,7 +217,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.archiveTask': '归档任务',
   'sidebar.archiveFailed': '归档失败。',
   'sidebar.pinFailed': '置顶失败。',
-  'sidebar.openSettings': '打开设置',
   'sidebar.justNow': '刚刚',
   'sidebar.minutesAgo': '{count}分钟',
   'sidebar.hoursAgo': '{count}小时',
@@ -228,8 +226,7 @@ export const zhCN: Record<TranslationKey, string> = {
 
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': '设置',
-  'settings.close': '关闭设置',
-  'settings.done': '完成',
+  'settings.description': '管理你的连接、技能和通知。',
   'settings.notifications.title': '通知',
   'settings.notifications.description':
     'Agent 提问或完成一轮任务时接收浏览器通知。请保持应用打开以接收通知。',

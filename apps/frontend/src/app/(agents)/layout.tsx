@@ -15,6 +15,7 @@ import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
+import { WebsitePreferences } from '@/components/features/settings/WebsitePreferences';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
@@ -49,7 +50,7 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   };
 
   return (
-    <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-gray-200/80 bg-white/95 px-4 py-3 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur sm:px-5 dark:border-white/10 dark:bg-gray-900/95">
+    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 border-b border-gray-200/80 bg-white/95 px-4 py-3 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur max-[359px]:grid-cols-1 sm:px-5 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto] dark:border-white/10 dark:bg-gray-900/95">
       <div className="flex min-w-0 items-center gap-2.5">
         {sidebarToggle}
         <Link
@@ -83,9 +84,12 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
           </a>
         )}
       </div>
+      <div className="max-[359px]:justify-self-end md:col-start-3 md:row-start-1">
+        <WebsitePreferences />
+      </div>
       <nav
         aria-label={t('nav.aria')}
-        className="flex max-w-full items-center gap-1 overflow-x-auto text-[13px] font-medium text-gray-600 max-md:w-full dark:text-gray-400"
+        className="col-span-2 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto text-[13px] font-medium text-gray-600 max-[359px]:col-span-1 md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-end dark:text-gray-400"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the

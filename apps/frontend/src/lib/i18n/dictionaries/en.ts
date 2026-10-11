@@ -211,7 +211,6 @@ export const en = {
   'sidebar.moved': 'Order updated',
   'sidebar.newTask': 'New task',
   'sidebar.archived': 'Archived',
-  'sidebar.integrations': 'Integrations',
   'sidebar.noJobs': 'No jobs yet.',
   'sidebar.resize': 'Resize task list',
   'sidebar.showMore': 'Show {count} more',
@@ -225,7 +224,6 @@ export const en = {
   'sidebar.archiveTask': 'Archive task',
   'sidebar.archiveFailed': 'Could not archive the task.',
   'sidebar.pinFailed': 'Could not pin the task.',
-  'sidebar.openSettings': 'Open settings',
   'sidebar.justNow': 'now',
   'sidebar.minutesAgo': '{count}m',
   'sidebar.hoursAgo': '{count}h',
@@ -234,9 +232,8 @@ export const en = {
   'sidebar.dateOtherYear': '{month}/{day}/{year}',
 
   // ── Settings ────────────────────────────────────────────────────────────
-  'settings.title': 'Settings',
-  'settings.close': 'Close settings',
-  'settings.done': 'Done',
+  'settings.title': 'Setting',
+  'settings.description': 'Manage your connections, skills, and notifications.',
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',

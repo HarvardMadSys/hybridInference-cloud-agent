@@ -1,6 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useT } from '@/components/providers';
+import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
+import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
@@ -227,6 +230,7 @@ export function IntegrationsView({
   connectedProvider?: AgentIntegrationProvider | null;
   mcpAuthorization?: McpAuthorizationResult;
 }) {
+  const t = useT();
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -331,10 +335,10 @@ export function IntegrationsView({
     <section className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-10 lg:py-10">
       <header className="border-b border-border pb-6">
         <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-          Integrations
+          {t('settings.title')}
         </h1>
         <p className="mt-2 max-w-xl text-sm leading-6 text-muted sm:text-base">
-          Connect your tools and give your agents reusable skills.
+          {t('settings.description')}
         </p>
       </header>
 
@@ -431,6 +435,8 @@ export function IntegrationsView({
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
       <SkillsSection />
+      <NotificationSettings />
+      <GettingStartedSettings />
     </section>
   );
 }

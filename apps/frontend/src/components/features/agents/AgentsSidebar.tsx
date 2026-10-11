@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
-import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
+import { GearIcon } from '@/components/features/settings/icons';
 import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
 import { useAgentReads } from './AgentReadProvider';
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
@@ -894,25 +894,12 @@ export function AgentsSidebar({
                 : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
-            <svg
-              className="h-4 w-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M8 5v3m8-3v3M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0V8ZM12 16v3"
-              />
-            </svg>
-            {t('sidebar.integrations')}
+            <GearIcon className="h-4 w-4" />
+            {t('settings.title')}
           </Link>
         </div>
 
         <GettingStarted />
-        <SettingsLauncher />
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
     </>
