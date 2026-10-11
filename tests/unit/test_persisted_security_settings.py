@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from starlette.datastructures import Headers
 
 from cloud_agent import identity, settings, tokens
 from cloud_agent.api.deps import get_client_ip
@@ -86,7 +87,7 @@ def test_saved_cookie_proxy_broker_and_execution_policies_are_applied():
     )
     assert _cookie_is_secure() is False
     assert (
-        get_client_ip(SimpleNamespace(headers={"x-forwarded-for": "198.51.100.1"}))
+        get_client_ip(SimpleNamespace(headers=Headers({"x-forwarded-for": "198.51.100.1"})))
         == "198.51.100.1"
     )
     assert validate_broker_url("https://broker.example") == "https://broker.example"

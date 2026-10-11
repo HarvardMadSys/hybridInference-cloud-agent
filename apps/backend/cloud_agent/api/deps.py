@@ -498,10 +498,12 @@ def get_client_ip(request: Request) -> str:
     nearest proxy wrote, whether that proxy overwrites the header or appends
     to it. Everything to its left arrived from the caller, and an appending
     proxy such as nginx's ``$proxy_add_x_forwarded_for`` passes it through
-    verbatim, so the leftmost entry is whatever the caller typed.
+    verbatim, so the leftmost entry is whatever the caller typed. Repeated
+    header lines count as one list in order: HAProxy appends a line of its own
+    rather than editing the caller's, and the first line is then all theirs.
     """
     if (setting_env(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
-        forwarded = request.headers.get("x-forwarded-for") or ""
+        forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
         nearest_hop = forwarded.split(",")[-1].strip()
         if nearest_hop:
             return nearest_hop

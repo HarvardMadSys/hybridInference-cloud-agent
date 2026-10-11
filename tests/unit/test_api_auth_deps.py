@@ -327,6 +327,24 @@ async def test_a_trusted_header_records_the_hop_the_nearest_proxy_wrote(
     assert response.json()["ip"] == "192.0.2.44"
 
 
+async def test_a_proxy_that_appends_its_own_header_line_is_the_one_recorded(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """HAProxy adds a second line instead of editing the caller's.
+
+    Reading only the first line would take its last entry from a header the
+    caller wrote in full.
+    """
+    monkeypatch.setenv(deps.ENV_TRUST_PROXY_HEADERS, "true")
+
+    response = await client.get(
+        "/ip",
+        headers=[("X-Forwarded-For", "10.9.9.9, 10.8.8.8"), ("X-Forwarded-For", "192.0.2.44")],
+    )
+
+    assert response.json()["ip"] == "192.0.2.44"
+
+
 async def test_a_trusted_deployment_falls_back_to_the_socket(
     client: AsyncClient, monkeypatch
 ) -> None:
