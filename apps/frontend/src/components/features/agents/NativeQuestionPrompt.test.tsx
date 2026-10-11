@@ -108,6 +108,8 @@ it.each(['approve', 'reject'] as const)(
     // The plan body renders as Markdown: headings become elements instead of
     // one preformatted text node.
     expect(screen.getByRole('heading', { name: 'Plan' })).toBeInTheDocument();
+    const group = screen.getByRole('group', { name: 'Plan approval' });
+    expect(within(group).getByRole('heading', { name: 'Plan' }).closest('legend')).toBeNull();
     expect(screen.getByText('Inspect the issue.')).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Approve plan' })).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Request changes' })).toBeInTheDocument();
@@ -145,29 +147,33 @@ it.each(['approve', 'reject'] as const)(
   },
 );
 
-it('sends plan feedback as the custom answer instead of approving', async () => {
-  list.mockResolvedValue(snapshot([planRequest]));
-  await act(async () => {
-    render(<NativeQuestionPrompt {...props} />);
-  });
-  fireEvent.click(screen.getByRole('radio', { name: 'Request changes' }));
-  const feedback = within(screen.getByRole('group', { name: /Approve this plan/ })).getByRole(
-    'textbox',
-    { name: 'Your feedback' },
-  );
-  expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled();
-  fireEvent.change(feedback, { target: { value: 'Skip step 2; cover it with tests instead.' } });
-  list.mockResolvedValue(snapshot([]));
-  await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
-  });
-  expect(answer).toHaveBeenCalledWith('thread-1', {
-    request_id: 'plan-request-1',
-    job_id: 'job-1',
-    attempt_id: 10,
-    answers: { 0: ['Skip step 2; cover it with tests instead.'] },
-  });
-});
+it.each(['Skip step 2; cover it with tests instead.', 'Approve plan'])(
+  'explicitly rejects the plan when requesting changes with feedback %s',
+  async (text) => {
+    list.mockResolvedValue(snapshot([planRequest]));
+    await act(async () => {
+      render(<NativeQuestionPrompt {...props} />);
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Request changes' }));
+    const feedback = within(screen.getByRole('group', { name: 'Plan approval' })).getByRole(
+      'textbox',
+      { name: 'Your feedback' },
+    );
+    expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled();
+    fireEvent.change(feedback, { target: { value: text } });
+    list.mockResolvedValue(snapshot([]));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    });
+    expect(answer).toHaveBeenCalledWith('thread-1', {
+      request_id: 'plan-request-1',
+      job_id: 'job-1',
+      attempt_id: 10,
+      answers: { 0: [text] },
+      reject: true,
+    });
+  },
+);
 
 it('supports multiple questions, multiple options, and a custom answer', async () => {
   list.mockResolvedValue(

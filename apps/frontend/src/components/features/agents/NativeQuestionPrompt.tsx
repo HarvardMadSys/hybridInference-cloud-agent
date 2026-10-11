@@ -70,6 +70,9 @@ function QuestionDialog({
     if (submitting || !complete) return;
     onAnswer(
       Object.fromEntries(request.questions.map((question, index) => [question.id, values[index]])),
+      request.questions.some(
+        (question, index) => question.kind === 'plan_approval' && answers[index].custom,
+      ),
     );
   }
 
@@ -103,19 +106,24 @@ function QuestionDialog({
                   className={index ? 'mt-6' : undefined}
                 >
                   <legend className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {question.header ? <span className="mb-1 block">{question.header}</span> : null}
                     {question.kind === 'plan_approval' ? (
-                      // The plan body is the agent's Markdown; it renders in a
-                      // scrollable panel instead of one preformatted text node.
-                      <span className="mt-3 block max-h-[50vh] overflow-y-auto rounded-lg border border-gray-200 px-4 py-3 font-normal dark:border-white/10">
-                        <Markdown text={question.question} />
-                      </span>
+                      question.header || 'Plan approval'
                     ) : (
-                      <span className="block whitespace-pre-wrap break-words">
-                        {question.question}
-                      </span>
+                      <>
+                        {question.header ? (
+                          <span className="mb-1 block">{question.header}</span>
+                        ) : null}
+                        <span className="block whitespace-pre-wrap break-words">
+                          {question.question}
+                        </span>
+                      </>
                     )}
                   </legend>
+                  {question.kind === 'plan_approval' ? (
+                    <div className="mt-3 max-h-[50vh] overflow-y-auto rounded-lg border border-gray-200 px-4 py-3 text-gray-900 dark:border-white/10 dark:text-gray-100">
+                      <Markdown text={question.question} />
+                    </div>
+                  ) : null}
                   {question.multiple && question.options.length ? (
                     <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                       Select all that apply.

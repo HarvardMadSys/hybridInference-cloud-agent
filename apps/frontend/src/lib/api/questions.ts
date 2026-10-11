@@ -9,7 +9,7 @@ export interface AgentQuestionApi {
   options: { label: string; description: string }[];
   allow_custom: boolean;
   /** 'plan_approval' renders the question as the plan's Markdown with feedback. */
-  kind?: 'plan_approval';
+  kind?: 'plan_approval' | null;
 }
 
 export interface AgentQuestionRequestApi {

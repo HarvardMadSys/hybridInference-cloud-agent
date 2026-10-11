@@ -418,16 +418,30 @@ def test_claude_declining_plan_sends_native_denial(tmp_path):
     assert turn.pending_questions() == []
 
 
-def test_claude_plan_feedback_declines_and_carries_the_comment_back(tmp_path):
+@pytest.mark.parametrize("reject", [False, True])
+def test_claude_plan_feedback_declines_and_carries_the_comment_back(tmp_path, reject):
     process, _session, turn, _request = _plan_turn(tmp_path, {})
     (pending,) = turn.pending_questions()
     feedback = "Skip the migration; fix the endpoint in place instead."
-    assert turn.answer_question(pending["request_id"], {"0": [feedback]}).accepted
+    assert turn.answer_question(pending["request_id"], {"0": [feedback]}, reject=reject).accepted
     reply = json.loads(process.sent[-1])
     assert reply["response"]["request_id"] == "plan-native-1"
     assert reply["response"]["response"] == {
         "behavior": "deny",
         "message": f"The user declined this plan: {feedback}",
+    }
+    assert turn.pending_questions() == []
+
+
+def test_claude_plan_rejection_wins_over_feedback_matching_the_approval_label(tmp_path):
+    process, _session, turn, _request = _plan_turn(tmp_path, {})
+    (pending,) = turn.pending_questions()
+    assert turn.answer_question(
+        pending["request_id"], {"0": ["Approve plan"]}, reject=True
+    ).accepted
+    assert json.loads(process.sent[-1])["response"]["response"] == {
+        "behavior": "deny",
+        "message": "The user declined this plan: Approve plan",
     }
     assert turn.pending_questions() == []
 

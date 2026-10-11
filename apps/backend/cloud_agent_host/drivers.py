@@ -2257,7 +2257,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             else:
                 declined = (
                     "The user declined this plan. Keep planning."
-                    if not feedback or feedback == "Approve plan"
+                    if not feedback
                     else f"The user declined this plan: {feedback}"
                 )
                 response = {"behavior": "deny", "message": declined}
