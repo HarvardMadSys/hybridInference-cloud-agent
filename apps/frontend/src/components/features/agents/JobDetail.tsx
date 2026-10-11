@@ -2240,7 +2240,7 @@ export function JobDetail({
               {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
               <div
                 ref={scroll.composerRef}
-                className="sticky bottom-0 z-10 -mx-2 mt-8 bg-gray-50 px-2 pb-2 pt-5 dark:bg-gray-950"
+                className="sticky bottom-0 z-10 -mx-2 mt-4 bg-gray-50 px-2 pb-2 pt-3 dark:bg-gray-950"
               >
                 <LiveAgentStatus job={job} />
                 {/* `/goal` on its own is not an objective. It is consumed
@@ -2407,7 +2407,7 @@ export function JobDetail({
                             : 'Message or run a task, / commands, @ files or sessions'
                         }
                         aria-label="Add a follow-up"
-                        className="max-h-[30vh] min-h-[76px] w-full resize-y rounded-xl border-0 bg-transparent px-4 pb-3 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                        className="block max-h-[30vh] min-h-14 w-full resize-y rounded-xl border-0 bg-transparent px-3 py-2 text-sm leading-5 text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
                       />
                       <AttachmentStrip
                         entries={attachments.entries}
@@ -2416,6 +2416,7 @@ export function JobDetail({
                       />
                       <PromptRewrite
                         key={threadId}
+                        compact
                         value={followUp}
                         model={model}
                         disabled={
@@ -2427,7 +2428,7 @@ export function JobDetail({
                           followUpBox.current?.focus();
                         }}
                       />
-                      <div className="flex flex-wrap items-center gap-0.5 border-t border-gray-100/90 px-2.5 py-1.5 dark:border-white/5">
+                      <div className="flex flex-wrap items-center gap-0.5 border-t border-gray-100/90 px-2 py-1 dark:border-white/5">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
@@ -2486,7 +2487,7 @@ export function JobDetail({
                           busy={submitting || goalCommand.busy}
                         />
                       </div>
-                      <p className="px-4 pb-3 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+                      <p className="px-3 pb-2 text-[11px] leading-4 text-gray-500 dark:text-gray-400">
                         {contextLost
                           ? `Start a new chat · ${job.runtime}`
                           : job.state === 'cancelled'
