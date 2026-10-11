@@ -304,3 +304,16 @@ def test_the_job_logs_in_to_a_config_of_its_own() -> None:
     assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
     names = [str(s.get("name", "")) for s in workflow()["jobs"]["artifacts"]["steps"]]
     assert names.index("Name this cell's artifacts") < names.index("Log in to Docker Hub")
+
+
+def test_only_the_disposable_pr_sandbox_reclaims_host_toolchains() -> None:
+    """The large sandbox needs hosted-runner space without touching trusted hosts."""
+    reclaim = step("Reclaim hosted sandbox build space")
+    assert reclaim["if"] == (
+        "github.event_name == 'pull_request' && matrix.artifact.name == 'sandbox'"
+    )
+    assert "sudo rm -rf -- /usr/local/lib/android" in str(reclaim["run"])
+
+    names = [str(s.get("name", "")) for s in workflow()["jobs"]["artifacts"]["steps"]]
+    assert names.index("Name this cell's artifacts") < names.index(reclaim["name"])
+    assert names.index(reclaim["name"]) < names.index("Reuse this runner's builder, or make one")
