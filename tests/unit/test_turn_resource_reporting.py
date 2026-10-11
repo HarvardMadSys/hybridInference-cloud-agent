@@ -171,7 +171,7 @@ def _run_terminal_turn(
             runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
         ),
         control=control,
-        heart=SimpleNamespace(),
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
         gateway_base_url="http://gateway",

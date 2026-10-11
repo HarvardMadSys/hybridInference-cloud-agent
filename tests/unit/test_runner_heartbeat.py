@@ -18,6 +18,9 @@ def test_brief_control_outage_recovers_before_the_original_lease_expires(monkeyp
 
     class Stop:
         def wait(self, delay):
+            # The runner stops renewal once the cancelled turn has ended.
+            if heart.cancel_requested:
+                return True
             clock.now += delay
             assert clock.now < 200, "heartbeat loop did not stop"
             return False
@@ -59,6 +62,9 @@ def test_heartbeat_recovery_restores_normal_cadence_and_logs_no_credentials(monk
 
     class Stop:
         def wait(self, delay):
+            # The runner stops renewal once the cancelled turn has ended.
+            if heart.cancel_requested:
+                return True
             waits.append(delay)
             clock.now += delay
             assert len(waits) <= 3
@@ -90,6 +96,9 @@ def test_repeated_heartbeat_failures_record_the_detail_once(monkeypatch, caplog)
 
     class Stop:
         def wait(self, delay):
+            # The runner stops renewal once the cancelled turn has ended.
+            if heart.cancel_requested:
+                return True
             waits.append(delay)
             clock.now += delay
             assert len(waits) <= 3
@@ -121,6 +130,32 @@ def test_fenced_heartbeat_never_retries_or_claims_a_replacement(caplog):
     assert heart.lease_lost
     assert not heart.cancel_requested
     assert "PRIVATE_RESPONSE" not in caplog.text
+
+
+def test_cancellation_keeps_the_lease_renewed_until_the_runner_stops():
+    """A Stop is surfaced at once, but renewal continues while the runner cleans up.
+
+    The interrupted turn drains for up to three minutes and a startup that saw
+    the Stop still has to release its activation. Ending renewal at the first
+    cancelled beat let a 120-second lease expire under either, and the reaper
+    then marked the chat's context lost.
+    """
+    control = Mock(job_id="ajob_cancelled")
+    control.heartbeat.return_value = {"cancel_requested": True}
+    beats = []
+
+    class Stop:
+        def wait(self, delay):
+            beats.append(heart.cancel_requested)
+            return len(beats) > 4
+
+    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart._stop = Stop()
+    heart._run()
+
+    assert control.heartbeat.call_count == 4
+    assert beats == [False, True, True, True, True]
+    assert heart.cancel_requested and not heart.lease_lost
 
 
 def test_stopped_heartbeat_makes_no_request():

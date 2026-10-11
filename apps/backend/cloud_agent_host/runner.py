@@ -785,8 +785,11 @@ class Heartbeater:
             last_success = time.monotonic()
             delay = self._interval
             if reply.get("cancel_requested"):
+                # Renewal goes on until the runner stops it: releasing the
+                # activation, or draining an interrupted turn, still happens
+                # under this lease, and one left to expire meanwhile makes the
+                # reaper mark the chat's context lost.
                 self.cancel_requested = True
-                return
 
 
 def claim(
@@ -2837,6 +2840,19 @@ def _run_shared_live_attempt(
             control.report_context_status("new")
 
         stage = _stage(measurement, "prompt_admission")
+        # The last point at which a Stop costs nothing. The heartbeat may have
+        # carried it at any time during the startup above; admitting anyway
+        # would spend the prompt only to interrupt it, and an interrupted turn
+        # leaves its native context lost. Nothing has reached the CLI yet, so
+        # the activation is released with the conversation intact.
+        if heart.lease_lost:
+            raise LeaseLost("lease lost before prompt admission")
+        if heart.cancel_requested:
+            failure_detail = "cancelled by owner before prompt admission"
+            operation_profiling.finish(measurement, outcome="cancelled", failure_stage=stage)
+            abandon_before_finish(lost=False, detail=failure_detail)
+            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
+            return 0
         _retry_lifecycle_receipt(
             "prompt_admission_retry",
             job.job_id,

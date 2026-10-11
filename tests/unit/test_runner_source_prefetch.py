@@ -148,7 +148,7 @@ def _run_turn(
         runtime=get_runtime("claude-code"),
         job=replace(_JOB),
         control=control,
-        heart=SimpleNamespace(),
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
         gateway_base_url="http://gateway",

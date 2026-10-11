@@ -705,6 +705,59 @@ def test_error_upload_failure_does_not_skip_terminal_transition(monkeypatch, fai
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
 
 
+def test_a_stop_before_admission_spends_no_prompt_and_keeps_the_context(monkeypatch):
+    """A Stop that arrives while the turn is resuming is honoured before admission.
+
+    It used to be read only inside the stream, after the prompt had been
+    admitted and dispatched: the turn spent tokens, was interrupted, and its
+    intact conversation was abandoned as lost.
+    """
+    stream = Mock()
+
+    def configure(_control, _supervisor, _finish):
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=configure,
+        heart=SimpleNamespace(cancel_requested=True, lease_lost=False),
+    )
+
+    assert result == 0
+    control.admit_chat_turn.assert_not_called()
+    stream.assert_not_called()
+    assert supervisor.abandon_shared.call_args.kwargs["lost"] is False
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    finish.assert_called_once()
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+    supervisor.settle_shared.assert_not_called()
+
+
+def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
+    stream = Mock()
+
+    def configure(_control, _supervisor, _finish):
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=configure,
+        heart=SimpleNamespace(cancel_requested=True, lease_lost=True),
+    )
+
+    assert result == 3
+    control.admit_chat_turn.assert_not_called()
+    stream.assert_not_called()
+    finish.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+
+
 @pytest.mark.parametrize(
     ("error", "expected_code"),
     [(httpx.ReadTimeout("completion notice unavailable"), 0), (LeaseLost("expired"), 3)],
