@@ -106,6 +106,16 @@ class Machine:
             }
             for service, daemon in (("docker", "dockerd"), ("containerd", "containerd"))
         }
+        self.units.update(
+            {
+                f"var-lib-{name}.mount": {
+                    "LoadState": "not-found",
+                    "FragmentPath": "",
+                    "DropInPaths": "",
+                }
+                for name in ("docker", "containerd")
+            }
+        )
 
     def logical(self, value: str) -> str:
         """Map redirected paths back to the node paths they stand for."""
@@ -139,9 +149,13 @@ class Machine:
             self.runner = [c for c in self.runner if c not in stopped]
             self.containers = [c for c in self.containers if c not in stopped]
         elif args[:2] == ["systemctl", "stop"]:
-            self.active = {"docker": False, "containerd": False}
+            for name in args[2:]:
+                if name in self.active:
+                    self.active[name] = False
         elif args[:2] == ["systemctl", "start"]:
-            self.active = {"docker": True, "containerd": True}
+            for name in args[2:]:
+                if name in self.active:
+                    self.active[name] = True
         elif args[:3] == ["systemctl", "is-active", "--quiet"]:
             code = 0 if self.active.get(args[3]) else 3
         elif args[:2] == ["systemctl", "show"]:
@@ -167,7 +181,18 @@ def machine(tmp_path, monkeypatch):
 
     def path(value="", *rest):
         value = str(value)
-        if value.startswith(("/var/lib", "/etc/", "/mydata", "/proc")):
+        if value.startswith(
+            (
+                "/var/lib",
+                "/etc/",
+                "/mydata",
+                "/proc",
+                "/run/systemd/",
+                "/usr/local/lib/systemd/",
+                "/usr/lib/systemd/",
+                "/lib/systemd/",
+            )
+        ):
             return original(str(node) + value, *rest)
         return original(value, *rest)
 

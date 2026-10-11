@@ -44,6 +44,16 @@ def disk(tmp_path, monkeypatch):
             for service, daemon in (("docker", "dockerd"), ("containerd", "containerd"))
         },
     )
+    machine.units.update(
+        {
+            f"var-lib-{name}.mount": {
+                "LoadState": "not-found",
+                "FragmentPath": "",
+                "DropInPaths": "",
+            }
+            for name in ("docker", "containerd")
+        }
+    )
     original_path = pathlib.Path
     original_samefile = os.path.samefile
     original_statvfs = os.statvfs
@@ -53,7 +63,20 @@ def disk(tmp_path, monkeypatch):
 
     def isolated_path(value="", *rest):
         value = str(value)
-        if value.startswith(("/etc/", "/dev/", "/var/lib", "/mydata", "/alias", "/proc")):
+        if value.startswith(
+            (
+                "/etc/",
+                "/dev/",
+                "/var/lib",
+                "/mydata",
+                "/alias",
+                "/proc",
+                "/run/systemd/",
+                "/usr/local/lib/systemd/",
+                "/usr/lib/systemd/",
+                "/lib/systemd/",
+            )
+        ):
             return original_path(str(root) + value, *rest)
         return original_path(value, *rest)
 

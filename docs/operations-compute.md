@@ -78,6 +78,10 @@ and `containerd` directories on the selected disk. Deployment retries can reuse
 nonempty directories only when the existing deployment identity matches and
 both daemon directories are already bound to those same storage directories.
 Retained data with missing binds requires operator repair before retrying.
+Existing `/etc/fstab` entries for either daemon directory must match the selected
+storage bind; conflicting or duplicate entries block setup before host changes.
+Native systemd mount units, masks, or mount overrides for these directories also
+block setup; ordinary `fstab`-generated mount units remain supported.
 Preflight does not query or start these daemons, and bootstrap never deletes or
 moves existing sandbox data to a different disk. Docker and containerd must use
 their default `/var/lib/docker`

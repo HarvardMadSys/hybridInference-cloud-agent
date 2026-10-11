@@ -50,6 +50,72 @@ if TYPE_CHECKING:
 _DAEMON_STORAGE_GUARD = r"""
 import json, os, re, shlex, subprocess
 from pathlib import Path
+def storage_fstab_entries(base, text=None):
+    try:
+        fstab = Path('/etc/fstab')
+        if fstab.is_symlink() or fstab.resolve() != fstab or fstab.exists() and not fstab.is_file():
+            return None
+        if text is None:
+            text = fstab.read_text() if fstab.exists() else ''
+        targets = {Path('/var/lib') / name: name for name in ('docker', 'containerd')}
+        entries = set()
+        for line in text.splitlines():
+            fields = [re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), field) for field in line.split('#', 1)[0].split()]
+            if len(fields) < 2 or not fields[1].startswith('/'):
+                continue
+            target = Path('/' + os.path.normpath(fields[1]).lstrip('/'))
+            name = targets.get(target)
+            if name is None:
+                continue
+            if name in entries or not 4 <= len(fields) <= 6 or fields[2] != 'none' or any(value != '0' for value in fields[4:]):
+                return None
+            source = fields[0].rstrip('/')
+            if source != os.path.normpath(source) or not source.startswith('/') or Path(source) != base / name:
+                return None
+            if fields[1].rstrip('/') != '/' + os.path.normpath(fields[1]).lstrip('/'):
+                return None
+            options = fields[3].split(',')
+            if 'bind' not in options or len(set(options)) != len(options):
+                return None
+            for option in options:
+                if option in ('bind', 'defaults', 'rw', 'nofail'):
+                    continue
+                key, separator, value = option.partition('=')
+                if key != 'x-systemd.requires-mounts-for' or not separator or not value.startswith('/') or value.rstrip('/') != os.path.normpath(value) or Path(value.rstrip('/')) != base:
+                    return None
+            entries.add(name)
+        return entries
+    except (OSError, ValueError, UnicodeError):
+        return None
+def storage_mount_units_compatible():
+    native = ('/etc/systemd/system', '/etc/systemd/system.control', '/etc/systemd/system.attached', '/run/systemd/system', '/run/systemd/system.control', '/run/systemd/system.attached', '/run/systemd/transient', '/usr/local/lib/systemd/system', '/usr/lib/systemd/system', '/lib/systemd/system')
+    generated = ('/run/systemd/generator', '/run/systemd/generator.early', '/run/systemd/generator.late')
+    try:
+        for name in ('docker', 'containerd'):
+            unit = 'var-lib-' + name + '.mount'
+            # Inspect dormant files too: a later daemon-reload would otherwise
+            # activate an operator override absent from current unit metadata.
+            for directory in native:
+                path = Path(directory) / unit
+                if path.exists() or path.is_symlink():
+                    return False
+            for directory in native + generated:
+                path = Path(directory) / (unit + '.d')
+                if path.is_symlink() or path.exists() and (not path.is_dir() or any(path.iterdir())):
+                    return False
+            shown = subprocess.run(['systemctl', 'show', unit, '--property=LoadState', '--property=FragmentPath', '--property=DropInPaths'], capture_output=True, text=True)
+            properties = dict(line.split('=', 1) for line in shown.stdout.splitlines() if '=' in line)
+            fragment, dropins = properties.get('FragmentPath'), properties.get('DropInPaths')
+            if fragment is None or dropins is None or dropins:
+                return False
+            if properties.get('LoadState') == 'not-found':
+                if fragment:
+                    return False
+            elif shown.returncode or properties.get('LoadState') != 'loaded' or fragment and fragment not in tuple(directory + '/' + unit for directory in generated):
+                return False
+        return True
+    except OSError:
+        return False
 def deployment_storage_owned(deployment):
     if not isinstance(deployment, dict) or not isinstance(deployment.get('identity'), dict):
         return False
@@ -61,6 +127,8 @@ def deployment_storage_owned(deployment):
         return False
 def storage_state_compatible(base, owned):
     try:
+        if storage_fstab_entries(base) is None or not storage_mount_units_compatible():
+            return False
         nonempty = False
         bound = True
         for name in ('docker', 'containerd'):
@@ -404,7 +472,11 @@ with open(lock_path, 'a') as lock:
         unmounted = [target for _, _, target, mounted in stores if not mounted]
         active_daemons = [name for name in ('docker.socket', 'docker', 'containerd') if subprocess.run(['systemctl', 'is-active', '--quiet', name], **quiet).returncode == 0] if unmounted else []
         if unmounted and active_daemons:
-            run('data_mount_failed', ['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'])
+            if subprocess.run(['systemctl', 'stop', *active_daemons], cwd=root, env=environment, **quiet).returncode:
+                # systemctl may stop some requested units before returning an
+                # error. Restore only the units that were active on entry.
+                run('data_mount_failed', ['systemctl', 'start', *active_daemons])
+                blocked('data_mount_failed')
         # Recheck after stopping: a daemon may have populated an initially
         # empty store while its disk was being inspected.
         if not storage_state_compatible(base, owned_storage):
@@ -414,10 +486,21 @@ with open(lock_path, 'a') as lock:
         for name, source, target, mounted in stores:
             if not mounted:
                 run('data_mount_failed', ['mount', '--bind', str(source), str(target)])
-            entry = f'{source} {target} none bind,nofail,x-systemd.requires-mounts-for={base} 0 0'
-            current = fstab.read_text() if fstab.exists() else ''
-            if entry not in current.splitlines():
-                fstab.write_text((current.rstrip('\n') + '\n' if current.strip() else '') + entry + '\n')
+        # Re-read operator configuration after mounting and immediately before
+        # persistence. Equivalent existing entries are reused without rewriting.
+        current = fstab.read_text() if fstab.exists() else ''
+        existing = storage_fstab_entries(base, current)
+        if existing is None or not storage_mount_units_compatible():
+            if active_daemons:
+                run('data_mount_failed', ['systemctl', 'start', *active_daemons])
+            blocked('data_mount_conflict')
+        missing = [f'{source} {target} none bind,nofail,x-systemd.requires-mounts-for={base} 0 0' for name, source, target, _ in stores if name not in existing]
+        if missing:
+            with fstab.open('a') as persisted:
+                if current and not current.endswith('\n'):
+                    persisted.write('\n')
+                persisted.write('\n'.join(missing) + '\n')
+        for name, _, target, _ in stores:
             # On reboot a missing disk must keep its daemon stopped rather
             # than silently opening an empty store under the bare target.
             dropin = Path('/etc/systemd/system') / (name + '.service.d')
