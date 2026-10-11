@@ -1047,7 +1047,10 @@ class AgentThreadMessageCreate(BaseModel):
     require_idle: bool = Field(
         False,
         strict=True,
-        description="Accept only on an idle chat with an empty queue and published workspace.",
+        description=(
+            "Accept only when every chat sharing the published workspace is idle "
+            "with an empty queue."
+        ),
     )
     expected_latest_job_id: str | None = Field(
         None,

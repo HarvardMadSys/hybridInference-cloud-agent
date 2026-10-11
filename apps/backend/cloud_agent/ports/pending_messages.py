@@ -34,19 +34,25 @@ class PendingMessageRepository(Protocol):
         client_request_fingerprint: str | None = None,
         require_idle: bool = False,
         expected_latest_job_id: str | None = None,
+        reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
-        Answers ``{"message": row}``; ``{"job_id": id}`` when this key already
-        made a turn; or ``{"error": ...}`` — ``not_found``, ``session_archived``,
+        Answers ``{"message": row}``; ``{"job_id": id}`` for an idle-only turn
+        or when this key already made a turn; or ``{"error": ...}`` —
+        ``not_found``, ``session_archived``,
         ``client_request_conflict``, ``attachments_unavailable`` or
         ``conversation_changed``.
 
-        An idle-only action is checked under the same lock as every queue
-        write. It requires the expected newest turn, no live turn or waiting
-        message, and the shared workspace's latest snapshot to be published.
-        It replays its original receipt after the chat changes, but cannot
-        newly queue behind or resume another waiting message.
+        An idle-only action locks its membership, then its sandbox group after
+        the thread lock. It requires the expected newest turn, no live turn,
+        waiting message, active member or Fork in the shared group, and its
+        latest snapshot to be published. Using the resolved skills, attachments
+        and effort choices, it creates the turn in this same transaction, never
+        a pending message. It replays its original receipt before these checks,
+        but cannot newly queue behind or resume waiting work.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as

@@ -73,7 +73,7 @@ export interface ThreadMessageResultApi {
 
 export interface ThreadMessageRequest {
   prompt: string;
-  /** Refuse unless the thread is idle, its queue is empty and its workspace is published. */
+  /** Require idle chats, empty queues and a published shared workspace. */
   require_idle?: boolean;
   /** The newest turn verified by the caller; required with require_idle. */
   expected_latest_job_id?: string;

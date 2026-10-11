@@ -32,6 +32,7 @@ from cloud_agent.storage._sql.pending_messages import (
     LIVE_TURN_SQL,
     PAUSE_QUEUE_SQL,
     PENDING_MESSAGE_COLUMNS,
+    GuardedSubmissionRefused,
     PendingAttachmentsUnavailable,
     list_pending_messages,
     pending_message_row,
@@ -186,19 +187,25 @@ class PostgresPendingMessageRepository:
         client_request_fingerprint: str | None = None,
         require_idle: bool = False,
         expected_latest_job_id: str | None = None,
+        reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
-        Answers ``{"message": row}``; ``{"job_id": id}`` when this key already
-        made a turn; or ``{"error": ...}`` — ``not_found``, ``session_archived``,
+        Answers ``{"message": row}``; ``{"job_id": id}`` for an idle-only turn
+        or when this key already made a turn; or ``{"error": ...}`` —
+        ``not_found``, ``session_archived``,
         ``client_request_conflict``, ``attachments_unavailable`` or
         ``conversation_changed``.
 
-        An idle-only action is checked under the same lock as every queue
-        write. It requires the expected newest turn, no live turn or waiting
-        message, and the shared workspace's latest snapshot to be published.
-        It replays its original receipt after the chat changes, but cannot
-        newly queue behind or resume another waiting message.
+        An idle-only action locks its membership, then its sandbox group after
+        the thread lock. It requires the expected newest turn, no live turn,
+        waiting message, active member or Fork in the shared group, and its
+        latest snapshot to be published. Using the resolved skills, attachments
+        and effort choices, it creates the turn in this same transaction, never
+        a pending message. It replays its original receipt before these checks,
+        but cannot newly queue behind or resume waiting work.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as
@@ -226,33 +233,92 @@ class PostgresPendingMessageRepository:
                 if thread["archived_at"] is not None:
                     return {"error": "session_archived"}
                 if require_idle:
+                    # The helper creating a turn takes thread -> latest job ->
+                    # own membership -> group. Acquire the job before taking
+                    # the shared admission boundary, not while holding it.
+                    latest_job_id = await conn.fetchval(
+                        "SELECT id FROM agent_jobs WHERE thread_id = $1 "
+                        "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
+                        thread_id,
+                    )
+                    if expected_latest_job_id is None or latest_job_id != expected_latest_job_id:
+                        return {"error": "conversation_changed"}
+                    # Match member reservation, follow-up creation and Fork:
+                    # own membership before group. Never lock sibling members
+                    # after the group; they may already hold their member row
+                    # while waiting for this shared admission boundary.
+                    membership = await conn.fetchrow(
+                        "SELECT sandbox_id FROM agent_thread_sandbox_memberships "
+                        "WHERE thread_id = $1 FOR UPDATE",
+                        thread_id,
+                    )
+                    if membership is None:
+                        return {"error": "conversation_changed"}
+                    group = await conn.fetchrow(
+                        "SELECT id, active_operation_count FROM agent_sandboxes "
+                        "WHERE id = $1 FOR UPDATE",
+                        membership["sandbox_id"],
+                    )
+                    if group is None:
+                        return {"error": "conversation_changed"}
                     current = await conn.fetchrow(
                         f"""
                         SELECT
-                            (SELECT id FROM agent_jobs WHERE thread_id = $1
-                             ORDER BY turn_no DESC LIMIT 1) AS latest_job_id,
-                            EXISTS (SELECT 1 FROM agent_jobs WHERE thread_id = $1
-                                    AND {LIVE_TURN_SQL}) AS has_live_turn,
-                            EXISTS (SELECT 1 FROM agent_pending_messages
-                                    WHERE thread_id = $1) AS has_pending_message,
+                            EXISTS (SELECT 1 FROM agent_jobs job
+                                    JOIN agent_thread_sandbox_memberships member
+                                      ON member.thread_id = job.thread_id
+                                    WHERE member.sandbox_id = $1
+                                      AND job.{LIVE_TURN_SQL}) AS has_live_turn,
+                            EXISTS (SELECT 1 FROM agent_pending_messages message
+                                    JOIN agent_thread_sandbox_memberships member
+                                      ON member.thread_id = message.thread_id
+                                    WHERE member.sandbox_id = $1) AS has_pending_message,
+                            EXISTS (SELECT 1 FROM agent_thread_sandbox_memberships member
+                                    WHERE member.sandbox_id = $1
+                                      AND (member.active_attempt_id IS NOT NULL
+                                           OR member.fork_operation_id IS NOT NULL))
+                                AS has_active_member,
                             (SELECT snapshot.state
-                             FROM agent_thread_sandbox_memberships membership
-                             JOIN agent_sandbox_snapshots snapshot
-                               ON snapshot.sandbox_id = membership.sandbox_id
-                             WHERE membership.thread_id = $1
+                             FROM agent_sandbox_snapshots snapshot
+                             WHERE snapshot.sandbox_id = $1
                              ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
                              LIMIT 1) AS workspace_publication_state
                         """,
-                        thread_id,
+                        group["id"],
                     )
                     if (
-                        expected_latest_job_id is None
-                        or current["latest_job_id"] != expected_latest_job_id
-                        or current["has_live_turn"]
+                        current["has_live_turn"]
                         or current["has_pending_message"]
+                        or current["has_active_member"]
+                        or group["active_operation_count"] != 0
                         or current["workspace_publication_state"] != "published"
                     ):
                         return {"error": "conversation_changed"}
+                    job = await insert_follow_up(
+                        conn,
+                        parent_job_id=expected_latest_job_id,
+                        user_id=user_id,
+                        prompt=prompt,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        reset_reasoning_effort=reset_reasoning_effort,
+                        skills=skills,
+                        attachments=attachments,
+                        yield_to_queued=True,
+                        client_request_id=client_request_id,
+                        client_request_fingerprint=client_request_fingerprint,
+                    )
+                    if job is None:
+                        raise GuardedSubmissionRefused({"error": "conversation_changed"})
+                    if job.get("error") is not None:
+                        raise GuardedSubmissionRefused(job)
+                    await conn.execute(
+                        "UPDATE agent_threads SET queue_paused_reason = NULL, "
+                        "queue_settled_job_id = $2 WHERE id = $1",
+                        thread_id,
+                        expected_latest_job_id,
+                    )
+                    return {"job_id": str(job["id"])}
                 await _continue_if_idle(conn, thread_id=thread_id)
                 await conn.execute(
                     """
@@ -277,12 +343,17 @@ class PostgresPendingMessageRepository:
                     conn, message_id=message_id, user_id=user_id, attachment_ids=attachment_ids
                 )
                 message = await read_pending_message(conn, message_id)
-        except PendingAttachmentsUnavailable:
+        except GuardedSubmissionRefused as exc:
+            return exc.result
+        except (PendingAttachmentsUnavailable, AttachmentError):
             return {"error": "attachments_unavailable"}
         except asyncpg.UniqueViolationError as exc:
             # The same key sent to two conversations at once: the loser reads
             # back whatever the winner made.
-            if exc.constraint_name != _CLIENT_REQUEST_CONSTRAINT:
+            if exc.constraint_name not in {
+                _CLIENT_REQUEST_CONSTRAINT,
+                "uq_agent_jobs_client_request",
+            }:
                 raise
             assert client_request_id is not None
             async with self._pool.acquire() as conn:

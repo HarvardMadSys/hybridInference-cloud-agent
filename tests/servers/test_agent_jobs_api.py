@@ -43,6 +43,7 @@ from cloud_agent import broker_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.application.follow_ups import PreparedFollowUp
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
@@ -846,6 +847,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         client_request_fingerprint: str | None = None,
         require_idle: bool = False,
         expected_latest_job_id: str | None = None,
+        reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         turns = self._thread_turns(thread_id)
         if not turns or turns[-1]["user_id"] != user_id:
@@ -876,6 +880,26 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 or sandbox.get("workspace_publication_state") != "published"
             ):
                 return {"error": "conversation_changed"}
+            made = await self.create_follow_up(
+                parent_job_id=expected_latest_job_id,
+                user_id=user_id,
+                prompt=prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                reset_reasoning_effort=reset_reasoning_effort,
+                skills=skills,
+                attachments=attachments,
+                yield_to_queued=True,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+            )
+            if made is None:
+                return {"error": "conversation_changed"}
+            if made.get("error") is not None:
+                return made
+            self.queue_paused.pop(thread_id, None)
+            self.queue_settled[thread_id] = expected_latest_job_id
+            return {"job_id": made["id"]}
         self._continue_if_idle(thread_id)
         message_id = f"apmsg_{self._next_pending:04d}"
         self._next_pending += 1
@@ -7936,12 +7960,14 @@ async def test_an_idle_only_message_requires_a_complete_strict_guard(
 
 
 async def test_an_idle_only_message_replays_after_its_turn_has_started(
-    client: AsyncClient, store: FakeStorage
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     job_id = await _create_job(client)
     store.jobs[job_id]["state"] = "succeeded"
     _attach_shared_workspace(store, job_id)
     store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "settle_queue", settlement)
     body = {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id}
     headers = {"Idempotency-Key": "watch-pr-once"}
 
@@ -7966,6 +7992,72 @@ async def test_an_idle_only_message_replays_after_its_turn_has_started(
     assert changed_guard.json()["detail"]["error"]["type"] == "idempotency_conflict"
     assert len(store.jobs) == 2
     assert store.pending == {}
+    settlement.assert_not_awaited()
+
+
+async def test_an_idle_only_message_creates_its_turn_with_prepared_choices_without_settlement(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    store.jobs[job_id]["reasoning_effort"] = "high"
+    thread_id = _attach_shared_workspace(store, job_id)
+    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    store.queue_paused[thread_id] = "failed"
+    prepared = PreparedFollowUp(
+        model="glm-5.1",
+        reasoning_effort=None,
+        reset_reasoning_effort=True,
+        skills=[
+            {
+                "id": 5,
+                "name": "Review",
+                "description": "Review changes",
+                "revision": 2,
+                "instructions": "Inspect tests and edge cases.",
+            }
+        ],
+        attachments=[
+            {"id": 42, "path": "notes.txt", "content_type": "text/plain", "size_bytes": 11}
+        ],
+    )
+    monkeypatch.setattr("cloud_agent.api.turns.prepare_follow_up", AsyncMock(return_value=prepared))
+    created = AsyncMock(wraps=store.create_follow_up)
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "create_follow_up", created)
+    monkeypatch.setattr(store, "settle_queue", settlement)
+
+    response = await _send(
+        client,
+        store,
+        job_id,
+        {
+            "prompt": "watch the PR",
+            "require_idle": True,
+            "expected_latest_job_id": job_id,
+            "reasoning_effort": "auto",
+            "skill_ids": [5],
+            "attachment_ids": [42],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    watch = response.json()["job"]
+    assert watch["parent_job_id"] == job_id
+    assert watch["reasoning_effort"] is None
+    assert store.jobs[watch["id"]]["skills"] == prepared.skills
+    created.assert_awaited_once()
+    assert created.await_args.kwargs["model"] == prepared.model
+    assert created.await_args.kwargs["reasoning_effort"] is None
+    assert created.await_args.kwargs["reset_reasoning_effort"] is True
+    assert created.await_args.kwargs["skills"] == prepared.skills
+    assert created.await_args.kwargs["attachments"] == prepared.attachments
+    assert created.await_args.kwargs["yield_to_queued"] is True
+    assert response.json()["pending"] is None
+    assert store.pending == {}
+    assert thread_id not in store.queue_paused
+    assert store.queue_settled[thread_id] == job_id
+    settlement.assert_not_awaited()
 
 
 async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(

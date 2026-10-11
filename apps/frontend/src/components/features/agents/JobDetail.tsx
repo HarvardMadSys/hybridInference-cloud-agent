@@ -1624,7 +1624,6 @@ export function JobDetail({
       );
       if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
       // Keep the completed source action closed while the next turn loads.
-      // Queued watches are guarded by their queue card, which can be removed.
       if (result.job && !result.pending) setWatchPrAcceptedJobId(job.id);
       queue.apply(result);
     } catch (cause: unknown) {
