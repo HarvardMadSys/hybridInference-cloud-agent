@@ -80,6 +80,13 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+// What xterm sends on its own, in answer to a query in its output: device
+// attributes, status and cursor reports, mode and window reports (CSI ... c,
+// n, R, $y, t, u), and DCS or OSC reports such as its version or a colour.
+// Keystrokes take other shapes, so they still pass while history replays.
+const TERMINAL_REPLY =
+  /^(?:\x1b\[[?>]?[\d;]*(?:\$y|[cnRtu])|\x1bP[\s\S]*\x1b\\|\x1b\][\s\S]*(?:\x07|\x1b\\))$/;
+
 function decodeBase64(value: string): Uint8Array {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -267,10 +274,13 @@ export function TerminalPane({
     // sent as one request.
     let pendingInput: Array<{ binary: boolean; data: string }> = [];
     let flushingInput = false;
-    // Output up to `replayThrough` predates this screen. While xterm is still
-    // parsing it, anything xterm "types" is its answer to a query in that
-    // history — for a program long past waiting, or gone — not a keystroke.
+    // Output up to `replayThrough` predates this screen: the first attach
+    // names it. While xterm is still parsing it, a reply xterm sends answers
+    // a query in that history — for a program long past waiting, or gone.
+    // A reconnect's backlog is not history: it arrived late, but for this
+    // screen, so its queries are answered as over any slow link.
     let replayThrough = 0;
+    let attached = false;
     let replayWrites = 0;
     let lastSize: string | null = null;
 
@@ -373,7 +383,10 @@ export function TerminalPane({
         };
 
         const queueInput = (data: string, binary: boolean) => {
-          if (!acceptsInput() || replayWrites > 0) return;
+          if (!acceptsInput()) return;
+          // Only xterm's replies to replayed queries are dropped; anything
+          // typed meanwhile goes to the shell.
+          if (replayWrites > 0 && !binary && TERMINAL_REPLY.test(data)) return;
           const last = pendingInput[pendingInput.length - 1];
           if (last && last.binary === binary) last.data += data;
           else pendingInput.push({ binary, data });
@@ -405,7 +418,9 @@ export function TerminalPane({
           after: 0,
           signal: controller.signal,
           onAttached: (event) => {
-            replayThrough = Math.max(replayThrough, event.seq);
+            if (attached) return;
+            attached = true;
+            replayThrough = event.seq;
           },
           onOutput: (event) => {
             if (!disposed) write(decodeBase64(event.data), event.seq);

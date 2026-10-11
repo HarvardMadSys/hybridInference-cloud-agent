@@ -825,9 +825,14 @@ describe('TerminalWorkspace', () => {
     await waitFor(() => expect(live).toBeTypeOf('function'));
     const xterm = xtermHarness.instances[0];
 
-    // While xterm parses the history, what it "types" answers that history:
+    // While xterm parses the history, a reply it sends answers that history:
     // a cursor report for a program that asked before this screen existed.
+    // Keys typed meanwhile still reach the shell.
     xterm.emitData('\x1b[24;1R');
+    xterm.emitData('ls\r');
+    await waitFor(() =>
+      expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-1', first.id, 'ls\r'),
+    );
     const replayed = xtermHarness.heldWrites.splice(0);
     expect(replayed).toHaveLength(2);
     replayed.forEach((parsed) => parsed());
@@ -839,7 +844,39 @@ describe('TerminalWorkspace', () => {
     await waitFor(() =>
       expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-1', first.id, '\x1b[?1;2c'),
     );
-    expect(writeAgentTerminalInput).toHaveBeenCalledTimes(1);
+    expect(writeAgentTerminalInput).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers queries that arrived while the stream was reconnecting', async () => {
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue([first]);
+    let reconnect: (() => void) | undefined;
+    vi.mocked(streamAgentTerminal).mockImplementation(async (_job, _terminal, opts) => {
+      opts.onAttached?.({ seq: 1 });
+      opts.onOutput({ seq: 1, data: btoa('$ ') });
+      // After a dropped connection the broker announces its newest event
+      // again; what was produced meanwhile is late, not history.
+      reconnect = () => {
+        opts.onAttached?.({ seq: 3 });
+        opts.onOutput({ seq: 2, data: btoa('\x1b[6n') });
+        opts.onOutput({ seq: 3, data: btoa('?') });
+      };
+    });
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(reconnect).toBeTypeOf('function'));
+    const xterm = xtermHarness.instances[0];
+    xtermHarness.heldWrites = [];
+    reconnect!();
+
+    // Nothing from the reconnect waits on being parsed as history...
+    expect(xtermHarness.heldWrites).toHaveLength(0);
+    xtermHarness.heldWrites = null;
+    // ...so the program still waiting on its cursor report receives it.
+    xterm.emitData('\x1b[5;1R');
+    await waitFor(() =>
+      expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-1', first.id, '\x1b[5;1R'),
+    );
   });
 
   it('sends binary input, such as an old-style mouse report, as bytes', async () => {
