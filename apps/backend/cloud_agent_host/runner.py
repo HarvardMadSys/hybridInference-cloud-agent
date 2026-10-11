@@ -158,6 +158,15 @@ FIRST_SETTINGS_WAIT_S = 30.0
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
 _HEARTBEAT_TIMEOUT_S = 10.0
+#: Heartbeat answers no retry can change. The worker token and the job it names
+#: are fixed for the attempt, so a renewal refused for either is refused every
+#: time, and the lease runs out regardless.
+_HEARTBEAT_REFUSALS = frozenset({401, 403, 404})
+#: The longest lease that still cannot be renewed: the first renewal is sent
+#: one heartbeat interval in and may take a whole request timeout to land, so a
+#: lease no longer than that expires first and every attempt is lost at its
+#: first beat. The control plane itself only requires a positive number.
+_UNRENEWABLE_LEASE_S = HEARTBEAT_INTERVAL_S + _HEARTBEAT_TIMEOUT_S
 #: How long one event upload keeps retrying an unreachable control plane, and
 #: the backoff ceiling between tries. Half the default lease: long enough to
 #: ride out a control-plane container being recreated, short enough that a
@@ -756,6 +765,23 @@ class Heartbeater:
                 self.lease_lost = True
                 return
             except Exception as exc:
+                refused = (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code in _HEARTBEAT_REFUSALS
+                )
+                if refused or time.monotonic() - last_success >= self._ttl:
+                    # A refused renewal is refused on every retry, and once the
+                    # last acknowledged renewal has run out no request can fit
+                    # inside it. Either way the lease is gone, so the agent is
+                    # stopped as for a 409 rather than left writing to a
+                    # workspace the reaper has already taken back.
+                    _log_control_failure(
+                        "heartbeat_refused" if refused else "heartbeat_expired",
+                        self._control.job_id,
+                        exc,
+                    )
+                    self.lease_lost = True
+                    return
                 # A transient control-plane blip must not kill a healthy run;
                 # the next request still has to fit inside the original lease.
                 failures += 1
@@ -4588,6 +4614,32 @@ def _env_float(name: str, fallback: float) -> float:
         return fallback
 
 
+def _lease_ttl_arg(raw: str) -> float:
+    """Parse ``--lease-ttl``, refusing a lease that expires before its first renewal."""
+    try:
+        ttl = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a number: {raw!r}") from exc
+    if not ttl > _UNRENEWABLE_LEASE_S:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} is not longer than {_UNRENEWABLE_LEASE_S:g} seconds, one heartbeat "
+            "interval plus one request timeout: such a lease expires before it is renewed"
+        )
+    return ttl
+
+
+def _env_lease_ttl() -> float:
+    """Read ``AGENT_LEASE_TTL``, keeping the default for a value no lease can use."""
+    raw = os.environ.get("AGENT_LEASE_TTL")
+    if not raw:
+        return DEFAULT_LEASE_TTL_S
+    try:
+        return _lease_ttl_arg(raw)
+    except argparse.ArgumentTypeError as exc:
+        print(f"ignoring AGENT_LEASE_TTL: {exc}", file=sys.stderr)
+        return DEFAULT_LEASE_TTL_S
+
+
 def _chat_idle_timeout_s() -> float:
     """Read the one product-level chat inactivity clock.
 
@@ -4734,8 +4786,8 @@ def build_parser() -> argparse.ArgumentParser:
     # defaults regardless of what the operator configured, silently.
     parser.add_argument(
         "--lease-ttl",
-        type=float,
-        default=_env_float("AGENT_LEASE_TTL", DEFAULT_LEASE_TTL_S),
+        type=_lease_ttl_arg,
+        default=_env_lease_ttl(),
     )
     parser.add_argument(
         "--agent-timeout",

@@ -22,6 +22,16 @@ lease permanently: renewal and execution stop, and retries cannot restore the
 expired owner. Renewal does not depend on model output, tool activity or
 progress events, so a quiet call can span many lease periods.
 
+The runner reaches the same verdict without a 409 when the lease cannot still
+be valid: once its last acknowledged renewal is a whole lease old, or when the
+control plane refuses the worker credential itself (HTTP 401, 403 or 404,
+which no retry changes). It then stops the agent as for a 409 instead of
+letting it write to the shared workspace after the reaper has superseded the
+attempt. A lease must therefore outlast one heartbeat interval plus one
+request timeout (40 seconds): a shorter `AGENT_LEASE_TTL` is ignored in favour
+of the default, and a shorter `--lease-ttl` is refused. A cancellation does not
+end renewal; the lease is kept while the runner releases or drains the turn.
+
 With the first heartbeat at 30 seconds and repeated ten-second read timeouts,
 retry requests start at 30, 45, 60, 75, 90 and 105 seconds after claim. This
 illustrates opportunities to reconnect before the original 120-second lease

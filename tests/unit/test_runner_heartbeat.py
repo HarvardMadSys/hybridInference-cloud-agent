@@ -158,6 +158,87 @@ def test_cancellation_keeps_the_lease_renewed_until_the_runner_stops():
     assert heart.cancel_requested and not heart.lease_lost
 
 
+def test_an_outage_longer_than_the_lease_stops_the_agent(monkeypatch, caplog):
+    """No acknowledged renewal for a whole lease means the lease is gone.
+
+    The reaper supersedes such an attempt and marks its member lost, but the
+    heartbeat used to retry every five seconds for as long as the partition
+    lasted, so a silent agent kept writing to the shared workspace until a 409
+    finally got through.
+    """
+    clock = SimpleNamespace(now=0.0)
+    attempts = []
+
+    class Stop:
+        def wait(self, delay):
+            clock.now += delay
+            assert clock.now < 300, "heartbeat never gave the lease up"
+            return False
+
+    class Control:
+        job_id = "ajob_partitioned"
+
+        def heartbeat(self, ttl):
+            attempts.append(clock.now)
+            clock.now += 10
+            raise httpx.ConnectTimeout("partitioned")
+
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
+    heart = runner.Heartbeater(Control(), ttl=120, interval=30)
+    heart._stop = Stop()
+    heart._run()
+
+    assert heart.lease_lost and not heart.cancel_requested
+    # Every renewal that could still have landed inside the lease was tried.
+    assert attempts == [30, 45, 60, 75, 90, 105, 120]
+    assert clock.now == 130
+    assert "operation=heartbeat_expired" in caplog.text
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_refused_worker_credential_stops_the_agent_at_once(status):
+    """The token never changes during an attempt, so a refusal is final."""
+    request = httpx.Request("POST", "https://control.test/v1/agent/worker/jobs/a/heartbeat")
+    response = httpx.Response(status, request=request)
+    control = Mock(job_id="ajob_refused")
+    control.heartbeat.side_effect = httpx.HTTPStatusError(
+        "refused", request=request, response=response
+    )
+    waits = []
+
+    class Stop:
+        def wait(self, delay):
+            waits.append(delay)
+            assert len(waits) <= 2, "a refused credential was retried"
+            return False
+
+    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart._stop = Stop()
+
+    heart._run()
+
+    control.heartbeat.assert_called_once_with(120)
+    assert heart.lease_lost
+
+
+@pytest.mark.parametrize("configured", ["5", "30", "40"])
+def test_a_lease_no_renewal_could_reach_is_not_used(monkeypatch, capsys, configured):
+    """A lease that ends before its first renewal would lose every attempt."""
+    monkeypatch.setenv("AGENT_LEASE_TTL", configured)
+
+    assert runner.build_parser().parse_args([]).lease_ttl == runner.DEFAULT_LEASE_TTL_S
+    assert "ignoring AGENT_LEASE_TTL" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        runner.build_parser().parse_args(["--lease-ttl", configured])
+
+
+def test_a_lease_that_outlasts_its_first_renewal_is_used(monkeypatch):
+    monkeypatch.setenv("AGENT_LEASE_TTL", "45")
+    assert runner.build_parser().parse_args([]).lease_ttl == 45.0
+    assert runner.build_parser().parse_args(["--lease-ttl", "300"]).lease_ttl == 300.0
+
+
 def test_stopped_heartbeat_makes_no_request():
     control = Mock(job_id="ajob_stopped")
     heart = runner.Heartbeater(control, ttl=120, interval=30)
