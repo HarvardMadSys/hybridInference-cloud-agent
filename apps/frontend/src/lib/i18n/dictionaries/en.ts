@@ -237,22 +237,18 @@ export const en = {
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': 'Setting',
   'settings.description': 'Manage your connections, skills, memory, and notifications.',
-  'settings.memory.title': 'Avatar & memory',
+  'settings.memory.title': 'Memory',
   'settings.memory.description':
-    'Your illustrated avatar is generated automatically and evolves with recent work. Memory uses up to your 50 latest requests to suggest improvements. Explicit preferences can guide future tasks in the same project.',
-  'settings.memory.avatar': 'Your avatar',
-  'settings.memory.avatarAlt': 'Your automatically generated illustrated avatar',
-  'settings.memory.avatarDescription':
-    'Your base character stays the same while colors and details reflect your recent work.',
+    'Memory uses up to your 50 latest requests to suggest improvements. Explicit preferences can guide future tasks in the same project.',
   'settings.memory.automatic': 'Automatically build memory',
   'settings.memory.enabled':
     'Your avatar’s theme, memory, and suggestions update automatically from your requests.',
   'settings.memory.disabled':
     'Avatar theme updates, memory updates, and personalization are paused.',
-  'settings.memory.loading': 'Loading your avatar and memory…',
+  'settings.memory.loading': 'Loading your memory…',
   'settings.memory.error': 'Could not load or update your memory. Please try again.',
   'settings.memory.retry': 'Retry',
-  'settings.memory.signIn': 'Sign in to see your avatar and memory.',
+  'settings.memory.signIn': 'Sign in to see your memory.',
   'settings.memory.updated': 'Memory updated {date}',
   'settings.memory.refresh': 'Refresh',
   'settings.memory.refreshing': 'Refreshing…',
@@ -469,6 +465,9 @@ export const en = {
   'archive.order': 'Recently archived first',
 
   // ── Composer ────────────────────────────────────────────────────────────
+  'composer.avatarAlt': 'Your automatically generated illustrated avatar',
+  'composer.avatarDescription':
+    'Your base character stays the same while colors and details reflect your recent work.',
   'composer.heading': 'What should the agent do?',
   'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.subheadingFirstVisit':

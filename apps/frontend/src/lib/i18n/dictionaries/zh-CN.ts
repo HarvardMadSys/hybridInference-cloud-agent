@@ -230,19 +230,16 @@ export const zhCN: Record<TranslationKey, string> = {
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': '设置',
   'settings.description': '管理你的连接、技能、记忆和通知。',
-  'settings.memory.title': '头像与记忆',
+  'settings.memory.title': '记忆',
   'settings.memory.description':
-    '系统会自动为你的账户生成插画头像，头像会随近期工作变化。记忆最多使用你的最近 50 个请求来提供改进建议。明确表达的偏好可用于指导同一项目中的未来任务。',
-  'settings.memory.avatar': '你的头像',
-  'settings.memory.avatarAlt': '为你自动生成的插画头像',
-  'settings.memory.avatarDescription': '头像的基础角色保持不变，配色与细节会随近期工作变化。',
+    '记忆最多使用你的最近 50 个请求来提供改进建议。明确表达的偏好可用于指导同一项目中的未来任务。',
   'settings.memory.automatic': '自动建立记忆',
   'settings.memory.enabled': '头像主题、记忆和建议会根据你的请求自动更新。',
   'settings.memory.disabled': '已暂停头像主题更新、记忆更新和个性化功能。',
-  'settings.memory.loading': '正在加载头像与记忆…',
+  'settings.memory.loading': '正在加载记忆…',
   'settings.memory.error': '无法加载或更新记忆，请重试。',
   'settings.memory.retry': '重试',
-  'settings.memory.signIn': '登录后即可查看头像与记忆。',
+  'settings.memory.signIn': '登录后即可查看记忆。',
   'settings.memory.updated': '记忆更新时间：{date}',
   'settings.memory.refresh': '刷新',
   'settings.memory.refreshing': '正在刷新…',
@@ -442,6 +439,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'archive.order': '按归档时间从近到远',
 
   // ── Composer ────────────────────────────────────────────────────────────
+  'composer.avatarAlt': '为你自动生成的插画头像',
+  'composer.avatarDescription': '头像的基础角色保持不变，配色与细节会随近期工作变化。',
   'composer.heading': '让 Agent 做什么?',
   'composer.subheading': '在隔离沙箱里运行。',
   'composer.subheadingFirstVisit':

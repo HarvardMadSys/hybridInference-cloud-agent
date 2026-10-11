@@ -163,23 +163,6 @@ function UserMemoryPanel({ userId }: { userId: string | undefined }) {
           {view ? (
             <>
               <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-4">
-                {/* The API generates this illustration as a data URL for the account. */}
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={view.avatar.data_url}
-                  alt={t('settings.memory.avatarAlt')}
-                  width={64}
-                  height={64}
-                  className="h-16 w-16 shrink-0 rounded-full border border-border object-cover"
-                />
-                <div className="min-w-0">
-                  <h3 className="text-sm font-semibold text-foreground">
-                    {t('settings.memory.avatar')}
-                  </h3>
-                  <p className="text-xs leading-relaxed text-muted">
-                    {t('settings.memory.avatarDescription')}
-                  </p>
-                </div>
                 <div className="min-w-0">
                   <label className="flex min-h-11 items-center gap-3 text-sm font-medium text-foreground">
                     <input

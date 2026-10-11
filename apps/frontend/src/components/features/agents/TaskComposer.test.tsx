@@ -21,6 +21,9 @@ import {
   listRepoBranches,
 } from '@/lib/api/agents';
 import type { AgentConfigApi, AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
+import { getUserMemory, type UserMemoryView } from '@/lib/api/userMemory';
+vi.mock('@/lib/api/userMemory', () => ({ getUserMemory: vi.fn() }));
+
 import { rewritePrompt, type RewritePromptResult } from '@/lib/api/promptRewrite';
 
 vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
@@ -36,6 +39,7 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 }));
 beforeEach(() => {
   account.id = undefined;
+  vi.mocked(getUserMemory).mockRejectedValue(new Error('Avatar unavailable'));
   localStorage.clear();
 });
 
@@ -220,6 +224,27 @@ describe('TaskComposer source-control onboarding', () => {
   });
 
   afterEach(() => cleanup());
+
+  it('shows the account avatar above the homepage composer and keeps the composer usable on avatar failure', async () => {
+    account.id = 'alice';
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(getUserMemory).mockResolvedValueOnce({
+      avatar: { data_url: 'data:image/svg+xml,<svg></svg>', style: 'illustrated' },
+    } as UserMemoryView);
+    const rendered = render(<TaskComposer />);
+    const image = await screen.findByRole('img', {
+      name: 'Your automatically generated illustrated avatar',
+    });
+    const heading = screen.getByRole('heading', { name: 'What should the agent do?' });
+    expect(image.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const box = screen.getByRole('textbox', { name: 'What should the agent do?' });
+    expect(box).toBeEnabled();
+    rendered.unmount();
+
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox', { name: 'What should the agent do?' })).toBeEnabled();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
 
   it('rewrites the draft for review before creating a task', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());

@@ -120,14 +120,12 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe('avatar and memory settings', () => {
-  it('automatically loads an illustrated avatar, recent work, source-linked memory, and actionable suggestions', async () => {
+describe('memory settings', () => {
+  it('automatically loads recent work, source-linked memory, and actionable suggestions without an avatar', async () => {
     render(panel());
-    expect(screen.getByRole('status')).toHaveTextContent('Loading your avatar and memory');
-    const avatar = await screen.findByRole('img', {
-      name: 'Your automatically generated illustrated avatar',
-    });
-    expect(avatar).toHaveAttribute('src', populated.avatar.data_url);
+    expect(screen.getByRole('status')).toHaveTextContent('Loading your memory');
+    await screen.findByRole('switch');
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Automatically build memory' })).toBeChecked();
     expect(getUserMemory).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(screen.getByText(populated.portrait.summary)).toBeInTheDocument();
@@ -147,10 +145,10 @@ describe('avatar and memory settings', () => {
     expect(screen.getByText(/Memory updated/)).toBeInTheDocument();
   });
 
-  it('renders useful empty states while retaining the avatar', async () => {
+  it('renders useful empty states', async () => {
     vi.mocked(getUserMemory).mockResolvedValue(empty);
     render(panel());
-    await screen.findByRole('img');
+    await screen.findByRole('switch');
     expect(screen.getByText(/Recent work will appear/)).toBeInTheDocument();
     expect(screen.getByText('No saved memory yet.')).toBeInTheDocument();
     expect(screen.getByText(/Suggestions will appear/)).toBeInTheDocument();
@@ -180,50 +178,9 @@ describe('avatar and memory settings', () => {
     expect(getUserMemory).toHaveBeenCalledTimes(2);
   });
 
-  it('replaces the avatar with the refreshed work theme, preserves the paused response, and resets the theme after clearing', async () => {
-    const refreshed: UserMemoryView = {
-      ...populated,
-      revision: 2,
-      avatar: illustratedAvatar('#ac7db5'),
-    };
-    const refresh = deferred<UserMemoryView>();
-    const paused = { ...refreshed, enabled: false };
-    const cleared = { ...empty, enabled: false };
-    vi.mocked(updateUserMemory).mockResolvedValueOnce(paused);
-    vi.mocked(clearUserMemory).mockResolvedValueOnce(cleared);
+  it('requires explicit clear confirmation, supports cancellation, and displays the returned empty memory after clearing', async () => {
     render(panel());
-    const avatar = await screen.findByRole('img');
-    expect(avatar).toHaveAttribute('src', populated.avatar.data_url);
-
-    vi.mocked(getUserMemory).mockReturnValueOnce(refresh.promise);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    expect(avatar).toHaveAttribute('src', populated.avatar.data_url);
-    await act(async () => refresh.resolve(refreshed));
-    expect(avatar).toHaveAttribute('src', refreshed.avatar.data_url);
-
-    fireEvent.click(screen.getByRole('switch', { name: 'Automatically build memory' }));
-    await waitFor(() => expect(screen.getByRole('switch')).not.toBeChecked());
-    expect(avatar).toHaveAttribute('src', paused.avatar.data_url);
-    expect(screen.getByText(/Avatar theme updates, memory updates/)).toBeInTheDocument();
-    vi.mocked(getUserMemory).mockResolvedValueOnce(paused);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
-    expect(avatar).toHaveAttribute('src', paused.avatar.data_url);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear memory' }));
-    expect(
-      screen.getByText(/resets your avatar’s work theme while keeping its base character/),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm clear memory' }));
-    await screen.findByText('No saved memory yet.');
-    expect(avatar).toHaveAttribute('src', cleared.avatar.data_url);
-    expect(avatar).not.toHaveAttribute('src', refreshed.avatar.data_url);
-    expect(screen.getByRole('switch')).not.toBeChecked();
-  });
-
-  it('requires explicit clear confirmation, supports cancellation, and displays the returned base avatar after clearing', async () => {
-    render(panel());
-    await screen.findByRole('img');
+    await screen.findByRole('switch');
     fireEvent.click(screen.getByRole('button', { name: 'Clear memory' }));
     expect(clearUserMemory).not.toHaveBeenCalled();
     expect(screen.getByText(/Old requests won’t be used again/)).toBeInTheDocument();
@@ -238,7 +195,7 @@ describe('avatar and memory settings', () => {
     expect(screen.queryByText(populated.memories[0].content)).not.toBeInTheDocument();
     expect(screen.queryByText(populated.suggestions[0].title)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm clear memory' })).not.toBeInTheDocument();
-    expect(screen.getByRole('img')).toHaveAttribute('src', empty.avatar.data_url);
+    expect(screen.queryByText(populated.portrait.summary)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Clear memory' })).toHaveFocus();
   });
 
@@ -295,8 +252,7 @@ describe('avatar and memory settings', () => {
     await act(async () => newRead.resolve(otherAccount));
     await act(async () => oldClear.resolve(populated));
     expect(screen.getByRole('switch')).not.toBeChecked();
-    expect(screen.getByRole('img')).toHaveAttribute('src', otherAccount.avatar.data_url);
-    expect(screen.getByRole('img')).not.toHaveAttribute('src', populated.avatar.data_url);
+    expect(screen.getByText('No saved memory yet.')).toBeInTheDocument();
     expect(screen.queryByText(populated.memories[0].content)).not.toBeInTheDocument();
   });
 
@@ -310,19 +266,17 @@ describe('avatar and memory settings', () => {
     await act(async () => read.resolve(populated));
     auth.userId = undefined;
     render(panel());
-    expect(screen.getByText('Sign in to see your avatar and memory.')).toBeInTheDocument();
+    expect(screen.getByText('Sign in to see your memory.')).toBeInTheDocument();
     expect(getUserMemory).toHaveBeenCalledTimes(1);
   });
 
-  it('translates the avatar, memory controls, and clear confirmation into Chinese', async () => {
+  it('translates memory controls and clear confirmation into Chinese', async () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     render(panel());
-    expect(await screen.findByRole('img', { name: '为你自动生成的插画头像' })).toBeInTheDocument();
+    await screen.findByRole('switch', { name: '自动建立记忆' });
     expect(screen.getByRole('switch', { name: '自动建立记忆' })).toBeChecked();
     expect(screen.getByRole('heading', { name: '未来任务建议' })).toBeInTheDocument();
-    expect(
-      screen.getByText('头像的基础角色保持不变，配色与细节会随近期工作变化。'),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '清除记忆' }));
     expect(screen.getByRole('button', { name: '确认清除记忆' })).toBeInTheDocument();
     expect(screen.getByText(/清除记忆会重置头像的工作主题，保留基础角色/)).toBeInTheDocument();

@@ -41,6 +41,7 @@ import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
 import { PluginSelectionDialog } from './plugins/PluginSelectionDialog';
+import { UserAvatar } from './UserAvatar';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -586,20 +587,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
 
   return (
     <section className="mx-auto w-full max-w-4xl px-4 pb-12 pt-8 sm:px-8 md:pt-16 lg:pt-20">
-      <div
-        aria-hidden="true"
-        className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl border border-crimson/10 bg-crimson/[0.06] text-crimson shadow-[0_4px_16px_-8px_rgba(165,28,48,0.3)] dark:border-crimson-light/20 dark:bg-crimson/10 dark:text-crimson-light"
-      >
-        <svg
-          className="h-6 w-6"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={1.6}
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="m5 7 5 5-5 5m8 0h6" />
-        </svg>
-      </div>
+      <UserAvatar />
       <h1
         id={headingId}
         className="text-balance text-center text-[30px] font-semibold leading-tight tracking-[-0.035em] text-gray-950 sm:text-[36px] lg:text-[40px] dark:text-gray-50"
