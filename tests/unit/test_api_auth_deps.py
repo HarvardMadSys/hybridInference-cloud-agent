@@ -306,9 +306,25 @@ async def test_the_forwarded_header_is_ignored_by_default(client: AsyncClient) -
 async def test_the_forwarded_header_is_read_when_trusted(client: AsyncClient, monkeypatch) -> None:
     monkeypatch.setenv(deps.ENV_TRUST_PROXY_HEADERS, "true")
 
-    response = await client.get("/ip", headers={"X-Forwarded-For": "198.51.100.7, 203.0.113.9"})
+    response = await client.get("/ip", headers={"X-Forwarded-For": "198.51.100.7"})
 
     assert response.json()["ip"] == "198.51.100.7"
+
+
+async def test_a_trusted_header_records_the_hop_the_nearest_proxy_wrote(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """An appending proxy passes the caller's own entries through untouched.
+
+    nginx's ``$proxy_add_x_forwarded_for`` adds the peer it saw to the right of
+    whatever the caller sent, so everything to the left of the last entry is
+    the caller's to choose — and an audit row must not record that.
+    """
+    monkeypatch.setenv(deps.ENV_TRUST_PROXY_HEADERS, "true")
+
+    response = await client.get("/ip", headers={"X-Forwarded-For": "10.9.9.9, 192.0.2.44"})
+
+    assert response.json()["ip"] == "192.0.2.44"
 
 
 async def test_a_trusted_deployment_falls_back_to_the_socket(

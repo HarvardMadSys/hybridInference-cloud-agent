@@ -209,7 +209,7 @@ permissions, retention and verification requirements.
 | `AGENT_EDGE_CONFIG_FILE` | existing | Host-side nginx configuration mounted read-only by the edge service. Default `./edge.nginx.conf`, relative to the Compose file. |
 | `AGENT_NETWORK_NAME` | existing | Control-plane Compose network name, default `cloud-agent`. Use distinct names for independent stacks. |
 | `AGENT_SESSION_COOKIE_SECURE` | **NEW** | Defaults to on. Set to `false` **only** for a developer running the whole stack on plain `http://localhost`; a session cookie without `Secure` is one anyone on the path can take. |
-| `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls overwrites `X-Forwarded-For`; otherwise the admin audit trail records whatever address the caller typed. |
+| `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls sits directly in front of the control plane and sets or appends `X-Forwarded-For`. Only the rightmost entry, the one that proxy wrote, is recorded in the admin audit trail; entries to its left are the caller's own and are ignored. Behind a further proxy, such as a tunnel or load balancer in front of the edge, the recorded address is that hop's. |
 | `AGENT_DEPLOYMENT_SHA` | **NEW** | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
 
 ### Source control

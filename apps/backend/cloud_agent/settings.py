@@ -838,7 +838,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         False,
         kind="boolean",
         env="AGENT_TRUST_PROXY_HEADERS",
-        description="Enable only when a trusted reverse proxy overwrites forwarded address headers.",
+        description="Enable only when a reverse proxy you control sits directly in front of the control plane and sets or appends X-Forwarded-For. Only its rightmost entry is recorded.",
     ),
     Setting(
         "mcp_allow_private_targets",
