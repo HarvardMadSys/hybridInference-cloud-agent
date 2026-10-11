@@ -30,7 +30,9 @@ from cloud_agent.api.deps import (
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
 
-router = APIRouter(prefix="/admin/agent", tags=["admin-database"])
+router = APIRouter(
+    prefix="/admin/agent", tags=["admin-database"], dependencies=[Depends(verify_admin_access)]
+)
 
 PGADMIN_PATH = "/admin/agent/pgadmin"
 _COOKIES = {"pga4_session", "remember_token"}
