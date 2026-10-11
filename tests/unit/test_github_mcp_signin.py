@@ -13,7 +13,7 @@ from tests.unit.test_mcp_connections_api import (
 
 from cloud_agent.api import mcp_connections
 from cloud_agent.mcp import github_oauth, oauth, refresh
-from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
 
 URL = "https://api.githubcopilot.com/mcp/readonly"
 BASE = "https://agent.example.com/agents/api"
@@ -232,3 +232,32 @@ def test_explicit_registration_can_replace_an_existing_managed_connection(manage
     assert row["auth_config"]["managed_github_oauth"] is False
     renewal = refresh._build_request(row, cipher=mcp_cipher(_ENCRYPTION_KEY))
     assert renewal.form()["client_secret"] == "own-secret"
+
+
+def test_retry_preserves_stored_custom_github_app(managed_app, monkeypatch):
+    """A normal UI retry keeps an existing user's app identity and permissions."""
+    store, connection_id = _flow_store(monkeypatch)
+    cipher = mcp_cipher(_ENCRYPTION_KEY)
+    client_cipher = oauth_cipher(_ENCRYPTION_KEY)
+    store.connections[connection_id]["auth_config"] = {"client_id": "own-client"}
+    store.connections[connection_id]["client_secret_ciphertext"] = client_cipher.encrypt("own-secret")
+    exchange = AsyncMock(return_value={"access_token": "own-app-token", "refresh_token": "refresh"})
+    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    with _client(store) as client:
+        response = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
+        assert response.status_code == 200, response.text
+        query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+        assert query["client_id"] == ["own-client"]
+        assert query["redirect_uri"] == [f"{BASE}/v1/agent/mcp/oauth/callback/{connection_id}"]
+        callback = client.get(
+            f"/v1/agent/mcp/oauth/callback/{connection_id}",
+            params={"state": query["state"][0], "code": "code"},
+            follow_redirects=False,
+        )
+        assert "mcp_authorized=1" in callback.headers["location"]
+    assert exchange.call_args.args[0].form()["client_secret"] == "own-secret"
+    row = store.connections[connection_id]
+    assert row["auth_config"]["client_id"] == "own-client"
+    assert not row["auth_config"].get("managed_github_oauth")
+    assert client_cipher.decrypt(row["client_secret_ciphertext"]) == "own-secret"
+    assert refresh._build_request(row, cipher=cipher).form()["client_secret"] == "own-secret"

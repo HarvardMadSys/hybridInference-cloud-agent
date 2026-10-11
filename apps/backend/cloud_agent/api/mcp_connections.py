@@ -1226,7 +1226,9 @@ async def authorize_connection(
     github_endpoint = github_oauth.is_endpoint(connection.config.url)
     managed_client = (
         _github_browser_client()
-        if github_endpoint and not (body is not None and body.client_id)
+        if github_endpoint
+        and (not client_id or configured.get("managed_github_oauth"))
+        and not (body is not None and body.client_id)
         else None
     )
     try:
