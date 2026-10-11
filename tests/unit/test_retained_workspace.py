@@ -5,13 +5,18 @@ from __future__ import annotations
 import base64
 import json
 import os
+import resource
 import stat
 import subprocess
 import sys
 
 import pytest
 
-from cloud_agent_host.retained_workspace import _READ_PROGRAM, _WRITE_PROGRAM
+from cloud_agent_host.retained_workspace import (
+    _READ_PROGRAM,
+    _WRITE_PROGRAM,
+    _error_from_result,
+)
 
 
 def _read(root, relative: str, *, max_bytes: int = 1024, entries: int = 100):
@@ -177,3 +182,74 @@ def test_retained_writer_keeps_files_group_writable_for_fork_members(tmp_path):
 
     assert written.returncode == 0
     assert stat.S_IMODE((tmp_path / "shared.txt").stat().st_mode) == 0o664
+
+
+def _write_with_file_size_limit(root, relative: str, content: bytes, *, limit: int):
+    """Run the writer where no file may grow past ``limit`` bytes.
+
+    A file size limit is the one way to make a write run out of room without
+    filling a real disk: the kernel refuses past it as it would on a full disk
+    or quota, and Python already ignores SIGXFSZ, so the writer sees the error.
+    """
+
+    def limit_file_size() -> None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    return subprocess.run(
+        [sys.executable, "-c", _WRITE_PROGRAM, str(root), relative, "1000"],
+        input=content,
+        capture_output=True,
+        check=False,
+        preexec_fn=limit_file_size,
+    )
+
+
+def test_retained_writer_leaves_the_file_unchanged_when_the_new_content_has_no_room(tmp_path):
+    target = tmp_path / "note.txt"
+    target.write_text("original content\n")
+
+    refused = _write_with_file_size_limit(tmp_path, "note.txt", b"replacement " * 10, limit=32)
+    refused_new = _write_with_file_size_limit(tmp_path, "new.txt", b"replacement " * 10, limit=32)
+
+    assert refused.returncode == 47
+    assert target.read_text() == "original content\n"
+    assert refused_new.returncode == 47
+    assert not (tmp_path / "new.txt").exists()
+    error = _error_from_result(refused.returncode, refused.stdout, refused.stderr)
+    assert (error.status_code, error.message) == (
+        507,
+        "workspace has no room for this file; it was not changed",
+    )
+
+
+def test_retained_writer_replaces_in_place_and_keeps_the_files_inode_and_mode(tmp_path):
+    target = tmp_path / "run.sh"
+    target.write_text("#!/bin/sh\necho a much longer original script\n")
+    target.chmod(0o755)
+    before = target.stat()
+
+    written = subprocess.run(
+        [sys.executable, "-c", _WRITE_PROGRAM, str(tmp_path), "run.sh", "100"],
+        input=b"#!/bin/sh\necho short\n",
+        capture_output=True,
+        check=False,
+    )
+
+    after = target.stat()
+    assert written.returncode == 0
+    assert target.read_text() == "#!/bin/sh\necho short\n"
+    assert (after.st_ino, stat.S_IMODE(after.st_mode)) == (before.st_ino, 0o755)
+
+
+def test_retained_writer_refuses_a_fifo_without_blocking_on_it(tmp_path):
+    os.mkfifo(tmp_path / "pipe")
+
+    refused = subprocess.run(
+        [sys.executable, "-c", _WRITE_PROGRAM, str(tmp_path), "pipe", "100"],
+        input=b"data",
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert refused.returncode == 49
