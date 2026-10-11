@@ -40,9 +40,11 @@ class _AdminSandboxesStorage(Protocol):
 async def _refresh_terminal_activity(
     detail: AdminSandboxDetail, storage: _AdminSandboxesStorage
 ) -> str | None:
-    """Read a fenced broker census when heartbeat terminal data is unavailable.
+    """Read a fenced broker census before trusting heartbeat terminal data.
 
     Older runners omit terminal counts even though their broker knows them.
+    Older brokers count only the origin member, so even a fresh zero must be
+    checked against the group's activity flag before closing admission.
     Keep this recovery independent of the optional Docker resource collector.
     A failed probe leaves terminal activity unknown and stopping disabled.
     """
@@ -87,12 +89,13 @@ async def _refresh_terminal_activity(
     return None
 
 
-def _terminal_activity_unavailable(detail: AdminSandboxDetail) -> bool:
-    """Use the database clock for the same freshness gate as the stop command."""
+def _terminal_activity_needs_refresh(detail: AdminSandboxDetail) -> bool:
+    """Recheck idle counts and use the stop command's database freshness clock."""
     sandbox = detail.sandbox
     observed = sandbox.terminal_count_observed_at
     return sandbox.state == "running" and (
         sandbox.terminal_count is None
+        or sandbox.terminal_count == 0
         or observed is None
         or (detail.observed_at - observed).total_seconds() > 90
     )
@@ -144,7 +147,7 @@ async def get_admin_sandbox(
     if detail is None:
         raise HTTPException(status_code=404, detail="Sandbox not found.")
     detail = AdminSandboxDetail.model_validate(detail)
-    if _terminal_activity_unavailable(detail):
+    if _terminal_activity_needs_refresh(detail):
         error = await _refresh_terminal_activity(detail, require_store(store))
         if error is not None:
             detail.terminal_activity_error = error
@@ -165,6 +168,22 @@ async def stop_admin_sandbox(
 ) -> AdminSandboxDetail:
     """Request a fenced idle stop; the owning host confirms it asynchronously."""
     storage = require_store(store)
+    current = await storage.admin_sandboxes.detail(sandbox_id)
+    if current is not None:
+        reviewed = AdminSandboxDetail.model_validate(current)
+        sandbox = reviewed.sandbox
+        if (
+            sandbox.state == "running"
+            and sandbox.generation == payload.generation
+            and sandbox.container_id == payload.container_id
+            and sandbox.last_activity_at == payload.last_activity_at
+        ):
+            # A legacy broker can heartbeat a fresh origin-only zero while a
+            # sibling has an open terminal. Check the whole group before the
+            # database closes admission, retaining every original stop fence.
+            error = await _refresh_terminal_activity(reviewed, storage)
+            if error is not None:
+                raise HTTPException(status_code=409, detail=error)
     result = await storage.sandbox.request_admin_stop(
         sandbox_id=sandbox_id,
         generation=payload.generation,

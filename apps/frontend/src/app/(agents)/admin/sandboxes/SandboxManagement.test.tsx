@@ -149,6 +149,8 @@ describe('sandbox member visibility and control', () => {
 
   it.each([
     { terminal_count: null, terminal_count_observed_at: null },
+    { terminal_count: 0, terminal_count_observed_at: observedAt },
+    { terminal_count: 2, terminal_count_observed_at: observedAt },
     { terminal_count: 0, terminal_count_observed_at: '2026-10-10T09:57:00Z' },
     { terminal_count: 2, terminal_count_observed_at: '2026-10-10T09:57:00Z' },
   ])(
@@ -170,6 +172,26 @@ describe('sandbox member visibility and control', () => {
       );
       expect(getAdminSandbox).toHaveBeenCalledTimes(2);
       expect(screen.queryByText(message)).not.toBeInTheDocument();
+      expect(stopAdminSandbox).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [{ active_attempt_count: 1 }, 'Wait for all active turns to finish.'],
+    [{ active_operation_count: 1 }, 'Wait for active workspace operations to finish.'],
+    [{ snapshot_state: 'pending' }, 'Wait for the workspace snapshot to finish.'],
+  ] as const)(
+    'keeps the current activity blocker visible ahead of broker errors: %j',
+    async (overrides, message) => {
+      const brokerError = "The host's workspace broker is unavailable.";
+      vi.mocked(getAdminSandbox).mockResolvedValue({
+        ...detail(overrides),
+        terminal_activity_error: brokerError,
+      });
+      mount();
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.queryByText(brokerError)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeDisabled();
       expect(stopAdminSandbox).not.toHaveBeenCalled();
     },
   );

@@ -394,8 +394,10 @@ before accepting the request, and refuses a busy group, pending snapshot or
 publication work, or a group with open terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
-When the terminal report is missing or older than 90 seconds, opening or
-refreshing details queries the owning workspace broker directly. This also
+When the terminal report is zero, missing, or older than 90 seconds, opening or
+refreshing details queries the owning workspace broker directly. Stop requests
+also verify terminal activity before closing admission: older brokers may report
+only the origin session's terminals even when another member is active. This also
 supports runners that omit terminal counts from their heartbeats. The report
 must match the reviewed container and generation; an unavailable broker or
 unknown activity keeps stopping disabled and shows the required recovery step.

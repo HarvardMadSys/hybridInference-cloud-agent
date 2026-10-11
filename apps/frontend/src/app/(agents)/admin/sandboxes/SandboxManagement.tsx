@@ -82,17 +82,18 @@ export function SandboxManagement({
           ? 'Wait for active workspace operations to finish.'
           : ['pending', 'snapshotting', 'importing'].includes(sandbox.snapshot_state ?? '')
             ? 'Wait for the workspace snapshot to finish.'
-            : sandbox.terminal_count == null || !Number.isFinite(terminalObserved)
-              ? (detail?.terminal_activity_error ??
-                'Terminal activity is unavailable. Refresh details to check the host.')
-              : !Number.isFinite(serverNow) || serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
-                ? (detail?.terminal_activity_error ??
-                  'Terminal activity is stale. Refresh details to check the host.')
-                : sandbox.terminal_count > 0
-                  ? 'Close all open terminals before stopping the sandbox.'
-                  : sandbox.generation == null || !sandbox.container_id
-                    ? 'The current container identity is unavailable.'
-                    : null;
+            : detail?.terminal_activity_error
+              ? detail.terminal_activity_error
+              : sandbox.terminal_count == null || !Number.isFinite(terminalObserved)
+                ? 'Terminal activity is unavailable. Refresh details to check the host.'
+                : !Number.isFinite(serverNow) ||
+                    serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
+                  ? 'Terminal activity is stale. Refresh details to check the host.'
+                  : sandbox.terminal_count > 0
+                    ? 'Close all open terminals before stopping the sandbox.'
+                    : sandbox.generation == null || !sandbox.container_id
+                      ? 'The current container identity is unavailable.'
+                      : null;
 
   async function stop() {
     if (!sandbox || blocked || action.current) return;
