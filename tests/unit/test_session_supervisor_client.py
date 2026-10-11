@@ -25,6 +25,7 @@ def _spec() -> ChatSandboxSpec:
         resident_slot_capacity=8,
         memory_limit="6g",
         cpu_limit="3",
+        disk_limit_mib=16384,
         stop_timeout_s=20,
     )
 
@@ -82,6 +83,7 @@ def test_initial_archive_sends_the_exact_sandbox_identity_with_a_long_timeout():
         "resident_slot_capacity": 8,
         "memory_limit": "6g",
         "cpu_limit": "3",
+        "disk_limit_mib": 16384,
         "stop_timeout_s": 20,
         "members": members,
         "token": "lease-token",
@@ -145,9 +147,23 @@ def test_initial_archive_status_runs_before_reset_with_the_exact_identity():
     [request] = seen
     assert request.url.raw_path == b"/shared-sandboxes/athr%2Fcurrent/archive-initial/status"
     payload = json.loads(request.content)
-    assert payload["preparation_id"] == "ajob_initial"
-    assert payload["expected_container_id"] == "container-shared"
-    assert payload["token"] == "lease-token"
+    assert payload == {
+        "sandbox_id": "asbx_shared",
+        "generation": 3,
+        "origin_thread_id": "athr_origin",
+        "runtime_id": "claude-code",
+        "runtime_version": "2.1.220",
+        "sandbox_image_digest": "sha256:image",
+        "expected_container_id": "container-shared",
+        "resident_slot_capacity": 8,
+        "memory_limit": "6g",
+        "cpu_limit": "3",
+        "disk_limit_mib": 16384,
+        "stop_timeout_s": 20,
+        "members": members,
+        "token": "lease-token",
+        "preparation_id": "ajob_initial",
+    }
     assert request.extensions["timeout"]["read"] == 900.0
     assert answer["base_sha"] == "b" * 40
 
