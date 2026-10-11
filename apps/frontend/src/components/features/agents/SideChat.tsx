@@ -438,27 +438,29 @@ function SideChatContent({
                   </span>
                 )}
                 {running ? (
-                  <>
-                    <span className="text-xs text-gray-400 dark:text-gray-500">
-                      {t('sideChat.queued')}
-                    </span>
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
+                    {t('sideChat.queued')}
+                  </span>
+                ) : null}
+                <div className="ml-auto flex shrink-0 items-center gap-1">
+                  {running ? (
                     <button
                       type="button"
                       aria-label={t('sideChat.stop')}
                       disabled={stopping}
                       onClick={() => void stop()}
-                      className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900"
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900"
                     >
                       <span className="h-2.5 w-2.5 rounded-sm bg-current" />
                     </button>
-                  </>
-                ) : null}
-                <ComposerSendButton
-                  label={t('sideChat.send')}
-                  title={t('sideChat.sendHint')}
-                  busy={submitting || (active && status === 'preparing')}
-                  disabled={!ready || unavailable || !draft.trim() || submitting}
-                />
+                  ) : null}
+                  <ComposerSendButton
+                    label={t('sideChat.send')}
+                    title={t('sideChat.sendHint')}
+                    busy={submitting || (active && status === 'preparing')}
+                    disabled={!ready || unavailable || !draft.trim() || submitting}
+                  />
+                </div>
               </div>
             </form>
             {status === 'waiting' ? (
