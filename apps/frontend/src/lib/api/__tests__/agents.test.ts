@@ -585,6 +585,70 @@ describe('agents api', () => {
     );
   });
 
+  it('reports where history ends without moving the resume cursor', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(
+        sseResponse([
+          'event: attached\ndata: {"seq":9}\n\n',
+          'event: output\ndata: {"seq":8,"data":"YQ=="}\n\n',
+        ]),
+      )
+      .mockResolvedValueOnce(
+        sseResponse([
+          'event: attached\ndata: {"seq":12}\n\n',
+          'event: output\ndata: {"seq":9,"data":"Yg=="}\n\n',
+          'event: exit\ndata: {"seq":10,"exit_code":0}\n\n',
+        ]),
+      );
+    const onAttached = vi.fn();
+    const onOutput = vi.fn();
+
+    await streamAgentTerminal('job-1', 'term-1', {
+      after: 7,
+      onAttached,
+      onOutput,
+      onReset: vi.fn(),
+      onExit: vi.fn(),
+    });
+
+    expect(onAttached.mock.calls.map(([event]) => event.seq)).toEqual([9, 12]);
+    expect(onOutput.mock.calls.map(([event]) => event.seq)).toEqual([8, 9]);
+    // Resumed after the last output applied, not after the announced history.
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      '/v1/agent/jobs/job-1/terminals/term-1/stream?after=8',
+      expect.any(Object),
+    );
+  });
+
+  it('sends binary terminal input byte for byte', async () => {
+    fetchWithAuth.mockResolvedValue(new Response(null, { status: 204 }));
+    // An X10 mouse report: not valid UTF-8, so it must not be re-encoded.
+    const report = Uint8Array.from([0x1b, 0x5b, 0x4d, 0x20, 0xa1, 0xbb]);
+
+    await writeAgentTerminalInput('job-1', 'term-1', report);
+
+    const init = fetchWithAuth.mock.calls[0][2] as RequestInit;
+    const encoded = (JSON.parse(String(init.body)) as { data: string }).data;
+    expect(Array.from(Buffer.from(encoded, 'base64'))).toEqual(Array.from(report));
+  });
+
+  it('splits long binary input that looks like UTF-8 continuation bytes', async () => {
+    fetchWithAuth.mockResolvedValue(new Response(null, { status: 204 }));
+    const bytes = new Uint8Array(10).fill(0x80);
+
+    await writeAgentTerminalInput('job-1', 'term-1', bytes, 4);
+
+    const sent = fetchWithAuth.mock.calls.map((call: unknown[]) => {
+      const init = call[2] as RequestInit;
+      const encoded = (JSON.parse(String(init.body)) as { data: string }).data;
+      return Array.from(Buffer.from(encoded, 'base64'));
+    });
+    expect(sent.map((chunk: number[]) => chunk.length)).toEqual([4, 4, 2]);
+    expect(sent.flat()).toEqual(Array.from(bytes));
+  });
+
   it('advances the resume cursor when a truncated-output reset is received', async () => {
     fetchWithAuth
       .mockResolvedValueOnce(

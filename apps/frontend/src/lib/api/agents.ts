@@ -1499,9 +1499,9 @@ export interface AgentTerminalApi {
 export interface AgentTerminalListApi {
   terminals: AgentTerminalApi[];
   /** Per-workspace creation limit advertised by the owning broker. */
-  max_sessions?: number;
+  max_sessions?: number | null;
   /** Maximum input bytes in one request, advertised by the owning broker. */
-  max_input_bytes?: number;
+  max_input_bytes?: number | null;
 }
 
 /** List the PTY sessions that still belong to this workspace. */
@@ -1552,15 +1552,20 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function utf8Chunks(value: string, maximum: number): Uint8Array[] {
-  const encoded = new TextEncoder().encode(value);
+function byteChunks(encoded: Uint8Array, maximum: number): Uint8Array[] {
   if (encoded.byteLength === 0) return [];
   const chunks: Uint8Array[] = [];
   let offset = 0;
   while (offset < encoded.byteLength) {
     let end = Math.min(offset + maximum, encoded.byteLength);
     if (end < encoded.byteLength) {
-      while (end > offset && (encoded[end] & 0xc0) === 0x80) end -= 1;
+      // Prefer not to split a UTF-8 character. A character has at most three
+      // continuation bytes, so anything longer is not text and is cut as is.
+      let boundary = end;
+      while (boundary > end - 4 && boundary > offset && (encoded[boundary] & 0xc0) === 0x80) {
+        boundary -= 1;
+      }
+      if (boundary > offset && (encoded[boundary] & 0xc0) !== 0x80) end = boundary;
     }
     chunks.push(encoded.subarray(offset, end));
     offset = end;
@@ -1568,11 +1573,16 @@ function utf8Chunks(value: string, maximum: number): Uint8Array[] {
   return chunks;
 }
 
-/** Send keystrokes, including control sequences, to a running PTY. */
+/**
+ * Send keystrokes, including control sequences, to a running PTY.
+ *
+ * Text is sent as UTF-8. Bytes are sent as they are: xterm reports some mouse
+ * events as binary that is not valid UTF-8.
+ */
 export async function writeAgentTerminalInput(
   jobId: string,
   terminalId: string,
-  data: string,
+  data: string | Uint8Array,
   maxInputBytes = MAX_TERMINAL_INPUT_BYTES,
 ): Promise<void> {
   // Four bytes can hold any UTF-8 character; smaller or malformed limits
@@ -1581,7 +1591,8 @@ export async function writeAgentTerminalInput(
     Number.isInteger(maxInputBytes) && maxInputBytes >= 4
       ? Math.min(maxInputBytes, MAX_TERMINAL_INPUT_BYTES)
       : MAX_TERMINAL_INPUT_BYTES;
-  for (const chunk of utf8Chunks(data, maximum)) {
+  const encoded = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+  for (const chunk of byteChunks(encoded, maximum)) {
     const resp = await fetchWithAuth(API_BASE, `${terminalPath(jobId, terminalId)}/input`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1629,12 +1640,19 @@ export interface AgentTerminalResetEvent {
   reason: 'output_truncated';
 }
 
+/** Sent first on every connection: events up to `seq` predate this viewer. */
+export interface AgentTerminalAttachedEvent {
+  seq: number;
+}
+
 export interface StreamAgentTerminalOptions {
   after?: number;
   signal?: AbortSignal;
   onOutput: (event: AgentTerminalOutputEvent) => void;
   onReset: (event: AgentTerminalResetEvent) => void;
   onExit: (event: AgentTerminalExitEvent) => void;
+  /** Where the terminal's history ends; brokers that predate it never call this. */
+  onAttached?: (event: AgentTerminalAttachedEvent) => void;
 }
 
 /**
@@ -1663,6 +1681,14 @@ export async function streamAgentTerminal(
     try {
       const payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
       const seq = payload.seq;
+      if (eventName === 'attached') {
+        // Not a terminal event: it names where history ends and must not move
+        // the resume cursor.
+        if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0) {
+          options.onAttached?.({ seq });
+        }
+        return false;
+      }
       if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= cursor) return false;
       if (eventName === 'output' && typeof payload.data === 'string') {
         cursor = seq;

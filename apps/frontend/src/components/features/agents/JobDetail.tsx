@@ -2284,9 +2284,12 @@ export function JobDetail({
                 {t('sessionArchive.terminal')}
               </p>
             ) : (
+              // Keyed by the chat, not the turn: every turn shares the one
+              // workspace, and a new turn must not tear its terminals down.
               <TerminalWorkspace
-                key={job.id}
+                key={job.threadId ?? job.id}
                 jobId={job.id}
+                workspaceKey={job.threadId ?? job.id}
                 active={workspaceOpen && workspaceTab === 'terminal'}
                 ready={terminalWorkspaceReady}
               />

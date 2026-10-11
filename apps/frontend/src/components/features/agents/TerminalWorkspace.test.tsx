@@ -28,8 +28,11 @@ const xtermHarness = vi.hoisted(() => ({
     focus: ReturnType<typeof vi.fn>;
     dispose: ReturnType<typeof vi.fn>;
     emitData: (data: string) => void;
+    emitBinary: (data: string) => void;
   }>,
   fits: [] as Array<{ fit: ReturnType<typeof vi.fn> }>,
+  // Parse callbacks of writes xterm has not finished, while a test holds them.
+  heldWrites: null as Array<() => void> | null,
 }));
 
 vi.mock('@xterm/xterm', () => ({
@@ -37,12 +40,17 @@ vi.mock('@xterm/xterm', () => ({
     options: Record<string, unknown>;
     rows = 24;
     cols = 80;
-    write = vi.fn();
+    write = vi.fn((_data: unknown, callback?: () => void) => {
+      if (!callback) return;
+      if (xtermHarness.heldWrites) xtermHarness.heldWrites.push(callback);
+      else callback();
+    });
     writeln = vi.fn();
     reset = vi.fn();
     focus = vi.fn();
     dispose = vi.fn();
     private dataHandler: (data: string) => void = () => undefined;
+    private binaryHandler: (data: string) => void = () => undefined;
 
     constructor(options: Record<string, unknown>) {
       this.options = options;
@@ -57,6 +65,13 @@ vi.mock('@xterm/xterm', () => ({
     }
     emitData(data: string) {
       this.dataHandler(data);
+    }
+    onBinary(handler: (data: string) => void) {
+      this.binaryHandler = handler;
+      return { dispose: vi.fn() };
+    }
+    emitBinary(data: string) {
+      this.binaryHandler(data);
     }
   },
 }));
@@ -109,6 +124,7 @@ describe('TerminalWorkspace', () => {
   beforeEach(() => {
     xtermHarness.instances.length = 0;
     xtermHarness.fits.length = 0;
+    xtermHarness.heldWrites = null;
     vi.mocked(createAgentTerminal).mockReset();
     vi.mocked(deleteAgentTerminal).mockReset();
     vi.mocked(listAgentTerminals).mockReset();
@@ -396,9 +412,10 @@ describe('TerminalWorkspace', () => {
     await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
     const xterm = xtermHarness.instances[0];
 
-    expect(xterm.reset).toHaveBeenCalled();
-    expect(xterm.writeln).toHaveBeenCalledWith('\x1b[90m[Earlier output truncated]\x1b[0m');
-    expect(Array.from(xterm.write.mock.calls[0][0] as Uint8Array)).toEqual([104, 105]);
+    // The reset is written in-band (RIS), so it cannot overtake output xterm
+    // has queued but not yet drawn, as a synchronous `reset()` would.
+    expect(xterm.write.mock.calls[0][0]).toBe('\x1bc\x1b[90m[Earlier output truncated]\x1b[0m\r\n');
+    expect(Array.from(xterm.write.mock.calls[1][0] as Uint8Array)).toEqual([104, 105]);
     expect(xtermHarness.fits[0].fit).toHaveBeenCalled();
     expect(resizeAgentTerminal).toHaveBeenCalledWith('job-1', first.id, 24, 80);
 
@@ -655,5 +672,225 @@ describe('TerminalWorkspace', () => {
     // And it becomes usable the moment the workspace is.
     view.rerender(<TerminalWorkspace jobId="job-1" active ready />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'New terminal' })).toBeEnabled());
+  });
+
+  it('keeps its terminals open across turns of the same chat', async () => {
+    // Every turn is its own job, but they share the chat's one workspace.
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue([first]);
+    const view = render(<TerminalWorkspace jobId="job-1" workspaceKey="thread-1" active />);
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+
+    // The next turn locks the workspace while the agent prepares it...
+    view.rerender(<TerminalWorkspace jobId="job-2" workspaceKey="thread-1" active ready={false} />);
+    expect(screen.getByRole('application', { name: 'Terminal 1 terminal' })).toBeInTheDocument();
+    view.rerender(<TerminalWorkspace jobId="job-2" workspaceKey="thread-1" active ready />);
+
+    // ...and the same screen carries on, addressed through the new turn.
+    xtermHarness.instances[0].emitData('pwd\r');
+    await waitFor(() =>
+      expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-2', first.id, 'pwd\r'),
+    );
+    expect(xtermHarness.instances).toHaveLength(1);
+    expect(streamAgentTerminal).toHaveBeenCalledTimes(1);
+    expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a terminal whose shell exits cleanly', async () => {
+    const first = terminal('term-1');
+    const second = terminal('term-2', 'bash');
+    vi.mocked(listAgentTerminals).mockResolvedValue([first, second]);
+    vi.mocked(deleteAgentTerminal).mockResolvedValue();
+    vi.mocked(streamAgentTerminal).mockImplementation(async (_job, terminalId, opts) => {
+      if (terminalId === first.id) opts.onExit({ seq: 1, exit_code: 0 });
+    });
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+
+    await waitFor(() => expect(deleteAgentTerminal).toHaveBeenCalledWith('job-1', first.id));
+    const tab = await screen.findByRole('tab', { name: 'Terminal 1 · bash' });
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByRole('tab')).toHaveLength(1);
+  });
+
+  it('keeps a failed shell readable but gives its slot back', async () => {
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue({ terminals: [first], max_sessions: 1 });
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-2', 'bash'));
+    vi.mocked(streamAgentTerminal).mockImplementation(async (_job, terminalId, opts) => {
+      if (terminalId === first.id) opts.onExit({ seq: 3, exit_code: 2 });
+    });
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+
+    expect(await screen.findByRole('tab', { name: 'Terminal 1 · exited' })).toBeInTheDocument();
+    expect(xtermHarness.instances[0].write).toHaveBeenCalledWith(
+      '\r\n\x1b[90m[process exited with code 2]\x1b[0m\r\n',
+    );
+    expect(deleteAgentTerminal).not.toHaveBeenCalled();
+
+    // At the limit of one, the ended shell no longer blocks a new terminal,
+    // and makes way for it the same way the broker does.
+    const create = screen.getByRole('button', { name: 'New terminal' });
+    expect(create).toBeEnabled();
+    fireEvent.click(create);
+    expect(await screen.findByRole('tab', { name: 'Terminal 1 · bash' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /exited/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps an ended shell read-only when the workspace unlocks again', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([terminal('term-1')]);
+    vi.mocked(streamAgentTerminal).mockImplementation(async (_job, _terminal, opts) => {
+      opts.onExit({ seq: 1, exit_code: 1 });
+    });
+
+    const view = render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+    const xterm = xtermHarness.instances[0];
+    await waitFor(() => expect(xterm.options.disableStdin).toBe(true));
+
+    view.rerender(<TerminalWorkspace jobId="job-1" active ready={false} />);
+    view.rerender(<TerminalWorkspace jobId="job-1" active ready />);
+
+    expect(xterm.options.disableStdin).toBe(true);
+    xterm.emitData('ls\r');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(writeAgentTerminalInput).not.toHaveBeenCalled();
+  });
+
+  it('does not take focus from the chat when the workspace unlocks', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([terminal('term-1')]);
+    const composer = document.createElement('textarea');
+    document.body.appendChild(composer);
+    try {
+      const view = render(<TerminalWorkspace jobId="job-1" active />);
+      await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+      const xterm = xtermHarness.instances[0];
+      composer.focus();
+      xterm.focus.mockClear();
+
+      // A turn locks and then unlocks the workspace while someone types.
+      view.rerender(<TerminalWorkspace jobId="job-1" active ready={false} />);
+      view.rerender(<TerminalWorkspace jobId="job-1" active ready />);
+
+      expect(xterm.focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(composer);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it('does not open the first terminal over text being typed elsewhere', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([terminal('term-1')]);
+    const composer = document.createElement('textarea');
+    document.body.appendChild(composer);
+    composer.focus();
+    try {
+      render(<TerminalWorkspace jobId="job-1" active />);
+      await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+      expect(xtermHarness.instances[0].focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(composer);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it('focuses a terminal the owner opens', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([]);
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    const button = await screen.findByRole('button', { name: 'New terminal' });
+    button.focus();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+    expect(xtermHarness.instances[0].focus).toHaveBeenCalled();
+  });
+
+  it("does not send xterm's answers to queries replayed from history", async () => {
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue([first]);
+    let live: ((seq: number) => void) | undefined;
+    vi.mocked(streamAgentTerminal).mockImplementation(async (_job, _terminal, opts) => {
+      opts.onAttached?.({ seq: 2 });
+      opts.onOutput({ seq: 1, data: btoa('\x1b[6n') });
+      opts.onOutput({ seq: 2, data: btoa('$ ') });
+      live = (seq) => opts.onOutput({ seq, data: btoa('\x1b[c') });
+    });
+    xtermHarness.heldWrites = [];
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(live).toBeTypeOf('function'));
+    const xterm = xtermHarness.instances[0];
+
+    // While xterm parses the history, what it "types" answers that history:
+    // a cursor report for a program that asked before this screen existed.
+    xterm.emitData('\x1b[24;1R');
+    const replayed = xtermHarness.heldWrites.splice(0);
+    expect(replayed).toHaveLength(2);
+    replayed.forEach((parsed) => parsed());
+    xtermHarness.heldWrites = null;
+
+    // Live output is answered as usual.
+    live!(3);
+    xterm.emitData('\x1b[?1;2c');
+    await waitFor(() =>
+      expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-1', first.id, '\x1b[?1;2c'),
+    );
+    expect(writeAgentTerminalInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends binary input, such as an old-style mouse report, as bytes', async () => {
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue([first]);
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+    xtermHarness.instances[0].emitData('a');
+    xtermHarness.instances[0].emitBinary('\x1b[M \xa1\xbb');
+
+    await waitFor(() => expect(writeAgentTerminalInput).toHaveBeenCalledTimes(2));
+    expect(writeAgentTerminalInput).toHaveBeenNthCalledWith(1, 'job-1', first.id, 'a');
+    const bytes = vi.mocked(writeAgentTerminalInput).mock.calls[1][2] as Uint8Array;
+    expect(Array.from(bytes)).toEqual([0x1b, 0x5b, 0x4d, 0x20, 0xa1, 0xbb]);
+  });
+
+  it('sends each new size once, inside the bounds the API accepts', async () => {
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue([first]);
+    let resizePane: (() => void) | undefined;
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private readonly callback: ResizeObserverCallback) {}
+        observe(target: Element) {
+          if (target.getAttribute('role') !== 'tablist') {
+            resizePane = () => this.callback([], this as unknown as ResizeObserver);
+          }
+        }
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() =>
+      expect(resizeAgentTerminal).toHaveBeenCalledWith('job-1', first.id, 24, 80),
+    );
+    await waitFor(() => expect(resizePane).toBeTypeOf('function'));
+
+    resizePane!();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(resizeAgentTerminal).toHaveBeenCalledTimes(1);
+
+    const xterm = xtermHarness.instances[0];
+    xterm.rows = 1;
+    xterm.cols = 9;
+    resizePane!();
+    await waitFor(() =>
+      expect(resizeAgentTerminal).toHaveBeenLastCalledWith('job-1', first.id, 2, 20),
+    );
   });
 });

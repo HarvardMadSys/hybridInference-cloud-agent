@@ -13,6 +13,13 @@
   scrollbar-width: thin;
 }
 
+/* xterm's stylesheet paints the viewport black and its theme paints only the
+   rows, so the part of the pane below the last whole row showed as a black
+   strip. The pane's own background matches both terminal themes. */
+.agent-xterm .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
 .dark .agent-xterm .xterm-viewport {
   scrollbar-color: #4b5563 transparent;
 }

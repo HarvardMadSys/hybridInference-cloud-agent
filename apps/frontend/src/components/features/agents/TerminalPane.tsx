@@ -69,6 +69,17 @@ const TERMINAL_THEMES: Record<ResolvedTheme, ITheme> = {
   },
 };
 
+// The window size the API accepts. A size outside it is refused, which would
+// leave the shell at its previous size, so it is clamped instead.
+const MIN_ROWS = 2;
+const MAX_ROWS = 200;
+const MIN_COLS = 20;
+const MAX_COLS = 500;
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
 function decodeBase64(value: string): Uint8Array {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -76,6 +87,24 @@ function decodeBase64(value: string): Uint8Array {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+/** xterm hands binary input over as a string of byte values. */
+function binaryBytes(value: string): Uint8Array {
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes[index] = value.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+/** Whether focusing the terminal would not pull it away from someone typing elsewhere. */
+function focusIsFree(pane: HTMLElement | null): boolean {
+  const active = document.activeElement;
+  if (!active || active === document.body || pane?.contains(active)) return true;
+  return !active.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+  );
 }
 
 function terminalLabel(terminal: AgentTerminalApi, sessions: AgentTerminalApi[]): string {
@@ -117,8 +146,12 @@ interface TerminalPaneProps {
   jobId: string;
   terminal: AgentTerminalApi;
   sessions: AgentTerminalApi[];
+  /** Terminals whose shell has ended, so their tabs can say so. */
+  exitedIds?: ReadonlySet<string>;
   paneIndex: number;
   ready: boolean;
+  /** Take keyboard focus once open, unless someone is typing elsewhere. */
+  autoFocus?: boolean;
   canCreate: boolean;
   canSplit: boolean;
   busy: boolean;
@@ -127,14 +160,17 @@ interface TerminalPaneProps {
   onNew: () => void;
   onSplit: () => void;
   onKill: () => void;
+  onExit?: (terminalId: string, exitCode: number) => void;
 }
 
 export function TerminalPane({
   jobId,
   terminal,
   sessions,
+  exitedIds,
   paneIndex,
   ready,
+  autoFocus = false,
   canCreate,
   canSplit,
   busy,
@@ -143,26 +179,43 @@ export function TerminalPane({
   onNew,
   onSplit,
   onKill,
+  onExit,
 }: TerminalPaneProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
+  const paneRef = useRef<HTMLElement>(null);
+  const mountRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const { resolved } = useTheme();
-  // Read by the creation effect, which must not re-run on a theme change.
+  // The creation effect runs once per terminal and reads everything else
+  // through these. A new turn of the same chat changes `jobId` without
+  // changing the terminal, and must not rebuild it: that would drop the
+  // screen and replay the whole stream.
   const themeRef = useRef(resolved);
   themeRef.current = resolved;
-  const inputEnabledRef = useRef(ready && terminal.state === 'running');
+  const jobIdRef = useRef(jobId);
+  jobIdRef.current = jobId;
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
+  const autoFocusRef = useRef(autoFocus);
+  autoFocusRef.current = autoFocus;
   const inputLimitRef = useRef(maxInputBytes);
   inputLimitRef.current = maxInputBytes;
+  // Set once the shell has exited or its stream is gone for good.
+  const endedRef = useRef(terminal.state !== 'running');
+  const resizeRef = useRef<(() => void) | null>(null);
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const inputEnabled = ready && terminal.state === 'running';
+  const inputEnabledRef = useRef(inputEnabled);
   inputEnabledRef.current = inputEnabled;
 
   useEffect(() => {
+    // Deliberately no focus here: readiness changes while someone may be
+    // typing in the chat, and keystrokes meant for it must not reach a shell.
     if (terminalRef.current) {
-      terminalRef.current.options.disableStdin = !inputEnabled;
-      if (inputEnabled) terminalRef.current.focus();
+      terminalRef.current.options.disableStdin = !inputEnabled || endedRef.current;
     }
+    // A size refused while the workspace was locked is sent now.
+    if (inputEnabled) resizeRef.current?.();
   }, [inputEnabled]);
 
   // Repaint an already-open terminal when the theme changes.
@@ -197,17 +250,31 @@ export function TerminalPane({
   }, [sessions.length, terminal.id]);
 
   useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
+    // xterm is mounted in an unpadded box: FitAddon measures the box it was
+    // opened in, and padding there was counted as room for more cells, which
+    // hid the bottom line (the prompt) under the pane's edge.
+    const mount = mountRef.current;
+    if (!mount) return;
 
+    const terminalId = terminal.id;
     const controller = new AbortController();
     let disposed = false;
     let observer: ResizeObserver | undefined;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     let inputTimer: ReturnType<typeof setTimeout> | undefined;
-    let dataDisposable: { dispose: () => void } | undefined;
-    let pendingInput = '';
+    const disposables: Array<{ dispose: () => void }> = [];
+    // Text and binary input in arrival order; adjacent input of one kind is
+    // sent as one request.
+    let pendingInput: Array<{ binary: boolean; data: string }> = [];
     let flushingInput = false;
+    // Output up to `replayThrough` predates this screen. While xterm is still
+    // parsing it, anything xterm "types" is its answer to a query in that
+    // history — for a program long past waiting, or gone — not a keystroke.
+    let replayThrough = 0;
+    let replayWrites = 0;
+    let lastSize: string | null = null;
+
+    const acceptsInput = () => inputEnabledRef.current && !endedRef.current;
 
     void loadTerminalRuntime()
       .then(async ([{ Terminal: Xterm }, { FitAddon }]) => {
@@ -218,7 +285,7 @@ export function TerminalPane({
           convertEol: false,
           cursorBlink: true,
           cursorStyle: 'block',
-          disableStdin: !inputEnabledRef.current,
+          disableStdin: !acceptsInput(),
           fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
           fontSize: 13,
           lineHeight: 1.25,
@@ -227,17 +294,34 @@ export function TerminalPane({
         });
         const fitAddon = new FitAddon();
         xterm.loadAddon(fitAddon);
-        xterm.open(host);
+        xterm.open(mount);
         terminalRef.current = xterm;
-        if (!xterm.options.disableStdin) xterm.focus();
+        if (autoFocusRef.current && !xterm.options.disableStdin && focusIsFree(paneRef.current)) {
+          xterm.focus();
+        }
+
+        const end = () => {
+          endedRef.current = true;
+          xterm.options.disableStdin = true;
+          pendingInput = [];
+        };
 
         const resize = () => {
           if (disposed) return;
           fitAddon.fit();
-          void resizeAgentTerminal(jobId, terminal.id, xterm.rows, xterm.cols).catch(() => {
-            // The next resize or reconnect will reconcile the dimensions.
+          if (!acceptsInput()) return;
+          const rows = clamp(xterm.rows, MIN_ROWS, MAX_ROWS);
+          const cols = clamp(xterm.cols, MIN_COLS, MAX_COLS);
+          const size = `${rows}x${cols}`;
+          if (size === lastSize) return;
+          lastSize = size;
+          void resizeAgentTerminal(jobIdRef.current, terminalId, rows, cols).catch(() => {
+            // Not applied: send it again on the next resize, or once the
+            // workspace unlocks.
+            if (lastSize === size) lastSize = null;
           });
         };
+        resizeRef.current = resize;
         resize();
 
         if (typeof ResizeObserver !== 'undefined') {
@@ -245,28 +329,33 @@ export function TerminalPane({
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(resize, 80);
           });
-          observer.observe(host);
+          observer.observe(mount);
         }
 
         const flushInput = async () => {
           if (disposed || flushingInput) return;
-          if (!inputEnabledRef.current) {
-            pendingInput = '';
+          if (!acceptsInput()) {
+            pendingInput = [];
             return;
           }
           flushingInput = true;
           try {
-            while (!disposed && inputEnabledRef.current && pendingInput) {
-              const batch = pendingInput;
-              pendingInput = '';
+            while (!disposed && acceptsInput() && pendingInput.length) {
+              const segment = pendingInput.shift()!;
+              const data = segment.binary ? binaryBytes(segment.data) : segment.data;
               if (inputLimitRef.current === undefined) {
-                await writeAgentTerminalInput(jobId, terminal.id, batch);
+                await writeAgentTerminalInput(jobIdRef.current, terminalId, data);
               } else {
-                await writeAgentTerminalInput(jobId, terminal.id, batch, inputLimitRef.current);
+                await writeAgentTerminalInput(
+                  jobIdRef.current,
+                  terminalId,
+                  data,
+                  inputLimitRef.current,
+                );
               }
             }
           } catch (cause: unknown) {
-            pendingInput = '';
+            pendingInput = [];
             if (!disposed) {
               const message =
                 cause instanceof Error ? cause.message : 'Could not send terminal input';
@@ -274,7 +363,7 @@ export function TerminalPane({
             }
           } finally {
             flushingInput = false;
-            if (!disposed && pendingInput && !inputTimer) {
+            if (!disposed && pendingInput.length && !inputTimer) {
               inputTimer = setTimeout(() => {
                 inputTimer = undefined;
                 void flushInput();
@@ -283,42 +372,69 @@ export function TerminalPane({
           }
         };
 
-        dataDisposable = xterm.onData((data) => {
-          if (!inputEnabledRef.current) return;
-          pendingInput += data;
+        const queueInput = (data: string, binary: boolean) => {
+          if (!acceptsInput() || replayWrites > 0) return;
+          const last = pendingInput[pendingInput.length - 1];
+          if (last && last.binary === binary) last.data += data;
+          else pendingInput.push({ binary, data });
           if (!inputTimer && !flushingInput) {
             inputTimer = setTimeout(() => {
               inputTimer = undefined;
               void flushInput();
             }, 12);
           }
-        });
+        };
 
-        await streamAgentTerminal(jobId, terminal.id, {
+        disposables.push(xterm.onData((data) => queueInput(data, false)));
+        disposables.push(xterm.onBinary((data) => queueInput(data, true)));
+
+        // Written in-band, unlike `reset()`, so it lands after output that
+        // xterm has queued but not yet drawn.
+        const write = (data: Uint8Array | string, seq: number) => {
+          if (seq <= replayThrough) {
+            replayWrites += 1;
+            xterm.write(data, () => {
+              replayWrites -= 1;
+            });
+          } else {
+            xterm.write(data);
+          }
+        };
+
+        await streamAgentTerminal(jobIdRef.current, terminalId, {
           after: 0,
           signal: controller.signal,
-          onOutput: (event) => {
-            if (!disposed) xterm.write(decodeBase64(event.data));
+          onAttached: (event) => {
+            replayThrough = Math.max(replayThrough, event.seq);
           },
-          onReset: () => {
+          onOutput: (event) => {
+            if (!disposed) write(decodeBase64(event.data), event.seq);
+          },
+          onReset: (event) => {
             if (disposed) return;
-            xterm.reset();
-            xterm.writeln('\x1b[90m[Earlier output truncated]\x1b[0m');
+            write('\x1bc\x1b[90m[Earlier output truncated]\x1b[0m\r\n', event.seq);
           },
           onExit: (event) => {
             if (disposed) return;
-            xterm.options.disableStdin = true;
-            xterm.writeln(`\r\n\x1b[90m[process exited with code ${event.exit_code}]\x1b[0m`);
+            end();
+            write(
+              `\r\n\x1b[90m[process exited with code ${event.exit_code}]\x1b[0m\r\n`,
+              event.seq,
+            );
+            onExitRef.current?.(terminalId, event.exit_code);
           },
         }).catch((cause: unknown) => {
           if (disposed || controller.signal.aborted) return;
+          // The stream will not come back (the terminal is gone), so neither
+          // will any reply to input.
+          end();
           const message = cause instanceof Error ? cause.message : 'Terminal stream disconnected';
           xterm.writeln(`\r\n\x1b[31m${message}\x1b[0m`);
         });
       })
       .catch((cause: unknown) => {
         if (!disposed) {
-          host.textContent = cause instanceof Error ? cause.message : 'Could not load terminal';
+          mount.textContent = cause instanceof Error ? cause.message : 'Could not load terminal';
         }
       });
 
@@ -328,17 +444,19 @@ export function TerminalPane({
       observer?.disconnect();
       clearTimeout(resizeTimer);
       clearTimeout(inputTimer);
-      pendingInput = '';
-      dataDisposable?.dispose();
+      pendingInput = [];
+      resizeRef.current = null;
+      for (const disposable of disposables) disposable.dispose();
       terminalRef.current?.dispose();
       terminalRef.current = null;
     };
-  }, [jobId, terminal.id, terminal.state]);
+  }, [terminal.id]);
 
   const selectedLabel = terminalLabel(terminal, sessions);
 
   return (
     <section
+      ref={paneRef}
       aria-label={`${selectedLabel} pane`}
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm"
     >
@@ -370,7 +488,10 @@ export function TerminalPane({
           className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {sessions.map((candidate) => {
-            const label = `${terminalLabel(candidate, sessions)} · ${candidate.shell}`;
+            const exited = exitedIds?.has(candidate.id) || candidate.state === 'exited';
+            const label = `${terminalLabel(candidate, sessions)} · ${
+              exited ? 'exited' : candidate.shell
+            }`;
             const selected = candidate.id === terminal.id;
             return (
               <button
@@ -430,11 +551,12 @@ export function TerminalPane({
         </div>
       </header>
       <div
-        ref={hostRef}
         role="application"
         aria-label={`${selectedLabel} terminal`}
-        className="agent-xterm min-h-64 flex-1 bg-white dark:bg-gray-900 p-3"
-      />
+        className="agent-xterm flex min-h-64 flex-1 flex-col bg-white dark:bg-gray-900 p-3"
+      >
+        <div ref={mountRef} className="relative min-h-0 min-w-0 flex-1" />
+      </div>
     </section>
   );
 }
