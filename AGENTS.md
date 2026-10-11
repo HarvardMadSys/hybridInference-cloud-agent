@@ -75,6 +75,14 @@ make check       # format + lint + type-check + test — must be green before ev
 Database-backed tests are opt-in: `make test-db` (needs Postgres; see
 [ENVIRONMENT.md](ENVIRONMENT.md)).
 
+For frontend changes, use Node.js 22 and run `make ci-frontend`. It installs the
+locked dependencies with `npm ci`, then checks lint, formatting, types, tests,
+and build guards. `make setup-dev` installs backend dependencies only.
+
+If `apps/frontend/node_modules` is absent, install it before reporting checks
+as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
+`npm test`; `vitest` and `tsc` come from the project's development dependencies.
+
 ## 4. Workflow
 
 - Branch off `dev` as `<user>/<scope>/<name>`. Pull requests target `dev`.
