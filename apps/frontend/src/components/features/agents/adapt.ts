@@ -943,7 +943,118 @@ function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
   };
 }
 
+function mapThreadMessage(message: AgentThreadMessageApi) {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    jobId: message.job_id,
+    createdAt: message.created_at,
+    ...(message.mid_turn ? { midTurn: true } : {}),
+  };
+}
+
+/** Index a conversation once, rather than scanning its full log for each turn. */
+function groupByJob<T extends { job_id: string }>(rows: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const group = groups.get(row.job_id);
+    if (group) group.push(row);
+    else groups.set(row.job_id, [row]);
+  }
+  return groups;
+}
+
+function sameRecords<T>(previous: T[], next: T[]): boolean {
+  return previous.length === next.length && previous.every((row, index) => row === next[index]);
+}
+
+function displayHistoryTurn(
+  job: AgentJobApi,
+  messages: AgentThreadMessageApi[],
+  events: AgentThreadEventApi[],
+): AgentHistoryTurn {
+  const goalTurn = storedGoalTurn(job);
+  return {
+    jobId: job.id,
+    turnNo: job.turn_no ?? 1,
+    state: toDisplayState(job),
+    // Only the server can prove the native session and host are forkable.
+    forkable: job.native_fork_available === true,
+    ...(goalTurn ? { goalTurn } : {}),
+    messages: messages.map(mapThreadMessage),
+    events: displayEvents(events, job),
+  };
+}
+
+type HistoryProjector = (
+  jobs: AgentJobApi[],
+  messages: Map<string, AgentThreadMessageApi[]>,
+  events: Map<string, AgentThreadEventApi[]>,
+) => AgentHistoryTurn[];
+
+/**
+ * A projection cache owned by one mounted conversation. Stored rows are
+ * immutable: live appends keep their references, while reloads replace them.
+ * A changed row, message or event rebuilds that turn, including late results.
+ * Only the visible history is retained; there is no cross-owner or TTL cache.
+ */
+export function createDisplayJobAdapter(): typeof toDisplayJob {
+  type CachedTurn = {
+    job: AgentJobApi;
+    messages: AgentThreadMessageApi[];
+    events: AgentThreadEventApi[];
+    turn: AgentHistoryTurn;
+  };
+  let scope: string | undefined;
+  let cached = new Map<string, CachedTurn>();
+  let history: AgentHistoryTurn[] = [];
+  const projectHistory: HistoryProjector = (jobs, messages, events) => {
+    const nextCache = new Map<string, CachedTurn>();
+    const nextHistory = jobs.map((job) => {
+      const jobMessages = messages.get(job.id) ?? [];
+      const jobEvents = events.get(job.id) ?? [];
+      let entry = cached.get(job.id);
+      if (
+        !entry ||
+        entry.job !== job ||
+        !sameRecords(entry.messages, jobMessages) ||
+        !sameRecords(entry.events, jobEvents)
+      ) {
+        entry = {
+          job,
+          messages: jobMessages,
+          events: jobEvents,
+          turn: displayHistoryTurn(job, jobMessages, jobEvents),
+        };
+      }
+      nextCache.set(job.id, entry);
+      return entry.turn;
+    });
+    cached = nextCache;
+    if (!sameRecords(history, nextHistory)) history = nextHistory;
+    return history;
+  };
+  return (job, options = {}) => {
+    const nextScope = options.thread?.thread_id ?? job.thread_id ?? job.id;
+    if (scope !== nextScope || options.threadEvents === undefined) {
+      cached.clear();
+      history = [];
+      scope = nextScope;
+    }
+    return adaptJob(job, options, projectHistory);
+  };
+}
+
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
+  return adaptJob(job, options);
+}
+
+function adaptJob(
+  job: AgentJobApi,
+  options: AdaptOptions,
+  projectHistory?: HistoryProjector,
+): AgentJob {
   const failureCause = failureCauseOf(job.detail);
   const events = options.events ?? [];
   const patch = options.patch ?? '';
@@ -1012,19 +1123,12 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
         .map((threadJob) => threadJob.id),
     );
   }
-  const mapMessage = (message: AgentThreadMessageApi) => ({
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    jobId: message.job_id,
-    createdAt: message.created_at,
-    ...(message.mid_turn ? { midTurn: true } : {}),
-  });
+  const messagesByJob = groupByJob(options.thread?.messages ?? []);
   const priorMessages = (options.thread?.messages ?? [])
     .filter((message) =>
       priorJobIds ? priorJobIds.has(message.job_id) : message.job_id !== job.id,
     )
-    .map(mapMessage);
+    .map(mapThreadMessage);
   const historicalJobs = (options.thread?.jobs ?? []).filter(
     (threadJob) =>
       threadJob.id !== job.id &&
@@ -1033,40 +1137,27 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   const threadEvents = options.threadEvents;
   let historyTurns: AgentHistoryTurn[] | undefined;
   if (threadEvents !== undefined) {
-    historyTurns = historicalJobs.map((threadJob) => ({
-      jobId: threadJob.id,
-      turnNo: threadJob.turn_no ?? 1,
-      // The stored turn's own outcome, so the rail can say a turn failed
-      // without re-deriving it from the events it happens to carry.
-      state: toDisplayState(threadJob),
-      // This is stronger than platform success: the API has also proved a
-      // settled native ordinal, compatible online host/image, and idle source
-      // membership. Showing a button from state alone creates a predictable
-      // 409 for failed rollout generations.
-      forkable: threadJob.native_fork_available === true,
-      // Each stored turn carries its own relationship to the goal: whether the
-      // platform queued it, and what it reported. Absent for a conversation
-      // without a goal, which is what keeps this from touching every turn.
-      ...(storedGoalTurn(threadJob) ? { goalTurn: storedGoalTurn(threadJob) } : {}),
-      messages: (options.thread?.messages ?? [])
-        .filter((message) => message.job_id === threadJob.id)
-        .map(mapMessage),
-      events: displayEvents(
-        threadEvents.filter((event) => event.job_id === threadJob.id),
-        threadJob,
-      ),
-    }));
+    const eventsByJob = groupByJob(threadEvents);
+    if (projectHistory) {
+      historyTurns = projectHistory(historicalJobs, messagesByJob, eventsByJob);
+    } else {
+      historyTurns = historicalJobs.map((threadJob) =>
+        displayHistoryTurn(
+          threadJob,
+          messagesByJob.get(threadJob.id) ?? [],
+          eventsByJob.get(threadJob.id) ?? [],
+        ),
+      );
+    }
   }
   // A turn copied by fork has no events; its durable messages are the only
   // record of what it said. For a settled job whose event log carries no
   // message rows, render the thread's copy of the turn — prompt included, so
   // the turn keeps its chronology and the prompt card knows to stand down.
   const settled = job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled';
-  let ownMessages: ReturnType<typeof mapMessage>[] = [];
+  let ownMessages: ReturnType<typeof mapThreadMessage>[] = [];
   if (settled && !events.some((event) => event.event_type === 'message')) {
-    ownMessages = (options.thread?.messages ?? [])
-      .filter((message) => message.job_id === job.id)
-      .map(mapMessage);
+    ownMessages = (messagesByJob.get(job.id) ?? []).map(mapThreadMessage);
   }
   const threadPrJob = [...(options.thread?.jobs ?? [])]
     .reverse()

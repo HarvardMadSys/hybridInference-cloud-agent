@@ -44,11 +44,17 @@ async def _mint_residency_grant(
     """Mint the worker-fenced grant for one supervisor-owned member process."""
     if grants is None:
         return None
+    # The gateway's mint is idempotent on (job, attempt), even after revoke.
+    # A Fork retry or another establishment within the same worker attempt
+    # rotates the residency and revokes its predecessor. Include that durable
+    # generation so its replacement cannot receive the revoked grant again,
+    # while retries of this particular mint still recover the same capability.
+    mint_attempt_id = f"residency:{row['establishing_attempt_id']}:{int(row['generation'])}"
     try:
         grant = await grants.mint(
             user_id=row["user_id"],
             job_id=f"thread:{row['thread_id']}",
-            attempt_id=str(row["establishing_attempt_id"]),
+            attempt_id=mint_attempt_id,
             models=[row["model"]],
             ttl_seconds=int(residency_ttl_s()),
         )

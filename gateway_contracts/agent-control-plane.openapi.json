@@ -7405,6 +7405,65 @@
         "title": "AuthorizeResponse",
         "type": "object"
       },
+      "AutomaticDeploymentSetup": {
+        "additionalProperties": false,
+        "description": "Generate immutable Host setups from the running release and trusted machines.",
+        "properties": {
+          "chat_network_pool": {
+            "title": "Chat Network Pool",
+            "type": "string"
+          },
+          "control": {
+            "$ref": "#/components/schemas/SetupMachine"
+          },
+          "dns_server": {
+            "title": "Dns Server",
+            "type": "string"
+          },
+          "gateway": {
+            "$ref": "#/components/schemas/SetupMachine"
+          },
+          "gateway_port": {
+            "default": 8080,
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Gateway Port",
+            "type": "integer"
+          },
+          "protected_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Protected Cidrs",
+            "type": "array"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "slots": {
+            "default": 2,
+            "maximum": 8.0,
+            "minimum": 1.0,
+            "title": "Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id",
+          "gateway",
+          "control",
+          "chat_network_pool",
+          "dns_server",
+          "protected_cidrs"
+        ],
+        "title": "AutomaticDeploymentSetup",
+        "type": "object"
+      },
       "BindConnectorRequest": {
         "additionalProperties": false,
         "description": "Route one connection through one connector.",
@@ -12688,6 +12747,46 @@
         "title": "SetSandboxArchiveSettingsRequest",
         "type": "object"
       },
+      "SetupMachine": {
+        "additionalProperties": false,
+        "description": "A stable infrastructure machine reached through an existing verified key.",
+        "properties": {
+          "address": {
+            "maxLength": 253,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]*$",
+            "title": "Address",
+            "type": "string"
+          },
+          "connection_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "port": {
+            "default": 22,
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Port",
+            "type": "integer"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]*$",
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "address",
+          "username"
+        ],
+        "title": "SetupMachine",
+        "type": "object"
+      },
       "SkillImportPreview": {
         "description": "The exact content presented to the owner before confirmation.",
         "properties": {
@@ -16692,6 +16791,55 @@
         "summary": "Rotate"
       }
     },
+    "/admin/agent/compute-automatic-setup": {
+      "get": {
+        "description": "Expose deployed-release readiness without exposing generated setup inputs.",
+        "operationId": "automatic_setup_status_admin_agent_compute_automatic_setup_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Automatic Setup Status Admin Agent Compute Automatic Setup Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Automatic Setup Status"
+      }
+    },
     "/admin/agent/compute-connections": {
       "get": {
         "description": "List connection metadata without plaintext credentials or ciphertext.",
@@ -17087,6 +17235,65 @@
           }
         },
         "summary": "Create Deployment Profile"
+      }
+    },
+    "/admin/agent/compute-deployment-profiles/automatic": {
+      "post": {
+        "description": "Generate recoverable encrypted setups through explicitly selected SSH access.",
+        "operationId": "create_automatic_setup_admin_agent_compute_deployment_profiles_automatic_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutomaticDeploymentSetup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Automatic Setup Admin Agent Compute Deployment Profiles Automatic Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Automatic Setup"
       }
     },
     "/admin/agent/compute-operations": {

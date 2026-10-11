@@ -8,6 +8,7 @@ import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
 import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
+import { AgentReadProvider } from '@/components/features/agents/AgentReadProvider';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
@@ -223,27 +224,29 @@ function AgentsShell({
   // rather than by each of them. Keyed by account, so another one starts over.
   return (
     <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
-      <AgentChangeStream userId={state.user?.id} />
-      <AgentNotifications />
-      <div className="flex min-h-0 flex-1">
-        <div
-          className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}
-          onClick={(event) => {
-            if (mobileSidebarOpen && (event.target as HTMLElement).closest('a[href]'))
-              onSidebarNavigate();
-          }}
-        >
-          <AgentsSidebar collapsed={sidebarCollapsed} headerAction={sidebarToggle} />
+      <AgentReadProvider userId={state.user?.id}>
+        <AgentChangeStream userId={state.user?.id} />
+        <AgentNotifications />
+        <div className="flex min-h-0 flex-1">
+          <div
+            className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}
+            onClick={(event) => {
+              if (mobileSidebarOpen && (event.target as HTMLElement).closest('a[href]'))
+                onSidebarNavigate();
+            }}
+          >
+            <AgentsSidebar collapsed={sidebarCollapsed} headerAction={sidebarToggle} />
+          </div>
+          <main
+            id="agents-workspace"
+            hidden={mobileSidebarOpen}
+            tabIndex={-1}
+            className="min-w-0 flex-1 overflow-y-auto bg-white/70 outline-none dark:bg-gray-950"
+          >
+            {children}
+          </main>
         </div>
-        <main
-          id="agents-workspace"
-          hidden={mobileSidebarOpen}
-          tabIndex={-1}
-          className="min-w-0 flex-1 overflow-y-auto bg-white/70 outline-none dark:bg-gray-950"
-        >
-          {children}
-        </main>
-      </div>
+      </AgentReadProvider>
     </FirstRunProvider>
   );
 }

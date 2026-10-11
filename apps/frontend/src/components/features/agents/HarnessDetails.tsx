@@ -19,12 +19,9 @@ import {
 } from './StepDetailParts';
 import type { HarnessInventory, TrajectoryStep } from './trajectorySteps';
 
-export type HarnessTab = 'systemPrompt' | 'tools';
+import type { HarnessTab } from './trajectoryInspectorTabs';
 
-export const HARNESS_TABS: Array<{ key: HarnessTab; label: string }> = [
-  { key: 'systemPrompt', label: 'System Prompt' },
-  { key: 'tools', label: 'Tools' },
-];
+export { HARNESS_TABS, type HarnessTab } from './trajectoryInspectorTabs';
 
 /** A value the runtime reported, or the fact that it reported none. */
 function Reported({ value, mono = true }: { value: string | null; mono?: boolean }) {

@@ -27,6 +27,8 @@ vi.mock('@/lib/api/compute', () => ({
   preflightComputeServer: vi.fn(),
   importComputeResource: vi.fn(),
   saveComputeDeploymentProfile: vi.fn(),
+  getComputeAutomaticSetup: vi.fn(),
+  createAutomaticComputeSetup: vi.fn(),
   saveComputeConnection: vi.fn(),
   validateComputeConnection: vi.fn(),
   setComputePolicy: vi.fn(),
@@ -161,6 +163,11 @@ beforeEach(() => {
     observed_at: '2026-10-04T08:00:00Z',
   });
   vi.mocked(api.getComputeOperations).mockResolvedValue({ operations: [] });
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+  });
 });
 afterEach(cleanup);
 

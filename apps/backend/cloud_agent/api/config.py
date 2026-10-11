@@ -8,6 +8,7 @@ them beside the model.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Query
@@ -19,12 +20,12 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.entitlement import repos_for_user
+from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
-from cloud_agent.visible_models import agent_model_reasoning_efforts, agent_visible_models
 from cloud_agent_host.runtimes import (
     registered_runtimes,
     runtime_reasoning_efforts,
@@ -83,16 +84,13 @@ async def get_agent_config(
     """
     if fresh and github.credentials is not None:
         github.credentials.forget_user(user["user_id"])
-    # This user's repositories, not the deployment's: what the picker offers
-    # has to be what the create endpoint will accept for *them*.
-    repos = await repos_for_user(
-        user["user_id"],
-        store=None if store is None else store.source_control,
-        app_credentials=github.credentials,
+    # Independent sources can be read together. The model fields come from
+    # one current Gateway response, without caching the owner's admission.
+    (repos, github_account), (models, model_efforts), mcp_connections = await asyncio.gather(
+        _repositories_and_account(store, github, user["user_id"]),
+        _model_configuration_for_user(gateway, user["user_id"]),
+        _mcp_connections_for_user(store, user["user_id"]),
     )
-    github_account = None
-    if store is not None:
-        github_account = await store.source_control.get_github_account(user_id=user["user_id"])
     if github.load_status == "unavailable":
         # The create endpoint answers 503 until the App is back, so a form that
         # looked ready would only fail on submit — whatever else is true.
@@ -120,25 +118,18 @@ async def get_agent_config(
         # Same predicate the create endpoint enforces and the sandbox's calls
         # will hit — not /v1/models, which answers for the *browsing* user and
         # offered models whose first agent call then 404ed.
-        models=await agent_visible_models(gateway, user_id=user["user_id"]),
+        models=models,
         # What each runtime can express, and which models take the parameter at
         # all. The composer offers the platform's levels narrowed to the first
         # and gated on the second, and no control when either is empty — which
         # is also what an older gateway, answering no domains, produces.
         runtime_reasoning_efforts=runtime_reasoning_efforts(),
-        model_reasoning_efforts=await agent_model_reasoning_efforts(
-            gateway, user_id=user["user_id"]
-        ),
+        model_reasoning_efforts=model_efforts,
         # This user's connected servers, not the deployment's: same reason the
         # repository list above is theirs. Public fields only — McpConnectionSummary
         # has nowhere to put a URL or a credential, which is how it stays that
         # way.
-        mcp_connections=[
-            McpConnectionSummary(**entry)
-            for entry in (
-                await _mcp_connections_for_user(store, user["user_id"]) if store is not None else []
-            )
-        ],
+        mcp_connections=[McpConnectionSummary(**entry) for entry in mcp_connections],
         mcp_runtimes=runtimes_supporting_mcp(),
         github_connected=github_connected,
         # OAuth must start on the authenticated integrations page so the
@@ -149,7 +140,43 @@ async def get_agent_config(
     )
 
 
-async def _mcp_connections_for_user(store: _ConfigStorage, user_id: str) -> list[dict[str, Any]]:
+async def _repositories_and_account(
+    store: _ConfigStorage | None, github: GitHubAppState, user_id: str
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Read repository entitlement before the GitHub account it can invalidate."""
+    repos = await repos_for_user(
+        user_id,
+        store=None if store is None else store.source_control,
+        app_credentials=github.credentials,
+    )
+    # Entitlement can clear a revoked user token. Reading the account after it
+    # preserves the reconnect answer for that same request.
+    account = (
+        await store.source_control.get_github_account(user_id=user_id)
+        if store is not None
+        else None
+    )
+    return repos, account
+
+
+async def _model_configuration_for_user(
+    gateway: Any, user_id: str
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Return one model configuration, or no options when the Gateway fails."""
+    try:
+        return await gateway.model_catalog_with_reasoning_efforts(user_id)
+    except GatewayError:
+        logger.warning(
+            "agent_model_catalog_unavailable",
+            exc_info=True,
+            extra={"event": "agent_model_catalog_unavailable", "user_id": user_id},
+        )
+        return [], {}
+
+
+async def _mcp_connections_for_user(
+    store: _ConfigStorage | None, user_id: str
+) -> list[dict[str, Any]]:
     """The MCP connections *this user* has added, for the composer.
 
     Display metadata only. A connection's address and its credential never
@@ -163,6 +190,8 @@ async def _mcp_connections_for_user(store: _ConfigStorage, user_id: str) -> list
     report waiting to happen; one that says *this credential expired* is an
     instruction.
     """
+    if store is None:
+        return []
     rows = await store.mcp.list_mcp_connections(user_id=user_id)
     summaries: list[dict[str, Any]] = []
     for row in rows:

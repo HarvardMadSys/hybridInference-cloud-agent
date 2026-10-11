@@ -398,6 +398,7 @@ export default function ComputeResources({
       {panel?.kind === 'setup' && (
         <Panel title="Server setup" onClose={() => setPanel(null)}>
           <ComputeSetup
+            connections={connections}
             onSaved={() => {
               addReturnFocus.current = 'title';
               setAddSetupOpen(false);
@@ -431,6 +432,7 @@ export default function ComputeResources({
           </div>
           {addSetupOpen && (
             <ComputeSetup
+              connections={connections}
               onSaved={() => {
                 addReturnFocus.current = 'title';
                 setAddSetupOpen(false);
