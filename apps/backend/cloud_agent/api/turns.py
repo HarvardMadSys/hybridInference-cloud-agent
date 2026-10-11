@@ -44,6 +44,7 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.application.follow_ups import (
     prepare_follow_up,
+    sandbox_context_lost_error,
     session_archived_error,
 )
 from cloud_agent.application.job_admission import _idempotency_conflict
@@ -150,8 +151,24 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
         return _no_such_message_error()
     if error == "session_archived":
         return session_archived_error()
+    if error == "sandbox_context_lost":
+        return sandbox_context_lost_error()
     if error == "client_request_conflict":
         return _idempotency_conflict()
+    if error == "conversation_changed":
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "conversation_changed",
+                    "message": (
+                        "A chat sharing this workspace changed or is still busy. Wait for "
+                        "all chats' messages and workspace publication to finish, then "
+                        "refresh and try again."
+                    ),
+                }
+            },
+        )
     if error == "attachments_unavailable":
         return HTTPException(
             status_code=400,
@@ -392,6 +409,12 @@ async def submit_thread_message(
     the first send made — the turn if it has become one, the waiting message if
     not — and the same key under different content is a 409
     ``idempotency_conflict``.
+
+    ``require_idle`` binds a fresh action to ``expected_latest_job_id`` and
+    refuses it with ``conversation_changed`` if any chat sharing the workspace
+    has a live turn or waiting message, a Fork is active, or the workspace is
+    unpublished at the locked write. An accepted idle-only action creates its
+    turn in that same transaction without entering the pending queue.
     """
     job_store = _require_store(store)
     latest = await _owned_latest_turn(job_store, thread_id, user)
@@ -446,16 +469,22 @@ async def submit_thread_message(
         # The canonical id the check resolved, never the alias typed: it is
         # checked again against whatever turn is newest when this is sent.
         model=prepared.model,
-        reasoning_effort=body.reasoning_effort,
+        reasoning_effort=prepared.reasoning_effort if body.require_idle else body.reasoning_effort,
         client_request_id=idempotency_key,
         client_request_fingerprint=fingerprint,
+        require_idle=body.require_idle,
+        expected_latest_job_id=body.expected_latest_job_id,
+        reset_reasoning_effort=prepared.reset_reasoning_effort,
+        skills=prepared.skills,
+        attachments=prepared.attachments,
     )
     if submitted.get("error") is not None:
         if submitted["error"] == "not_found":
             raise _no_such_thread_error(thread_id)
         raise _message_refused(submitted)
     if submitted.get("job_id") is not None:
-        # The same key, sent twice at once: the other send got there first.
+        # A guarded action created its turn atomically, or a concurrent send
+        # with this key got there first.
         return AgentThreadMessageResult(
             job=_job_response(
                 await _owned_job(job_store.conversation_queries, str(submitted["job_id"]), user)

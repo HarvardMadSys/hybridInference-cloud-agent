@@ -134,6 +134,17 @@ and is instructed to return findings without editing files. Clicking Review
 again reopens that chat's review. Review requires an available native Fork;
 archived chats and chats with lost context cannot start one.
 
+**Watch PR and merge** beside the published PR starts a follow-up in the same
+chat to monitor tests and reviews, address failures and feedback, and merge
+when the current PR head passes required checks and review requirements. It
+preserves unsent composer text and attachments. Chats sharing the workspace
+must have no active work or waiting messages before watching starts. Enable
+source-control tools that can read checks and reviews, mark drafts ready, and
+merge; the supplied GitHub MCP template is read-only, so merging needs a
+writable connection. The agent reports missing access or other blockers. Watching runs within the
+agent turn's timeout. If it makes fixes, the turn ends so the platform can
+publish them; click the button again after publication to resume watching.
+
 | Context status | Meaning |
 |---|---|
 | `NEW` | No native turn has previously settled for this member |

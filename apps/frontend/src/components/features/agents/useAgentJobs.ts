@@ -5,7 +5,6 @@ import {
   getAgentJob,
   getAgentJobFiles,
   getAgentJobGit,
-  getAgentJobThread,
   listAllAgentThreadEvents,
   listAgentProjects,
   streamAgentJob,
@@ -20,7 +19,8 @@ import type {
   AgentThreadApi,
   AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { toDisplayJob } from './adapt';
+import { createDisplayJobAdapter } from './adapt';
+import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
@@ -209,11 +209,18 @@ export function useAgentJob(
   const [tick, setTick] = useState(0);
   const seen = useRef<Set<number>>(new Set());
   const generation = useRef(0);
+  const reads = useAgentReads();
+  const loadedStreamCursor = useRef<{
+    jobId: string;
+    reads: typeof reads;
+    cursor: number;
+  } | null>(null);
 
   const reload = useCallback(() => {
+    reads.invalidate(jobId);
     generation.current += 1;
     setTick((value) => value + 1);
-  }, []);
+  }, [jobId, reads]);
 
   useEffect(
     () =>
@@ -249,14 +256,18 @@ export function useAgentJob(
     // before it ends, so events read after a row that says it ended are all
     // of them; read alongside, they could predate an end the row then reports,
     // and the turn would end on screen without its last events.
-    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId)])
-      .then(
-        async ([job, foundThread]) =>
-          [job, foundThread, await listAllAgentThreadEvents(jobId)] as const,
-      )
-      .then(([job, foundThread, foundEvents]) => {
-        if (cancelled || requestGeneration !== generation.current) return;
+    Promise.all([reads.getAgentJob(jobId), reads.getAgentJobThread(jobId)])
+      .then(async ([job, foundThread]) => {
+        if (cancelled || requestGeneration !== generation.current) return null;
+        return [job, foundThread, await listAllAgentThreadEvents(jobId)] as const;
+      })
+      .then((snapshot) => {
+        if (!snapshot || cancelled || requestGeneration !== generation.current) return;
+        const [job, foundThread, foundEvents] = snapshot;
         const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
+        let cursor = 0;
+        for (const event of ownEvents) cursor = Math.max(cursor, event.id);
+        loadedStreamCursor.current = { jobId, reads, cursor };
         setApi((current) => preserveResolvedTaskTitle(current, overlayPushed(job)));
         setEvents(ownEvents);
         setThreadEvents(foundEvents);
@@ -275,7 +286,7 @@ export function useAgentJob(
     return () => {
       cancelled = true;
     };
-  }, [active, jobId, tick]);
+  }, [active, jobId, reads, tick]);
 
   // Diff state belongs to the retained group workspace, not to a per-turn
   // artifact uploaded by the runner. Fork siblings therefore see the same
@@ -301,7 +312,12 @@ export function useAgentJob(
 
   // Live events. Terminal jobs have nothing more to say, so no stream is
   // opened for them at all.
-  const isLive = isActiveJobState(state);
+  // A metadata push can arrive before the initial history read. Subscribe
+  // after that snapshot, resuming only from this owner's selected turn, so
+  // its stored backlog is not transferred and parsed a second time.
+  const loadedCursor = loadedStreamCursor.current;
+  const isLive =
+    isActiveJobState(state) && loadedCursor?.jobId === jobId && loadedCursor.reads === reads;
   const currentTurnNo =
     api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
   // Whether this turn's own stream is open or opening. Only then is the end of
@@ -321,6 +337,10 @@ export function useAgentJob(
     streaming.current = true;
     void streamAgentJob(jobId, {
       signal: controller.signal,
+      lastEventId:
+        loadedStreamCursor.current?.jobId === jobId && loadedStreamCursor.current.reads === reads
+          ? loadedStreamCursor.current.cursor
+          : 0,
       onEvent: (event) => {
         streamFailures.current = 0;
         // The stream can replay across a reconnect, so dedupe on the global id
@@ -362,7 +382,7 @@ export function useAgentJob(
       controller.abort();
       clearTimeout(retry);
     };
-  }, [active, currentTurnNo, jobId, isLive, reload, streamAttempt]);
+  }, [active, currentTurnNo, jobId, isLive, reads, reload, streamAttempt]);
 
   // The turn on screen, for the reads below that decide outside a state update.
   const shownApi = useRef<AgentJobApi | null>(null);
@@ -533,9 +553,14 @@ export function useAgentJob(
       messages: thread.messages.filter((message) => own.has(message.job_id)),
     };
   }, [hideForkedHistory, thread]);
+  const adapter = useMemo(
+    () => ({ jobId, reads, project: createDisplayJobAdapter() }),
+    [jobId, reads],
+  );
   const job = useMemo(
-    () => (api ? toDisplayJob(api, { events, patch, thread: visibleThread, threadEvents }) : null),
-    [api, events, patch, visibleThread, threadEvents],
+    () =>
+      api ? adapter.project(api, { events, patch, thread: visibleThread, threadEvents }) : null,
+    [adapter, api, events, patch, visibleThread, threadEvents],
   );
   // The turn rows come from the thread read, which is a snapshot: a live
   // attempt replacement updates `api` and would otherwise leave the inspector

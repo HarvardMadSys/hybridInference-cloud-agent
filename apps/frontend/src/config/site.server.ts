@@ -27,6 +27,7 @@
 // a Client Component built successfully without this line.
 import 'server-only';
 
+import { cache } from 'react';
 import { connection } from 'next/server';
 
 import { parseRuntimeSiteConfig, parseSavedSiteConfig, type RuntimeSiteConfig } from './site';
@@ -36,8 +37,13 @@ import { parseRuntimeSiteConfig, parseSavedSiteConfig, type RuntimeSiteConfig } 
  *
  * Async because `connection()` is: the value must not be computed before the
  * request exists, or it is computed once at build time again.
+ *
+ * Metadata and the root layout read this separately. Share their promise for
+ * this render, including the abort signal that opts out of Next's fetch
+ * deduplication. React discards this cache between requests, so appearance
+ * edits remain visible on the next page load.
  */
-export async function readRuntimeSiteConfig(): Promise<RuntimeSiteConfig> {
+export const readRuntimeSiteConfig = cache(async (): Promise<RuntimeSiteConfig> => {
   await connection();
   const api = (process.env['AGENT_CONTROL_PLANE_URL'] || '').replace(/\/+$/, '');
   if (api) {
@@ -54,4 +60,4 @@ export async function readRuntimeSiteConfig(): Promise<RuntimeSiteConfig> {
     return parseSavedSiteConfig(null, process.env);
   }
   return parseRuntimeSiteConfig(process.env);
-}
+});

@@ -24,9 +24,15 @@ import {
 } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 
-import { PUSH_BATCH_MS, receiveHint, resetAgentPush, setAgentPushLive } from './agentPush';
+import {
+  PUSH_BATCH_MS,
+  PUSH_FALLBACK_POLL_MS,
+  receiveHint,
+  resetAgentPush,
+  setAgentPushLive,
+} from './agentPush';
 import { PendingMessageQueue } from './PendingMessageQueue';
-import { usePendingMessages } from './usePendingMessages';
+import { IDLE_QUEUE_POLL_MS, usePendingMessages } from './usePendingMessages';
 
 vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/pendingMessages')>()),
@@ -448,6 +454,38 @@ describe('PendingMessageQueue', () => {
 });
 
 describe('usePendingMessages', () => {
+  it.each([
+    [false, IDLE_QUEUE_POLL_MS],
+    [true, PUSH_FALLBACK_POLL_MS],
+  ])(
+    'retries an unread idle queue, then stops polling (push live: %s)',
+    async (pushLive, interval) => {
+      vi.useFakeTimers();
+      try {
+        queueWith([], { latest_job_state: 'succeeded' });
+        vi.mocked(getThreadQueue).mockRejectedValue(new Error('Temporary read failure'));
+        act(() => setAgentPushLive(pushLive));
+        const { result } = renderHook(() =>
+          usePendingMessages({ threadId: 'athr_1', active: false }),
+        );
+        await act(async () => {});
+        expect(result.current.loaded).toBe(false);
+        const reads = vi.mocked(getThreadQueue).mock.calls.length;
+
+        vi.mocked(getThreadQueue).mockResolvedValue(structuredClone(server));
+        await act(async () => vi.advanceTimersByTimeAsync(interval));
+        expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+        expect(result.current.loaded).toBe(true);
+        expect(result.current.messages).toEqual([]);
+
+        await act(async () => vi.advanceTimersByTimeAsync(interval * 2));
+        expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('reports a message the server sent, with the turn it follows', async () => {
     const onSent = vi.fn();
     const { result } = renderHook(() =>

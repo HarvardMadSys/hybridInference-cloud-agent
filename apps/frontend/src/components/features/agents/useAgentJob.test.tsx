@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
 
 import {
   getAgentJob,
@@ -26,6 +27,7 @@ import {
 } from './agentPush';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { STREAM_RETRY_MAX_MS, STREAM_RETRY_MIN_MS, useAgentJob } from './useAgentJobs';
+import { AgentReadProvider } from './AgentReadProvider';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
@@ -69,6 +71,182 @@ function event(
     created_at: `2026-09-11T10:00:0${id}.000Z`,
   } as AgentThreadEventApi;
 }
+
+describe('useAgentJob history-to-stream handoff', () => {
+  beforeEach(() => resetAgentPush());
+  afterEach(() => resetAgentPush());
+
+  function running(id = 'live-job'): AgentJobApi {
+    return {
+      id,
+      thread_id: 'live-thread',
+      state: 'running',
+      conversation_state: 'running',
+      current_attempt_id: 10,
+      task_prompt: 'Fix it',
+      title: 'Fix it',
+      title_source: 'manual',
+      runtime: 'codex',
+      model: 'test',
+      revision: 1,
+    } as AgentJobApi;
+  }
+
+  function serve(job: AgentJobApi, history: AgentThreadEventApi[]) {
+    vi.mocked(getAgentJob).mockResolvedValue(job);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: job.thread_id,
+      jobs: [job],
+      messages: [],
+    } as AgentThreadApi);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue(history);
+    vi.mocked(streamAgentJob).mockImplementation(stayOpen);
+  }
+
+  it('resumes a 5,000-event backlog after the selected turn, despite newer other-turn ids', async () => {
+    const own = Array.from({ length: 5_000 }, (_, index) => ({
+      ...event(index + 1, 'message', { text: `Saved ${index + 1}` }),
+      created_at: '2026-09-11T10:00:00Z',
+    }));
+    const other = { ...event(9_000, 'message', { text: 'Another turn' }), job_id: 'other-job' };
+    serve(running(), [...own, other]);
+    const { result } = renderHook(() => useAgentJob('live-job'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+    expect(vi.mocked(streamAgentJob).mock.calls[0][1].lastEventId).toBe(5_000);
+    expect(result.current.events).toHaveLength(5_001);
+  });
+
+  it('receives an event stored after the history snapshot and before stream subscription', async () => {
+    const snapshot = event(3, 'message', { text: 'In the snapshot' });
+    const between = event(4, 'message', { text: 'After the snapshot' });
+    serve(running(), [snapshot]);
+    const stored = [snapshot];
+    vi.mocked(listAllAgentThreadEvents).mockImplementation(async () => {
+      const rows = [...stored];
+      stored.push(between);
+      return rows;
+    });
+    vi.mocked(streamAgentJob).mockImplementation((_id, options) => {
+      // The server returns exactly the events newer than the submitted cursor.
+      for (const item of stored) {
+        if (item.id > (options.lastEventId ?? 0)) options.onEvent(item);
+      }
+      return stayOpen();
+    });
+    const { result } = renderHook(() => useAgentJob('live-job'));
+    await waitFor(() => expect(result.current.events.map((item) => item.id)).toEqual([3, 4]));
+    expect(vi.mocked(streamAgentJob).mock.calls[0][1].lastEventId).toBe(3);
+  });
+
+  it('uses an empty turn cursor and a new owner cursor instead of the previous snapshot', async () => {
+    const first = running();
+    const next = running('next-job');
+    const oldEvent = event(50, 'message', { text: 'Previous turn' });
+    serve(first, [oldEvent]);
+    let userId = 'alice';
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AgentReadProvider userId={userId}>{children}</AgentReadProvider>
+    );
+    const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+      initialProps: { id: first.id },
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const oldStream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    expect(oldStream.lastEventId).toBe(50);
+
+    serve(next, [oldEvent]);
+    rerender({ id: next.id });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(oldStream.signal?.aborted).toBe(true);
+    expect(streamAgentJob).toHaveBeenCalledTimes(2);
+    const nextStream = vi.mocked(streamAgentJob).mock.calls[1][1];
+    expect(nextStream.lastEventId).toBe(0);
+
+    let resolveHistory!: (rows: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveHistory = resolve)),
+    );
+    userId = 'bob';
+    rerender({ id: next.id });
+    await act(async () => {});
+    expect(nextStream.signal?.aborted).toBe(true);
+    expect(streamAgentJob).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      resolveHistory([{ ...event(2, 'message', { text: 'New owner' }), job_id: next.id }]),
+    );
+    expect(streamAgentJob).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(streamAgentJob).mock.calls[2][1].lastEventId).toBe(2);
+  });
+
+  it('waits for the history snapshot when an owner metadata push arrives first', async () => {
+    vi.useFakeTimers();
+    const job = running();
+    serve(job, []);
+    let resolveHistory!: (rows: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveHistory = resolve)),
+    );
+    const { result } = renderHook(() => useAgentJob(job.id));
+    await act(async () => {});
+    expect(listAllAgentThreadEvents).toHaveBeenCalledOnce();
+    expect(streamAgentJob).not.toHaveBeenCalled();
+    vi.mocked(getAgentJob).mockResolvedValue({ ...job, revision: 2 });
+    await act(async () => {
+      receiveJobChange({
+        id: job.id,
+        thread_id: job.thread_id ?? undefined,
+        revision: 2,
+        state: 'running',
+      });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    expect(result.current.job?.state).toBe('running');
+    expect(getAgentJob).toHaveBeenCalledTimes(2);
+    expect(streamAgentJob).not.toHaveBeenCalled();
+    await act(async () => resolveHistory([event(17, 'message', { text: 'Stored history' })]));
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+    expect(vi.mocked(streamAgentJob).mock.calls[0][1].lastEventId).toBe(17);
+  });
+
+  it('skips the history request when a previous route metadata response arrives late', async () => {
+    const first = running();
+    const next = running('next-job');
+    serve(next, []);
+    let resolveOldJob!: (job: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveOldJob = resolve)),
+    );
+    const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+      initialProps: { id: first.id },
+    });
+    expect(listAllAgentThreadEvents).not.toHaveBeenCalled();
+    rerender({ id: next.id });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => resolveOldJob(first));
+    expect(vi.mocked(listAllAgentThreadEvents).mock.calls).toEqual([[next.id]]);
+    expect(vi.mocked(streamAgentJob).mock.calls.map(([id]) => id)).toEqual([next.id]);
+    expect(result.current.job?.id).toBe(next.id);
+  });
+
+  it('retries a dropped stream using the refreshed history cursor', async () => {
+    vi.useFakeTimers();
+    const earlier = event(5, 'message', { text: 'Before the drop' });
+    const later = event(8, 'message', { text: 'While disconnected' });
+    serve(running(), [earlier, later]);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValueOnce([earlier]);
+    vi.mocked(streamAgentJob).mockResolvedValueOnce(undefined).mockImplementation(stayOpen);
+    const { result } = renderHook(() => useAgentJob('live-job'));
+    await act(async () => {});
+    expect(vi.mocked(streamAgentJob).mock.calls[0][1].lastEventId).toBe(5);
+    expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MIN_MS));
+    expect(streamAgentJob).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(streamAgentJob).mock.calls[1][1].lastEventId).toBe(8);
+    expect(result.current.events.map((item) => item.id)).toEqual([5, 8]);
+  });
+});
 
 describe('useAgentJob live turn rows', () => {
   it('keeps the previous transcript while loading a follow-up without mixing their streams', async () => {

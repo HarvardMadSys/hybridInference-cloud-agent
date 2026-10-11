@@ -87,6 +87,12 @@ export const en = {
   'review.fix': 'Fix issues',
   'review.fixing': 'Starting fixes…',
   'review.fixHint': 'Ask this review agent to fix its findings in the shared workspace',
+  'watchPr.action': 'Watch PR and merge',
+  'watchPr.start':
+    'Ask the agent to watch tests and reviews, then merge. Requires source-control tools with merge access.',
+  'watchPr.unavailable':
+    'This chat must be able to continue and its latest changes must finish publishing before starting a PR watch.',
+  'watchPr.sendFailed': 'Could not start watching this PR.',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',

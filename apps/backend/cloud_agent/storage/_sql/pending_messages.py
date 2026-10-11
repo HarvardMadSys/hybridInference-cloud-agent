@@ -42,6 +42,15 @@ class PendingAttachmentsUnavailable(Exception):
     """Raised inside a transaction so a message whose uploads were taken is not written."""
 
 
+class GuardedSubmissionRefused(Exception):
+    """Roll back a direct turn's transaction before returning its refusal."""
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        """Keep the helper's owner-facing refusal after the transaction exits."""
+        super().__init__(result["error"])
+        self.result = result
+
+
 def pending_message_row(
     row: Any, attachments: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:

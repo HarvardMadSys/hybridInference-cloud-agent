@@ -24,13 +24,9 @@ import {
 import { formatDuration } from './TurnFooter';
 import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
 
-export type AssistantTab = 'summary' | 'preview' | 'raw';
+import type { AssistantTab } from './trajectoryInspectorTabs';
 
-export const ASSISTANT_TABS: Array<{ key: AssistantTab; label: string }> = [
-  { key: 'summary', label: 'Summary' },
-  { key: 'preview', label: 'Preview' },
-  { key: 'raw', label: 'Raw' },
-];
+export { ASSISTANT_TABS, type AssistantTab } from './trajectoryInspectorTabs';
 
 function ToolCallList({
   tools,

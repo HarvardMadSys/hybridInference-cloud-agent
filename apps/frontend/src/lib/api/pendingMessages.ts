@@ -73,6 +73,10 @@ export interface ThreadMessageResultApi {
 
 export interface ThreadMessageRequest {
   prompt: string;
+  /** Require idle chats, empty queues and a published shared workspace. */
+  require_idle?: boolean;
+  /** The newest turn verified by the caller; required with require_idle. */
+  expected_latest_job_id?: string;
   /** Omitted inherits the previous turn's skills; `[]` clears them. */
   skill_ids?: number[];
   attachment_ids?: number[];

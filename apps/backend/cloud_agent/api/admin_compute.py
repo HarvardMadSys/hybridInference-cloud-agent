@@ -26,6 +26,7 @@ from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request model
     AddComputeConnection,
     AddDeploymentProfile,
     AddServerRequest,
+    AutomaticDeploymentSetup,
     CloudLabDefaults,
     ComputeOperationAction,
     ExtendComputeRequest,
@@ -181,6 +182,32 @@ async def create_deployment_profile(
     profile = await commands.create_deployment_profile(payload)
     await _audit(request, actor, "profile.create", profile_id=profile["id"])
     return {"profile": profile}
+
+
+@router.get("/compute-automatic-setup")
+async def automatic_setup_status(
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Expose deployed-release readiness without exposing generated setup inputs."""
+    return await commands.automatic_setup_status()
+
+
+@router.post("/compute-deployment-profiles/automatic", status_code=201)
+async def create_automatic_setup(
+    request: Request,
+    payload: AutomaticDeploymentSetup,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Generate recoverable encrypted setups through explicitly selected SSH access."""
+    result = await commands.create_automatic_setup(payload)
+    await _audit(
+        request,
+        actor,
+        "profile.automatic_create",
+        profile_id=",".join(profile["id"] for profile in result["profiles"]),
+    )
+    return result
 
 
 @router.get("/compute-defaults/cloudlab")

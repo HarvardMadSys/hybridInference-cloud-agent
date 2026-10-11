@@ -4,13 +4,8 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
 import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
-import {
-  archiveAgentJob,
-  pinAgentJob,
-  unpinAgentJob,
-  getAgentJob,
-  getAgentJobThread,
-} from '@/lib/api/agents';
+import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import { useAgentReads } from './AgentReadProvider';
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -52,6 +47,7 @@ export function AgentsSidebar({
   const t = useT();
   const { state } = useAuth();
   const userId = state.user?.id;
+  const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
   const { isUnread, markRead } = useConversationReadState(userId);
   const knownRows = useMemo(
@@ -192,7 +188,7 @@ export function AgentsSidebar({
     setSelected(null);
     const id = /^\/([^/]+)$/.exec(pathname)?.[1];
     if (!id || ['archived', 'integrations', 'admin', 'login'].includes(id)) return;
-    Promise.all([getAgentJob(id), getAgentJobThread(id)])
+    Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
       .then(([job, thread]) => {
         if (cancelled || generation !== sessionGeneration.current) return;
         const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
@@ -216,7 +212,7 @@ export function AgentsSidebar({
     return () => {
       cancelled = true;
     };
-  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh]);
+  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh, reads]);
   const mountPath = useRef(pathname);
   useEffect(() => {
     if (mountPath.current === pathname) return;

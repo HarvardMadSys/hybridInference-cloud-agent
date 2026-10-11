@@ -17,9 +17,11 @@ database that is not there is a failure to report, never a reason to skip.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -42,6 +44,7 @@ from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -231,6 +234,58 @@ class Api:
             )
         return {**dict(row), "messages": [dict(message) for message in waiting]}
 
+    async def fork(self, source_job: dict[str, Any]) -> dict[str, Any]:
+        """Materialize a native sibling in the source's retained sandbox."""
+        source_sandbox = await self.store.sandbox.thread_sandbox(thread_id=source_job["thread_id"])
+        assert source_sandbox is not None
+        operation = await self.store.session_fork.prepare_session_fork(
+            source_job_id=source_job["id"],
+            user_id=_OWNER,
+            idempotency_key=f"queue-test-fork:{source_job['id']}:{len(self._sandboxes)}",
+        )
+        assert operation is not None and operation.get("error") is None
+        coordinator = f"queue-test-coordinator:{operation['id']}"
+        assert await self.store.session_fork.claim_session_fork_materialization(
+            operation_id=operation["id"],
+            coordinator_token=coordinator,
+            lease_seconds=210,
+        )
+        residencies = await self.store.session_fork.establish_session_fork_residencies(
+            operation_id=operation["id"],
+            coordinator_token=coordinator,
+            ttl_seconds=120,
+        )
+        assert residencies is not None
+        receipt = {
+            "operation_id": operation["id"],
+            "sandbox_id": operation["sandbox_id"],
+            "sandbox_generation": operation["sandbox_generation"],
+            "container_id": operation["container_id"],
+            "runtime_id": operation["runtime_id"],
+            "runtime_version": operation["runtime_version"],
+            "source_thread_id": operation["source_thread_id"],
+            "source_native_session_id": operation["source_native_session_id"],
+            "target_thread_id": operation["target_thread_id"],
+            "target_native_session_id": f"native-{operation['target_thread_id']}",
+            "target_resident_slot_id": operation["target_resident_slot_id"],
+            "source_residency_generation": residencies["source"]["generation"],
+            "target_residency_generation": residencies["target"]["generation"],
+            "source_process_generation": source_sandbox["process_generation"] + 1,
+            "target_process_generation": 1,
+        }
+        materialized = await self.store.session_fork.record_session_fork_materialized(
+            operation_id=operation["id"],
+            coordinator_token=coordinator,
+            receipt=receipt,
+        )
+        assert materialized is not None and materialized["state"] == "materialized"
+        child = await self.store.session_fork.finalize_session_fork(operation_id=operation["id"])
+        assert child is not None
+        child_sandbox = await self.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
+        assert child_sandbox is not None and child_sandbox["native_state"] == "ready"
+        self._sandboxes[child["thread_id"]] = child_sandbox
+        return child
+
     # -- the host's side -----------------------------------------------------
 
     async def claim(self, expected_job_id: str) -> dict[str, Any]:
@@ -273,7 +328,7 @@ class Api:
         }
         assert await self.store.sandbox.mark_thread_sandbox_running(
             **fence,
-            container_id=f"container-{thread_id}",
+            container_id=reserved.get("container_id") or f"container-{thread_id}",
             context_status="live" if known else "new",
         )
         assert await self.store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
@@ -317,7 +372,9 @@ async def api(pool, monkeypatch):
         slots_total=4,
     )
     await store.host_pool.record_host_heartbeat(
-        host=_HOST, capabilities=[SHARED_SANDBOX_CAPABILITY]
+        host=_HOST,
+        capabilities=[SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY],
+        sandbox_image_digest=_IMAGE_DIGEST,
     )
 
     async def no_broker(*_args: Any, **_kwargs: Any) -> None:
@@ -727,6 +784,952 @@ async def test_a_resend_finds_the_message_while_it_waits_and_its_turn_after(api:
     turns = await api.turns(thread_id)
     assert [turn["task_prompt"] for turn in turns] == ["fix it", "queued once"]
     assert turns[1]["client_request_id"] == "queued-key"
+    assert (await api.queue(thread_id))["messages"] == []
+
+
+async def _publish_workspace(api: Api, thread_id: str) -> None:
+    """Complete the latest snapshot without a publisher in this queue-only tier."""
+    async with api.pool.acquire() as conn:
+        snapshot_id = await conn.fetchval(
+            "UPDATE agent_sandbox_snapshots SET state = 'published', "
+            "published_commit_sha = $2, published_at = NOW() WHERE id = ("
+            "SELECT snapshot.id FROM agent_sandbox_snapshots snapshot "
+            "JOIN agent_thread_sandbox_memberships membership "
+            "ON membership.sandbox_id = snapshot.sandbox_id "
+            "WHERE membership.thread_id = $1 "
+            "ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC LIMIT 1) RETURNING id",
+            thread_id,
+            "b" * 40,
+        )
+    assert snapshot_id is not None
+
+
+async def test_two_tabs_guarded_submit_creates_one_turn_under_the_thread_lock(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+
+    fields = {
+        "thread_id": thread_id,
+        "user_id": _OWNER,
+        "prompt": "Watch the PR and merge",
+        "skill_ids": None,
+        "attachment_ids": None,
+        "model": None,
+        "reasoning_effort": None,
+        "client_request_id": "two-tabs-watch",
+        "client_request_fingerprint": "same-guarded-request",
+        "require_idle": True,
+        "expected_latest_job_id": job["id"],
+    }
+    first, second = await asyncio.gather(
+        api.store.pending_messages.submit_message(**fields),
+        api.store.pending_messages.submit_message(**fields),
+    )
+
+    assert first["job_id"] == second["job_id"]
+    assert (await api.queue(thread_id))["messages"] == []
+    assert [turn["id"] for turn in await api.turns(thread_id)] == [job["id"], first["job_id"]]
+
+
+async def test_guarded_submit_sees_a_message_committed_while_it_waits_for_the_thread_lock(
+    api: Api,
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    task = None
+    try:
+        async with api.pool.acquire() as writer, writer.transaction():
+            writer_pid = await writer.fetchval("SELECT pg_backend_pid()")
+            await writer.execute("SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id)
+            task = asyncio.create_task(
+                api.store.pending_messages.submit_message(
+                    thread_id=thread_id,
+                    user_id=_OWNER,
+                    prompt="Watch the PR and merge",
+                    skill_ids=None,
+                    attachment_ids=None,
+                    model=None,
+                    reasoning_effort=None,
+                    require_idle=True,
+                    expected_latest_job_id=job["id"],
+                )
+            )
+            async with asyncio.timeout(10), api.pool.acquire() as observer:
+                while not await observer.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                    "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                    writer_pid,
+                ):
+                    await asyncio.sleep(0.01)
+            await writer.execute(
+                "INSERT INTO agent_pending_messages (id, thread_id, user_id, state, prompt) "
+                "VALUES ('pending-lock-race', $1, $2, 'queued', 'Ordinary message wins')",
+                thread_id,
+                _OWNER,
+            )
+            await writer.execute(
+                "UPDATE agent_threads SET queue_paused_reason = 'failed', "
+                "queue_settled_job_id = NULL WHERE id = $1",
+                thread_id,
+            )
+        assert await asyncio.wait_for(task, timeout=10) == {"error": "conversation_changed"}
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    queue = await api.queue(thread_id)
+    assert (queue["queue_paused_reason"], queue["queue_settled_job_id"]) == ("failed", None)
+    assert [(row["id"], row["prompt"]) for row in queue["messages"]] == [
+        ("pending-lock-race", "Ordinary message wins")
+    ]
+    assert len(await api.turns(thread_id)) == 1
+
+
+async def test_guarded_submit_replays_its_turn_after_the_chat_changes(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    fields = {"require_idle": True, "expected_latest_job_id": job["id"]}
+
+    first = await api.send(thread_id, "Watch the PR and merge", key="watch-once", **fields)
+    assert first.status_code == 201, first.text
+    made = first.json()["job"]
+    assert made["task_prompt"] == "Watch the PR and merge"
+    running = await api.start(made)
+    await api.send(thread_id, "another ordinary message")
+    queue_before = await api.queue(thread_id)
+
+    again = await api.send(thread_id, "Watch the PR and merge", key="watch-once", **fields)
+
+    assert again.status_code == 201, again.text
+    assert again.json()["job"]["id"] == made["id"]
+    assert await api.queue(thread_id) == queue_before
+    assert len(await api.turns(thread_id)) == 2
+    async with api.pool.acquire() as conn:
+        fingerprint = await conn.fetchval(
+            "SELECT client_request_fingerprint FROM agent_jobs WHERE id = $1", made["id"]
+        )
+    # The locked write must replay too: concurrent requests can both pass the
+    # route's earlier replay read before either has committed its submission.
+    replayed_at_write = await api.store.pending_messages.submit_message(
+        thread_id=thread_id,
+        user_id=_OWNER,
+        prompt="Watch the PR and merge",
+        skill_ids=None,
+        attachment_ids=None,
+        model=None,
+        reasoning_effort=None,
+        client_request_id="watch-once",
+        client_request_fingerprint=fingerprint,
+        **fields,
+    )
+    assert replayed_at_write == {"job_id": made["id"]}
+    assert await api.queue(thread_id) == queue_before
+    await api.finish(running)
+
+
+async def test_guarded_submit_refuses_an_ordinary_message_winning_after_the_queue_read(
+    api: Api, monkeypatch
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    before_locked_write = asyncio.Event()
+    ordinary_won = asyncio.Event()
+    original = api.store.pending_messages.submit_message
+
+    async def intercept(**fields: Any) -> dict[str, Any]:
+        if fields["require_idle"]:
+            before_locked_write.set()
+            await ordinary_won.wait()
+        return await original(**fields)
+
+    monkeypatch.setattr(api.store.pending_messages, "submit_message", intercept)
+    watch = asyncio.create_task(
+        api.send(
+            thread_id,
+            "Watch the PR and merge",
+            key="racing-watch",
+            require_idle=True,
+            expected_latest_job_id=job["id"],
+        )
+    )
+    try:
+        await asyncio.wait_for(before_locked_write.wait(), timeout=10)
+        ordinary = await api.send(thread_id, "ordinary message wins")
+        assert ordinary.status_code == 201, ordinary.text
+        ordinary_won.set()
+        refused = await asyncio.wait_for(watch, timeout=10)
+    finally:
+        ordinary_won.set()
+        if not watch.done():
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == [
+        "fix it",
+        "ordinary message wins",
+    ]
+    assert (await api.queue(thread_id))["messages"] == []
+
+
+@pytest.mark.parametrize("state", ["queued", "held", "sending"])
+async def test_guarded_submit_preserves_every_waiting_message_and_a_paused_queue(
+    api: Api, state: str
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    waiting = await api.store.pending_messages.submit_message(
+        thread_id=thread_id,
+        user_id=_OWNER,
+        prompt="unrelated waiting message",
+        skill_ids=None,
+        attachment_ids=None,
+        model=None,
+        reasoning_effort=None,
+    )
+    async with api.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_pending_messages SET state = $2 WHERE id = $1",
+            waiting["message"]["id"],
+            state,
+        )
+        await conn.execute(
+            "UPDATE agent_threads SET queue_paused_reason = 'failed', "
+            "queue_settled_job_id = NULL WHERE id = $1",
+            thread_id,
+        )
+    before = await api.queue(thread_id)
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert await api.queue(thread_id) == before
+    assert len(await api.turns(thread_id)) == 1
+
+
+async def test_guarded_submit_refuses_a_newer_completed_turn(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    ordinary = (await api.send(thread_id, "another completed turn")).json()["job"]
+    await api.run(ordinary)
+    await _publish_workspace(api, thread_id)
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert len(await api.turns(thread_id)) == 2
+    assert (await api.queue(thread_id))["messages"] == []
+
+
+@pytest.mark.parametrize("state", ["queued", "running"])
+async def test_guarded_submit_refuses_any_live_turn_even_when_its_id_matches(api: Api, state: str):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    ordinary = (await api.send(thread_id, "ordinary live turn")).json()["job"]
+    async with api.pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = $2 WHERE id = $1", ordinary["id"], state)
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=ordinary["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert len(await api.turns(thread_id)) == 2
+    assert (await api.queue(thread_id))["messages"] == []
+
+
+@pytest.mark.parametrize("state", ["pending", "capturing", "captured", "publishing", "failed"])
+async def test_guarded_submit_waits_for_the_current_workspace_publication(api: Api, state: str):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    async with api.pool.acquire() as conn:
+        await conn.execute("UPDATE agent_sandbox_snapshots SET state = $1", state)
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert len(await api.turns(thread_id)) == 1
+    assert (await api.queue(thread_id))["messages"] == []
+    # Normal messages retain their existing ability to start before publication.
+    ordinary = await api.send(thread_id, "ordinary follow-up")
+    assert ordinary.status_code == 201, ordinary.text
+    assert ordinary.json()["job"]["task_prompt"] == "ordinary follow-up"
+
+
+async def test_guarded_submit_refuses_a_newer_unpublished_workspace_after_an_older_publication(
+    api: Api,
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    ordinary = (await api.send(thread_id, "new changes to publish")).json()["job"]
+    await api.run(ordinary)
+    async with api.pool.acquire() as conn:
+        assert [
+            row["state"]
+            for row in await conn.fetch(
+                "SELECT state FROM agent_sandbox_snapshots ORDER BY workspace_epoch"
+            )
+        ] == ["published", "pending"]
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=ordinary["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert len(await api.turns(thread_id)) == 2
+    assert (await api.queue(thread_id))["messages"] == []
+
+
+@pytest.mark.parametrize("missing", ["snapshot", "membership"])
+async def test_guarded_submit_requires_a_known_published_workspace(api: Api, missing: str):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    async with api.pool.acquire() as conn:
+        if missing == "snapshot":
+            await conn.execute("DELETE FROM agent_sandbox_snapshots")
+        else:
+            await conn.execute(
+                "DELETE FROM agent_thread_sandbox_memberships WHERE thread_id = $1", thread_id
+            )
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert len(await api.turns(thread_id)) == 1
+    assert (await api.queue(thread_id))["messages"] == []
+
+
+async def test_guarded_submit_creates_its_turn_atomically_with_idle_native_siblings(
+    api: Api, monkeypatch
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    settlement = AsyncMock()
+    monkeypatch.setattr(api.store.pending_messages, "settle_queue", settlement)
+
+    accepted = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert accepted.status_code == 201, accepted.text
+    made = accepted.json()["job"]
+    assert made["task_prompt"] == "Watch the PR and merge"
+    assert accepted.json()["pending"] is None
+    settlement.assert_not_awaited()
+    assert (await api.queue(thread_id))["messages"] == []
+    assert len(await api.turns(thread_id)) == 2
+    assert len(await api.turns(sibling["thread_id"])) == 1
+
+
+@pytest.mark.parametrize("state", ["queued", "running"])
+async def test_guarded_submit_refuses_a_native_sibling_with_a_live_turn(api: Api, state: str):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    ordinary = (await api.send(sibling["thread_id"], "sibling changes")).json()["job"]
+    if state == "running":
+        await api.start(ordinary)
+    before = await api.queue(thread_id)
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert "sharing this workspace" in refused.json()["detail"]["error"]["message"]
+    assert await api.queue(thread_id) == before
+    assert len(await api.turns(thread_id)) == 1
+    assert len(await api.turns(sibling["thread_id"])) == 2
+
+
+@pytest.mark.parametrize("state", ["queued", "held", "sending"])
+async def test_guarded_submit_refuses_a_native_siblings_waiting_messages(api: Api, state: str):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    message = await api.store.pending_messages.submit_message(
+        thread_id=sibling["thread_id"],
+        user_id=_OWNER,
+        prompt="sibling's waiting changes",
+        skill_ids=None,
+        attachment_ids=None,
+        model=None,
+        reasoning_effort=None,
+    )
+    async with api.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_pending_messages SET state = $2 WHERE id = $1",
+            message["message"]["id"],
+            state,
+        )
+    own_before = await api.queue(thread_id)
+    sibling_before = await api.queue(sibling["thread_id"])
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert await api.queue(thread_id) == own_before
+    assert await api.queue(sibling["thread_id"]) == sibling_before
+    assert len(await api.turns(thread_id)) == len(await api.turns(sibling["thread_id"])) == 1
+
+
+async def test_guarded_submit_waits_for_a_siblings_active_attempt_after_its_job_ends(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    ordinary = (await api.send(sibling["thread_id"], "sibling finishing")).json()["job"]
+    await api.start(ordinary)
+    async with api.pool.acquire() as conn:
+        # A terminal job alone does not say the host finished its workspace
+        # mutation: the member's active-attempt fence must settle as well.
+        await conn.execute("UPDATE agent_jobs SET state = 'failed' WHERE id = $1", ordinary["id"])
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert (await api.queue(thread_id))["messages"] == []
+    assert len(await api.turns(thread_id)) == 1
+
+
+@pytest.mark.parametrize("operation", ["fork", "group_operation"])
+async def test_guarded_submit_refuses_live_shared_workspace_operations(api: Api, operation: str):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    if operation == "fork":
+        prepared = await api.store.session_fork.prepare_session_fork(
+            source_job_id=job["id"], user_id=_OWNER, idempotency_key="fork-before-watch"
+        )
+        assert prepared is not None and prepared.get("error") is None
+    else:
+        async with api.pool.acquire() as conn:
+            await conn.execute("UPDATE agent_sandboxes SET active_operation_count = 1")
+    before = await api.queue(thread_id)
+
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert await api.queue(thread_id) == before
+    assert len(await api.turns(thread_id)) == 1
+
+
+async def test_guarded_submit_ignores_live_work_in_an_unrelated_sandbox(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    unrelated = await api.create("unrelated work")
+    await api.start(unrelated)
+
+    accepted = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["job"]["task_prompt"] == "Watch the PR and merge"
+    assert (await api.queue(thread_id))["messages"] == []
+    assert len(await api.turns(thread_id)) == 2
+    assert len(await api.turns(unrelated["thread_id"])) == 1
+
+
+async def test_guarded_submit_replays_before_group_checks_when_a_sibling_becomes_busy(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    guard = {"require_idle": True, "expected_latest_job_id": job["id"]}
+    first = await api.send(thread_id, "Watch the PR and merge", key="group-watch-once", **guard)
+    assert first.status_code == 201, first.text
+    made = first.json()["job"]
+    ordinary = await api.send(sibling["thread_id"], "sibling's next turn")
+    assert ordinary.status_code == 201, ordinary.text
+    async with api.pool.acquire() as conn:
+        fingerprint = await conn.fetchval(
+            "SELECT client_request_fingerprint FROM agent_jobs WHERE id = $1", made["id"]
+        )
+
+    replayed = await api.store.pending_messages.submit_message(
+        thread_id=thread_id,
+        user_id=_OWNER,
+        prompt="Watch the PR and merge",
+        skill_ids=None,
+        attachment_ids=None,
+        model=None,
+        reasoning_effort=None,
+        client_request_id="group-watch-once",
+        client_request_fingerprint=fingerprint,
+        **guard,
+    )
+
+    assert replayed == {"job_id": made["id"]}
+    assert (await api.queue(thread_id))["messages"] == []
+    assert len(await api.turns(thread_id)) == len(await api.turns(sibling["thread_id"])) == 2
+
+
+async def test_guarded_submit_waits_for_actual_sibling_admission_at_the_group_lock(
+    api: Api, monkeypatch
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    ordinary = (await api.send(sibling["thread_id"], "sibling's admitted work")).json()["job"]
+    admission_holds_group = asyncio.Event()
+    release_admission = asyncio.Event()
+    admission_pid = None
+    group = await api.store.sandbox.thread_sandbox(thread_id=thread_id)
+    assert group is not None
+    original_capture = api.store.sandbox._capture_attempt_ledger
+
+    async def hold_admission(conn: Any, **fields: Any) -> None:
+        nonlocal admission_pid
+        await original_capture(conn, **fields)
+        if fields["thread_id"] == sibling["thread_id"]:
+            # Hold the admission's next write boundary in its own transaction.
+            # Its attempt and membership are already locked in normal order.
+            await conn.fetchval(
+                "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE", group["sandbox_id"]
+            )
+            admission_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            admission_holds_group.set()
+            await release_admission.wait()
+
+    monkeypatch.setattr(api.store.sandbox, "_capture_attempt_ledger", hold_admission)
+    admission = asyncio.create_task(api.start(ordinary))
+    watch = None
+    before = await api.queue(thread_id)
+    try:
+        await asyncio.wait_for(admission_holds_group.wait(), timeout=10)
+        watch = asyncio.create_task(
+            api.send(
+                thread_id,
+                "Watch the PR and merge",
+                require_idle=True,
+                expected_latest_job_id=job["id"],
+            )
+        )
+        async with asyncio.timeout(10), api.pool.acquire() as observer:
+            while not await observer.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                admission_pid,
+            ):
+                await asyncio.sleep(0.01)
+        assert not watch.done()
+        release_admission.set()
+        admitted, refused = await asyncio.wait_for(asyncio.gather(admission, watch), timeout=10)
+    finally:
+        release_admission.set()
+        for task in (admission, watch):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    assert admitted["job_id"] == ordinary["id"]
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert await api.queue(thread_id) == before
+    assert len(await api.turns(thread_id)) == 1
+
+
+async def test_ordinary_sibling_submit_waits_for_watch_to_commit_after_its_empty_group_check(
+    api: Api, monkeypatch
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    sibling = await api.fork(job)
+    checked_empty_group = asyncio.Event()
+    release_watch = asyncio.Event()
+    watch_pid = None
+    original_insert = pending_message_storage.insert_follow_up
+
+    async def hold_watch(conn: Any, **fields: Any) -> dict[str, Any] | None:
+        nonlocal watch_pid
+        if fields["prompt"] == "Watch the PR and merge":
+            # The guarded transaction has read the group's empty queue and
+            # still owns its thread, membership and group locks.
+            watch_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            checked_empty_group.set()
+            await release_watch.wait()
+        return await original_insert(conn, **fields)
+
+    monkeypatch.setattr(pending_message_storage, "insert_follow_up", hold_watch)
+    watch = asyncio.create_task(
+        api.send(
+            thread_id,
+            "Watch the PR and merge",
+            require_idle=True,
+            expected_latest_job_id=job["id"],
+        )
+    )
+    ordinary = None
+    try:
+        await asyncio.wait_for(checked_empty_group.wait(), timeout=10)
+        ordinary = asyncio.create_task(api.send(sibling["thread_id"], "ordinary sibling follow-up"))
+        async with asyncio.timeout(10), api.pool.acquire() as observer:
+            while not await observer.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                watch_pid,
+            ):
+                await asyncio.sleep(0.01)
+            assert (
+                await observer.fetchval(
+                    "SELECT count(*) FROM agent_pending_messages WHERE thread_id = $1",
+                    sibling["thread_id"],
+                )
+                == 0
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT count(*) FROM agent_jobs WHERE thread_id = $1", sibling["thread_id"]
+                )
+                == 1
+            )
+        assert not ordinary.done()
+        release_watch.set()
+        accepted_watch, accepted_ordinary = await asyncio.wait_for(
+            asyncio.gather(watch, ordinary), timeout=10
+        )
+    finally:
+        release_watch.set()
+        for task in (watch, ordinary):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    assert accepted_watch.status_code == accepted_ordinary.status_code == 201
+    assert accepted_watch.json()["job"]["task_prompt"] == "Watch the PR and merge"
+    assert accepted_ordinary.json()["job"]["task_prompt"] == "ordinary sibling follow-up"
+    assert accepted_watch.json()["pending"] is accepted_ordinary.json()["pending"] is None
+    assert len(await api.turns(thread_id)) == len(await api.turns(sibling["thread_id"])) == 2
+    assert (await api.queue(thread_id))["messages"] == []
+    assert (await api.queue(sibling["thread_id"]))["messages"] == []
+
+
+async def test_ordinary_submit_without_a_retained_membership_still_queues_and_replays(api: Api):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    # The first turn has not reached a host, so no membership or group exists.
+    assert await api.store.sandbox.thread_sandbox(thread_id=thread_id) is None
+
+    first = await api.send(thread_id, "ordinary legacy queue", key="no-membership-queue")
+    again = await api.send(thread_id, "ordinary legacy queue", key="no-membership-queue")
+
+    assert first.status_code == again.status_code == 201
+    assert first.json()["job"] is again.json()["job"] is None
+    assert first.json()["pending"]["id"] == again.json()["pending"]["id"]
+    assert [row["prompt"] for row in (await api.queue(thread_id))["messages"]] == [
+        "ordinary legacy queue"
+    ]
+    assert len(await api.turns(thread_id)) == 1
+
+
+async def test_guarded_submit_does_not_hold_an_included_job_while_waiting_for_publication(
+    api: Api,
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    group = await api.store.sandbox.thread_sandbox(thread_id=thread_id)
+    assert group is not None
+    watch = None
+    try:
+        async with api.pool.acquire() as publisher:
+            snapshot_id = await publisher.fetchval(
+                "UPDATE agent_sandbox_snapshots SET state = 'publishing' "
+                "WHERE sandbox_id = $1 RETURNING id",
+                group["sandbox_id"],
+            )
+            assert snapshot_id is not None
+            async with publisher.transaction():
+                # record_snapshot_publish locks snapshot -> group -> included
+                # jobs. Pause at its group boundary before the included write.
+                await publisher.execute(
+                    "UPDATE agent_sandbox_snapshots SET state = 'published', "
+                    "published_commit_sha = $2, published_at = NOW() WHERE id = $1",
+                    snapshot_id,
+                    "a" * 40,
+                )
+                await publisher.fetchval(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                    group["sandbox_id"],
+                )
+                publisher_pid = await publisher.fetchval("SELECT pg_backend_pid()")
+                watch = asyncio.create_task(
+                    api.send(
+                        thread_id,
+                        "Watch the PR and merge",
+                        require_idle=True,
+                        expected_latest_job_id=job["id"],
+                    )
+                )
+                async with asyncio.timeout(10), api.pool.acquire() as observer:
+                    while not await observer.fetchval(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                        publisher_pid,
+                    ):
+                        await asyncio.sleep(0.01)
+                # If Watch locked its parent before waiting for the group,
+                # this real included-job update would form a PostgreSQL cycle.
+                async with asyncio.timeout(10):
+                    updated = await publisher.execute(
+                        "UPDATE agent_jobs SET published_pr_url = $2, "
+                        "published_commit_sha = $3 WHERE id IN ("
+                        "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1)",
+                        snapshot_id,
+                        "https://github.com/owner/name/pull/1",
+                        "a" * 40,
+                    )
+                    assert updated == "UPDATE 1"
+                assert not watch.done()
+        accepted = await asyncio.wait_for(watch, timeout=10)
+    finally:
+        if watch is not None and not watch.done():
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["job"]["task_prompt"] == "Watch the PR and merge"
+    assert accepted.json()["pending"] is None
+    assert (await api.queue(thread_id))["messages"] == []
+    assert len(await api.turns(thread_id)) == 2
+
+
+async def test_guarded_submit_rolls_back_the_turn_if_a_prepared_upload_disappears(
+    api: Api, monkeypatch
+):
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    upload = await api.store.attachments.create_attachment(
+        user_id=_OWNER, path="notes.txt", content=b"notes", content_type="text/plain"
+    )
+    async with api.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET queue_paused_reason = 'failed', "
+            "queue_settled_job_id = NULL WHERE id = $1",
+            thread_id,
+        )
+    before = await api.queue(thread_id)
+    original = api.store.pending_messages.submit_message
+
+    async def lose_prepared_upload(**fields: Any) -> dict[str, Any]:
+        assert fields["attachments"][0]["id"] == upload["id"]
+        assert await api.store.attachments.delete_attachment(
+            user_id=_OWNER, attachment_id=upload["id"]
+        )
+        return await original(**fields)
+
+    monkeypatch.setattr(api.store.pending_messages, "submit_message", lose_prepared_upload)
+    refused = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        key="watch-with-missing-upload",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+        attachment_ids=[upload["id"]],
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"]["error"]["type"] == "invalid_attachment_selection"
+    assert await api.queue(thread_id) == before
+    assert len(await api.turns(thread_id)) == 1
+    assert [message["role"] for message in (await api.thread(job["id"]))["messages"]].count(
+        "user"
+    ) == 1
+
+
+@pytest.mark.parametrize("override", [False, True], ids=["inherit", "prepared-overrides"])
+async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_ownership(
+    api: Api, override: bool
+):
+    skill = await api.store.skills.create_skill(
+        user_id=_OWNER,
+        values={
+            "name": "Review",
+            "description": "Review changes",
+            "instructions": "Inspect the original tests.",
+            "source": "created",
+        },
+    )
+    original_upload = await api.store.attachments.create_attachment(
+        user_id=_OWNER, path="original.txt", content=b"original", content_type="text/plain"
+    )
+    job = await api.create(
+        reasoning_effort="high", skill_ids=[skill["id"]], attachment_ids=[original_upload["id"]]
+    )
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    previous = await api.store.conversation_queries.get_job(job["id"])
+    assert previous is not None
+    async with api.pool.acquire() as conn:
+        previous_skills = json.loads(
+            await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", job["id"])
+        )
+    await api.store.skills.update_skill(
+        user_id=_OWNER,
+        skill_id=skill["id"],
+        revision=skill["revision"],
+        values={"instructions": "Inspect the newly selected tests."},
+    )
+    fields: dict[str, Any] = {}
+    upload = None
+    if override:
+        upload = await api.store.attachments.create_attachment(
+            user_id=_OWNER, path="next.txt", content=b"next", content_type="text/plain"
+        )
+        fields = {
+            "model": "glm-4.6",
+            "reasoning_effort": "auto",
+            "skill_ids": [skill["id"]],
+            "attachment_ids": [upload["id"]],
+        }
+
+    accepted = await api.send(
+        thread_id,
+        "Watch the PR and merge",
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+        **fields,
+    )
+
+    assert accepted.status_code == 201, accepted.text
+    made = await api.store.conversation_queries.get_job(accepted.json()["job"]["id"])
+    assert made is not None
+    async with api.pool.acquire() as conn:
+        made_skills = json.loads(
+            await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", made["id"])
+        )
+    assert made["parent_job_id"] == job["id"]
+    if override:
+        assert (made["model"], made["reasoning_effort"]) == ("glm-4.6", None)
+        assert made_skills[0]["instructions"] == "Inspect the newly selected tests."
+        assert made_skills[0]["revision"] == previous_skills[0]["revision"] + 1
+        assert upload is not None
+        assert made["attachments"] == [
+            {"id": upload["id"], "path": "next.txt", "content_type": "text/plain", "size_bytes": 4}
+        ]
+        async with api.pool.acquire() as conn:
+            bound = await conn.fetchrow(
+                "SELECT job_id, thread_id, pending_message_id FROM agent_job_attachments WHERE id = $1",
+                upload["id"],
+            )
+        assert dict(bound) == {
+            "job_id": made["id"],
+            "thread_id": thread_id,
+            "pending_message_id": None,
+        }
+    else:
+        assert (made["model"], made["reasoning_effort"]) == ("glm-5.1", "high")
+        assert made_skills == previous_skills
+        assert made_skills[0]["instructions"] == "Inspect the original tests."
+        assert made["attachments"] is None
+    async with api.pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT job_id FROM agent_job_attachments WHERE id = $1", original_upload["id"]
+            )
+            == job["id"]
+        )
     assert (await api.queue(thread_id))["messages"] == []
 
 

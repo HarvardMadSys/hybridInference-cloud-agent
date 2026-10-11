@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
@@ -42,6 +43,8 @@ from cloud_agent import broker_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
@@ -843,6 +846,11 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         reasoning_effort: str | None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        require_idle: bool = False,
+        expected_latest_job_id: str | None = None,
+        reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         turns = self._thread_turns(thread_id)
         if not turns or turns[-1]["user_id"] != user_id:
@@ -864,6 +872,35 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 return waiting
         if thread_id in self.archived_threads:
             return {"error": "session_archived"}
+        if require_idle:
+            sandbox = turns[-1].get("thread_sandbox") or {}
+            if (
+                turns[-1]["id"] != expected_latest_job_id
+                or any(turn["state"] not in ("succeeded", "failed", "cancelled") for turn in turns)
+                or self._waiting(thread_id)
+                or sandbox.get("workspace_publication_state") != "published"
+            ):
+                return {"error": "conversation_changed"}
+            made = await self.create_follow_up(
+                parent_job_id=expected_latest_job_id,
+                user_id=user_id,
+                prompt=prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                reset_reasoning_effort=reset_reasoning_effort,
+                skills=skills,
+                attachments=attachments,
+                yield_to_queued=True,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+            )
+            if made is None:
+                return {"error": "conversation_changed"}
+            if made.get("error") is not None:
+                return made
+            self.queue_paused.pop(thread_id, None)
+            self.queue_settled[thread_id] = expected_latest_job_id
+            return {"job_id": made["id"]}
         self._continue_if_idle(thread_id)
         message_id = f"apmsg_{self._next_pending:04d}"
         self._next_pending += 1
@@ -1336,6 +1373,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             # builder both look for it.
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
+
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        job = self.jobs.get(job_id)
+        if job is None or job["user_id"] != user_id:
+            return None
+        return JobStreamState(job["state"], job.get("published_pr_url"))
 
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
@@ -1936,6 +1979,12 @@ class _FakeGateway:
         ``AttributeError`` rather than the behaviour under test.
         """
         return {model: list(values) for model, values in _TEST_MODEL_EFFORTS.items()}
+
+    async def model_catalog_with_reasoning_efforts(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """The composer's model options, returned by one current catalog read."""
+        return await self.model_catalog(user_id), await self.model_reasoning_efforts(user_id)
 
 
 class _FakeGrants:
@@ -2765,6 +2814,146 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     # must not disable itself behind a narrower historical field name.
     assert "owner/name" in config.json()["repos"]
     assert config.json()["github_connected"] is True
+
+
+async def test_config_reads_one_current_catalog_and_rechecks_admission(store: FakeStorage):
+    """One catalog response supplies both fields, for each admitted owner read."""
+    from httpx import MockTransport, Response
+
+    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.gateway import GatewayClient
+
+    catalog_owners: list[str] = []
+    admitted_owners: list[str] = []
+
+    def handler(request):
+        assert request.headers["Authorization"] == "Bearer config-dispatch-token"
+        if request.url.path.endswith("/agent-access"):
+            owner = request.url.path.split("/")[-2]
+            admitted_owners.append(owner)
+            return Response(
+                200, json={"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
+            )
+        assert request.url.path == "/internal/model-catalog"
+        owner = request.url.params["user_id"]
+        catalog_owners.append(owner)
+        model = f"{owner}-model-{len(catalog_owners)}"
+        return Response(200, json={"models": [model], "reasoning_efforts": {model: ["high"]}})
+
+    app = _build_app(store)
+    identity = {"user_id": _OWNER}
+    app.dependency_overrides[authenticate_agent_owner] = lambda: identity
+    async with AsyncClient(transport=MockTransport(handler)) as upstream:
+        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
+        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
+                identity["user_id"] = owner
+                response = await client.get("/v1/agent/config")
+                assert response.status_code == 200, response.text
+                model = f"{owner}-model-{index}"
+                assert response.json()["models"] == [model]
+                assert response.json()["model_reasoning_efforts"] == {model: ["high"]}
+                assert len(catalog_owners) == index
+                assert len(admitted_owners) == index
+    assert catalog_owners == admitted_owners == [_OWNER, _OWNER, _OTHER]
+
+
+@pytest.mark.parametrize(
+    "payload,status",
+    [({}, 200), ({"models": "all"}, 200), ({"models": ["unavailable"]}, 503)],
+)
+async def test_config_catalog_failure_offers_no_models_or_efforts(
+    store: FakeStorage, payload, status
+):
+    """Catalog failure cannot widen options or discard the remaining config."""
+    from httpx import MockTransport, Response
+
+    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.gateway import GatewayClient
+
+    def handler(request):
+        if request.url.path.endswith("/agent-access"):
+            return Response(
+                200, json={"user_id": _OWNER, "allowed": True, "permissions": ["agent.use"]}
+            )
+        return Response(status, json=payload)
+
+    app = _build_app(store)
+    async with AsyncClient(transport=MockTransport(handler)) as upstream:
+        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
+        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/v1/agent/config")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"] == []
+    assert response.json()["model_reasoning_efforts"] == {}
+    assert response.json()["repos"]
+    assert response.json()["runtimes"]
+
+
+async def test_config_reads_independent_sources_concurrently(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """Each source starts before the slow repository read releases its result."""
+    from cloud_agent.api import config as config_api
+
+    started: set[str] = set()
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    repositories_read = False
+    account_reads = 0
+
+    async def wait_for_sources(name):
+        started.add(name)
+        if len(started) == 3:
+            all_started.set()
+        await release.wait()
+
+    async def repositories(user_id, **kwargs):
+        nonlocal repositories_read
+        assert user_id == _OWNER
+        await wait_for_sources("repositories")
+        repositories_read = True
+        return ["owner/name"]
+
+    async def model_options(self, user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("models")
+        return ["glm-5.1"], {"glm-5.1": ["high"]}
+
+    async def connections(*, user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("mcp")
+        return []
+
+    async def account(*, user_id):
+        nonlocal account_reads
+        assert user_id == _OWNER
+        assert repositories_read, "entitlement must finish before its account is read"
+        account_reads += 1
+        return None
+
+    monkeypatch.setattr(config_api, "repos_for_user", repositories)
+    monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
+    monkeypatch.setattr(store, "list_mcp_connections", connections)
+    monkeypatch.setattr(store, "get_github_account", account)
+    request = asyncio.create_task(client.get("/v1/agent/config"))
+    try:
+        # This is a deadlock limit, not a speed assertion: each source waits
+        # for release, so a serial implementation cannot reach all_started.
+        await asyncio.wait_for(all_started.wait(), timeout=2)
+        assert not request.done()
+        assert account_reads == 0
+    finally:
+        release.set()
+        response = await request
+    assert response.status_code == 200, response.text
+    assert account_reads == 1
+    assert response.json()["repos"] == ["owner/name"]
+    assert response.json()["models"] == ["glm-5.1"]
+    assert response.json()["model_reasoning_efforts"] == {"glm-5.1": ["high"]}
+    assert response.json()["mcp_connections"] == []
 
 
 async def test_messages_append_to_latest_turn_and_reject_blank_prompts(
@@ -7871,6 +8060,159 @@ async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
     assert response.json()["detail"]["error"]["type"] == "session_archived"
 
 
+async def test_an_idle_only_message_passes_its_guard_to_the_atomic_store(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """A stale action is refused before any queue settlement can send owner work."""
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    submitted = AsyncMock(return_value={"error": "conversation_changed"})
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "submit_message", submitted)
+    monkeypatch.setattr(store, "settle_queue", settlement)
+
+    response = await _send(
+        client,
+        store,
+        job_id,
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error"]["type"] == "conversation_changed"
+    submitted.assert_awaited_once()
+    assert submitted.await_args.kwargs["require_idle"] is True
+    assert submitted.await_args.kwargs["expected_latest_job_id"] == job_id
+    settlement.assert_not_awaited()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        {"require_idle": True},
+        {"require_idle": True, "expected_latest_job_id": ""},
+        {"expected_latest_job_id": "ajob_0001"},
+        {"require_idle": "true", "expected_latest_job_id": "ajob_0001"},
+    ],
+)
+async def test_an_idle_only_message_requires_a_complete_strict_guard(
+    client: AsyncClient, store: FakeStorage, monkeypatch, guard: dict[str, Any]
+):
+    job_id = await _create_job(client)
+    submitted = AsyncMock()
+    monkeypatch.setattr(store, "submit_message", submitted)
+
+    response = await _send(client, store, job_id, {"prompt": "watch the PR", **guard})
+
+    assert response.status_code == 422, response.text
+    submitted.assert_not_awaited()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+
+
+async def test_an_idle_only_message_replays_after_its_turn_has_started(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    _attach_shared_workspace(store, job_id)
+    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "settle_queue", settlement)
+    body = {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id}
+    headers = {"Idempotency-Key": "watch-pr-once"}
+
+    first = await _send(client, store, job_id, body, headers=headers)
+    assert first.status_code == 201, first.text
+    watch_id = first.json()["job"]["id"]
+    store.jobs[watch_id]["state"] = "running"
+    again = await _send(client, store, job_id, body, headers=headers)
+
+    assert again.status_code == 201, again.text
+    assert again.json()["job"]["id"] == watch_id
+    assert len(store.jobs) == 2
+    assert store.pending == {}
+    changed_guard = await _send(
+        client,
+        store,
+        job_id,
+        {**body, "expected_latest_job_id": watch_id},
+        headers=headers,
+    )
+    assert changed_guard.status_code == 409, changed_guard.text
+    assert changed_guard.json()["detail"]["error"]["type"] == "idempotency_conflict"
+    assert len(store.jobs) == 2
+    assert store.pending == {}
+    settlement.assert_not_awaited()
+
+
+async def test_an_idle_only_message_creates_its_turn_with_prepared_choices_without_settlement(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    store.jobs[job_id]["reasoning_effort"] = "high"
+    thread_id = _attach_shared_workspace(store, job_id)
+    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    store.queue_paused[thread_id] = "failed"
+    prepared = PreparedFollowUp(
+        model="glm-5.1",
+        reasoning_effort=None,
+        reset_reasoning_effort=True,
+        skills=[
+            {
+                "id": 5,
+                "name": "Review",
+                "description": "Review changes",
+                "revision": 2,
+                "instructions": "Inspect tests and edge cases.",
+            }
+        ],
+        attachments=[
+            {"id": 42, "path": "notes.txt", "content_type": "text/plain", "size_bytes": 11}
+        ],
+    )
+    monkeypatch.setattr("cloud_agent.api.turns.prepare_follow_up", AsyncMock(return_value=prepared))
+    created = AsyncMock(wraps=store.create_follow_up)
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "create_follow_up", created)
+    monkeypatch.setattr(store, "settle_queue", settlement)
+
+    response = await _send(
+        client,
+        store,
+        job_id,
+        {
+            "prompt": "watch the PR",
+            "require_idle": True,
+            "expected_latest_job_id": job_id,
+            "reasoning_effort": "auto",
+            "skill_ids": [5],
+            "attachment_ids": [42],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    watch = response.json()["job"]
+    assert watch["parent_job_id"] == job_id
+    assert watch["reasoning_effort"] is None
+    assert store.jobs[watch["id"]]["skills"] == prepared.skills
+    created.assert_awaited_once()
+    assert created.await_args.kwargs["model"] == prepared.model
+    assert created.await_args.kwargs["reasoning_effort"] is None
+    assert created.await_args.kwargs["reset_reasoning_effort"] is True
+    assert created.await_args.kwargs["skills"] == prepared.skills
+    assert created.await_args.kwargs["attachments"] == prepared.attachments
+    assert created.await_args.kwargs["yield_to_queued"] is True
+    assert response.json()["pending"] is None
+    assert store.pending == {}
+    assert thread_id not in store.queue_paused
+    assert store.queue_settled[thread_id] == job_id
+    settlement.assert_not_awaited()
+
+
 async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(
     client: AsyncClient, store: FakeStorage
 ):
@@ -7938,6 +8280,44 @@ async def test_a_submission_without_a_key_carries_none(client: AsyncClient, stor
     job_id = await _create_job(client)
     assert store.jobs[job_id]["client_request_id"] is None
     assert store.jobs[job_id]["client_request_fingerprint"] is None
+
+
+async def test_idle_guards_preserve_ordinary_message_fingerprints_and_bind_the_newest_turn(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    submitted = AsyncMock(return_value={"error": "conversation_changed"})
+    monkeypatch.setattr(store, "submit_message", submitted)
+    bodies = [
+        {"prompt": "watch the PR"},
+        {"prompt": "watch the PR", "require_idle": False},
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": "ajob_newer"},
+    ]
+    for index, body in enumerate(bodies):
+        response = await _send(
+            client, store, job_id, body, headers={"Idempotency-Key": f"fingerprint-{index}"}
+        )
+        assert response.status_code == 409, response.text
+    fingerprints = [call.kwargs["client_request_fingerprint"] for call in submitted.await_args_list]
+    legacy_payload = {
+        "kind": "thread_message",
+        "thread_id": _thread_of(store, job_id),
+        "prompt": "watch the PR",
+        "attachment_ids": None,
+        "model": None,
+        "reasoning_effort": None,
+    }
+    legacy_hash = hashlib.sha256(
+        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    assert fingerprints[0] == fingerprints[1] == legacy_hash
+    assert fingerprints[2] != fingerprints[0]
+    assert fingerprints[3] != fingerprints[2]
+    assert store.pending == {}
+    assert len(store.jobs) == 1
 
 
 async def test_a_reused_key_under_different_content_is_a_409(

@@ -7,6 +7,7 @@ Secrets have their own write-only field and never enter operation requests.
 from __future__ import annotations
 
 import base64
+import ipaddress
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -128,6 +129,80 @@ class AddDeploymentProfile(ComputeRequest):
         if not payload or len(payload) > 64 * 1024 * 1024:
             raise ValueError("invalid deployment bundle")
         return payload
+
+
+class SetupMachine(ComputeRequest):
+    """A stable infrastructure machine reached through an existing verified key."""
+
+    connection_id: str = Field(min_length=1, max_length=128)
+    address: str = Field(min_length=1, max_length=253, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9.:-]*$")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+
+
+class AutomaticDeploymentSetup(ComputeRequest):
+    """Generate immutable Host setups from the running release and trusted machines."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    gateway: SetupMachine
+    control: SetupMachine
+    gateway_port: int = Field(default=8080, ge=1, le=65535)
+    chat_network_pool: str
+    dns_server: str
+    protected_cidrs: list[str] = Field(min_length=1, max_length=64)
+    slots: int = Field(default=2, ge=1, le=8)
+
+    @field_validator("chat_network_pool")
+    @classmethod
+    def validate_pool(cls, value: str) -> str:
+        """Require an explicit private IPv4 pool large enough for group bridges."""
+        pool = ipaddress.IPv4Network(value, strict=True)
+        private = [
+            ipaddress.IPv4Network(cidr)
+            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        ]
+        if (
+            pool.version != 4
+            or pool.prefixlen > 29
+            or not any(pool.subnet_of(net) for net in private)
+        ):
+            raise ValueError("Use an RFC1918 IPv4 pool with a prefix at most /29")
+        return str(pool)
+
+    @field_validator("dns_server")
+    @classmethod
+    def validate_resolver(cls, value: str) -> str:
+        """Require a usable explicit IPv4 resolver address."""
+        resolver = ipaddress.ip_address(value)
+        if (
+            resolver.version != 4
+            or resolver.is_unspecified
+            or resolver.is_loopback
+            or resolver.is_multicast
+            or resolver.is_link_local
+        ):
+            raise ValueError("Use a reachable IPv4 DNS resolver")
+        return str(resolver)
+
+    @field_validator("protected_cidrs")
+    @classmethod
+    def validate_protected(cls, values: list[str]) -> list[str]:
+        """Canonicalize protected IPv4 destinations without accepting shell data."""
+        result = []
+        for value in values:
+            network = ipaddress.ip_network(value, strict=False)
+            if network.version != 4:
+                raise ValueError("Protected destinations must be IPv4 networks")
+            result.append(str(network))
+        return sorted(set(result))
+
+    @model_validator(mode="after")
+    def validate_network_destinations(self) -> Self:
+        """Reject configurations the unchanged Host network guard cannot install."""
+        pool = ipaddress.IPv4Network(self.chat_network_pool)
+        if ipaddress.IPv4Address(self.dns_server) in pool:
+            raise ValueError("The DNS resolver must be outside the sandbox network pool")
+        return self
 
 
 class AddServerRequest(ComputeRequest):

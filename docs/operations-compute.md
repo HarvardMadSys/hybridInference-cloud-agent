@@ -93,24 +93,62 @@ use the operator profile's `data_mount` configuration.
 
 ## Prepare a trusted deployment profile
 
-### Admin-managed setup
+### Automatic setup
 
-For new deployments, open **Admin → Servers → Server setup**. Upload the
-reviewed source archive, enter its exact 40-character revision and remote
-installation directory, paste the completed Host environment, and provide the
-three tunnel keys plus their verified known-hosts files. The control plane
-validates the archive before it becomes selectable, encrypts every environment
-and credential value with `AGENT_COMPUTE_SECRET_KEY`, and stores the bundle and
-ciphertext in Postgres. Read APIs return only the profile ID and label.
+Open **Admin → Servers → Server setup** and use **Automatic setup**. The
+control-plane image includes the Host source bundle for its own release; the
+application supplies the revision, environment and existing workspace broker
+token, generates three separate tunnel keys per setup slot, and discovers the
+control-plane listener ports and Docker bridge.
 
-Profiles are immutable so admitted operations and retries keep their exact
-deployment inputs. To rotate or replace one, create a profile under a new ID.
+Supply the infrastructure inputs once:
 
-The file-backed configuration below remains supported for existing deployments
-and recovery, but is no longer required for initial setup through Admin.
+1. Add and validate management SSH connections for the stable gateway machine
+   and control-plane machine, including independently verified host keys.
+2. Select those connections and enter the machines' SSH addresses and users.
+   Both machines need Python 3 and passwordless `sudo`. The control machine
+   must run the supported Docker Compose deployment, and the gateway must
+   already listen on the selected inference port.
+3. Enter an approved private IPv4 pool for chat networks, a reachable DNS
+   resolver outside that pool, and the protected infrastructure CIDRs. These
+   values depend on your network and require an administrator's decision.
+4. Choose the number of setup slots and prepare the setups. Two slots allow
+   separate broker routes for a current node and its replacement.
 
+The application creates dedicated restricted SSH accounts on the two stable
+machines. Inference and MCP credentials permit only their respective local
+service destinations; the control credential permits the main API and its
+assigned reverse broker route. Management credentials stay in the control
+plane. Existing SSH policies must permit these restricted accounts; setup
+refuses incompatible policies instead of broadening them. Co-located gateway
+and control services must use separate inference, MCP and main API ports.
 
-Start with these operator templates:
+Generated keys and configuration are encrypted in Postgres before remote
+authorization begins. A setup becomes selectable only after all its slots
+finish. If a request fails or the browser closes, reopen Server setup and retry
+the pending setup to reuse its exact credentials and routes. Infrastructure
+defaults are saved for future setups. **Start new setup** retains those inputs
+and creates a new request on submission; it leaves an unfinished setup
+unavailable. Profiles are immutable so later deployment operations keep their
+exact inputs.
+
+Automatic setup requires a control-plane image built with its full release
+revision, the compute encryption key and the existing broker token. The form
+shows missing prerequisites. Rebuild or update older images to include the
+Host bundle, or use advanced manual setup.
+
+### Manual and file-backed setup
+
+**Advanced manual setup** retains the existing form: upload a reviewed source
+archive, enter its exact 40-character revision and installation directory, paste the
+Host environment, and provide the three tunnel keys and verified known-hosts
+files. The control plane validates the archive, encrypts all environment and
+credential values, and stores them in Postgres. Profile read APIs expose only
+IDs and labels, never generated credentials. Create a new profile to replace
+immutable inputs.
+
+File-backed configuration remains supported for existing deployments and
+recovery. Start with these operator templates:
 
 - [`compute.example.json`](../deploy/control-plane/compute.example.json)
 - [`compute-host.env.example`](../deploy/control-plane/compute-host.env.example)
