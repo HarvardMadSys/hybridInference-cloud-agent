@@ -135,6 +135,14 @@ def test_a_tool_call_with_invalid_utf8_is_refused_not_forwarded():
             "method": "tools/call",
             "param\N{LATIN SMALL LETTER LONG S}": {"name": "x"},
         },
+        # Neither I casefolds to ``i``; Java's equalsIgnoreCase folds both.
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": {"uri": "repo://allowed", "ur\N{LATIN SMALL LETTER DOTLESS I}": "repo://x"},
+        },
+        {"jsonrpc": "2.0", "\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}d": 2, "method": "ping"},
         {
             "jsonrpc": "2.0",
             "id": 1,

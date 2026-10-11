@@ -82,6 +82,14 @@ _FRAME_SEPARATOR = b"\n\n"
 _MESSAGE_FIELDS = frozenset({"jsonrpc", "id", "method", "params"})
 _PARAMS_FIELDS = frozenset({"name", "arguments", "uri"})
 
+#: The dotted capital and dotless small I: a per-character case-insensitive
+#: match (Java's ``equalsIgnoreCase``, for one) folds both onto ASCII ``i`` and
+#: :meth:`str.casefold` folds neither, so ``uri`` spelled with one would
+#: otherwise pass here as an unrelated key.
+_EXTRA_FOLDS = str.maketrans(
+    {"\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}": "i", "\N{LATIN SMALL LETTER DOTLESS I}": "i"}
+)
+
 
 class MalformedRequest(ValueError):
     """A relayed body that cannot be read as exactly one JSON-RPC message."""
@@ -119,8 +127,9 @@ def _refuse_constant(name: str) -> Any:
 def _refuse_case_variants(mapping: dict[str, Any], names: frozenset[str], where: str) -> None:
     """Refuse a key that only folds to one of ``names``."""
     for key in mapping:
-        if key not in names and key.casefold() in names:
-            raise MalformedRequest(f"{where} field {key!r} is not {key.casefold()!r}")
+        folded = key.translate(_EXTRA_FOLDS).casefold()
+        if key not in names and folded in names:
+            raise MalformedRequest(f"{where} field {key!r} is not {folded!r}")
 
 
 def parse_request(body: bytes) -> Any:
