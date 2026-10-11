@@ -66,10 +66,14 @@ Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
 and `<path>/containerd`, binding these directories to the daemons' standard
 `/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
 saved choice. Observation-only imports do not need a storage path.
+Attachment preflight checks the selected disk without changing the host;
+deployment checks it again before preparing storage.
 
 The path is saved with the allocation and reused on retries and replacement
 nodes, where the same mount must exist. A missing mount, symlink or conflicting
-existing store blocks setup. Bootstrap never moves existing sandbox data to a
+existing store blocks setup. A nonempty containerd store outside the selected
+mount also blocks setup, since it may hold workloads that Docker cannot list.
+Bootstrap never moves existing sandbox data to a
 different disk. Daemon startup requires the configured disk and bind mount after
 a reboot. Older API clients that omit `sandbox_storage_path` continue to
 use the operator profile's `data_mount` configuration.

@@ -273,7 +273,6 @@ def test_an_empty_initialised_store_is_replaced_by_the_data_disk(
     tmp_path, machine, monkeypatch, capsys
 ):
     (machine.root / "var/lib/docker/network").mkdir(parents=True)
-    (machine.root / "var/lib/containerd/io.containerd.metadata.v1.bolt").mkdir(parents=True)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
     run_remote(
         _DEPLOY,
@@ -284,9 +283,47 @@ def test_an_empty_initialised_store_is_replaced_by_the_data_disk(
     )
     assert ["systemctl", "stop", "docker.socket", "docker", "containerd"] in machine.calls
     assert not (machine.root / "var/lib/docker/network").exists()
-    assert not (machine.root / "var/lib/containerd/io.containerd.metadata.v1.bolt").exists()
     assert machine.calls.count(["docker", "ps", "-aq"]) == 1
     assert ["mount", "--bind", "/mydata/docker", "/var/lib/docker"] in machine.calls
+
+
+def test_non_docker_containerd_state_is_preserved_even_when_docker_is_empty(
+    tmp_path, machine, monkeypatch, capsys
+):
+    (machine.root / "var/lib/docker/network").mkdir(parents=True)
+    state = machine.root / "var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"k8s.io workload state")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker")
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert state.read_bytes() == b"k8s.io workload state"
+    assert (machine.root / "var/lib/docker/network").exists()
+    assert not [call for call in machine.calls if call[0] in {"mount", "systemctl", "apt-get"}]
+
+
+def test_containerd_state_created_during_inspection_is_preserved(
+    tmp_path, machine, monkeypatch, capsys
+):
+    original_run = machine.run
+    state = machine.root / "var/lib/containerd/meta.db"
+
+    def run(args, **kwargs):
+        if args[:2] == ["systemctl", "stop"]:
+            state.write_bytes(b"concurrent containerd state")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    result = run_remote(
+        _DEPLOY, deploy_params(tmp_path / "deploy"), monkeypatch, capsys, stdin=payload()
+    )
+    assert result == {"ready": False, "blocked_reasons": ["data_mount_conflict"]}
+    assert state.read_bytes() == b"concurrent containerd state"
+    assert machine.active == {"docker": True, "containerd": True}
+    assert ["systemctl", "start", "docker", "containerd"] in machine.calls
+    assert not [call for call in machine.calls if call[0] in {"mount", "apt-get"}]
 
 
 def test_an_existing_volume_is_never_hidden_by_the_selected_disk(

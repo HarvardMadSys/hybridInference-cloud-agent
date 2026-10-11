@@ -142,6 +142,19 @@ async def test_selected_storage_path_is_used_by_bootstrap_and_daemon_attestation
     profile = profile.model_copy(
         update={"data_mount": "/profile-disk", "sandbox_storage_path": "/sandbox-disk"}
     )
+    transport.run.side_effect = [
+        json.dumps(
+            {
+                **PREFLIGHT,
+                "checks": {
+                    **PREFLIGHT["checks"],
+                    "data_mount_available": True,
+                    "data_mount_conflict_free": True,
+                },
+            }
+        ),
+        json.dumps({"ready": True, "blocked_reasons": []}),
+    ]
     secrets["deployment:env"] += "\nAGENT_RETAINED_DOCKER_DATA_ROOT=/profile-docker"
     result = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("token"))
     assert result.ready
@@ -186,6 +199,42 @@ async def test_preflight_blocks_install_when_prerequisite_cannot_be_installed(tm
     result = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("token"))
     assert not result.ready and check in result.blocked_reasons
     assert transport.run.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected_path", [None, "/selected-disk"])
+@pytest.mark.parametrize(
+    ("storage_checks", "blocked"),
+    [
+        ({}, "data_mount_unavailable"),
+        (
+            {"data_mount_available": False, "data_mount_conflict_free": False},
+            "data_mount_unavailable",
+        ),
+        (
+            {"data_mount_available": True, "data_mount_conflict_free": False},
+            "data_mount_conflict",
+        ),
+        ({"data_mount_available": True, "data_mount_conflict_free": True}, None),
+    ],
+)
+async def test_storage_preflight_uses_effective_disk_and_preserves_failure_codes(
+    tmp_path, selected_path, storage_checks, blocked
+):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    profile = profile.model_copy(
+        update={"data_mount": "/profile-disk", "sandbox_storage_path": selected_path}
+    )
+    transport.run.side_effect = [
+        json.dumps({**PREFLIGHT, "checks": {**PREFLIGHT["checks"], **storage_checks}})
+    ]
+    result = await bootstrap.preflight(NODE, profile)
+    command = shlex.split(transport.run.call_args.args[1])
+    assert command[:2] == ["python3", "-c"]
+    assert command[2] == _PREFLIGHT
+    assert json.loads(command[3]) == {"data_mount": selected_path or "/profile-disk"}
+    assert result.ready is (blocked is None)
+    assert result.blocked_reasons == (() if blocked is None else (blocked,))
 
 
 @pytest.mark.asyncio

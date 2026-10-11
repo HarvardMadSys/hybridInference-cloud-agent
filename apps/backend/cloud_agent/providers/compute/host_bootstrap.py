@@ -46,8 +46,9 @@ if TYPE_CHECKING:
 
 
 _PREFLIGHT = r"""
-import hashlib, json, os, platform, shutil, subprocess
+import hashlib, json, os, platform, shutil, subprocess, sys
 from pathlib import Path
+params = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 osinfo = {}
 for line in Path('/etc/os-release').read_text().splitlines():
     key, _, value = line.partition('=')
@@ -63,6 +64,60 @@ checks = {
     'docker': bool(shutil.which('docker')),
     'compose': bool(shutil.which('docker')) and works(['sudo', '-n', 'docker', 'compose', 'version']),
 }
+if params.get('data_mount'):
+    # Root-owned daemon stores need privileged inspection. This helper only
+    # reads paths and inventories; preflight never mounts or changes state.
+    storage_script = r'''
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+def inspect_storage(data_mount):
+    result = {'data_mount_available': False, 'data_mount_conflict_free': False}
+    quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+    try:
+        base = Path(data_mount)
+        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode:
+            return result
+        result['data_mount_available'] = True
+        for name in ('docker', 'containerd'):
+            source, target = base / name, Path('/var/lib') / name
+            if source.is_symlink() or source.resolve() != source or target.is_symlink() or target.resolve() != target:
+                return result
+            if (source.exists() and not source.is_dir()) or (target.exists() and not target.is_dir()):
+                return result
+            mounted = target.is_dir() and subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode == 0
+            if mounted:
+                if not source.is_dir() or not os.path.samefile(source, target):
+                    return result
+            elif target.is_dir() and any(target.iterdir()):
+                # Docker's inventory cannot prove that a separate containerd
+                # store has no retained objects. Never hide that store.
+                if name == 'containerd' or not shutil.which('docker'):
+                    return result
+                for command in (['docker', 'ps', '-aq'], ['docker', 'image', 'ls', '-aq'], ['docker', 'volume', 'ls', '-q']):
+                    listed = subprocess.run(command, capture_output=True, text=True)
+                    if listed.returncode or listed.stdout.strip():
+                        return result
+        result['data_mount_conflict_free'] = True
+    except OSError:
+        pass
+    return result
+'''
+    if os.geteuid() == 0:
+        storage = {}
+        exec(storage_script, storage)
+        checks.update(storage['inspect_storage'](params['data_mount']))
+    elif root:
+        inspected = subprocess.run(
+            ['sudo', '-n', 'python3', '-c', storage_script + "\nprint(json.dumps(inspect_storage(json.loads(sys.argv[1])['data_mount'])))", json.dumps(params)],
+            capture_output=True, text=True,
+        )
+        try:
+            storage = json.loads(inspected.stdout) if inspected.returncode == 0 else {}
+        except ValueError:
+            storage = {}
+        checks.update({key: storage.get(key) is True for key in ('data_mount_available', 'data_mount_conflict_free')})
+    else:
+        checks.update({'data_mount_available': False, 'data_mount_conflict_free': False})
 machine = Path('/etc/machine-id').read_text().strip().lower()
 print(json.dumps({'machine_identity': hashlib.sha256(machine.encode()).hexdigest(),
     'operating_system': osinfo.get('ID', '') + ':' + osinfo.get('VERSION_ID', ''),
@@ -130,6 +185,8 @@ with open(lock_path, 'a') as lock:
             source, target = base / name, Path('/var/lib') / name
             if source.is_symlink() or source.resolve() != source or target.is_symlink() or target.resolve() != target:
                 blocked('data_mount_conflict')
+            if (source.exists() and not source.is_dir()) or (target.exists() and not target.is_dir()):
+                blocked('data_mount_conflict')
             source.mkdir(mode=0o711, exist_ok=True)
             target.mkdir(mode=0o711, exist_ok=True)
             mounted = subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode == 0
@@ -137,15 +194,31 @@ with open(lock_path, 'a') as lock:
                 # An already mounted daemon must use this Host's selected disk.
                 # Never accept or replace a different store on a retry.
                 blocked('data_mount_conflict')
+            if name == 'containerd' and not mounted and any(target.iterdir()):
+                # Docker cannot attest other containerd namespaces (for
+                # example Kubernetes). Never discard a nonempty shared store.
+                blocked('data_mount_conflict')
             stores.append((name, source, target, mounted))
         unmounted = [target for _, _, target, mounted in stores if not mounted]
-        if any(any(target.iterdir()) for target in unmounted):
-            # Verify both stores once, while Docker is still running. Never
+        cleanup = any(any(target.iterdir()) for target in unmounted)
+        if cleanup:
+            # Verify Docker's store once, while its daemon is still running. Never
             # hide containers, images or volumes beneath a new bind mount.
             if not shutil.which('docker') or listed(['docker', 'ps', '-aq']) or listed(['docker', 'image', 'ls', '-aq']) or listed(['docker', 'volume', 'ls', '-q']):
                 blocked('data_mount_conflict')
+        active_daemons = [name for name in ('docker.socket', 'docker', 'containerd') if subprocess.run(['systemctl', 'is-active', '--quiet', name], **quiet).returncode == 0] if unmounted else []
+        if unmounted and (cleanup or active_daemons):
             run('data_mount_failed', ['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'])
+        # Recheck after stopping: a daemon may have populated an initially
+        # empty containerd store while its disk was being inspected.
+        if any(target.name == 'containerd' and any(target.iterdir()) for target in unmounted):
+            if active_daemons:
+                run('data_mount_failed', ['systemctl', 'start', *active_daemons])
+            blocked('data_mount_conflict')
+        if cleanup:
             for target in unmounted:
+                if target.name == 'containerd':
+                    continue
                 for child in target.iterdir():
                     if child.is_dir() and not child.is_symlink():
                         shutil.rmtree(child)
@@ -279,9 +352,14 @@ class SshHostBootstrap:
         return value
 
     async def preflight(self, node: NodeObservation, profile: DeploymentProfile) -> PreflightResult:
-        """Verify machine identity and prerequisites without installing software."""
+        """Verify identity, prerequisites and selected storage without changing state."""
+        data_mount = profile.sandbox_storage_path or profile.data_mount
         text = await self._transport.run(
-            self._connection(node), "python3 -c " + shlex.quote(_PREFLIGHT)
+            self._connection(node),
+            "python3 -c "
+            + shlex.quote(_PREFLIGHT)
+            + " "
+            + shlex.quote(json.dumps({"data_mount": data_mount})),
         )
         result = self._json(text)
         checks = result.get("checks", {})
@@ -289,6 +367,11 @@ class SshHostBootstrap:
         if not profile.install_prerequisites:
             required |= {"docker", "compose"}
         blocked = [name for name in sorted(required) if checks.get(name) is not True]
+        if data_mount:
+            if checks.get("data_mount_available") is not True:
+                blocked.append("data_mount_unavailable")
+            elif checks.get("data_mount_conflict_free") is not True:
+                blocked.append("data_mount_conflict")
         if node.machine_identity and result.get("machine_identity") != node.machine_identity:
             blocked.append("machine_identity_changed")
         return PreflightResult(

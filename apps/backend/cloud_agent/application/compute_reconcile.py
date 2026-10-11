@@ -50,6 +50,9 @@ _BOOTSTRAP_REASONS = {
     "kvm": "KVM is required for sandbox isolation.",
     "docker": "Install Docker or enable prerequisite installation.",
     "compose": "Docker Compose is unavailable.",
+    "data_mount_unavailable": "Sandbox storage must be an existing mounted data disk.",
+    "data_mount_conflict": "Sandbox storage conflicts with an existing mount or retained daemon data.",
+    "data_mount_failed": "The selected sandbox storage could not be prepared.",
     "machine_identity_changed": "The verified machine identity has changed.",
     "prerequisites_update_failed": "The node could not refresh its package repositories.",
     "prerequisites_install_failed": "The node could not install the required packages.",
@@ -65,6 +68,8 @@ _PREFLIGHT_CHECKS = {
     "kvm",
     "docker",
     "compose",
+    "data_mount_available",
+    "data_mount_conflict_free",
 }
 
 
