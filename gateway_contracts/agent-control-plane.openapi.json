@@ -4090,11 +4090,12 @@
                 "type": "null"
               }
             ],
-            "description": "Opaque caller metadata.",
+            "description": "Opaque caller metadata: at most 64 keys and 16 KiB as JSON.",
             "title": "Metadata"
           },
           "model": {
             "description": "Gateway model id the runtime should use.",
+            "maxLength": 255,
             "title": "Model",
             "type": "string"
           },
@@ -4121,6 +4122,7 @@
           "runtime": {
             "default": "claude-code",
             "description": "Agent runtime id.",
+            "maxLength": 64,
             "title": "Runtime",
             "type": "string"
           },
@@ -4156,6 +4158,8 @@
           },
           "task_prompt": {
             "description": "What the agent should do.",
+            "maxLength": 100000,
+            "minLength": 1,
             "title": "Task Prompt",
             "type": "string"
           }

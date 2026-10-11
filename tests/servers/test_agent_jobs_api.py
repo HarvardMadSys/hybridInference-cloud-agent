@@ -2789,6 +2789,44 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
     assert "no-such-harness" in response.json()["detail"]["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"task_prompt": "   \n  "},
+        {"task_prompt": "x" * 100_001},
+        {"model": "m" * 256},
+        {"runtime": "r" * 65},
+        {"metadata": {f"key-{index}": index for index in range(65)}},
+        {"metadata": {"blob": "x" * (16 * 1024)}},
+    ],
+)
+async def test_a_first_turn_is_bounded_like_every_later_message(
+    client: AsyncClient, store: FakeStorage, change: dict[str, Any]
+):
+    """Whitespace is not a task, and nothing a turn stores is unbounded.
+
+    The first turn's prompt is stored twice and its metadata is copied onto
+    every later turn and returned with every job read, so neither may be
+    larger than a message to the same conversation could be.
+    """
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **change},
+    )
+    assert response.status_code == 422, response.text
+    assert store.jobs == {}
+
+
+async def test_a_first_turn_keeps_the_trimmed_task(client: AsyncClient, store: FakeStorage):
+    """The same trimming a message gets, so a first turn reads like the rest."""
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "  fix it \n", "model": "glm-5.1"},
+    )
+    assert response.status_code == 201, response.text
+    assert store.jobs[response.json()["id"]]["task_prompt"] == "fix it"
+
+
 async def test_a_message_cannot_name_a_harness(client: AsyncClient, store: FakeStorage):
     """The harness is fixed per thread; its session is the memory.
 
