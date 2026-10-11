@@ -19,6 +19,8 @@ from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 logger = get_logger(__name__)
@@ -30,6 +32,109 @@ class PostgresSandboxRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+
+    async def request_admin_stop(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+    ) -> str:
+        """Queue a reviewed, quiescent container stop under its admission fence.
+
+        The host still checks its local terminals and operations before acting.
+        The database marker survives observations and excludes new admission
+        until Docker confirms the stop. No container or workspace is deleted.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            # The same membership -> group order as reservation, Fork and
+            # reconciliation. Claims hold a shared group lock until committed.
+            await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                "SELECT id, user_id, host, generation, container_id, last_activity_at, state, "
+                "stop_requested_at, active_operation_count, snapshot_state, "
+                "terminal_count, terminal_count_observed_at, NOW() AS observed_at "
+                "FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                sandbox_id,
+            )
+            if group is None:
+                return "not_found"
+            if (
+                group["generation"] != generation
+                or group["container_id"] != container_id
+                or group["last_activity_at"] != last_activity_at
+            ):
+                return "stale"
+            if group["state"] == "stopping" and group["stop_requested_at"] is not None:
+                return "accepted"
+            if group["state"] != "running":
+                return "not_running"
+            busy = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM agent_thread_sandbox_memberships m
+                    WHERE m.sandbox_id = $1 AND (
+                        m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
+                        OR EXISTS (
+                            SELECT 1 FROM agent_jobs j
+                            WHERE j.thread_id = m.thread_id AND j.state = 'running'
+                        )
+                    )
+                ) OR EXISTS (
+                    SELECT 1 FROM agent_sandbox_snapshots s
+                    WHERE s.sandbox_id = $1
+                      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
+                )
+                """,
+                sandbox_id,
+            )
+            if (
+                busy
+                or group["active_operation_count"]
+                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
+            ):
+                return "busy"
+            if group["terminal_count"]:
+                return "terminals_open"
+            terminal_observed = group["terminal_count_observed_at"]
+            if (
+                group["terminal_count"] is None
+                or terminal_observed is None
+                or (group["observed_at"] - terminal_observed).total_seconds() > 90
+            ):
+                return "activity_unknown"
+            await conn.execute(
+                "UPDATE agent_sandboxes SET state = 'stopping', "
+                "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
+                sandbox_id,
+            )
+            # Stop and its audit receipt commit together. An unavailable audit
+            # table must never leave an unrecorded cross-owner mutation.
+            await conn.execute(
+                "INSERT INTO agent_admin_audit_log "
+                "(action, actor_id, admin_ip, target_user_id, details, success) "
+                "VALUES ('agent.sandbox.stop', $1, $2, $3, $4::jsonb, TRUE)",
+                actor_id,
+                admin_ip,
+                group["user_id"],
+                json.dumps(
+                    {
+                        "sandbox_id": sandbox_id,
+                        "host": group["host"],
+                        "generation": generation,
+                        "container_id": container_id,
+                    }
+                ),
+            )
+        return "accepted"
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
@@ -47,6 +152,7 @@ class PostgresSandboxRepository:
                     AND g.state NOT IN (
                         'provisioning', 'stopping', 'stopped_dirty', 'lost'
                     )
+                    AND g.stop_requested_at IS NULL
                     AND m.fork_operation_id IS NULL
                     AND (
                         m.active_attempt_id IS NULL
@@ -227,7 +333,7 @@ class PostgresSandboxRepository:
                     JOIN agent_attempts a ON a.id = m.active_attempt_id
                     JOIN agent_jobs j ON j.id = a.job_id
                     WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                      AND g.generation = $4
+                      AND g.generation = $4 AND g.stop_requested_at IS NULL
                       AND m.activation_generation = $5
                       AND m.active_attempt_id = $2
                       AND (g.container_id IS NULL OR g.container_id = $6)
@@ -279,7 +385,7 @@ class PostgresSandboxRepository:
                 SET process_generation = $6, resident_state = 'live', updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.generation = $4
+                  AND g.generation = $4 AND g.stop_requested_at IS NULL
                   AND m.activation_generation = $5
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
@@ -383,7 +489,7 @@ class PostgresSandboxRepository:
                     updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a, agent_jobs j
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.generation = $4
+                  AND g.generation = $4 AND g.stop_requested_at IS NULL
                   AND m.activation_generation = $5
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
@@ -672,11 +778,18 @@ class PostgresSandboxRepository:
                 SELECT origin_thread_id AS thread_id, generation,
                        0::bigint AS activation_generation,
                        CASE
+                           WHEN stop_requested_at IS NOT NULL THEN 'idle'
                            WHEN state IN ('stopped_dirty', 'lost') THEN 'lost'
                            WHEN state = 'stopping' THEN 'orphaned_attempt'
                            ELSE 'idle'
                        END AS reason,
-                       TRUE AS shared_live
+                       TRUE AS shared_live,
+                       CASE WHEN stop_requested_at IS NOT NULL THEN (
+                           SELECT COALESCE(jsonb_object_agg(m.thread_id, m.activation_generation),
+                                           '{}'::jsonb)
+                           FROM agent_thread_sandbox_memberships m
+                           WHERE m.sandbox_id = g.id AND m.resident_slot_id IS NOT NULL
+                       ) END AS member_activation_generations
                 FROM agent_sandboxes g
                 WHERE g.id = $1 AND g.origin_thread_id = $2 AND g.host = $3
                   AND g.container_id = $4 AND g.generation = $5
@@ -698,7 +811,11 @@ class PostgresSandboxRepository:
                 container_id,
                 sandbox_generation,
             )
-        return None if row is None else dict(row)
+        if row is None:
+            return None
+        result = dict(row)
+        result["member_activation_generations"] = load_json(result["member_activation_generations"])
+        return result
 
     async def abandon_thread_sandbox(
         self,
@@ -952,7 +1069,11 @@ class PostgresSandboxRepository:
         }
         if any(group[key] != value for key, value in immutable.items()):
             raise ValueError("shared sandbox immutable identity or runtime changed")
-        if group["state"] in {"lost", "stopped_dirty"} or membership["native_state"] == "lost":
+        if (
+            group["state"] in {"lost", "stopped_dirty", "stopping"}
+            or group["stop_requested_at"] is not None
+            or membership["native_state"] == "lost"
+        ):
             return None
         if membership["fork_operation_id"] is not None:
             # The dequeue query carries the same fence, but admission is a
@@ -1189,6 +1310,12 @@ class PostgresSandboxRepository:
                 )
                 return None if recovered is None else str(recovered)
             if running:
+                if group["stop_requested_at"] is not None:
+                    # A heartbeat is an observation of a still-running
+                    # container, not cancellation of an administrator's
+                    # request. Keep admission closed and retry the safe
+                    # host-side idle check on every subsequent heartbeat.
+                    return "stopping"
                 deadline_sql = "idle_deadline"
                 deadline_arg: float | None = None
                 if activity_active is True or durable_activity:
@@ -1224,7 +1351,8 @@ class PostgresSandboxRepository:
             row = await conn.fetchrow(
                 """
                 UPDATE agent_sandboxes
-                SET state = 'stopped', idle_deadline = NULL, updated_at = NOW()
+                SET state = 'stopped', idle_deadline = NULL,
+                    stop_requested_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND (
                     state IN ('stopping', 'stopped_dirty', 'lost')
                     OR (state = 'running' AND idle_deadline IS NOT NULL

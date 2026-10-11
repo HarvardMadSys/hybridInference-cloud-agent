@@ -56,7 +56,7 @@ log. Credential fields show only whether a value is configured. Enter and save
 a replacement to change one; **Reset** restores its built-in default.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0036_host_settings_import`, then start the main control-plane listener with its
+`0037_admin_sandbox_stop`, then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once.
 The MCP-only listener waits for initialization and reads the same settings.
 Subsequent deployments preserve admin values, and resetting a field never
@@ -284,12 +284,30 @@ deletes the account, encrypted token, and installation grants and asks GitHub
 to withdraw the authorization. Uninstalling the App on GitHub revokes the
 platform's installation access.
 
-## Running sandbox inventory and resource usage
+## Sandbox inventory, resource usage, and controls
 
-The admin console's **Sandboxes** tab lists every group recorded as running,
-including containers retained between turns. Fork members share one container
-row. The inventory refreshes every 30 seconds and follows every page of
-`GET /admin/agent/sandboxes`, which requires admin access.
+The admin console's **Sandboxes** tab initially lists every group recorded as
+running, including containers retained between turns. Use the state filter to
+include stopped, starting, stopping, or failed groups. Fork members share one
+container row. The inventory refreshes every 30 seconds and follows every page
+of `GET /admin/agent/sandboxes`, which requires admin access. The default API
+filter remains `state=running`; `state=all` includes every lifecycle state.
+
+Open a sandbox's details to inspect its member sessions, host, runtime,
+container identity, and lifecycle. Member details include session links and
+activity states, without exposing native session identifiers, credentials,
+prompts, or raw container diagnostics.
+
+**Stop idle sandbox** requests a stop of the shared container, preserving its
+workspace and native sessions for a later turn. It applies to every member of
+the group. The API checks the reviewed container, generation, and last activity
+before accepting the request, and refuses a busy group, pending snapshot or
+publication work, or a group with open terminals or stale terminal observations.
+The request is recorded in the admin audit log. The host performs its own idle
+check before stopping the container.
+The page shows the pending request until a host observation confirms the stop;
+an offline host cannot complete it. New turns wait while the stop is pending.
+This action does not delete the container or reclaim its retained disk space.
 
 CPU is measured in occupied cores over the interval between Docker samples;
 memory is current usage with inactive file cache removed. Network and block
@@ -306,10 +324,13 @@ their measured coverage. Counters Docker or Kata does not report remain
 unavailable. A current host heartbeat alone does not imply current resource
 measurements.
 
-Resource persistence requires migration `0034_sandbox_resource_usage` and a
-host running the updated workspace broker. Older hosts still appear in the
-inventory with resource usage unavailable. Only the latest observation is
-stored; this view does not provide resource history.
+Sandbox controls require migration `0037_admin_sandbox_stop` and matching
+control-plane and host releases. Apply `alembic upgrade head` before starting
+the updated API. Resource persistence requires migration
+`0034_sandbox_resource_usage` and a host running the updated workspace broker.
+Older hosts still appear in the inventory with resource usage unavailable.
+Only the latest observation is stored; this view does not provide resource
+history.
 
 ## Reading a task's recorded events
 

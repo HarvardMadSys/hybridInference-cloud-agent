@@ -118,7 +118,7 @@ async def test_a_filter_asks_only_for_its_own_actions(audit_api) -> None:
     await client.get("/admin/agent/audit-log?category=settings", headers=ADMIN)
 
     servers, settings = trail.calls
-    assert servers["actions"] == ("agent.runner_host.", "agent.compute.")
+    assert servers["actions"] == ("agent.runner_host.", "agent.compute.", "agent.sandbox.")
     # A server's own settings live under agent.runner_host. but are a settings
     # change; the Servers filter must not show them twice.
     assert "agent.runner_host.set_settings" in servers["excluded_actions"]
@@ -176,5 +176,6 @@ def test_every_action_falls_under_at_most_one_filter() -> None:
     """The first filter that covers an action wins, so none is shown twice."""
     assert audit_category("agent.runner_host.set_settings") == "settings"
     assert audit_category("agent.runner_host.set_slots") == "servers"
+    assert audit_category("agent.sandbox.stop") == "servers"
     assert audit_category("agent.runner_host_extra.drain") is None
     assert audit_category("agent.run.event_content.read") == "content"

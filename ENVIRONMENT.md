@@ -27,7 +27,7 @@ settings live in the Agent database and are authoritative across restarts.
 The inventory below records defaults and the environment names used for an
 initial import; registered settings are no longer continuously read from `.env`.
 
-Run `alembic upgrade head` (through `0036_host_settings_import`) before starting
+Run `alembic upgrade head` (through `0037_admin_sandbox_stop`) before starting
 this release. The main control-plane listener initializes the settings document
 once from its existing environment. The MCP-only listener waits for that document and uses the same
 saved values. Later environment edits do not overwrite it. **Reset** restores

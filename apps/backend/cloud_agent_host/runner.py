@@ -1476,6 +1476,7 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
                     str(command["thread_id"]),
                     generation=int(command["generation"]),
                     reason=str(command.get("reason") or "idle"),
+                    member_activation_generations=command.get("member_activation_generations"),
                 )
             except (KeyError, TypeError, ValueError, SessionSupervisorError) as exc:
                 # A stale command is expected during a racing acquire. The

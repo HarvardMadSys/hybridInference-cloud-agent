@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AdminSandbox, AdminSandboxResourceUsage } from '@/lib/api/adminSandboxes';
-import { getAdminSandboxes } from '@/lib/api/adminSandboxes';
+import { getAdminSandbox, getAdminSandboxes, stopAdminSandbox } from '@/lib/api/adminSandboxes';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
@@ -16,7 +16,11 @@ const auth = vi.hoisted(() => ({
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: auth.id, agent_access: auth.access } } }),
 }));
-vi.mock('@/lib/api/adminSandboxes', () => ({ getAdminSandboxes: vi.fn() }));
+vi.mock('@/lib/api/adminSandboxes', () => ({
+  getAdminSandboxes: vi.fn(),
+  getAdminSandbox: vi.fn(),
+  stopAdminSandbox: vi.fn(),
+}));
 
 import AdminSandboxesPage from './page';
 
@@ -97,13 +101,133 @@ beforeEach(() => {
   auth.id = 'admin-one';
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   vi.mocked(getAdminSandboxes).mockResolvedValue(page());
+  vi.mocked(getAdminSandbox).mockResolvedValue({
+    sandbox: sandbox(),
+    members: [],
+    observed_at: observedAt,
+  });
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
 describe('running sandbox inventory', () => {
+  it('loads all lifecycle states without carrying over the previous filter snapshot', async () => {
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    const next = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes).mockReturnValueOnce(next.promise);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox state' }), {
+      target: { value: 'all' },
+    });
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(getAdminSandboxes).toHaveBeenLastCalledWith(
+        { limit: 200, state: 'all' },
+        expect.any(AbortSignal),
+      ),
+    );
+    await act(async () => next.resolve(page([sandbox({ state: 'stopped', id: 'stopped-one' })])));
+    expect(await screen.findByText('stopped-one')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'All sandboxes (1)' })).toBeInTheDocument();
+    expect(screen.getByRole('table')).toHaveTextContent('stopped');
+    expect(statValue('Running sandboxes')).toHaveTextContent('0');
+  });
+
+  it('clears private inventory if a sandbox detail read loses admin access', async () => {
+    vi.mocked(getAdminSandbox).mockRejectedValue(new APIError('FORBIDDEN', 'no', 403));
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
+    expect(await screen.findByText('Admin access required')).toBeInTheDocument();
+    expect(screen.queryByText('owner-one')).not.toBeInTheDocument();
+  });
+
+  it('switches to all states after a stop request so host confirmation remains visible', async () => {
+    const idle = sandbox({
+      generation: 4,
+      active_attempt_count: 0,
+      active_operation_count: 0,
+      terminal_count: 0,
+      terminal_count_observed_at: observedAt,
+    });
+    vi.mocked(getAdminSandbox).mockResolvedValue({
+      sandbox: idle,
+      members: [],
+      observed_at: observedAt,
+    });
+    vi.mocked(stopAdminSandbox).mockResolvedValue({
+      sandbox: { ...idle, state: 'stopping', stop_requested_at: observedAt },
+      members: [],
+      observed_at: observedAt,
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Stop idle sandbox' }));
+    expect(await screen.findByText(/Stop requested\. Waiting for the host/)).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveValue('all');
+    expect(getAdminSandboxes).toHaveBeenLastCalledWith(
+      { limit: 200, state: 'all' },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('aborts a fleet read begun before a stop and ignores its late running state', async () => {
+    const idle = sandbox({
+      generation: 4,
+      active_attempt_count: 0,
+      active_operation_count: 0,
+      terminal_count: 0,
+      terminal_count_observed_at: observedAt,
+    });
+    const stopping = { ...idle, state: 'stopping' as const };
+    const oldRead = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes)
+      .mockResolvedValueOnce(page([idle]))
+      .mockReturnValueOnce(oldRead.promise)
+      .mockResolvedValue(page([stopping]));
+    vi.mocked(getAdminSandbox).mockResolvedValue({
+      sandbox: idle,
+      members: [],
+      observed_at: observedAt,
+    });
+    vi.mocked(stopAdminSandbox).mockResolvedValue({
+      sandbox: stopping,
+      members: [],
+      observed_at: observedAt,
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(2));
+    const oldSignal = vi.mocked(getAdminSandboxes).mock.calls[1][1];
+    fireEvent.click(screen.getByRole('button', { name: 'Stop idle sandbox' }));
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(3));
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => oldRead.resolve(page([idle])));
+    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    expect(row).toHaveTextContent('stopping');
+    expect(row).not.toHaveTextContent('Retained');
+  });
+
+  it('stops fleet polling after a detail read loses admin permission', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    vi.mocked(getAdminSandbox).mockRejectedValue(new APIError('FORBIDDEN', 'no', 403));
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
+    await screen.findByText('Admin access required');
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+  });
   it.each<AgentAccessApi | undefined>([
     undefined,
     { allowed: false, permissions: ['agent.admin'] },
@@ -407,7 +531,7 @@ describe('running sandbox inventory', () => {
       ]),
     );
     render(<AdminSandboxesPage />);
-    const button = await screen.findByRole('button', { name: 'Show stats for Fix login' });
+    const button = await screen.findByRole('button', { name: 'Show details for Fix login' });
     expect(button).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
     const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
@@ -502,7 +626,7 @@ describe('running sandbox inventory', () => {
 
   it('keeps older host responses usable and displays missing telemetry as unavailable', async () => {
     render(<AdminSandboxesPage />);
-    const button = await screen.findByRole('button', { name: 'Show stats for Fix login' });
+    const button = await screen.findByRole('button', { name: 'Show details for Fix login' });
     expect(statValue('Measured CPU')).toHaveTextContent('Unavailable');
     expect(statValue('Measured memory')).toHaveTextContent('Unavailable');
     fireEvent.click(button);
@@ -533,7 +657,7 @@ describe('running sandbox inventory', () => {
       ]),
     );
     render(<AdminSandboxesPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Show stats for Fix login' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
     const stats = screen.getByRole('region', { name: 'Stats for Fix login' });
     expect(statValue('Terminals', stats)).toHaveTextContent('0 · Stale count');
     expect(statValue('Sample age', stats)).toHaveTextContent('Fresh');

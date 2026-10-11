@@ -366,6 +366,7 @@ class SessionSupervisorClient:
         *,
         generation: int,
         reason: str = "idle",
+        member_activation_generations: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Apply a group-fenced shared idle stop."""
         return self._shared_request(
@@ -376,6 +377,7 @@ class SessionSupervisorClient:
                 "generation": generation,
                 "activation_generation": 0,
                 "reason": reason,
+                "member_activation_generations": member_activation_generations,
             },
         )
 

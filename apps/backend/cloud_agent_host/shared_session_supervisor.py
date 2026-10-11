@@ -2159,6 +2159,7 @@ class SharedChatSessionSupervisor:
         *,
         generation: int,
         reason: Literal["idle", "orphaned_attempt", "lost", "unguarded"] = "idle",
+        member_activation_generations: dict[str, int] | None = None,
     ) -> SharedSessionDescriptor:
         """Close all member transports, then stop the group exactly once.
 
@@ -2171,6 +2172,13 @@ class SharedChatSessionSupervisor:
             group, requested = self._member(thread_id)
             if group.spec.generation != generation:
                 raise SessionLeaseLost("shared sandbox generation is stale")
+            if member_activation_generations is not None and any(
+                member_activation_generations.get(member.thread_id) != member.activation_generation
+                for member in group.members.values()
+            ):
+                raise SessionLeaseLost(
+                    "shared sandbox member activation changed after stop request"
+                )
             if group.stopping:
                 raise SessionBusy("shared sandbox group stop is already in progress")
             if reason == "idle" and not self._is_quiescent(group):

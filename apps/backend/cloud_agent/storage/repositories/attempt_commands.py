@@ -268,6 +268,19 @@ class PostgresAttemptCommands:
             if job_row is None:
                 return None
             job_id = job_row["id"]
+            thread_sandbox = load_json(job_row["thread_sandbox"])
+            if isinstance(thread_sandbox, dict):
+                # Serialize a retained claim with an administrative stop. A
+                # claim committed first is visible to the stop's busy check;
+                # a stop committed first leaves this job queued.
+                claimable = await conn.fetchval(
+                    "SELECT state IN ('provisioning', 'starting', 'running', 'stopped') "
+                    "AND stop_requested_at IS NULL FROM agent_sandboxes "
+                    "WHERE id = $1 FOR SHARE",
+                    thread_sandbox["sandbox_id"],
+                )
+                if not claimable:
+                    return None
             # The atomic half of the slot claim. Under READ COMMITTED two
             # claims hitting the same host row serialize and the loser
             # re-evaluates capacity against the winner's committed value.
@@ -291,7 +304,6 @@ class PostgresAttemptCommands:
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
                 job_id,
             )
-            thread_sandbox = load_json(job_row["thread_sandbox"])
             # A thread keeps the version it started on; see
             # ``resolve_runtime_version``. Read here, inside the claim, because
             # the answer must be the one the attempt is stamped with — the

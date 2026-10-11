@@ -154,6 +154,129 @@ async def test_valid_cursor_and_page_limit_are_forwarded(setup):
     queries.list_running.assert_awaited_once_with(cursor=parsed, limit=200)
 
 
+async def test_all_lifecycle_filter_and_cursor_are_scoped(setup):
+    app, queries, _ = setup
+    queries.list_sandboxes = AsyncMock(return_value=queries.list_running.return_value)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX, headers=ADMIN, params={"state": "all"})
+        mismatch = await client.get(
+            PREFIX,
+            headers=ADMIN,
+            params={
+                "state": "all",
+                "cursor": encode_cursor(SandboxCursor(scope=SANDBOX_CURSOR_SCOPE, after_id="one")),
+            },
+        )
+        invalid = await client.get(PREFIX, headers=ADMIN, params={"state": "deleted"})
+    assert response.status_code == 200
+    assert mismatch.status_code == invalid.status_code == 422
+    queries.list_sandboxes.assert_awaited_once_with(cursor=None, limit=100, state="all")
+
+
+async def test_detail_sanitizes_members_and_preserves_stopped_state(setup):
+    app, queries, _ = setup
+    row = sandbox() | {"state": "stopped", "generation": 3}
+    queries.detail = AsyncMock(
+        return_value={
+            "sandbox": row,
+            "members": [
+                {
+                    "thread_id": "athr_other",
+                    "user_id": "other-owner",
+                    "resident_slot_id": 0,
+                    "resident_state": "stopped",
+                    "context_status": "restored",
+                    "native_state": "ready",
+                    "created_at": START,
+                    "updated_at": END,
+                    "native_session_id": "PRIVATE session",
+                    "last_error": "PRIVATE diagnostic",
+                }
+            ],
+            "observed_at": END,
+        }
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["sandbox"]["state"] == "stopped"
+    assert response.json()["sandbox"]["generation"] == 3
+    assert "PRIVATE" not in response.text
+    queries.detail.return_value = None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        missing = await client.get(f"{PREFIX}/missing", headers=ADMIN)
+    assert missing.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/asbx_other", "/asbx_other/stop"])
+async def test_detail_and_control_require_current_admin_access(setup, path):
+    app, _, gateway = setup
+    gateway.permissions = ["agent.use"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id="admin"))
+        response = await client.request(
+            "POST" if path.endswith("stop") else "GET",
+            PREFIX + path,
+            json={
+                "generation": 1,
+                "container_id": "container-one",
+                "last_activity_at": END.isoformat(),
+            },
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("result", "status"),
+    [
+        ("accepted", 202),
+        ("not_found", 404),
+        ("stale", 409),
+        ("busy", 409),
+        ("not_running", 409),
+        ("terminals_open", 409),
+        ("activity_unknown", 409),
+    ],
+)
+async def test_reviewed_stop_passes_authenticated_actor_to_atomic_command(setup, result, status):
+    from cloud_agent.admin_sandboxes import AdminSandboxDetail
+
+    app, queries, _ = setup
+    queries.detail = AsyncMock(
+        return_value=AdminSandboxDetail(
+            sandbox=sandbox() | {"state": "stopping", "stop_requested_at": END},
+            members=[],
+            observed_at=END,
+        )
+    )
+    commands = SimpleNamespace(request_admin_stop=AsyncMock(return_value=result))
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        sandbox=commands, admin_sandboxes=queries
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{PREFIX}/asbx_other/stop",
+            headers=ADMIN,
+            json={
+                "generation": 1,
+                "container_id": "container-one",
+                "last_activity_at": END.isoformat(),
+            },
+        )
+    assert response.status_code == status
+    commands.request_admin_stop.assert_awaited_once_with(
+        sandbox_id="asbx_other",
+        generation=1,
+        container_id="container-one",
+        last_activity_at=END,
+        actor_id="admin-token",
+        admin_ip="127.0.0.1",
+    )
+    if result == "accepted":
+        assert response.json()["sandbox"]["state"] == "stopping"
+
+
 @pytest.mark.parametrize(
     "params",
     [
@@ -196,3 +319,5 @@ def test_sandboxes_are_only_on_the_main_listener():
     """Cross-user runtime metadata is never available to sandbox MCP clients."""
     assert PREFIX in create_app().openapi()["paths"]
     assert PREFIX not in create_mcp_app().openapi()["paths"]
+    assert PREFIX + "/{sandbox_id}" not in create_mcp_app().openapi()["paths"]
+    assert PREFIX + "/{sandbox_id}/stop" not in create_mcp_app().openapi()["paths"]

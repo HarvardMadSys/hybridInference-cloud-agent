@@ -1,11 +1,50 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getAdminSandboxes } from './adminSandboxes';
+import { getAdminSandbox, getAdminSandboxes, stopAdminSandbox } from './adminSandboxes';
 import * as client from './client';
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('admin sandbox inventory client', () => {
+  it('filters the complete inventory by lifecycle state', async () => {
+    const fetch = vi.spyOn(client, 'fetchWithAuth').mockResolvedValue(new Response('{}'));
+    await getAdminSandboxes({ state: 'all', limit: 200 });
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/sandboxes?limit=200&state=all');
+  });
+
+  it('reads member metadata with an encoded sandbox identity and abort support', async () => {
+    const response = { sandbox: { id: 'sandbox/one' }, members: [], observed_at: 'now' };
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockResolvedValue(new Response(JSON.stringify(response)));
+    const controller = new AbortController();
+    expect(await getAdminSandbox('sandbox/one', controller.signal)).toEqual(response);
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/sandboxes/sandbox%2Fone');
+    expect(fetch.mock.calls[0][2]).toEqual({ signal: controller.signal, cache: 'no-store' });
+  });
+
+  it('posts exactly the reviewed identity and activity fence to stop a sandbox', async () => {
+    const response = { sandbox: { state: 'stopping' }, members: [], observed_at: 'now' };
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockResolvedValue(new Response(JSON.stringify(response), { status: 202 }));
+    const reviewed = {
+      generation: 3,
+      container_id: 'container-one',
+      last_activity_at: '2026-10-10T09:59:00Z',
+    };
+    const controller = new AbortController();
+    expect(await stopAdminSandbox('sandbox/one', reviewed, controller.signal)).toEqual(response);
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/sandboxes/sandbox%2Fone/stop');
+    expect(fetch.mock.calls[0][2]).toEqual({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reviewed),
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+  });
+
   it('uses an admin-only uncached read with encoded pagination and abort support', async () => {
     const response = {
       sandboxes: [],

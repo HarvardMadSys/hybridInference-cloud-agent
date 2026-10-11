@@ -1,4 +1,4 @@
-"""Metadata-only inventory of running retained sandbox groups."""
+"""Metadata-only inventory and reviewed controls for retained sandbox groups."""
 
 from __future__ import annotations
 
@@ -12,6 +12,17 @@ from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 SANDBOX_CURSOR_SCOPE = cursor_scope(["sandboxes", "running"])
 RESOURCE_STALE_SECONDS = 90.0
+SandboxState = Literal[
+    "provisioning", "starting", "running", "stopping", "stopped", "stopped_dirty", "lost"
+]
+SandboxStateFilter = Literal[
+    "all", "provisioning", "starting", "running", "stopping", "stopped", "stopped_dirty", "lost"
+]
+
+
+def sandbox_cursor_scope(state: SandboxStateFilter) -> str:
+    """Bind continuation tokens to the exact lifecycle filter."""
+    return cursor_scope(["sandboxes", state])
 
 
 class AdminSandboxResourceUsage(BaseModel):
@@ -69,6 +80,7 @@ class AdminSandbox(BaseModel):
     """One container shared by its current chat members, including idle groups."""
 
     id: str
+    generation: int = Field(1, ge=1)
     origin_thread_id: str
     title: str | None = None
     repo: str
@@ -79,7 +91,8 @@ class AdminSandbox(BaseModel):
     runtime_id: str
     runtime_version: str | None = None
     execution_profile: str
-    state: Literal["running"] = "running"
+    state: SandboxState = "running"
+    stop_requested_at: datetime | None = None
     memory_limit: str
     cpu_limit: str
     member_count: int = Field(ge=0)
@@ -114,3 +127,37 @@ class SandboxCursor(BaseModel):
     version: Literal[1] = 1
     scope: str
     after_id: str = Field(min_length=1, max_length=256)
+
+
+class AdminSandboxMember(BaseModel):
+    """Bounded member identity and occupancy, without native session content."""
+
+    thread_id: str
+    title: str | None = None
+    user_id: str
+    resident_slot_id: int | None = None
+    resident_state: str
+    context_status: str
+    native_state: str
+    active_attempt_id: int | None = None
+    last_settled_job_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AdminSandboxDetail(BaseModel):
+    """A consistent sandbox inspection with at most 128 current members."""
+
+    sandbox: AdminSandbox
+    members: list[AdminSandboxMember] = Field(max_length=128)
+    observed_at: datetime
+
+
+class AdminSandboxStopRequest(BaseModel):
+    """The exact container and activity the administrator reviewed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    generation: int = Field(ge=1)
+    container_id: str = Field(min_length=1, max_length=256)
+    last_activity_at: datetime

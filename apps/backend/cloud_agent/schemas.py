@@ -2906,6 +2906,10 @@ class RetainedSandboxStop(BaseModel):
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
     shared_live: Literal[True] = True
+    member_activation_generations: (
+        dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
+        | None
+    ) = Field(None, max_length=128)
 
 
 class HostHeartbeatRequest(BaseModel):

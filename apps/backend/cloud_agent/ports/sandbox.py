@@ -9,11 +9,32 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class SandboxRepository(Protocol):
     """Port: retained sandbox groups and the members that live in them."""
+
+    async def request_admin_stop(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+    ) -> str:
+        """Queue a reviewed, quiescent container stop under its admission fence.
+
+        The host still checks its local terminals and operations before acting.
+        The database marker survives observations and excludes new admission
+        until Docker confirms the stop. No container or workspace is deleted.
+        """
+        ...
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.

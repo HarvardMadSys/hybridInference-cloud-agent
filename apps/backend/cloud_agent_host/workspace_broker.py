@@ -229,6 +229,10 @@ class SharedIdleStopRequest(BaseModel):
     # fence must still be able to name that exact container.
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
+    member_activation_generations: (
+        dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
+        | None
+    ) = Field(None, max_length=128)
 
 
 class SharedSandboxMemberRequest(BaseModel):
@@ -2182,6 +2186,7 @@ def create_app(
                 thread_id,
                 generation=body.generation,
                 reason=body.reason,
+                member_activation_generations=body.member_activation_generations,
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc

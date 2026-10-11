@@ -77,6 +77,247 @@ async def listing(db, *, cursor=None, limit=100):
     return await AdminSandboxQueries(db).list_running(cursor=cursor, limit=limit)
 
 
+async def stop_request(db, store, sandbox_id, **overrides):
+    """Stop precisely the metadata an administrator has just reviewed."""
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET terminal_count = 0, terminal_count_observed_at = NOW() "
+            "WHERE id = $1 AND terminal_count IS NULL",
+            sandbox_id,
+        )
+    return await store.sandbox.request_admin_stop(
+        **(
+            {
+                "sandbox_id": sandbox_id,
+                "generation": detail.sandbox.generation,
+                "container_id": detail.sandbox.container_id,
+                "last_activity_at": detail.sandbox.last_activity_at,
+                "actor_id": "admin:operator",
+                "admin_ip": "127.0.0.1",
+            }
+            | overrides
+        )
+    )
+
+
+async def test_all_states_and_detail_include_safe_current_members(db, store):
+    origin = await seed(db, store, "asbx_stopped", state="stopped")
+    await seed(db, store, "asbx_lost", state="lost")
+    await member(db, "asbx_stopped", origin, 0)
+    page = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=1, state="all")
+    assert page.total_count == 2 and page.next_cursor is not None
+    only_stopped = await store.admin_sandboxes.list_sandboxes(
+        cursor=None, limit=100, state="stopped"
+    )
+    assert [row.id for row in only_stopped.sandboxes] == ["asbx_stopped"]
+    detail = await store.admin_sandboxes.detail("asbx_stopped")
+    assert detail is not None and detail.sandbox.state == "stopped"
+    assert detail.members[0].thread_id == origin["thread_id"]
+    assert "PRIVATE" not in detail.model_dump_json()
+    assert await store.admin_sandboxes.detail("missing") is None
+
+
+async def test_admin_stop_survives_running_heartbeats_and_clears_on_confirmation(db, store):
+    origin = await seed(db, store, "asbx_stop")
+    await member(db, "asbx_stop", origin, 0)
+    assert await stop_request(db, store, "asbx_stop") == "accepted"
+    assert await stop_request(db, store, "asbx_stop") == "accepted"
+    assert not await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
+    observed = {
+        "thread_id": origin["thread_id"],
+        "host": "runner-one",
+        "sandbox_id": "asbx_stop",
+        "container_id": "container-asbx_stop",
+        "sandbox_generation": 1,
+    }
+    for _ in range(2):
+        assert (
+            await store.sandbox.reconcile_thread_sandbox_observation(
+                **observed,
+                running=True,
+                activity_active=False,
+                idle_remaining_seconds=1800,
+                terminal_count=0,
+            )
+            == "stopping"
+        )
+        command = await store.sandbox.due_thread_sandbox_stop(**observed)
+        assert command is not None and command["reason"] == "idle"
+        assert command["member_activation_generations"] == {origin["thread_id"]: 0}
+    detail = await store.admin_sandboxes.detail("asbx_stop")
+    assert detail is not None and detail.sandbox.stop_requested_at is not None
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observed,
+            running=False,
+            terminal_count=0,
+        )
+        == "stopped"
+    )
+    detail = await store.admin_sandboxes.detail("asbx_stop")
+    assert detail is not None and detail.sandbox.stop_requested_at is None
+    assert await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
+    async with db.acquire() as conn:
+        logs = await conn.fetch(
+            "SELECT * FROM agent_admin_audit_log WHERE action = 'agent.sandbox.stop'"
+        )
+    assert len(logs) == 1
+    assert logs[0]["actor_id"] == "admin:operator"
+    assert logs[0]["target_user_id"] == origin["user_id"]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("active_operation_count = 1", "busy"),
+        ("snapshot_state = 'pending'", "busy"),
+        ("snapshot_state = 'snapshotting'", "busy"),
+        ("snapshot_state = 'importing'", "busy"),
+        ("terminal_count = 1", "terminals_open"),
+        ("terminal_count_observed_at = NOW() - INTERVAL '2 minutes'", "activity_unknown"),
+        ("state = 'stopped'", "not_running"),
+    ],
+)
+async def test_stop_refuses_busy_or_unobservable_groups(db, store, change, reason):
+    await seed(db, store, "asbx_refuse")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET terminal_count=0, terminal_count_observed_at=NOW()"
+        )
+        await conn.execute(f"UPDATE agent_sandboxes SET {change} WHERE id='asbx_refuse'")
+    assert await stop_request(db, store, "asbx_refuse") == reason
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
+
+
+@pytest.mark.parametrize(
+    "fence", [{"generation": 2}, {"container_id": "replacement"}, {"last_activity_at": START}]
+)
+async def test_stop_rejects_stale_review(db, store, fence):
+    await seed(db, store, "asbx_stale")
+    assert await stop_request(db, store, "asbx_stale", **fence) == "stale"
+
+
+async def test_stop_audit_failure_rolls_back_intent(db, store):
+    await seed(db, store, "asbx_audit")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE agent_admin_audit_log ADD CONSTRAINT reject_stop_test "
+            "CHECK (action <> 'agent.sandbox.stop')"
+        )
+    try:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await stop_request(db, store, "asbx_audit")
+        detail = await store.admin_sandboxes.detail("asbx_audit")
+        assert detail is not None and detail.sandbox.state == "running"
+        assert detail.sandbox.stop_requested_at is None
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute("ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_stop_test")
+
+
+async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(db, store):
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-controlled", context_status="new"
+    )
+    assert await stop_request(db, store, sandbox["sandbox_id"]) == "busy"
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-control",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    # This test starts after the completed publication pipeline. Unfinished
+    # snapshots are a separate stop blocker and must not wake the group later.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandbox_snapshots SET state='failed' WHERE sandbox_id=$1",
+            sandbox["sandbox_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_sandboxes SET snapshot_state='quiescent' WHERE id=$1",
+            sandbox["sandbox_id"],
+        )
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="Resume after the administrator stop",
+    )
+    assert follow_up is not None
+    assert await stop_request(db, store, sandbox["sandbox_id"]) == "accepted"
+    claim_options = {
+        "worker_id": "admin-control",
+        "lease_ttl_seconds": 60,
+        "host": "shared-runner",
+        "host_credential_hash": "test-credential-hash",
+        "claim_attestation": _shared_claim_attestation(),
+    }
+    assert await _claim(store, **claim_options) is None
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            thread_id=job["thread_id"],
+            host="shared-runner",
+            sandbox_id=sandbox["sandbox_id"],
+            container_id="container-controlled",
+            sandbox_generation=sandbox["generation"],
+            running=False,
+            terminal_count=0,
+        )
+        == "stopped"
+    )
+    resumed = await _claim(store, **claim_options)
+    assert resumed is not None and resumed["id"] == follow_up["id"]
+    # Claim has committed before reservation: the membership still has no
+    # active_attempt_id, but it is already too late to accept a stop.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state='running' WHERE id=$1", sandbox["sandbox_id"]
+        )
+    assert await stop_request(db, store, sandbox["sandbox_id"]) == "busy"
+    reserve = {
+        key: sandbox[key]
+        for key in (
+            "sandbox_id",
+            "container_name",
+            "runtime_id",
+            "runtime_version",
+            "sandbox_image_digest",
+            "execution_profile",
+            "host",
+        )
+    }
+    reserved = await store.sandbox.reserve_thread_sandbox(
+        **reserve,
+        thread_id=job["thread_id"],
+        attempt_id=resumed["attempt_id"],
+        lease_generation=resumed["lease_generation"],
+    )
+    assert (
+        reserved is not None
+        and reserved["activation_generation"] > sandbox["activation_generation"]
+    )
+
+
 async def test_running_idle_groups_include_all_owners_and_missing_hosts(db, store):
     idle = await seed(db, store, "asbx_idle", host="forgotten-host", user_id="owner-one")
     busy = await seed(db, store, "asbx_busy", host="known-host", user_id="owner-two")

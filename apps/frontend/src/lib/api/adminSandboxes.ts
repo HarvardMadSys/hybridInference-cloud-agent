@@ -37,7 +37,9 @@ export interface AdminSandbox {
   runtime_id: string;
   runtime_version: string | null;
   execution_profile: string;
-  state: 'running';
+  state: AdminSandboxState;
+  generation?: number;
+  stop_requested_at?: string | null;
   memory_limit: string;
   cpu_limit: string;
   member_count: number;
@@ -55,6 +57,41 @@ export interface AdminSandbox {
   host_last_heartbeat_at: string | null;
 }
 
+export type AdminSandboxState =
+  | 'provisioning'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'stopped'
+  | 'stopped_dirty'
+  | 'lost';
+
+export interface AdminSandboxMember {
+  thread_id: string;
+  title: string | null;
+  user_id: string;
+  resident_slot_id: number | null;
+  resident_state: string | null;
+  context_status: string | null;
+  native_state: string | null;
+  active_attempt_id: number | null;
+  last_settled_job_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminSandboxDetail {
+  sandbox: AdminSandbox;
+  members: AdminSandboxMember[];
+  observed_at: string;
+}
+
+export interface AdminSandboxStopRequest {
+  generation: number;
+  container_id: string;
+  last_activity_at: string;
+}
+
 export interface AdminSandboxesPage {
   sandboxes: AdminSandbox[];
   next_cursor: string | null;
@@ -63,15 +100,44 @@ export interface AdminSandboxesPage {
 }
 
 export function getAdminSandboxes(
-  filters: { cursor?: string; limit?: number } = {},
+  filters: { cursor?: string; limit?: number; state?: AdminSandboxState | 'all' } = {},
   signal?: AbortSignal,
 ): Promise<AdminSandboxesPage> {
   const params = new URLSearchParams();
   if (filters.cursor) params.set('cursor', filters.cursor);
   if (filters.limit !== undefined) params.set('limit', String(filters.limit));
+  if (filters.state) params.set('state', filters.state);
   const query = params.size ? `?${params}` : '';
   return fetchWithAuth(config.apiBase, `/admin/agent/sandboxes${query}`, {
     signal,
     cache: 'no-store',
   }).then(jsonOrThrow<AdminSandboxesPage>);
+}
+
+export function getAdminSandbox(
+  sandboxId: string,
+  signal?: AbortSignal,
+): Promise<AdminSandboxDetail> {
+  return fetchWithAuth(config.apiBase, `/admin/agent/sandboxes/${encodeURIComponent(sandboxId)}`, {
+    signal,
+    cache: 'no-store',
+  }).then(jsonOrThrow<AdminSandboxDetail>);
+}
+
+export function stopAdminSandbox(
+  sandboxId: string,
+  reviewed: AdminSandboxStopRequest,
+  signal?: AbortSignal,
+): Promise<AdminSandboxDetail> {
+  return fetchWithAuth(
+    config.apiBase,
+    `/admin/agent/sandboxes/${encodeURIComponent(sandboxId)}/stop`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reviewed),
+      signal,
+      cache: 'no-store',
+    },
+  ).then(jsonOrThrow<AdminSandboxDetail>);
 }

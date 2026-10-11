@@ -31,6 +31,14 @@ function entry(action: string, details: Record<string, unknown> | null = null): 
 }
 
 describe('describeAuditEntry', () => {
+  it('describes a sandbox stop as a request, before the host confirms the result', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox.stop', { sandbox_id: 'sandbox-one', host: 'host-one' }),
+      ),
+    ).toBe('Requested stopping sandbox sandbox-one on host-one');
+  });
+
   it('says what a settings change was, in units, and what it replaced', () => {
     const global = entry('agent.host_settings.set', {
       changes: { agent_timeout_s: 7200 },

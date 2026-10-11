@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -21,6 +21,7 @@ import {
   summarizeSandboxes,
   type SandboxObservation,
 } from './present';
+import { SandboxManagement } from './SandboxManagement';
 
 const REFRESH_MS = 30_000;
 const STALE_HEARTBEAT_MS = 90_000;
@@ -56,7 +57,18 @@ function SandboxesView() {
   const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [stateFilter, setStateFilter] = useState<'running' | 'all'>('running');
   const [nowMs, setNowMs] = useState(() => performance.now());
+  const denyAccess = useCallback(() => {
+    setSnapshot(null);
+    setDenied(true);
+  }, []);
+  const refresh = useCallback(() => setRevision((value) => value + 1), []);
+  const stopped = useCallback(() => {
+    // Keep pending and confirmed stops visible while the host applies them.
+    setStateFilter('all');
+    setRevision((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => setNowMs(performance.now()), 1_000);
@@ -64,12 +76,13 @@ function SandboxesView() {
   }, []);
 
   useEffect(() => {
+    if (denied) return;
     let disposed = false;
-    let denied = false;
+    let accessRevoked = false;
     let request: AbortController | null = null;
 
     async function load() {
-      if (request || denied || disposed) return;
+      if (request || accessRevoked || disposed) return;
       const controller = new AbortController();
       request = controller;
       setLoading(true);
@@ -84,7 +97,11 @@ function SandboxesView() {
         let appliedAtMs = 0;
         do {
           const page = await getAdminSandboxes(
-            { limit: 200, ...(cursor ? { cursor } : {}) },
+            {
+              limit: 200,
+              ...(stateFilter === 'all' ? { state: 'all' } : {}),
+              ...(cursor ? { cursor } : {}),
+            },
             controller.signal,
           );
           if (controller.signal.aborted || disposed) return;
@@ -110,7 +127,7 @@ function SandboxesView() {
       } catch (e) {
         if (controller.signal.aborted || disposed) return;
         if (accessDenied(e)) {
-          denied = true;
+          accessRevoked = true;
           setSnapshot(null);
           setDenied(true);
         } else setError(getErrorMessage(e));
@@ -127,7 +144,7 @@ function SandboxesView() {
       clearInterval(timer);
       request?.abort();
     };
-  }, [revision]);
+  }, [revision, stateFilter, denied]);
 
   if (denied) return <AdminRequired />;
   return (
@@ -139,24 +156,38 @@ function SandboxesView() {
         <AdminNavigation current="sandboxes" />
         <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">
-            Running sandboxes
+            {stateFilter === 'running' ? 'Running sandboxes' : 'All sandboxes'}{' '}
             {snapshot && (
               <span className="ml-2 text-sm font-normal tabular-nums text-gray-500 dark:text-gray-400">
                 ({snapshot.sandboxes.length})
               </span>
             )}
           </h2>
-          <button
-            type="button"
-            className={BUTTON}
-            disabled={loading}
-            onClick={() => setRevision((value) => value + 1)}
-          >
-            Refresh
-          </button>
+          <div className="flex items-center gap-3">
+            <label className="text-sm text-gray-500 dark:text-gray-400">
+              State
+              <select
+                aria-label="Sandbox state"
+                value={stateFilter}
+                className="ml-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+                onChange={(event) => {
+                  setSnapshot(null);
+                  setLoading(true);
+                  setStateFilter(event.target.value as 'running' | 'all');
+                }}
+              >
+                <option value="running">Running</option>
+                <option value="all">All states</option>
+              </select>
+            </label>
+            <button type="button" className={BUTTON} disabled={loading} onClick={refresh}>
+              Refresh
+            </button>
+          </div>
         </div>
         <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-          Includes idle containers retained between turns. Refreshes every 30 seconds.
+          Includes idle containers retained between turns. Choose All states to inspect stopped or
+          lost sandboxes. Refreshes every 30 seconds.
         </p>
         {snapshot && (
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -171,18 +202,28 @@ function SandboxesView() {
         )}
         {loading && (
           <p role="status" className="mt-4 text-sm text-gray-500 dark:text-gray-400">
-            {snapshot ? 'Refreshing running sandboxes…' : 'Loading running sandboxes…'}
+            {snapshot ? 'Refreshing' : 'Loading'}{' '}
+            {stateFilter === 'running' ? 'running sandboxes…' : 'sandboxes…'}
           </p>
         )}
-        {snapshot && <FleetSummary sandboxes={snapshot.sandboxes} nowMs={nowMs} />}
+        {snapshot && (
+          <FleetSummary
+            sandboxes={snapshot.sandboxes.filter(({ sandbox }) => sandbox.state === 'running')}
+            nowMs={nowMs}
+          />
+        )}
         {snapshot &&
           (snapshot.sandboxes.length === 0 ? (
-            <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">No running sandboxes.</p>
+            <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
+              {stateFilter === 'running' ? 'No running sandboxes.' : 'No sandboxes.'}
+            </p>
           ) : (
             <SandboxesTable
               sandboxes={snapshot.sandboxes}
               now={Date.parse(snapshot.observedAt) + Math.max(0, nowMs - snapshot.appliedAtMs)}
               nowMs={nowMs}
+              onDenied={denyAccess}
+              onChanged={stopped}
             />
           ))}
       </section>
@@ -237,15 +278,19 @@ function SandboxesTable({
   sandboxes,
   now,
   nowMs,
+  onDenied,
+  onChanged,
 }: {
   sandboxes: SandboxObservation[];
   now: number;
   nowMs: number;
+  onDenied: () => void;
+  onChanged: () => void;
 }) {
   return (
     <div className="mt-4 overflow-x-auto">
       <table className="w-full min-w-[950px] text-left text-sm">
-        <caption className="sr-only">All running sandboxes across users and hosts</caption>
+        <caption className="sr-only">Sandboxes across users and hosts</caption>
         <thead className="text-xs text-gray-500 dark:text-gray-400">
           <tr className="border-b border-gray-100 dark:border-white/5">
             {[
@@ -272,6 +317,8 @@ function SandboxesTable({
               observation={observation}
               now={now}
               nowMs={nowMs}
+              onDenied={onDenied}
+              onChanged={onChanged}
             />
           ))}
         </tbody>
@@ -284,10 +331,14 @@ function SandboxRow({
   observation,
   now,
   nowMs,
+  onDenied,
+  onChanged,
 }: {
   observation: SandboxObservation;
   now: number;
   nowMs: number;
+  onDenied: () => void;
+  onChanged: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const { sandbox, observedAtMs } = observation;
@@ -348,7 +399,11 @@ function SandboxRow({
                 : 'text-gray-500 dark:text-gray-400'
             }
           >
-            {sandbox.active_attempt_count > 0 ? 'Executing' : 'Retained'}
+            {sandbox.state !== 'running'
+              ? sandbox.state.replaceAll('_', ' ')
+              : sandbox.active_attempt_count > 0
+                ? 'Executing'
+                : 'Retained'}
           </span>
           {sandbox.active_attempt_count > 0 && (
             <span className="mt-1 block tabular-nums text-gray-500 dark:text-gray-400">
@@ -412,7 +467,7 @@ function SandboxRow({
             type="button"
             aria-expanded={expanded}
             aria-controls={detailId}
-            aria-label={`${expanded ? 'Hide' : 'Show'} stats for ${name}`}
+            aria-label={`${expanded ? 'Hide' : 'Show'} details for ${name}`}
             className={BUTTON}
             onClick={() => setExpanded((value) => !value)}
           >
@@ -423,7 +478,20 @@ function SandboxRow({
       {expanded && (
         <tr>
           <td colSpan={9} className="bg-gray-50 px-4 py-4 dark:bg-gray-900/60">
-            <SandboxDetails id={detailId} observation={observation} now={now} nowMs={nowMs} />
+            <div id={detailId}>
+              <SandboxDetails
+                id={`${detailId}-resources`}
+                observation={observation}
+                now={now}
+                nowMs={nowMs}
+              />
+              <SandboxManagement
+                sandboxId={sandbox.id}
+                nowMs={nowMs}
+                onDenied={onDenied}
+                onChanged={onChanged}
+              />
+            </div>
           </td>
         </tr>
       )}

@@ -1460,6 +1460,28 @@ def test_idle_stop_releases_networks_after_docker_already_stopped_the_container(
     assert manager.items[spec.container_name].networks == ()
 
 
+@pytest.mark.parametrize("generations", [{"athr_source": 0}, {"athr_source": 1, "athr_peer": 0}])
+def test_delayed_admin_stop_cannot_stop_changed_members(generations):
+    manager = _Manager()
+    spec = _spec()
+    manager.create(spec)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members(), expected_container_id="container-shared")
+    with pytest.raises(SessionLeaseLost, match="activation changed"):
+        supervisor.stop_if_idle(
+            "athr_source",
+            generation=1,
+            member_activation_generations=generations,
+        )
+    assert manager.stop_count == 0
+    stopped = supervisor.stop_if_idle(
+        "athr_source",
+        generation=1,
+        member_activation_generations={"athr_source": 0, "athr_peer": 0},
+    )
+    assert not stopped.running
+
+
 def test_new_activation_waits_for_an_inflight_idle_stop_then_restarts_exact_container():
     class BlockingStopManager(_Manager):
         def __init__(self) -> None:

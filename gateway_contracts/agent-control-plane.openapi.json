@@ -1532,6 +1532,12 @@
             "title": "Execution Profile",
             "type": "string"
           },
+          "generation": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
           "host": {
             "title": "Host",
             "type": "string"
@@ -1623,10 +1629,30 @@
             "type": "string"
           },
           "state": {
-            "const": "running",
             "default": "running",
+            "enum": [
+              "provisioning",
+              "starting",
+              "running",
+              "stopping",
+              "stopped",
+              "stopped_dirty",
+              "lost"
+            ],
             "title": "State",
             "type": "string"
+          },
+          "stop_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Requested At"
           },
           "terminal_count": {
             "anyOf": [
@@ -1693,6 +1719,34 @@
         "title": "AdminSandbox",
         "type": "object"
       },
+      "AdminSandboxDetail": {
+        "description": "A consistent sandbox inspection with at most 128 current members.",
+        "properties": {
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandboxMember"
+            },
+            "maxItems": 128,
+            "title": "Members",
+            "type": "array"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/AdminSandbox"
+          }
+        },
+        "required": [
+          "sandbox",
+          "members",
+          "observed_at"
+        ],
+        "title": "AdminSandboxDetail",
+        "type": "object"
+      },
       "AdminSandboxList": {
         "description": "A bounded page of the current inventory, ordered by sandbox identity.",
         "properties": {
@@ -1731,6 +1785,96 @@
           "observed_at"
         ],
         "title": "AdminSandboxList",
+        "type": "object"
+      },
+      "AdminSandboxMember": {
+        "description": "Bounded member identity and occupancy, without native session content.",
+        "properties": {
+          "active_attempt_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Attempt Id"
+          },
+          "context_status": {
+            "title": "Context Status",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "last_settled_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Settled Job Id"
+          },
+          "native_state": {
+            "title": "Native State",
+            "type": "string"
+          },
+          "resident_slot_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resident Slot Id"
+          },
+          "resident_state": {
+            "title": "Resident State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "user_id",
+          "resident_state",
+          "context_status",
+          "native_state",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AdminSandboxMember",
         "type": "object"
       },
       "AdminSandboxResourceUsage": {
@@ -1923,6 +2067,35 @@
           "stale"
         ],
         "title": "AdminSandboxResourceUsage",
+        "type": "object"
+      },
+      "AdminSandboxStopRequest": {
+        "additionalProperties": false,
+        "description": "The exact container and activity the administrator reviewed.",
+        "properties": {
+          "container_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Container Id",
+            "type": "string"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "container_id",
+          "last_activity_at"
+        ],
+        "title": "AdminSandboxStopRequest",
         "type": "object"
       },
       "AdminStep": {
@@ -11027,6 +11200,26 @@
             "title": "Generation",
             "type": "integer"
           },
+          "member_activation_generations": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                "maxProperties": 128,
+                "propertyNames": {
+                  "maxLength": 256,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Activation Generations"
+          },
           "reason": {
             "default": "idle",
             "enum": [
@@ -18880,7 +19073,7 @@
     },
     "/admin/agent/sandboxes": {
       "get": {
-        "description": "List running containers, including retained groups between active turns.",
+        "description": "List lifecycle metadata, defaulting to retained running containers.",
         "operationId": "list_admin_sandboxes_admin_agent_sandboxes_get",
         "parameters": [
           {
@@ -18910,6 +19103,26 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": "running",
+              "enum": [
+                "all",
+                "provisioning",
+                "starting",
+                "running",
+                "stopping",
+                "stopped",
+                "stopped_dirty",
+                "lost"
+              ],
+              "title": "State",
+              "type": "string"
             }
           },
           {
@@ -18952,6 +19165,128 @@
           }
         },
         "summary": "List Admin Sandboxes"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}": {
+      "get": {
+        "description": "Inspect safe container metadata and its current member identities.",
+        "operationId": "get_admin_sandbox_admin_agent_sandboxes__sandbox_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/stop": {
+      "post": {
+        "description": "Request a fenced idle stop; the owning host confirms it asynchronously.",
+        "operationId": "stop_admin_sandbox_admin_agent_sandboxes__sandbox_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxStopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Admin Sandbox"
       }
     },
     "/admin/agent/server-preflights": {

@@ -1617,7 +1617,10 @@ async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency
     assert store.sandbox_observations == []
 
 
-async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residency_client):
+@pytest.mark.parametrize("member_generations", [None, {"athr_1": 8}])
+async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
+    residency_client, member_generations
+):
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
@@ -1625,6 +1628,7 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residenc
         "generation": 3,
         "activation_generation": 8,
         "reason": "idle",
+        "member_activation_generations": member_generations,
     }
 
     response = await client.post(
@@ -1680,7 +1684,7 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
 
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": True}
+        {**store.sandbox_stop_due, "shared_live": True, "member_activation_generations": None}
     ]
 
 
