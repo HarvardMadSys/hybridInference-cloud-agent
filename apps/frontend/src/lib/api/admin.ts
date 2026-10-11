@@ -541,7 +541,7 @@ export async function removeAgentRunnerHost(
 }
 
 /** What an Audit log entry is about; the page filters by it. */
-export type AdminAuditCategory = 'settings' | 'servers' | 'measurements' | 'content';
+export type AdminAuditCategory = 'settings' | 'servers' | 'measurements' | 'content' | 'database';
 
 /** One recorded admin action (`GET /admin/agent/audit-log`). */
 export interface AdminAuditLogEntry {

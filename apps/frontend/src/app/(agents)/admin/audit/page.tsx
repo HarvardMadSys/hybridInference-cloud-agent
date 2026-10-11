@@ -29,6 +29,7 @@ const FILTERS: { key: AdminAuditCategory | null; label: string }[] = [
   { key: 'servers', label: 'Servers' },
   { key: 'measurements', label: 'Measurements' },
   { key: 'content', label: 'Content views' },
+  { key: 'database', label: 'Database' },
 ];
 
 export default function AdminAuditLogPage() {

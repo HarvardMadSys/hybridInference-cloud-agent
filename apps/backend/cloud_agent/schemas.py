@@ -2640,7 +2640,7 @@ class AdminAuditLogEntry(BaseModel):
 
     id: int
     action: str = Field(description="Dotted action name, e.g. ``agent.runner_host.drain``.")
-    category: Literal["settings", "servers", "measurements", "content"] | None = Field(
+    category: Literal["settings", "servers", "measurements", "content", "database"] | None = Field(
         None,
         description="The Audit log filter this action falls under, or null for none.",
     )

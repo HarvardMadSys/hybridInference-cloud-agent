@@ -166,6 +166,18 @@ async def test_a_bad_filter_or_page_size_is_refused(audit_api) -> None:
 
 
 @pytest.mark.asyncio
+async def test_database_reads_have_a_dedicated_audit_filter(audit_api) -> None:
+    client, trail, _ = audit_api
+    trail.rows = [_row(2, "agent.database.query"), _row(1, "agent.database.pgadmin.open")]
+
+    response = await client.get("/admin/agent/audit-log?category=database", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert trail.calls[0]["actions"] == ("agent.database.",)
+    assert [entry["category"] for entry in response.json()["entries"]] == ["database", "database"]
+
+
+@pytest.mark.asyncio
 async def test_without_a_database_the_route_says_so(audit_api) -> None:
     client, _, app = audit_api
     app.state.storage = None

@@ -39,6 +39,14 @@ describe('describeAuditEntry', () => {
     ).toBe('Requested stopping sandbox sandbox-one on host-one');
   });
 
+  it('describes database reads using their table without exposing filter values', () => {
+    expect(describeAuditEntry(entry('agent.database.query', { table: 'agent_jobs' }))).toBe(
+      'Queried database table agent_jobs',
+    );
+    expect(describeAuditEntry(entry('agent.database.query'))).toBe('Queried the database');
+    expect(describeAuditEntry(entry('agent.database.pgadmin.open'))).toBe('Opened pgAdmin');
+  });
+
   it('says what a settings change was, in units, and what it replaced', () => {
     const global = entry('agent.host_settings.set', {
       changes: { agent_timeout_s: 7200 },

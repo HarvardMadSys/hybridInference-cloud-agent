@@ -22,7 +22,7 @@ from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
 from cloud_agent.ports import AuditLogQueries  # noqa: TC001 — FastAPI resolves this at runtime.
 from cloud_agent.schemas import AdminAuditLogEntry, AdminAuditLogResponse
 
-AuditCategory = Literal["settings", "servers", "measurements", "content"]
+AuditCategory = Literal["settings", "servers", "measurements", "content", "database"]
 
 #: The Audit log's filters and the actions each covers. A name ending in ``.``
 #: is a prefix; any other is one exact action. ``settings`` comes first: a
@@ -39,6 +39,7 @@ AUDIT_CATEGORIES: dict[AuditCategory, tuple[str, ...]] = {
     "servers": ("agent.runner_host.", "agent.compute.", "agent.sandbox."),
     "measurements": ("agent.profiling.",),
     "content": ("agent.run.event_content.",),
+    "database": ("agent.database.",),
 }
 
 #: Reads the Servers page polls, recorded as actions before this release. They

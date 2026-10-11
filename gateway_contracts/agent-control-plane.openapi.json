@@ -404,7 +404,8 @@
                   "settings",
                   "servers",
                   "measurements",
-                  "content"
+                  "content",
+                  "database"
                 ],
                 "type": "string"
               },
@@ -8276,6 +8277,239 @@
         "title": "CreateUpload",
         "type": "object"
       },
+      "DatabaseColumn": {
+        "description": "One reviewed scalar column that exists in the current schema.",
+        "properties": {
+          "data_type": {
+            "title": "Data Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nullable": {
+            "title": "Nullable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "data_type",
+          "nullable"
+        ],
+        "title": "DatabaseColumn",
+        "type": "object"
+      },
+      "DatabaseFilter": {
+        "additionalProperties": false,
+        "description": "A structured comparison; a filter never contains SQL.",
+        "properties": {
+          "column": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Column",
+            "type": "string"
+          },
+          "operator": {
+            "enum": [
+              "eq",
+              "ne",
+              "contains",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "is_null",
+              "is_not_null"
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "column",
+          "operator"
+        ],
+        "title": "DatabaseFilter",
+        "type": "object"
+      },
+      "DatabaseQuery": {
+        "additionalProperties": false,
+        "description": "A bounded read of one reviewed table with AND-combined filters.",
+        "properties": {
+          "filters": {
+            "items": {
+              "$ref": "#/components/schemas/DatabaseFilter"
+            },
+            "maxItems": 12,
+            "title": "Filters",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 100000.0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "order_by": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order By"
+          },
+          "order_direction": {
+            "default": "asc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Order Direction",
+            "type": "string"
+          },
+          "table": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Table",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "title": "DatabaseQuery",
+        "type": "object"
+      },
+      "DatabaseQueryResult": {
+        "description": "Column-aligned scalar values; large integers retain exact precision.",
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "elapsed_ms": {
+            "title": "Elapsed Ms",
+            "type": "number"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "table": {
+            "title": "Table",
+            "type": "string"
+          },
+          "text_limit": {
+            "title": "Text Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "table",
+          "columns",
+          "rows",
+          "limit",
+          "offset",
+          "has_more",
+          "elapsed_ms",
+          "text_limit"
+        ],
+        "title": "DatabaseQueryResult",
+        "type": "object"
+      },
+      "DatabaseTable": {
+        "description": "The safe schema of one table, including its deterministic row key.",
+        "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/DatabaseColumn"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "primary_key": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Primary Key",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "columns",
+          "primary_key"
+        ],
+        "title": "DatabaseTable",
+        "type": "object"
+      },
+      "DatabaseTables": {
+        "description": "Available reviewed base tables in the Agent database.",
+        "properties": {
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/DatabaseTable"
+            },
+            "title": "Tables",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tables"
+        ],
+        "title": "DatabaseTables",
+        "type": "object"
+      },
       "DatabaseTools": {
         "description": "Whether the configured pgAdmin is reachable, and where to open it.",
         "properties": {
@@ -15750,7 +15984,8 @@
                     "settings",
                     "servers",
                     "measurements",
-                    "content"
+                    "content",
+                    "database"
                   ],
                   "type": "string"
                 },
@@ -17538,6 +17773,116 @@
         "summary": "Setup Pgadmin",
         "tags": [
           "admin-database"
+        ]
+      }
+    },
+    "/admin/agent/database/query": {
+      "post": {
+        "description": "Read a bounded projection and audit identifiers and outcome only.",
+        "operationId": "query_database_table_admin_agent_database_query_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatabaseQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseQueryResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query Database Table",
+        "tags": [
+          "admin-database-browser"
+        ]
+      }
+    },
+    "/admin/agent/database/tables": {
+      "get": {
+        "description": "Return reviewed public-table metadata, never unrestricted schema data.",
+        "operationId": "list_database_tables_admin_agent_database_tables_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseTables"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Database Tables",
+        "tags": [
+          "admin-database-browser"
         ]
       }
     },

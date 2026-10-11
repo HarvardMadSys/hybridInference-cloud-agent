@@ -59,6 +59,7 @@ function settingChanges(
  * changes and the lease policy are applied before they are recorded.
  */
 const FIXED: Record<string, string> = {
+  'agent.database.pgadmin.open': 'Opened pgAdmin',
   'agent.compute.connection.create': 'Added a server connection',
   'agent.compute.connection.update': 'Updated a server connection',
   'agent.compute.connection.validate': 'Checked a server connection',
@@ -123,6 +124,10 @@ type Sentence = (details: Details, host: string, definitions: HostSettingDefinit
 
 /** The actions whose sentence depends on what was recorded with them. */
 const SENTENCES: Record<string, Sentence> = {
+  'agent.database.query': (details) => {
+    const table = text(details.table);
+    return table ? `Queried database table ${table}` : 'Queried the database';
+  },
   'agent.host_settings.set': (details, _host, definitions) => {
     const lines = settingChanges(details, definitions, {
       where: 'for all servers',

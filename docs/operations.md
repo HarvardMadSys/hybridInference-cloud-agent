@@ -24,6 +24,7 @@ Start with the task you need:
 | Enable isolation for untrusted repositories | [Provisioning Kata](#provisioning-kata-on-a-runner-host) |
 | Change application behavior, integrations, or appearance | [Admin Settings](#admin-settings) |
 | Open PostgreSQL administration | [pgAdmin](#pgadmin) |
+| Browse and filter database rows | [Database browser](#database-browser) |
 | Change concurrency, sandbox settings, or placement | [How many runners](#how-many-runners), [which machine runs the jobs](#which-machine-runs-the-jobs) |
 | Add a host on another machine | [Tunnels and broker routing](#running-runners-on-another-machine) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
@@ -105,6 +106,26 @@ host provisioning, networking/listeners, actual host isolation,
 build routing, mounted files, and trusted compute
 deployment profiles remain deployment configuration. These bootstrap names
 appear on the page with hidden values. See [the environment inventory](../ENVIRONMENT.md#settings-and-bootstrap-configuration).
+
+## Database browser
+
+Open **Admin → Database** to inspect the Agent database directly in the dashboard.
+Select a table, inspect its columns and types, add filters, choose a sort column
+and page size, then select **Run query**. Previous and next controls page through
+the results. Filters are combined with AND; the Contains filter matches a literal
+case-insensitive substring. The browser uses the control plane's existing
+database connection and works without enabling pgAdmin.
+
+The built-in browser exposes reviewed metadata columns from Agent tables. Stored
+credentials, raw user content, and opaque configuration documents are omitted.
+It supports read-only queries with parameterized filters, stable ordering,
+bounded results, and a statement timeout. Each request checks current
+`agent.admin` permission. Query outcomes appear under **Audit log → Database**;
+the trail records query metadata without filter values or returned data.
+
+The API is `GET /admin/agent/database/tables` for the visible schema and
+`POST /admin/agent/database/query` for filtered rows. Database writes and arbitrary
+SQL remain available through the separately configured pgAdmin service below.
 
 ## pgAdmin
 

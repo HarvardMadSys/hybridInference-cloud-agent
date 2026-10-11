@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 #: The admin observation reads. Their bodies are time-varying and describe
 #: other users' runs, so no intermediary may store one.
 ADMIN_READ_PREFIXES = (
+    "/admin/agent/database",
     "/admin/agent/database-tools",
     "/admin/agent/pgadmin",
     "/admin/agent/audit-log",
@@ -67,12 +68,14 @@ def install_admin_no_store(
     async def with_no_store(request: Request, exc: Exception) -> Response:
         response: Response
         if isinstance(exc, RequestValidationError):
-            if request.url.path.rstrip("/") in {
+            path = request.url.path.rstrip("/")
+            if path in {
                 "/admin/agent/settings",
                 "/admin/agent/database-tools/setup",
-            }:
-                # Validation errors normally echo invalid input. Settings and
-                # pgAdmin setup can contain credentials, even in a malformed body.
+            } or path.startswith("/admin/agent/database/"):
+                # Validation errors normally echo invalid input. Settings,
+                # pgAdmin setup and query filters can contain credentials,
+                # even when the request body is malformed.
                 response = JSONResponse(
                     status_code=422,
                     content={
@@ -126,6 +129,7 @@ def create_app() -> FastAPI:
         admin_compute,
         admin_conversations,
         admin_database,
+        admin_database_browser,
         admin_hosts,
         admin_llm_requests,
         admin_measurements,
@@ -177,6 +181,7 @@ def create_app() -> FastAPI:
     app.include_router(compute_registration.router)
     app.include_router(admin_conversations.router)
     app.include_router(admin_database.router)
+    app.include_router(admin_database_browser.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_sandboxes.router)
     app.include_router(admin_settings.router)
