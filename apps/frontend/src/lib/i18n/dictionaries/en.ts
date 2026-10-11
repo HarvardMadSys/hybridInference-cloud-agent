@@ -10,6 +10,17 @@
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  'rewrite.button': 'Rewrite prompt',
+  'rewrite.clarify': 'Ask clarification questions first',
+  'rewrite.questionsTitle': 'Add a few details',
+  'rewrite.questionsHint': 'Answer these questions to create a more complete prompt.',
+  'rewrite.generate': 'Generate prompt',
+  'rewrite.generating': 'Rewriting…',
+  'rewrite.asking': 'Preparing questions…',
+  'rewrite.cancel': 'Cancel',
+  'rewrite.error': 'Could not rewrite your prompt. Please try again.',
+  'rewrite.invalidResponse': 'The rewrite response was incomplete. Please try again.',
+  'rewrite.applied': 'Prompt rewritten. Review it before sending.',
   'deployment.version': 'Version',
   'deployment.date': 'Deployed',
   'deployment.unavailable': 'Not available',

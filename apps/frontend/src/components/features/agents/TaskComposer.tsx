@@ -21,6 +21,7 @@ import { Picker } from './Picker';
 import { RepositoryPicker } from './RepositoryPicker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
@@ -92,6 +93,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [effort, setEffort] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [rewriting, setRewriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
@@ -273,7 +275,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
-  const busy = submitting || goalCommand.busy;
+  const busy = submitting || goalCommand.busy || rewriting;
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
     config?.github_connected === true &&
@@ -605,6 +607,19 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           />
         )}
 
+        {!disconnected && (
+          <PromptRewrite
+            value={task}
+            model={model}
+            disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
+            onActiveChange={setRewriting}
+            onApply={(prompt) => {
+              setTask(prompt);
+              taskBox.current?.focus();
+            }}
+          />
+        )}
+
         <div className="border-t border-gray-100 dark:border-white/5">
           <div className="flex flex-wrap items-center gap-1.5 px-3 py-2.5 sm:px-4">
             {disconnected ? (
@@ -708,7 +723,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
               }`}
             >
-              {busy ? t('composer.starting') : t('composer.run')}
+              {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
               <svg
                 aria-hidden="true"
                 className="h-3.5 w-3.5"

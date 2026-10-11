@@ -11,6 +11,9 @@ import {
   listRepoBranches,
 } from '@/lib/api/agents';
 import type { AgentConfigApi, AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
+import { rewritePrompt } from '@/lib/api/promptRewrite';
+
+vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 
 import { FirstRunProvider } from './firstRun';
 import { requestGitHubAccess } from './githubReturn';
@@ -197,6 +200,50 @@ describe('TaskComposer source-control onboarding', () => {
   });
 
   afterEach(() => cleanup());
+
+  it('rewrites the draft for review before creating a task', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'rewritten-task' } as never);
+    vi.mocked(rewritePrompt).mockResolvedValue({
+      kind: 'prompt',
+      prompt: 'Add CSV export with accessible controls and clear error feedback.',
+    });
+    render(<TaskComposer initialRepo="owner/repository" />);
+    const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
+    fireEvent.change(box, { target: { value: 'Add export' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
+    await waitFor(() =>
+      expect(box).toHaveValue('Add CSV export with accessible controls and clear error feedback.'),
+    );
+    expect(createAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /^Run/ }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task_prompt: 'Add CSV export with accessible controls and clear error feedback.',
+        }),
+      ),
+    );
+  });
+
+  it('keeps Enter from starting a task while clarification is open', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(rewritePrompt).mockResolvedValue({
+      kind: 'questions',
+      questions: ['Which export format?', 'Which records should be included?'],
+    });
+    render(<TaskComposer initialRepo="owner/repository" />);
+    const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
+    fireEvent.change(box, { target: { value: 'Add export' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Ask clarification questions first' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
+    await screen.findByText('Which export format?');
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(createAgentJob).not.toHaveBeenCalled();
+    expect(box).toHaveValue('Add export');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
+  });
 
   // Someone arriving for the first time writes the task before they have
   // connected anything: the box takes it, the connect card is the next step,

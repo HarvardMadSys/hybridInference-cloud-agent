@@ -43,6 +43,7 @@ import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
 import { GoalBar } from './goal/GoalBar';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
@@ -751,6 +752,7 @@ export function JobDetail({
   const [model, setModel] = useState(job.model);
   const [effort, setEffort] = useState(job.reasoningEffort ?? '');
   const [submitting, setSubmitting] = useState(false);
+  const [rewriting, setRewriting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -1205,6 +1207,7 @@ export function JobDetail({
   async function sendDraft(): Promise<ThreadMessageResultApi | null> {
     if (
       submitting ||
+      rewriting ||
       contextLost ||
       isArchived ||
       attachments.uploading ||
@@ -2031,6 +2034,19 @@ export function JobDetail({
                         onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
+                      <PromptRewrite
+                        key={threadId}
+                        value={followUp}
+                        model={model}
+                        disabled={
+                          contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
+                        }
+                        onActiveChange={setRewriting}
+                        onApply={(prompt) => {
+                          setFollowUp(prompt);
+                          followUpBox.current?.focus();
+                        }}
+                      />
                       <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
@@ -2097,6 +2113,7 @@ export function JobDetail({
                             contextLost ||
                             !followUp.trim() ||
                             submitting ||
+                            rewriting ||
                             attachments.uploading ||
                             readingFiles ||
                             mcp.saving ||

@@ -58,6 +58,9 @@ import {
 
 import { APIError } from '@/lib/utils/errors';
 import { listThreadQuestions } from '@/lib/api/questions';
+import { rewritePrompt } from '@/lib/api/promptRewrite';
+
+vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 
 vi.mock('@/lib/api/questions', () => ({
   listThreadQuestions: vi
@@ -335,6 +338,30 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('uses a rewritten follow-up only after the owner sends it', async () => {
+    vi.mocked(rewritePrompt).mockResolvedValue({
+      kind: 'prompt',
+      prompt: 'Add regression coverage for CSV exports, including empty records.',
+    });
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    const box = screen.getByRole('textbox', { name: 'Add a follow-up' });
+    fireEvent.change(box, { target: { value: 'Add tests' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
+    await waitFor(() =>
+      expect(box).toHaveValue('Add regression coverage for CSV exports, including empty records.'),
+    );
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith(
+        'ajob_1',
+        expect.objectContaining({
+          prompt: 'Add regression coverage for CSV exports, including empty records.',
+        }),
+      ),
+    );
+  });
+
   it('opens the latest live question while an older completed turn is being viewed', async () => {
     const job = makeJob({
       state: 'done',

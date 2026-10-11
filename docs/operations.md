@@ -200,6 +200,25 @@ valid conversation name, and forks inherit it. Legacy automatic or inherited
 titles containing the warmup status can recover on their next claim. Other
 existing titles remain unchanged, and no title data migration is required.
 
+### Draft prompt rewriting
+
+`POST /v1/agent/prompts/rewrite` prepares a draft without creating a job or
+starting a sandbox. It requires an owner session and current `agent.use`
+permission. The request contains `prompt`, `model`, optional `clarify`, and
+optional `answers` (`question` / `answer` pairs). With `clarify: true` and no
+answers it returns two to four clarification questions; otherwise it returns a
+complete prompt for the owner to review before submission. Answer-bearing
+requests always produce a rewrite rather than another question round.
+
+Each call resolves the selected model against the owner's current catalog and
+uses a fresh 120-second grant scoped to that model. Its opaque operation ID
+starts with `prompt-rewrite-`, so inference remains subject to the owner's
+Gateway quota while staying separate from job usage. The grant is revoked
+after the request and never renewed. The call has a 90-second total deadline;
+drafts and rewritten prompts are limited to 32,000 characters, with up to four
+clarification answers. Invalid, truncated, or warmup model responses are
+reported as errors without replacing the draft.
+
 ### Conversation status and run history
 
 The conversation UI shows four states: **Queued**, **Running**, **Idle**, and

@@ -10,6 +10,13 @@ Model access and account identity come from a
 FreeInference is a hosted deployment of that gateway. Cloud Agent is a separate
 service with its own database and credentials.
 
+Use **Rewrite prompt** below a new task or follow-up to expand a draft with the
+selected model. Check **Ask clarification questions first** to answer a few
+questions before generating the comprehensive prompt. The result stays in the
+editor for review and can be edited before sending. Cancel or an unsuccessful
+rewrite preserves the original draft. Rewriting uses the account's normal model
+permissions and inference quota.
+
 ## Getting started
 
 Choose a path based on what you want to do:

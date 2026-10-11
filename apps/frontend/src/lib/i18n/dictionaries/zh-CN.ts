@@ -12,6 +12,17 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  'rewrite.button': '改写提示词',
+  'rewrite.clarify': '先询问几个澄清问题',
+  'rewrite.questionsTitle': '补充一些细节',
+  'rewrite.questionsHint': '回答这些问题，以生成更完整的提示词。',
+  'rewrite.generate': '生成提示词',
+  'rewrite.generating': '正在改写…',
+  'rewrite.asking': '正在准备问题…',
+  'rewrite.cancel': '取消',
+  'rewrite.error': '无法改写提示词，请重试。',
+  'rewrite.invalidResponse': '改写结果不完整，请重试。',
+  'rewrite.applied': '提示词已改写，请检查后再发送。',
   'deployment.version': '版本',
   'deployment.date': '部署日期',
   'deployment.unavailable': '暂无信息',

@@ -1,8 +1,8 @@
-"""The agent API's single mount point: nine surface routers behind one prefix.
+"""The agent API's single mount point: surface routers behind one prefix.
 
 The handlers live in the surface modules this mounts — ``jobs``, ``turns``,
-``threads``, ``changes``, ``workspace``, ``worker``, ``source_control``,
-``catalog`` and ``config`` — each of which owns its own prefix, its own
+``prompt_rewrite``, ``threads``, ``changes``, ``workspace``, ``worker``,
+``source_control``, ``catalog`` and ``config`` — each owns its own prefix, its own
 dependencies and the capabilities it reaches the store for. This module
 exists so that ``app.py`` mounts one router, and so that the surfaces have a
 fixed order.
@@ -30,6 +30,7 @@ from cloud_agent.api import (
     changes,
     config,
     jobs,
+    prompt_rewrite,
     source_control,
     threads,
     turns,
@@ -47,6 +48,7 @@ SURFACE_ROUTERS = (
     config.router,
     source_control.router,
     jobs.router,
+    prompt_rewrite.router,
     catalog.router,
     turns.router,
     threads.router,

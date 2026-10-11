@@ -10666,6 +10666,117 @@
         "title": "ProcessObservation",
         "type": "object"
       },
+      "PromptRewriteAnswer": {
+        "additionalProperties": false,
+        "description": "One clarification and the user's optional answer.",
+        "properties": {
+          "answer": {
+            "maxLength": 5000,
+            "title": "Answer",
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "answer"
+        ],
+        "title": "PromptRewriteAnswer",
+        "type": "object"
+      },
+      "PromptRewritePrompt": {
+        "additionalProperties": false,
+        "description": "A complete prompt the owner can review before submitting a job.",
+        "properties": {
+          "kind": {
+            "const": "prompt",
+            "default": "prompt",
+            "title": "Kind",
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 32000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "PromptRewritePrompt",
+        "type": "object"
+      },
+      "PromptRewriteQuestions": {
+        "additionalProperties": false,
+        "description": "Questions to answer before requesting the final rewrite.",
+        "properties": {
+          "kind": {
+            "const": "questions",
+            "default": "questions",
+            "title": "Kind",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 2,
+            "title": "Questions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "questions"
+        ],
+        "title": "PromptRewriteQuestions",
+        "type": "object"
+      },
+      "PromptRewriteRequest": {
+        "additionalProperties": false,
+        "description": "A bounded draft and optional clarifications, independent of any job.",
+        "properties": {
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/PromptRewriteAnswer"
+            },
+            "maxItems": 4,
+            "title": "Answers",
+            "type": "array"
+          },
+          "clarify": {
+            "default": false,
+            "title": "Clarify",
+            "type": "boolean"
+          },
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 32000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "model"
+        ],
+        "title": "PromptRewriteRequest",
+        "type": "object"
+      },
       "RegisterConnectorRequest": {
         "additionalProperties": false,
         "description": "Register one machine as this user's connector.",
@@ -24190,6 +24301,78 @@
           }
         },
         "summary": "List Agent Projects"
+      }
+    },
+    "/v1/agent/prompts/rewrite": {
+      "post": {
+        "description": "Ask clarifications or rewrite a draft using the selected model.",
+        "operationId": "rewrite_agent_prompt_v1_agent_prompts_rewrite_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptRewriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "prompt": "#/components/schemas/PromptRewritePrompt",
+                      "questions": "#/components/schemas/PromptRewriteQuestions"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/PromptRewriteQuestions"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PromptRewritePrompt"
+                    }
+                  ],
+                  "title": "Response Rewrite Agent Prompt V1 Agent Prompts Rewrite Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rewrite Agent Prompt"
       }
     },
     "/v1/agent/service/oncall/jobs": {
