@@ -12,6 +12,22 @@ export function DeploymentFooter() {
 
   return (
     <footer className="flex shrink-0 flex-wrap items-center justify-center gap-x-4 gap-y-1 border-t border-gray-200/80 bg-gray-50 px-4 py-2 text-xs text-gray-500 dark:border-white/10 dark:bg-gray-950 dark:text-gray-400">
+      <a
+        href="https://seas.harvard.edu/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="hover:underline focus-visible:underline"
+      >
+        Harvard SEAS
+      </a>
+      <a
+        href="https://madsys.seas.harvard.edu/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="hover:underline focus-visible:underline"
+      >
+        MadSys Group
+      </a>
       <span>
         {t('deployment.version')}:{' '}
         <span title={version || undefined}>{shortVersion || t('deployment.unavailable')}</span>
