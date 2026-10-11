@@ -200,8 +200,8 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
 # Every binary is linked into /usr/local/bin. The runner launches the agent with
 # a fixed PATH (`SANDBOX_PATH` in cloud_agent_host/sandbox.py), and a login
 # shell resets PATH from /etc/profile, so an `ENV PATH` here would reach
-# neither. The toolchains stay root-owned: caches and `cargo install` go to
-# each member's own home.
+# neither. Go and uv stay root-owned; caches, modules and `cargo install` go
+# to each member's own home.
 RUN set -eu; \
     go_version=1.27.2; \
     case "$(dpkg --print-architecture)" in \
@@ -216,9 +216,13 @@ RUN set -eu; \
     ln -s /usr/local/go/bin/go /usr/local/go/bin/gofmt /usr/local/bin/
 
 # rustup reads its toolchains from RUSTUP_HOME, which defaults to a directory
-# under HOME that no member has, so it is set image-wide. A repository that
-# pins another toolchain in rust-toolchain.toml cannot install it here; the
-# agent can point RUSTUP_HOME at its own home to do that.
+# under HOME that no member has, so it is set image-wide. It is writable by the
+# agent group (gid 10001, created below): a repository's rust-toolchain.toml
+# makes rustup install the channel, components and targets it names on first
+# use, and a setup script that runs rustup-init itself installs into this same
+# RUSTUP_HOME. Read-only, both fail with "Permission denied" before the agent
+# starts. Members of a group already share a writable workspace, so sharing
+# installed toolchains adds no reach between them.
 ENV RUSTUP_HOME=/usr/local/rustup
 RUN set -eu; \
     rustup_version=1.29.1; \
@@ -235,6 +239,9 @@ RUN set -eu; \
     CARGO_HOME=/usr/local/cargo /tmp/rustup-init -y --no-modify-path --profile minimal \
         --default-toolchain "${rust_version}" --component rustfmt,clippy; \
     rm /tmp/rustup-init; \
+    chown -R root:10001 "${RUSTUP_HOME}"; \
+    chmod -R g+w "${RUSTUP_HOME}"; \
+    find "${RUSTUP_HOME}" -type d -exec chmod g+s {} +; \
     ln -s /usr/local/cargo/bin/* /usr/local/bin/
 
 # uv in its own venv, as the Claude Agent SDK below is, and pnpm/yarn through
@@ -463,6 +470,8 @@ RUN set -eu; \
     cargo --version; \
     cargo clippy --version; \
     cargo fmt --version; \
+    test -w "${RUSTUP_HOME}/tmp"; \
+    test -w "${RUSTUP_HOME}/toolchains"; \
     java -version; \
     javac -version; \
     mvn --batch-mode --version; \
