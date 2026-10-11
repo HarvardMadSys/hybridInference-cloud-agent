@@ -3,7 +3,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { cancelAgentJob, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
-import { submitThreadMessage } from '@/lib/api/pendingMessages';
+import { submitThreadMessage, type ThreadMessageRequest } from '@/lib/api/pendingMessages';
 import { useT } from '@/components/providers/LocaleProvider';
 import { hasLostContext, latestAttempt, latestJob, ownerRunNote } from './conversationJob';
 import { sideChatKeys } from './sideChatStorage';
@@ -14,6 +14,7 @@ import {
   ComposerSendButton,
 } from './ConversationComposer';
 import { HistoryTurn } from './ChatMessages';
+import { codeReviewFixPrompt } from './codeReview';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
@@ -208,6 +209,23 @@ function SideChatContent({
       .map((turn, index) => ({ ...turn, displayNo: index + 1 }));
   }, [belongsToSide, job, session?.threadId, threadJobs]);
   const turnKeys = useMemo(() => turns.map((turn) => turn.key), [turns]);
+  const completedReview = Boolean(
+    tab?.reviewPrompt &&
+    session?.reviewSent &&
+    current?.prompt === tab.reviewPrompt &&
+    (current?.state === 'done' || current?.state === 'needs_review') &&
+    turns.some((turn) => turn.jobId === current.id) &&
+    latestJob(threadJobs)?.id === current.id,
+  );
+  const canFixReview = Boolean(
+    completedReview &&
+    ready &&
+    !unavailable &&
+    current?.conversationState !== 'running' &&
+    current?.conversationState !== 'queued' &&
+    !submitting &&
+    !queue.messages.some((message) => message.prompt === codeReviewFixPrompt),
+  );
   const scroll = useConversationScroll({
     conversationKey: session?.threadId ?? 'side-chat-preparing',
     turnKeys,
@@ -242,23 +260,39 @@ function SideChatContent({
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const prompt = draft.trim();
+    if (!ready) {
+      setActionError(t('sideChat.preparing'));
+      return;
+    }
+    if (!current) return;
+    await sendMessage({ prompt: draft.trim(), ...composerOverrides(current, model, effort) }, true);
+  }
+
+  async function fixReview() {
+    if (!canFixReview || !current) return;
+    await sendMessage(
+      { prompt: codeReviewFixPrompt, skill_ids: [] },
+      false,
+      `review-fix-${current.id}`,
+    );
+  }
+
+  async function sendMessage(body: ThreadMessageRequest, clearDraft: boolean, requestId?: string) {
     if (!ready) {
       setActionError(t('sideChat.preparing'));
       return;
     }
     const threadId = current?.threadId ?? session?.threadId;
-    if (!current || !threadId || !prompt || unavailable || submission.current) return;
+    if (!current || !threadId || !body.prompt || unavailable || submission.current) return;
     submission.current = true;
     setSubmitting(true);
     setActionError(null);
     try {
-      const result = await submitThreadMessage(threadId, {
-        prompt,
-        ...composerOverrides(current, model, effort),
-      });
+      const result = requestId
+        ? await submitThreadMessage(threadId, body, { requestId })
+        : await submitThreadMessage(threadId, body);
       if (!mounted.current) return;
-      setDraft('');
+      if (clearDraft) setDraft('');
       queue.apply(result);
       // Idle, the message is the side chat's next turn now and the pane moves
       // to it; busy, it waits above the composer and nothing moves.
@@ -397,6 +431,19 @@ function SideChatContent({
               />
             ) : null}
             <PendingMessageQueue queue={queue} disabled={unavailable} />
+            {completedReview ? (
+              <div className="mb-2 flex justify-end">
+                <button
+                  type="button"
+                  title={t('review.fixHint')}
+                  disabled={!canFixReview}
+                  onClick={() => void fixReview()}
+                  className="rounded-lg bg-crimson px-3 py-2 text-xs font-medium text-white hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t(submitting ? 'review.fixing' : 'review.fix')}
+                </button>
+              </div>
+            ) : null}
             <form
               onSubmit={(event) => void send(event)}
               className="rounded-xl border border-gray-200 bg-white focus-within:border-crimson/30 dark:border-white/10 dark:bg-gray-900"

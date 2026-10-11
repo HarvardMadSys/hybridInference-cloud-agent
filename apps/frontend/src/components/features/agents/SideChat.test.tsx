@@ -23,10 +23,13 @@ import {
   type PendingMessageApi,
 } from '@/lib/api/pendingMessages';
 import { toDisplayJob } from './adapt';
+import { codeReviewFixPrompt } from './codeReview';
+import { sideChatKeys } from './sideChatStorage';
 import { SideChat } from './SideChat';
 import { conversationReadStorageKey } from './useConversationReadState';
 import { sideChatStorageKey } from './useSideChatSession';
 import { answerThreadQuestion, listThreadQuestions } from '@/lib/api/questions';
+import type { SideChatTab } from './useWorkspaceTabs';
 
 vi.mock('@/lib/api/questions', () => ({
   listThreadQuestions: vi.fn(),
@@ -595,5 +598,210 @@ describe('Side Chat review regressions', () => {
     expect(
       spy.mock.calls.filter(([key]) => key === conversationReadStorageKey(userId)),
     ).toHaveLength(0);
+  });
+});
+
+describe('fixing completed side chat reviews', () => {
+  const reviewTab: SideChatTab = {
+    id: 'side-chat-review',
+    number: 1,
+    anchor: { jobId: anchor.id, sandboxId: 'shared' },
+    reviewPrompt: 'Review these changes without editing files.',
+  };
+  const reviewJob: AgentJobApi = {
+    ...next,
+    task_prompt: reviewTab.reviewPrompt!,
+    state: 'succeeded',
+    conversation_state: 'idle',
+    current_attempt_id: null,
+  };
+  const fixJob: AgentJobApi = {
+    ...next,
+    id: 'side-fix',
+    turn_no: 4,
+    task_prompt: codeReviewFixPrompt,
+  };
+
+  function restoreReview(job = reviewJob, tab = reviewTab) {
+    jobs = [...[copied].filter((row) => row.id !== job.id), job];
+    localStorage.setItem(
+      sideChatKeys(userId, 'main', tab.id).session,
+      JSON.stringify({
+        anchorJobId: anchor.id,
+        sandboxId: 'shared',
+        operation: { id: 'review-operation', state: 'unknown' },
+        jobId: job.id,
+        threadId: 'side',
+        reviewSent: true,
+      }),
+    );
+  }
+
+  it('offers fixes after the live review succeeds and starts one fix turn in the same child', async () => {
+    vi.mocked(streamAgentJob).mockReturnValue(new Promise(() => {}));
+    render(<SideChat {...props()} tab={reviewTab} />);
+    await screen.findByRole('button', { name: 'Stop side chat' });
+    expect(screen.queryByRole('button', { name: 'Fix issues' })).not.toBeInTheDocument();
+    await waitFor(() => expect(streamAgentJob).toHaveBeenCalledWith(next.id, expect.anything()));
+    const handler = vi.mocked(streamAgentJob).mock.calls.at(-1)![1];
+    await act(async () => {
+      jobs = jobs.map((job) => {
+        if (job.id !== next.id) return job;
+        return {
+          ...job,
+          state: 'succeeded',
+          conversation_state: 'idle',
+          published_pr_url: 'https://github.com/owner/project/pull/1',
+        };
+      });
+      handler.onFinished?.({ state: 'succeeded', published_pr_url: null });
+    });
+    const fixButton = await screen.findByRole('button', { name: 'Fix issues' });
+    await waitFor(() => expect(fixButton).toBeEnabled());
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'Unsent follow-up question' },
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Side chat model' }), {
+      target: { value: 'model-b' },
+    });
+    let finishFix!: (result: { pending: null; job: AgentJobApi }) => void;
+    vi.mocked(submitThreadMessage).mockReturnValueOnce(
+      new Promise((resolve) => (finishFix = resolve)),
+    );
+    fireEvent.click(fixButton);
+    const starting = await screen.findByRole('button', { name: 'Starting fixes…' });
+    expect(starting).toBeDisabled();
+    fireEvent.click(starting);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(2);
+    expect(submitThreadMessage).toHaveBeenLastCalledWith(
+      'side',
+      { prompt: codeReviewFixPrompt, skill_ids: [] },
+      { requestId: `review-fix-${next.id}` },
+    );
+    await act(async () => {
+      jobs.push(fixJob);
+      finishFix({ pending: null, job: fixJob });
+    });
+    await waitFor(() => expect(streamAgentJob).toHaveBeenCalledWith(fixJob.id, expect.anything()));
+    expect(screen.queryByRole('button', { name: 'Fix issues' })).not.toBeInTheDocument();
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(submitThreadMessage).mock.calls.map(([threadId]) => threadId)).toEqual([
+      'side',
+      'side',
+    ]);
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
+      'Unsent follow-up question',
+    );
+    expect(screen.getByRole('combobox', { name: 'Side chat model' })).toHaveValue('model-b');
+  });
+
+  it('restores a completed review after refresh without creating a child or resending the review', async () => {
+    restoreReview();
+    const first = render(<SideChat {...props()} tab={reviewTab} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Fix issues' })).toBeEnabled());
+    first.unmount();
+    render(<SideChat {...props()} tab={reviewTab} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Fix issues' })).toBeEnabled());
+    expect(toDisplayJob(reviewJob).state).toBe('needs_review');
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed fix actionable and retries with the same request id while preserving the draft', async () => {
+    restoreReview();
+    vi.mocked(submitThreadMessage).mockRejectedValueOnce(new Error('Fix response lost'));
+    render(<SideChat {...props()} tab={reviewTab} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Fix issues' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'Draft remains mine' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Fix issues' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Fix response lost');
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
+      'Draft remains mine',
+    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Fix issues' })).toBeEnabled());
+    vi.mocked(submitThreadMessage).mockImplementationOnce(async () => {
+      jobs.push(fixJob);
+      return { pending: null, job: fixJob };
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Fix issues' }));
+    await screen.findByRole('button', { name: 'Stop side chat' });
+    expect(submitThreadMessage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(submitThreadMessage).mock.calls[1]).toEqual(
+      vi.mocked(submitThreadMessage).mock.calls[0],
+    );
+    expect(submitThreadMessage).toHaveBeenLastCalledWith(
+      'side',
+      { prompt: codeReviewFixPrompt, skill_ids: [] },
+      { requestId: `review-fix-${reviewJob.id}` },
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
+      'Draft remains mine',
+    );
+    expect(forkAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('shows a queued fix and prevents another fix submission, including after refresh', async () => {
+    restoreReview();
+    vi.mocked(submitThreadMessage).mockImplementationOnce(async (threadId, body) => {
+      const pending: PendingMessageApi = {
+        id: 'queued-review-fix',
+        thread_id: threadId,
+        position: 1,
+        state: 'queued',
+        revision: 1,
+        prompt: body.prompt,
+      };
+      waiting.push(pending);
+      return { pending, job: null };
+    });
+    const first = render(<SideChat {...props()} tab={reviewTab} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Fix issues' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Fix issues' }));
+    expect(await screen.findByRole('region', { name: 'Queued messages' })).toHaveTextContent(
+      'Fix the actionable issues',
+    );
+    expect(screen.getByRole('button', { name: 'Fix issues' })).toBeDisabled();
+    first.unmount();
+    render(<SideChat {...props()} tab={reviewTab} />);
+    await screen.findByRole('region', { name: 'Queued messages' });
+    expect(screen.getByRole('button', { name: 'Fix issues' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Fix issues' }));
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(forkAgentJob).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['lost context', { native_state: 'lost' }],
+    ['archived', { archived_at: '2026-10-10T12:00:00Z' }],
+    ['a conversation still running', { conversation_state: 'running' }],
+  ])('disables fixing a completed review with %s', async (_name, overrides) => {
+    restoreReview({ ...reviewJob, ...overrides } as AgentJobApi);
+    render(<SideChat {...props()} tab={reviewTab} />);
+    const button = await screen.findByRole('button', { name: 'Fix issues' });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['copied history', { ...copied, task_prompt: reviewTab.reviewPrompt! }, reviewTab],
+    ['an ordinary side chat', reviewJob, { ...reviewTab, reviewPrompt: undefined }],
+    ['another side question', { ...reviewJob, task_prompt: 'Explain another change' }, reviewTab],
+    ['a failed review', { ...reviewJob, state: 'failed', conversation_state: 'failed' }, reviewTab],
+    ['a cancelled review', { ...reviewJob, state: 'cancelled' }, reviewTab],
+  ])('does not offer fixes for %s', async (_name, job, tab) => {
+    restoreReview(job as AgentJobApi, tab as SideChatTab);
+    render(<SideChat {...props()} tab={tab as SideChatTab} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'Unsent draft' },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
+    expect(screen.queryByRole('button', { name: 'Fix issues' })).not.toBeInTheDocument();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
 });

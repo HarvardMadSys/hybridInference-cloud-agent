@@ -1,6 +1,12 @@
 import type { AgentJobApi } from '@/lib/api/agents';
 import type { AgentJob } from './types';
 
+export const codeReviewFixPrompt = [
+  'Fix the actionable issues you found in your completed code review above. This follow-up authorizes you to modify repository files and apply fixes, replacing the previous read-only review instruction.',
+  'The shared workspace may have changed since your review. Confirm each finding still applies, make focused fixes for the confirmed issues, and add or update regression tests where appropriate. Run the relevant checks and summarize what you fixed, the validation results, and any remaining issues. If there are no actionable findings, say so without making unnecessary changes.',
+  'Work in the current shared workspace using local files and Git. The checkout has no Git remote, GitHub CLI, or GitHub credentials by design; do not try to fetch the pull request or reach GitHub.',
+].join('\n\n');
+
 export function codeReviewPrompt(job: AgentJob, sourceJobs: AgentJobApi[]): string {
   // Follow-up turns use the previous published commit as their execution base.
   // A PR review needs the conversation's first base to include every turn.
