@@ -1467,6 +1467,32 @@ class TestInvocationDecisions:
         }
         return invocation_id
 
+    @pytest.mark.parametrize("attempt_id", [41, None])
+    def test_lists_and_decisions_report_the_attempt_that_raised_the_call(
+        self, attempt_id: int | None
+    ) -> None:
+        """A retried job cannot make an earlier approval appear to belong to its new attempt."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        if attempt_id is not None:
+            store.invocations[invocation_id]["attempt_id"] = attempt_id
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "current_attempt_id": 42,
+        }
+        with _client(store) as client:
+            listed = client.get(
+                "/v1/agent/mcp/invocations", params={"job_id": "job-1", "pending_only": True}
+            )
+            decided = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision", json={"approve": True}
+            )
+        assert listed.status_code == decided.status_code == 200
+        assert listed.json()["invocations"][0]["attempt_id"] == attempt_id
+        assert decided.json()["attempt_id"] == attempt_id
+
     def test_an_approval_records_who_made_it(self) -> None:
         """A write's audit trail names the person, not the session."""
         store = FakeStore()

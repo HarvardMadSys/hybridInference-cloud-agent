@@ -289,6 +289,8 @@ export interface McpBindingRequest {
 export interface McpInvocationApi {
   id: number;
   job_id: string;
+  /** The attempt that raised the call; absent on older control planes. */
+  attempt_id?: number | null;
   thread_id: string;
   /** Conversation title, absent on older control planes. */
   thread_title?: string | null;

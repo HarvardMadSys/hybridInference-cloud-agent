@@ -5,6 +5,8 @@ import { projectLabel } from './conversations';
 import { CONVERSATION_STATE_KEYS, getConversationState } from './conversationState';
 import { activityLabel } from './relativeTime';
 import { useConversationList, type SidebarConversation } from './useConversationList';
+import { useSessionReview } from './useSessionReview';
+import { SessionReviewBadge } from './SessionReviewBadge';
 export function Highlight({ text, query }: { text: string; query: string }) {
   if (!query) return <>{text}</>;
   const pieces = [];
@@ -77,6 +79,7 @@ export function TaskRow({
   const conversationState = getConversationState(job);
   const inProgress = conversationState === 'running' || conversationState === 'queued';
   const stateLabel = t(CONVERSATION_STATE_KEYS[conversationState]);
+  const review = useSessionReview(job);
   useEffect(() => {
     if (isActive && !inProgress) onRead(row);
   }, [isActive, inProgress, row, onRead]);
@@ -105,22 +108,32 @@ export function TaskRow({
         }`}
       >
         <span className="flex h-3 w-3 shrink-0 items-center justify-center">
-          <span
-            aria-label={stateLabel}
-            title={stateLabel}
-            className={
-              conversationState === 'running'
-                ? 'h-3 w-3 animate-spin rounded-full border-[1.5px] border-gray-400 border-t-transparent dark:border-gray-500 dark:border-t-transparent motion-reduce:animate-none'
-                : conversationState === 'queued'
-                  ? 'h-1.5 w-1.5 rounded-full bg-gray-400 dark:bg-gray-500'
-                  : conversationState === 'failed'
-                    ? 'h-1.5 w-1.5 rounded-full bg-red-500'
-                    : 'h-1.5 w-1.5 rounded-full border border-gray-400 dark:border-gray-500'
-            }
-          />
+          {review ? (
+            <span
+              aria-hidden="true"
+              className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-100 text-[10px] font-bold text-amber-800 dark:bg-amber-900/60 dark:text-amber-300"
+            >
+              !
+            </span>
+          ) : (
+            <span
+              aria-label={stateLabel}
+              title={stateLabel}
+              className={
+                conversationState === 'running'
+                  ? 'h-3 w-3 animate-spin rounded-full border-[1.5px] border-gray-400 border-t-transparent dark:border-gray-500 dark:border-t-transparent motion-reduce:animate-none'
+                  : conversationState === 'queued'
+                    ? 'h-1.5 w-1.5 rounded-full bg-gray-400 dark:bg-gray-500'
+                    : conversationState === 'failed'
+                      ? 'h-1.5 w-1.5 rounded-full bg-red-500'
+                      : 'h-1.5 w-1.5 rounded-full border border-gray-400 dark:border-gray-500'
+              }
+            />
+          )}
         </span>
         <span className="min-w-0 flex-1 truncate">
           <Highlight text={job.title} query={query} />
+          <SessionReviewBadge review={review} className="block truncate text-[11px]" />
           {flat && (
             <span className="block truncate text-[11px] font-normal text-gray-500 dark:text-gray-400">
               <Highlight text={job.repo} query={query} />

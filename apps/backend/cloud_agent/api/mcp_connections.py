@@ -439,6 +439,8 @@ class InvocationView(BaseModel):
 
     id: int
     job_id: str
+    #: The attempt that raised the call, even when the job has since been retried.
+    attempt_id: int | None = None
     thread_id: str
     thread_title: str | None = None
     connection_id: int
@@ -1952,6 +1954,7 @@ async def _invocation_view(
     return InvocationView(
         id=int(row["id"]),
         job_id=str(row["job_id"]),
+        attempt_id=int(row["attempt_id"]) if row.get("attempt_id") is not None else None,
         thread_id=thread_id,
         thread_title=thread_title,
         connection_id=int(row["connection_id"]),

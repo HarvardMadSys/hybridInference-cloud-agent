@@ -10708,6 +10708,17 @@
             "title": "Arguments Digest",
             "type": "string"
           },
+          "attempt_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
           "capability_annotations": {
             "additionalProperties": true,
             "title": "Capability Annotations",

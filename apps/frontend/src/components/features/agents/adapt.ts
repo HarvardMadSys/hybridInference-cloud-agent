@@ -1178,6 +1178,7 @@ function adaptJob(
     title: job.title ?? options.thread?.title ?? job.task_prompt.split('\n')[0].slice(0, 80),
     prompt: job.task_prompt,
     state: toDisplayState(job),
+    cancelRequested: job.cancel_requested,
     conversationState: job.conversation_state ?? undefined,
     stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
     ...(failureCause ? { failureCause } : {}),
