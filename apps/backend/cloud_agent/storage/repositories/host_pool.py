@@ -45,6 +45,11 @@ from cloud_agent_shared.host_settings import (
     admin_values,
     reported_values,
 )
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_CAPABILITY,
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -223,6 +228,7 @@ class PostgresHostPoolRepository:
                     -- an admin set for this name stay, as slots_desired does.
                     settings_applied = NULL,
                     settings_local = NULL,
+                    sandbox_archive_settings_applied_revision = NULL,
                     slots_used = (
                         SELECT count(*) FROM agent_attempts
                         WHERE host_id = EXCLUDED.host AND status = 'running'
@@ -279,6 +285,8 @@ class PostgresHostPoolRepository:
         runtime_versions_available: dict[str, list[str]] | None = None,
         settings_applied: Mapping[str, int | float] | None = None,
         settings_local: Mapping[str, int | float] | None = None,
+        sandbox_archive_settings_applied_revision: int | None = None,
+        sandbox_archive_settings_revision_reported: bool = False,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -313,7 +321,8 @@ class PostgresHostPoolRepository:
         Args:
             host: The authenticated host name.
             credential_hash: Digest the request authenticated with. The
-                capacity write is refused unless the row still holds it.
+                archive revision, capacity write, and legacy settings import
+                are refused unless the row still holds it.
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
@@ -370,7 +379,11 @@ class PostgresHostPoolRepository:
                     -- wrong, which has to be able to clear a stale reason.
                     launch_error = COALESCE($11, launch_error),
                     settings_applied = COALESCE($12::jsonb, settings_applied),
-                    settings_local = COALESCE($13::jsonb, settings_local)
+                    settings_local = COALESCE($13::jsonb, settings_local),
+                    sandbox_archive_settings_applied_revision = CASE
+                        WHEN $15 AND ($16::text IS NULL OR credential_hash = $16) THEN $14
+                        ELSE sandbox_archive_settings_applied_revision
+                    END
                 WHERE host = $1
                 RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
                 """,
@@ -393,6 +406,9 @@ class PostgresHostPoolRepository:
                 launch_error,
                 None if settings_applied is None else json.dumps(dict(settings_applied)),
                 None if settings_local is None else json.dumps(dict(settings_local)),
+                sandbox_archive_settings_applied_revision,
+                sandbox_archive_settings_revision_reported,
+                credential_hash,
             )
             if row is None:
                 return None
@@ -753,7 +769,29 @@ class PostgresHostPoolRepository:
         members use their owner, independent of the pin for new conversations.
         No user content, job identifiers or credentials leave this projection.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            archive_row = await conn.fetchrow(
+                """
+                SELECT sandbox_archive_settings, sandbox_archive_revision
+                FROM agent_runner_policy WHERE id FOR SHARE
+                """
+            )
+            try:
+                archive_policy = SandboxArchivePolicy.from_mapping(
+                    {}
+                    if archive_row is None
+                    else {
+                        **(load_json(archive_row["sandbox_archive_settings"]) or {}),
+                        "revision": archive_row["sandbox_archive_revision"],
+                    }
+                )
+                archive_required = archive_policy.enabled
+                archive_revision = archive_policy.revision
+            except SandboxArchivePolicyError:
+                # Claims fail closed on an invalid stored policy. Monitoring
+                # must not advertise capacity that the claim path will refuse.
+                archive_required = True
+                archive_revision = -1
             row = await conn.fetchrow(
                 """
                 WITH waiting AS (
@@ -780,6 +818,13 @@ class PostgresHostPoolRepository:
                           SELECT 1 FROM jsonb_array_elements_text(h.capabilities) c
                           WHERE c LIKE 'shared-sandbox-deployment:%'
                       )
+                      AND (
+                          NOT $4::boolean
+                          OR (
+                              h.sandbox_archive_settings_applied_revision = $5
+                              AND h.capabilities @> $6::jsonb
+                          )
+                      )
                 )
                 SELECT COUNT(*) AS queued,
                        COUNT(*) FILTER (WHERE NOT EXISTS (
@@ -801,6 +846,9 @@ class PostgresHostPoolRepository:
                 expected_deployment_sha,
                 KATA_RUNTIME,
                 number_setting("queue_alert_after_s", 600.0),
+                archive_required,
+                archive_revision,
+                json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
                 timeout=10,
             )
         return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
@@ -904,6 +952,82 @@ class PostgresHostPoolRepository:
                 list(changes),
             )
         return previous
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        """Return the normalized deployment-wide archive policy and its timestamp."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT sandbox_archive_settings, sandbox_archive_revision,
+                       sandbox_archive_updated_at
+                FROM agent_runner_policy WHERE id
+                """
+            )
+        if row is None:
+            # The baseline normally creates the singleton. Keep a missing row
+            # readable during restore/bootstrap; the first write recreates it.
+            policy = SandboxArchivePolicy()
+            return {**policy.as_dict(), "updated_at": None}
+        raw = dict(load_json(row["sandbox_archive_settings"]) or {})
+        raw["revision"] = row["sandbox_archive_revision"]
+        policy = SandboxArchivePolicy.from_mapping(raw)
+        return {**policy.as_dict(), "updated_at": row["sandbox_archive_updated_at"]}
+
+    async def set_sandbox_archive_settings(
+        self,
+        *,
+        expected_revision: int,
+        settings: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Atomically replace the archive policy, or return ``None`` on a stale revision."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO agent_runner_policy (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING"
+            )
+            current = await conn.fetchrow(
+                """
+                SELECT sandbox_archive_settings, sandbox_archive_revision,
+                       sandbox_archive_updated_at
+                FROM agent_runner_policy WHERE id FOR UPDATE
+                """
+            )
+            assert current is not None
+            current_raw = dict(load_json(current["sandbox_archive_settings"]) or {})
+            current_raw["revision"] = current["sandbox_archive_revision"]
+            current_policy = SandboxArchivePolicy.from_mapping(current_raw)
+            requested = SandboxArchivePolicy.from_mapping(
+                {**dict(settings), "revision": current_policy.revision}
+            )
+            current_response = {
+                **current_policy.as_dict(),
+                "updated_at": current["sandbox_archive_updated_at"],
+                "_changed": False,
+            }
+            if expected_revision > current_policy.revision:
+                return None
+            if requested.as_storage_dict() == current_policy.as_storage_dict():
+                # Covers both an ordinary no-op and a retry after a successful
+                # response was lost. Neither invents a new rollout revision.
+                return current_response
+            if current_policy.revision != expected_revision:
+                return None
+            policy = SandboxArchivePolicy.from_mapping(
+                {**dict(settings), "revision": current_policy.revision + 1}
+            )
+            updated_at = await conn.fetchval(
+                """
+                UPDATE agent_runner_policy
+                SET sandbox_archive_settings = $1::jsonb,
+                    sandbox_archive_revision = $2,
+                    sandbox_archive_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE id
+                RETURNING sandbox_archive_updated_at
+                """,
+                json.dumps(policy.as_storage_dict()),
+                policy.revision,
+            )
+        return {**policy.as_dict(), "updated_at": updated_at, "_changed": True}
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:
         """Pin new-chat placement to one host, or unpin with ``None``.

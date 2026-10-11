@@ -18,6 +18,9 @@ from cloud_agent.compute_config import (
 )
 from cloud_agent.compute_registry import build_registry
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+)
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
 from cloud_agent.workers import compute_resources
 
@@ -43,6 +46,67 @@ def test_provider_can_be_enabled_changed_and_disabled_without_rebuilding_registr
     settings.apply_settings(4, {})
     with pytest.raises(ComputeRefusal):
         registry.get("cloudlab")
+
+
+def test_cloudlab_ssh_defaults_to_no_host_key_check_without_weakening_existing_ssh():
+    configuration = ComputeConfiguration(cloudlab_api_url="https://portal.example/api")
+    registry = build_registry(configuration, resolver=AsyncMock(), transport=AsyncMock())
+    cloudlab = registry.get("cloudlab")
+
+    unchecked = cloudlab.configuration(
+        {"project": "research"}, "cloudlab-account", "management-key"
+    )
+    assert unchecked["ssh_credential_ref"] == "management-key"
+    assert unchecked["host_key_source"] == "known_hosts"
+    assert unchecked["ssh_known_hosts_ref"] == UNCHECKED_CLOUDLAB_HOST_KEY_REF
+
+    explicit_unchecked = cloudlab.configuration(
+        {"project": "research", "host_key_source": "none"},
+        "cloudlab-account",
+        "management-key",
+    )
+    assert explicit_unchecked == unchecked
+
+    verified = cloudlab.configuration(
+        {"project": "research", "host_key_source": "known_hosts"},
+        "cloudlab-account",
+        "management-key",
+    )
+    assert verified["ssh_known_hosts_ref"] == "management-key:known_hosts"
+
+    registered = cloudlab.configuration(
+        {"project": "research", "host_key_source": "registration"},
+        "cloudlab-account",
+        "management-key",
+    )
+    assert registered["host_key_source"] == "registration"
+    assert "ssh_known_hosts_ref" not in registered
+
+    existing = registry.get("existing_ssh").configuration(
+        {"address": "node.example", "username": "agent"},
+        "management-key",
+        None,
+    )
+    assert existing["known_hosts_ref"] == "management-key:known_hosts"
+
+    host_key_field = next(
+        field for field in cloudlab.catalog()["fields"] if field["key"] == "host_key_source"
+    )
+    assert host_key_field["default"] == "none"
+    assert [option["value"] for option in host_key_field["options"]] == [
+        "none",
+        "registration",
+    ]
+
+
+def test_key_only_connection_error_does_not_require_a_hidden_host_key_field():
+    registry = build_registry(ComputeConfiguration(), resolver=AsyncMock(), transport=AsyncMock())
+
+    with pytest.raises(ComputeRefusal) as refused:
+        registry.get("existing_ssh").validate_secret({}, "not-a-private-key")
+
+    assert refused.value.code == "invalid_ssh_key"
+    assert "host key" not in str(refused.value).lower()
 
 
 async def test_endpoint_rotation_affects_next_request_and_preserves_request_in_progress():

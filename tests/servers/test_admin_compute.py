@@ -9,6 +9,7 @@ import tarfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -19,9 +20,14 @@ from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
-from cloud_agent.ports.external.compute_provider import ProviderCapabilities
+from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+    ProviderCapabilities,
+)
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas_compute import AutomaticDeploymentSetup, RenewalPolicy
+from cloud_agent_shared.egress import network_from_env
 
 ADMIN = {"Authorization": "Bearer test-compute-admin"}
 
@@ -309,6 +315,208 @@ async def test_missing_runtime_is_unavailable_after_authentication(compute_api):
     assert response.headers["cache-control"] == "no-store"
 
 
+def automatic_setup_request() -> dict[str, Any]:
+    """Use infrastructure descriptors without including deployment credentials."""
+    return {
+        "request_id": "automatic-setup-once",
+        "gateway": {
+            "connection_id": "gateway-key",
+            "address": "gateway-input-canary.example.org",
+            "username": "gateway_operator",
+        },
+        "control": {
+            "connection_id": "control-key",
+            "address": "control-input-canary.example.org",
+            "username": "control_operator",
+        },
+        "chat_network_pool": "172.29.0.0/16",
+        "dns_server": "1.1.1.1",
+        "protected_cidrs": ["198.51.100.0/24", "192.0.2.0/24"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_automatic_setup_readiness_is_awaited_and_not_audited(compute_api):
+    client, repo, app = compute_api
+    status = {
+        "available": True,
+        "deployment_sha": "c" * 40,
+        "blocked_reasons": [],
+        "defaults": AutomaticDeploymentSetup.model_validate(automatic_setup_request()).model_dump(
+            mode="json", exclude={"request_id"}
+        ),
+        "pending_request_id": "automatic-setup-once",
+    }
+    service = SimpleNamespace(read_status=AsyncMock(return_value=status), create=AsyncMock())
+    app.state.compute_commands.automatic_setup = service
+
+    response = await client.get("/admin/agent/compute-automatic-setup", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert response.json() == status
+    assert response.headers["cache-control"] == "no-store"
+    service.read_status.assert_awaited_once_with()
+    service.create.assert_not_awaited()
+    assert repo.audit_rows == []
+
+
+@pytest.mark.asyncio
+async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(compute_api):
+    client, repo, app = compute_api
+    public_result = {
+        "profiles": [
+            {"id": "automatic-primary", "label": "Primary"},
+            {"id": "automatic-spare", "label": "Spare"},
+        ]
+    }
+    service = SimpleNamespace(
+        read_status=AsyncMock(),
+        create=AsyncMock(return_value=public_result),
+        broker_token="broker-token-canary",
+        private_key="generated-private-key-canary",
+    )
+    app.state.compute_commands.automatic_setup = service
+    body = automatic_setup_request()
+
+    response = await client.post(
+        "/admin/agent/compute-deployment-profiles/automatic", headers=ADMIN, json=body
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json() == public_result
+    assert response.headers["cache-control"] == "no-store"
+    service.create.assert_awaited_once()
+    parsed = service.create.await_args.args[0]
+    assert isinstance(parsed, AutomaticDeploymentSetup)
+    assert parsed.request_id == body["request_id"]
+    assert parsed.gateway.connection_id == "gateway-key"
+    assert parsed.gateway.address == body["gateway"]["address"]
+    assert parsed.gateway.username == "gateway_operator"
+    assert parsed.gateway.port == 22
+    assert parsed.control.connection_id == "control-key"
+    assert parsed.control.address == body["control"]["address"]
+    assert parsed.control.username == "control_operator"
+    assert parsed.control.port == 22
+    assert parsed.gateway_port == 8080
+    assert parsed.slots == 2
+    assert parsed.protected_cidrs == ["192.0.2.0/24", "198.51.100.0/24"]
+    assert len(repo.audit_rows) == 1
+    assert repo.audit_rows[0]["action"] == "agent.compute.profile.automatic_create"
+    assert repo.audit_rows[0]["actor_id"] == "admin-token"
+    assert repo.audit_rows[0]["details"] == {"profile_id": "automatic-primary,automatic-spare"}
+    for canary in (
+        body["gateway"]["address"],
+        body["control"]["address"],
+        service.broker_token,
+        service.private_key,
+    ):
+        assert canary not in response.text
+        assert canary not in str(repo.audit_rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"dns_server": "172.29.0.53"},
+        {"chat_network_pool": "203.0.113.0/24"},
+        {"protected_cidrs": ["invalid-network-canary"]},
+    ],
+    ids=["dns-in-pool", "public-pool", "malformed-protected"],
+)
+async def test_automatic_setup_network_validation_precedes_external_work(compute_api, invalid):
+    client, repo, app = compute_api
+    service = SimpleNamespace(read_status=AsyncMock(), create=AsyncMock())
+    app.state.compute_commands.automatic_setup = service
+    body = {**automatic_setup_request(), **invalid}
+
+    response = await client.post(
+        "/admin/agent/compute-deployment-profiles/automatic", headers=ADMIN, json=body
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "invalid_configuration",
+            "message": "Check the required fields and configuration values.",
+        }
+    }
+    assert response.headers["cache-control"] == "no-store"
+    assert "canary" not in response.text
+    service.create.assert_not_awaited()
+    assert repo.audit_rows == []
+
+
+@pytest.mark.asyncio
+async def test_automatic_setup_accepts_host_supported_broad_protected_networks(compute_api):
+    client, _, app = compute_api
+    service = SimpleNamespace(
+        read_status=AsyncMock(),
+        create=AsyncMock(return_value={"profiles": [{"id": "broad-protected", "label": "Kata"}]}),
+    )
+    app.state.compute_commands.automatic_setup = service
+    body = {
+        **automatic_setup_request(),
+        "protected_cidrs": ["172.16.0.0/12", "10.0.0.0/8"],
+    }
+
+    response = await client.post(
+        "/admin/agent/compute-deployment-profiles/automatic", headers=ADMIN, json=body
+    )
+
+    assert response.status_code == 201, response.text
+    service.create.assert_awaited_once()
+    parsed = service.create.await_args.args[0]
+    network = network_from_env(
+        {
+            "AGENT_SANDBOX_NAMESPACE": "ca-broad-protected",
+            "AGENT_RELAY_NETWORK": "relay-broad-protected",
+            "AGENT_GATEWAY_URL": "http://inference-relay:8080",
+            "AGENT_SANDBOX_MCP_URL": "http://mcp-relay:8001",
+            "AGENT_EGRESS_CHAT_NETWORK_POOL": parsed.chat_network_pool,
+            "AGENT_EGRESS_DNS_SERVER": parsed.dns_server,
+            "AGENT_EGRESS_PROTECTED_CIDRS": ",".join(parsed.protected_cidrs),
+        }
+    )
+    assert str(network.pool) == body["chat_network_pool"]
+    assert [str(cidr) for cidr in network.extra_protected] == parsed.protected_cidrs
+    assert any(network.pool.subnet_of(cidr) for cidr in network.extra_protected)
+
+
+@pytest.mark.asyncio
+async def test_automatic_setup_refusal_returns_safe_503_without_input_or_audit(compute_api):
+    client, repo, app = compute_api
+    service = SimpleNamespace(
+        read_status=AsyncMock(),
+        create=AsyncMock(
+            side_effect=ComputeRefusal(
+                "automatic_release_unavailable",
+                "Automatic setup needs the Host bundle included in this release.",
+                status=503,
+            )
+        ),
+    )
+    app.state.compute_commands.automatic_setup = service
+
+    response = await client.post(
+        "/admin/agent/compute-deployment-profiles/automatic",
+        headers=ADMIN,
+        json=automatic_setup_request(),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "automatic_release_unavailable",
+            "message": "Automatic setup needs the Host bundle included in this release.",
+        }
+    }
+    assert response.headers["cache-control"] == "no-store"
+    assert "canary" not in response.text
+    service.create.assert_awaited_once()
+    assert repo.audit_rows == []
+
+
 @pytest.mark.asyncio
 async def test_cloudlab_defaults_are_saved_audited_and_exposed_in_the_catalog(compute_api):
     client, repo, _ = compute_api
@@ -410,7 +618,11 @@ async def test_server_access_projection_links_credentials_without_transport_secr
             "instance_identity": "private-identity-canary",
         }
     ]
-    row["configuration"]["extra"] = "private-config-canary"
+    row["configuration"].update(
+        extra="private-config-canary",
+        host_key_source="known_hosts",
+        ssh_known_hosts_ref=UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+    )
     row["hosts"] = [
         {"host": "host-a", "compute_node_id": "node-a", "credential_hash": "private-hash-canary"}
     ]
@@ -419,6 +631,7 @@ async def test_server_access_projection_links_credentials_without_transport_secr
     public = response.json()["allocations"][0]
     assert public["connection_id"] == body["connection_id"]
     assert public["ssh_connection_id"] == "ssh-access-id"
+    assert public["ssh_host_key_policy"] == "unchecked"
     assert public["nodes"] == [
         {
             "id": "node-a",
@@ -430,8 +643,33 @@ async def test_server_access_projection_links_credentials_without_transport_secr
         }
     ]
     assert "canary" not in response.text
+    assert UNCHECKED_CLOUDLAB_HOST_KEY_REF not in response.text
     assert "configuration" not in public
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configuration", "expected"),
+    [
+        ({}, "known_hosts"),
+        ({"host_key_source": "known_hosts"}, "known_hosts"),
+        ({"host_key_source": "registration"}, "registration"),
+    ],
+)
+async def test_inventory_projects_only_the_effective_cloudlab_host_key_policy(
+    compute_api, configuration, expected
+):
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.allocations[operation["allocation_id"]]["configuration"] = configuration
+
+    response = await client.get("/admin/agent/servers", headers=ADMIN)
+
+    assert response.status_code == 200
+    public = response.json()["allocations"][0]
+    assert public["ssh_host_key_policy"] == expected
+    assert "configuration" not in public
 
 
 @pytest.mark.asyncio
@@ -521,6 +759,120 @@ async def test_automatic_server_setup_replay_keeps_original_profile(compute_api)
     )
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_storage_path_is_persisted_per_server_and_replay_keeps_it(compute_api):
+    client, repo, app = compute_api
+    commands = app.state.compute_commands
+    original_profile = commands.configuration.profiles["kata"]
+    body = {
+        "name": "Storage configured",
+        "request_id": "storage-a",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+        "configuration": {"project": "research"},
+        "sandbox_storage_path": " /mnt/sandbox-data/ ",
+    }
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    operation = response.json()["operation"]
+    saved = repo.allocations[operation["allocation_id"]]["deployment_profile"]
+    assert saved["sandbox_storage_path"] == "/mnt/sandbox-data"
+    assert repo.operations[operation["id"]]["parameters"]["sandbox_storage_path"] == (
+        "/mnt/sandbox-data"
+    )
+    assert commands.configuration.profiles["kata"] is original_profile
+    assert original_profile.sandbox_storage_path is None
+    inventory = await client.get("/admin/agent/servers", headers=ADMIN)
+    assert inventory.status_code == 200
+    assert inventory.json()["allocations"][0]["sandbox_storage_path"] == "/mnt/sandbox-data"
+
+    commands.configuration.profiles.clear()
+    replay = await client.post(
+        "/admin/agent/servers",
+        headers=ADMIN,
+        json={**body, "sandbox_storage_path": "/mnt/sandbox-data"},
+    )
+    assert replay.status_code == 202
+    assert replay.json()["operation"]["id"] == operation["id"]
+    assert len(repo.allocations) == len(repo.operations) == 1
+    conflict = await client.post(
+        "/admin/agent/servers",
+        headers=ADMIN,
+        json={**body, "sandbox_storage_path": "/mnt/another-disk"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_storage_path_is_in_preflight_profile(compute_api):
+    client, repo, _ = compute_api
+    body = {
+        "name": "Preflight storage",
+        "request_id": "storage-preflight",
+        "provider_id": "cloudlab",
+        "mode": "attach",
+        "connection_id": await connection(client),
+        "sandbox_storage_path": "/mydata",
+    }
+    response = await client.post("/admin/agent/server-preflights", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    operation = repo.operations[response.json()["operation"]["id"]]
+    assert operation["parameters"]["profile"]["sandbox_storage_path"] == "/mydata"
+    assert not repo.allocations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "relative/storage",
+        "/",
+        "/mnt",
+        "/var/lib",
+        "/etc/storage",
+        "/var/lib/docker",
+        "/var/lib/containerd/data",
+        "/mnt/../data",
+        "/mnt/./data",
+        "/mnt//data",
+        "/mnt/data\nother",
+        "/mnt/data;command",
+        "/" + "x" * 4096,
+    ],
+)
+async def test_invalid_storage_path_is_rejected_before_any_operation(compute_api, path):
+    client, repo, _ = compute_api
+    body = {
+        "name": "Invalid storage",
+        "request_id": "storage-invalid",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+        "sandbox_storage_path": path,
+    }
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 422, response.text
+    assert not repo.allocations and not repo.operations
+
+
+@pytest.mark.asyncio
+async def test_omitted_storage_path_preserves_legacy_profile_mount(compute_api):
+    client, repo, app = compute_api
+    profiles = app.state.compute_commands.configuration.profiles
+    profiles["kata"] = profiles["kata"].model_copy(update={"data_mount": "/legacy-data"})
+    _, operation = await allocation(client)
+    saved = repo.allocations[operation["allocation_id"]]["deployment_profile"]
+    assert saved["sandbox_storage_path"] is None
+    assert saved["data_mount"] == "/legacy-data"
+    assert "sandbox_storage_path" not in repo.operations[operation["id"]]["parameters"]
+    inventory = await client.get("/admin/agent/servers", headers=ADMIN)
+    assert inventory.status_code == 200
+    assert inventory.json()["allocations"][0]["sandbox_storage_path"] == "/legacy-data"
 
 
 @pytest.mark.asyncio

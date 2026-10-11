@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -162,6 +162,143 @@ describe('RunDetails', () => {
     );
 
     expect(screen.getByText('qwen-test')).toBeInTheDocument();
+  });
+
+  it('uses a matching loaded turn for its status summary when the thread row is unavailable', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_1"
+        turnNo={7}
+        tab="overview"
+        fallback={{
+          ...CURRENT_JOB,
+          state: 'done',
+          startedAt: '2026-08-19T09:00:00.000Z',
+          finishedAt: '2026-08-19T09:02:00.000Z',
+        }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByRole('region', { name: 'Turn 7 summary' });
+    expect(within(summary).getByRole('heading', { name: 'Completed' })).toBeInTheDocument();
+    expect(within(summary).getByText('2m')).toBeInTheDocument();
+  });
+
+  it('never borrows status, failure, or metadata from another turn when a historical row is missing', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_missing"
+        turnNo={2}
+        tab="overview"
+        fallback={{
+          ...CURRENT_JOB,
+          state: 'failed',
+          stateNote: 'The latest turn failed.',
+          startedAt: '2026-08-19T09:00:00.000Z',
+          finishedAt: '2026-08-19T09:02:00.000Z',
+          prUrl: 'https://github.test/current-pr',
+        }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Status not recorded' })).toBeInTheDocument();
+    expect(screen.queryByText('qwen-test')).not.toBeInTheDocument();
+    expect(screen.queryByText('The latest turn failed.')).not.toBeInTheDocument();
+    expect(screen.queryByText('2m')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open draft pull request' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/follow-up/)).not.toBeInTheDocument();
+  });
+
+  it('shows the selected turn’s owner-facing failure reason and retry guidance', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{
+          ...HISTORY_JOB,
+          state: 'failed',
+          detail: 'shared Agent CLI turn exceeded its execution timeout',
+        }}
+        fallback={{ ...CURRENT_JOB, state: 'failed', stateNote: 'Unrelated current failure' }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByRole('region', { name: 'Turn 2 summary' });
+    expect(within(summary).getByRole('heading', { name: 'Failed' })).toBeInTheDocument();
+    expect(summary).toHaveTextContent('This response took too long and was stopped.');
+    expect(summary).toHaveTextContent(
+      'Review these details before sending a follow-up to try again.',
+    );
+    expect(screen.queryByText('Unrelated current failure')).not.toBeInTheDocument();
+  });
+
+  it('reports missing failure details without inventing a reason', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', detail: null }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/No failure details were recorded/)).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      detail: 'source checkout exceeds the retained import size limit',
+      guidance: /Ask an admin to raise the repository import limit/,
+    },
+    {
+      detail: 'Site misconfigured: no MCP relay is configured. Ask an administrator.',
+      guidance: /An admin needs to finish setting up the site/,
+    },
+  ])('gives an actionable prerequisite instead of a retry for $detail', ({ detail, guidance }) => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', detail }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(guidance)).toBeInTheDocument();
+    expect(screen.queryByText(/sending a follow-up to try again/)).not.toBeInTheDocument();
+  });
+
+  it('explains lost context without offering to continue the same chat', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', context_status: 'lost', detail: null }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Start a new chat to continue/)).toBeInTheDocument();
+    expect(screen.queryByText(/sending a follow-up to try again/)).not.toBeInTheDocument();
   });
 
   it('offers the workspace diff while saying it is the current workspace', () => {

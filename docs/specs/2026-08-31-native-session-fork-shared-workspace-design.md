@@ -99,6 +99,24 @@ durability expected from this phase. If Docker loses the container object or
 its data root, every member in that group becomes `LOST`; there is no fake
 recovery from database event text.
 
+An optional deployment-wide archive policy is stored in the Agent database and
+configured in **Admin → Settings → Sandbox**, not in the host environment. Its
+destination is fixed at `s3://freeinference/cloud-agent/sandbox`; brokers use
+their AWS workload identity, and no AWS credential enters the database,
+runner-delivered policy, or sandbox. When enabled, the broker stores one
+immutable initial `/workspace` archive after source setup and before the first
+prompt, then a final `/workspace` plus native `/agent-state` archive after each
+broker-managed clean stop. It does not archive individual turns. Versioned S3
+objects are an export/forensics boundary only and are not a recovery path in
+this design; the retained container remains authoritative. Policy transitions
+are forward-only: enabling cannot manufacture a pre-prompt baseline for an
+already-used sandbox, and disabling does not force a final capture. A baseline
+or clean stop already durably prepared under an enabled revision still resolves
+under that original revision after a policy change; disabling only prevents new
+preparations. Operators who require paired initial/final objects enable and
+confirm the policy before admitting those sandboxes, then stop or drain them
+before disabling it.
+
 ## 3. Live Agent CLI sessions
 
 The workspace broker owns one group supervisor. The supervisor owns one
@@ -297,11 +315,15 @@ At the inactivity deadline (1800 seconds by default):
    turn, terminal, or broker operation is active;
 2. it flushes native state, closes all resident processes, suspends protected
    terminal activity, and performs `docker stop` on the exact fenced container;
-3. it disconnects the stopped container from its group bridge and removes
+3. when the database-backed archive policy is enabled, it synchronously stores
+   the exact stopped container's final workspace and native history; an
+   exhausted bounded upload fails the clean-stop operation rather than silently
+   claiming archive success;
+4. it disconnects the stopped container from its group bridge and removes
    that bridge, while retaining the same container writable layer;
-4. the next authenticated host heartbeat records the group as stopped without
+5. the next authenticated host heartbeat records the group as stopped without
    deleting it;
-5. after a broker restart, when the in-memory deadline is unavailable, the
+6. after a broker restart, when the in-memory deadline is unavailable, the
    control plane applies the same durable activity/admission fences and a
    bounded recovery window before issuing the exact-generation stop command.
 

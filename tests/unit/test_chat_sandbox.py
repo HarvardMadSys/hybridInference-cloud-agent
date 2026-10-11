@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
     CHAT_BOOTSTRAP_NETWORK,
+    CHAT_DISK_LIMIT_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
     CHAT_NAMESPACE_LABEL,
     CHAT_OFFLINE_DNS,
@@ -34,6 +37,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatBackend,
+    RetainedChatLost,
     SandboxActionFacts,
     _RetainedTerminalProcess,
     claude_member_config_dir,
@@ -63,6 +67,174 @@ def _spec() -> ChatSandboxSpec:
     )
 
 
+def test_archive_export_is_stopped_exact_id_and_metadata_excludes_secrets(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {
+        **spec.docker_labels(),
+        CHAT_NAMESPACE_LABEL: "deployment-a",
+        "custom-secret": "hidden",
+    }
+    raw = json.loads(_inspect_payload(spec, status="exited", labels=labels))[0]
+    raw["Config"].update(
+        {"Env": ["AWS_SECRET_ACCESS_KEY=hidden"], "User": "10001:10001", "WorkingDir": "/workspace"}
+    )
+    raw["HostConfig"].update({"Binds": ["/host/secret:/secret"], "Memory": 1024, "Runtime": "kata"})
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv[1:3] == ["container", "inspect"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps([raw]), stderr="")
+
+    class ExportProcess:
+        returncode = 0
+
+        def __init__(self, argv, *, stdout, stderr):
+            calls.append(argv)
+            stdout.write(b"complete Docker filesystem tar")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
+    with (tmp_path / "rootfs.tar").open("wb") as output:
+        metadata = manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1024
+        )
+    assert [manager.backend.docker_binary, "container", "export", "sha256:container-one"] in calls
+    assert metadata["Config"]["Image"] == spec.sandbox_image_digest
+    assert metadata["HostConfig"] == {"Memory": 1024, "Runtime": "kata"}
+    assert "Env" not in metadata["Config"]
+    assert "custom-secret" not in metadata["Config"]["Labels"]
+    assert "hidden" not in json.dumps(metadata)
+    assert "Mounts" not in metadata and "NetworkSettings" not in metadata
+    assert not any("exec" in command or "start" in command for command in calls)
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["running", "paused", "created", "wrong-id", "wrong-generation", "foreign", "volume"],
+)
+def test_archive_fences_reject_nonstopped_unowned_or_changed_containers(monkeypatch, change):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    if change == "wrong-generation":
+        labels[chat_sandbox_mod.CHAT_GENERATION_LABEL] = "100"
+    if change == "foreign":
+        labels[CHAT_NAMESPACE_LABEL] = "foreign"
+    payload = _inspect_payload(
+        spec,
+        labels=labels,
+        status="created" if change == "created" else "exited",
+        running=change == "running",
+        paused=change == "paused",
+        mounts=[{"Type": "volume", "Destination": "/agent-state"}] if change == "volume" else [],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
+    )
+    with pytest.raises(SandboxError):
+        manager.require_stopped_archive(
+            spec, container_id="replacement" if change == "wrong-id" else "sha256:container-one"
+        )
+
+
+def test_archived_removal_never_stops_an_external_start_before_removal(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        if argv[1:3] == ["container", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_inspect_payload(spec, status="exited", labels=labels),
+                stderr="",
+            )
+        assert argv == [manager.backend.docker_binary, "container", "rm", "sha256:container-one"]
+        # Docker refuses because an administrator started the exact original
+        # after the stopped inspection. No generic stop may make it removable.
+        return SimpleNamespace(returncode=1, stdout="", stderr="container is running")
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(
+        manager, "stop", lambda *_args: pytest.fail("archive must never stop a new start")
+    )
+    with pytest.raises(SandboxError, match="removal failed"):
+        manager.remove_stopped_archived(spec, container_id="sha256:container-one")
+    assert not any("stop" in argv or "--force" in argv for argv in calls)
+
+
+def test_archived_removal_rejects_start_at_second_identity_fence(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv[1:3] == ["container", "inspect"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_inspect_payload(spec, status="exited", labels=labels, running=len(calls) > 1),
+            stderr="",
+        )
+
+    monkeypatch.setattr(manager, "_run", run)
+    with pytest.raises(SandboxError, match="stopped container"):
+        manager.remove_stopped_archived(spec, container_id="sha256:container-one")
+    assert len(calls) == 2
+
+
+def test_archive_export_rejects_oversize_and_changed_identity_after_export(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    inspections = 0
+
+    def run(argv, *, timeout):
+        nonlocal inspections
+        inspections += 1
+        payload = json.loads(_inspect_payload(spec, status="exited", labels=labels))
+        if inspections > 2:
+            payload[0]["Id"] = "replacement"
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    class ExportProcess:
+        returncode = 0
+
+        def __init__(self, argv, *, stdout, stderr):
+            stdout.write(b"export data")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
+    with (
+        (tmp_path / "rootfs.tar").open("wb") as output,
+        pytest.raises(SandboxError, match="size limit"),
+    ):
+        manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1
+        )
+    inspections = 0
+    with (
+        (tmp_path / "rootfs.tar").open("wb") as output,
+        pytest.raises(SandboxError, match="durable sandbox record"),
+    ):
+        manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1024
+        )
+
+
 @pytest.fixture(autouse=True)
 def _plain_group_network(monkeypatch):
     """Keep these tests on one fixed bridge; the group network is tested elsewhere.
@@ -82,11 +254,17 @@ def _plain_group_network(monkeypatch):
         lambda self, spec, _current, *_snapshot: self._require(spec),
     )
     monkeypatch.setattr(ChatSandboxManager, "_sync_kata_guest_network", lambda *_args: None)
-    monkeypatch.setattr(ChatSandboxManager, "_verify_guest_network", lambda *_args: None)
+    monkeypatch.setattr(
+        ChatSandboxManager,
+        "_verify_guest_network",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         ChatSandboxManager,
         "_release_sandbox_networks",
-        lambda self, spec, _current: self._require(spec),
+        lambda self, spec, _current, *, expected_container_id: self._require_exact(
+            spec, expected_container_id
+        ),
     )
 
 
@@ -172,6 +350,61 @@ def test_create_command_has_stable_identity_and_no_chat_state_mount_or_secret():
     assert "--security-opt no-new-privileges" in joined
     assert "--pids-limit 512" in joined
     assert "sleep 2147483647 & child=$!" in command[-1]
+    assert "--storage-opt" not in command
+    assert CHAT_DISK_LIMIT_LABEL not in spec.docker_labels()
+
+
+def test_a_requested_disk_quota_is_not_dropped_when_docker_refuses_it(monkeypatch):
+    spec = replace(_spec(), disk_limit_mib=20480)
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(manager, "inspect", lambda _name: None)
+    creates = []
+
+    def run(argv, **_kwargs):
+        creates.append(argv)
+        return SimpleNamespace(
+            returncode=125,
+            stdout="",
+            stderr="--storage-opt is supported only for overlay over xfs with pquota",
+        )
+
+    monkeypatch.setattr(manager, "_run", run)
+
+    with pytest.raises(SandboxError, match="xfs with pquota"):
+        manager.create(spec)
+
+    assert len(creates) == 1
+    assert creates[0][creates[0].index("--storage-opt") + 1] == "size=20480M"
+    assert spec.docker_labels()[CHAT_DISK_LIMIT_LABEL] == "20480"
+
+
+@pytest.mark.parametrize("persisted_disk", [None, "0", "8192"])
+@pytest.mark.parametrize("requested_disk", [0, 8192])
+def test_retained_disk_policy_must_match_even_when_a_legacy_label_is_absent(
+    persisted_disk, requested_disk
+):
+    spec = replace(_spec(), disk_limit_mib=requested_disk)
+    labels = spec.docker_labels()
+    labels.pop(CHAT_DISK_LIMIT_LABEL, None)
+    if persisted_disk is not None:
+        labels[CHAT_DISK_LIMIT_LABEL] = persisted_disk
+    inspection = ChatSandboxInspection(
+        container_id="container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.STOPPED,
+        running=False,
+        image=spec.sandbox_image_digest or "sha256:image-pinned",
+        labels=labels,
+        mounts=(),
+        networks=(),
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+
+    if int(persisted_disk or 0) == requested_disk:
+        manager._verify_identity(inspection, spec)
+    else:
+        with pytest.raises(SandboxError, match="outside this chat/generation"):
+            manager._verify_identity(inspection, spec)
 
 
 def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
@@ -583,6 +816,28 @@ def test_unsafe_legacy_extra_args_cannot_add_a_host_mount():
         manager.build_create_command(_spec())
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--cpus", "16"],
+        ["--cpu-quota=-1"],
+        ["--memory=32g"],
+        ["-m", "32g"],
+        ["-m32g"],
+        ["-c1024"],
+        ["--memory-swap=-1"],
+        ["--storage-opt", "size=100G"],
+        ["-eTOKEN=secret"],
+        ["-v/host:/workspace"],
+    ],
+)
+def test_extra_args_cannot_override_the_configured_resource_limits(args):
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=args))
+
+    with pytest.raises(SandboxError, match="unsafe for retained chats"):
+        manager.build_create_command(_spec())
+
+
 def test_create_refuses_an_image_override_that_would_make_the_pin_a_lie():
     manager = ChatSandboxManager(ContainerBackend(image="registry/agent:latest"))
 
@@ -672,6 +927,52 @@ def test_create_start_stop_retains_the_same_container(monkeypatch):
     assert not any(argv[1:3] in (["rm", "--force"], ["container", "rm"]) for argv in calls)
 
 
+@pytest.mark.parametrize("operation", ["start", "stop"])
+def test_lifecycle_command_never_adopts_a_same_name_post_command_replacement(
+    monkeypatch,
+    operation,
+):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    command_completed = False
+
+    def inspection(container_id: str, *, running: bool) -> str:
+        payload = json.loads(
+            _inspect_payload(
+                spec,
+                status="running" if running else "exited",
+                running=running,
+            )
+        )
+        payload[0]["Id"] = container_id
+        return json.dumps(payload)
+
+    def fake_run(argv, **_kwargs):
+        nonlocal command_completed
+        if argv[1:3] == ["container", "inspect"]:
+            if command_completed:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=inspection("sha256:replacement", running=operation == "stop"),
+                    stderr="",
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=inspection("sha256:container-one", running=operation == "stop"),
+                stderr="",
+            )
+        if argv[1] == operation:
+            assert argv[-1] == "sha256:container-one"
+            command_completed = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+
+    with pytest.raises(RetainedChatLost, match="identity changed during"):
+        getattr(manager, operation)(spec)
+
+
 def test_an_existing_name_with_other_ownership_is_never_adopted(monkeypatch):
     spec = _spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
@@ -726,7 +1027,83 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
     exec_command = calls[-1]
     assert exec_command[:2] == ["docker", "exec"]
     assert exec_command[exec_command.index("--workdir") + 1] == CHAT_WORKDIR
-    assert exec_command[-4:] == [spec.container_name, "git", "status", "--short"]
+    assert exec_command[-4:] == ["sha256:container-one", "git", "status", "--short"]
+
+
+def _archive_export_failure(monkeypatch, detail: str) -> tuple[ChatSandboxManager, ChatSandboxSpec]:
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.STOPPED,
+        running=False,
+        image="img",
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=("agent-net",),
+    )
+    monkeypatch.setattr(manager, "_require", lambda _spec: current)
+    real_popen = subprocess.Popen
+
+    def fake_popen(_argv, **kwargs):
+        return real_popen(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.stderr.write({detail!r}); raise SystemExit(1)",
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", fake_popen)
+    return manager, spec
+
+
+def test_export_archive_normalizes_the_exact_missing_source_path(monkeypatch):
+    path = "/home/agent/.freeinference-platform"
+    detail = (
+        "Error response from daemon: Could not find the file "
+        f"{path} in container sha256:container-one"
+    )
+    manager, spec = _archive_export_failure(monkeypatch, detail)
+
+    with pytest.raises(FileNotFoundError, match="freeinference-platform"):
+        manager.export_archive(
+            spec,
+            path,
+            io.BytesIO(),
+            max_bytes=1024,
+            expected_container_id="sha256:container-one",
+        )
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Error response from daemon: No such container: sha256:container-one",
+        "Error response from daemon: permission denied",
+        (
+            "Error response from daemon: Could not find the file /workspace in container "
+            "sha256:container-one"
+        ),
+        (
+            "Error response from daemon: Could not find the file "
+            "/home/agent/.freeinference-platform in container sha256:another-container"
+        ),
+    ],
+)
+def test_export_archive_keeps_near_miss_daemon_errors_fatal(monkeypatch, detail):
+    manager, spec = _archive_export_failure(monkeypatch, detail)
+
+    with pytest.raises(SandboxError, match="archive export failed"):
+        manager.export_archive(
+            spec,
+            "/home/agent/.freeinference-platform",
+            io.BytesIO(),
+            max_bytes=1024,
+            expected_container_id="sha256:container-one",
+        )
 
 
 def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
@@ -1002,6 +1379,58 @@ def test_shared_writer_freeze_runs_as_each_owner_without_cap_kill(monkeypatch):
     assert '[ "$pid" != "$$" ]' in census_script
     assert "kill -STOP" in census_script
     assert "kill -CONT" in census_script
+
+
+def test_shared_writer_freeze_replacement_runs_exact_id_cleanup(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    exact_id = "sha256:original"
+    exact_checks = 0
+    calls: list[tuple[list[str], dict]] = []
+
+    def require_exact(_spec, container_id):
+        nonlocal exact_checks
+        assert container_id == exact_id
+        exact_checks += 1
+        if exact_checks == 2:
+            raise RetainedChatLost("same-name replacement")
+        return SimpleNamespace(container_id=exact_id, running=True)
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if kwargs.get("input_bytes") is not None:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if 'expected_uid="$1"; committed=0' in argv[2]:
+            uid = kwargs["user_uid"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{31 if uid == manager.backend.uid else 41} {uid} 300\n".encode(),
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "_require_exact", require_exact)
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    with pytest.raises(RetainedChatLost, match="replacement"):
+        manager.freeze_shared_writers(
+            spec,
+            slot_ids=[0],
+            token="c" * 32,
+            expected_container_id=exact_id,
+        )
+
+    assert exact_checks == 2
+    assert all(call[1]["expected_container_id"] == exact_id for call in calls)
+    assert len(calls) == 5
+    assert all("kill -CONT" in call[0][2] for call in calls[-2:])
 
 
 def test_shared_writer_thaw_reads_manifest_and_resumes_as_each_owner(monkeypatch):
@@ -1309,6 +1738,58 @@ def test_shared_writer_freeze_failure_resumes_live_threads_behind_a_zombie_leade
         manager.freeze_shared_writers(_spec(), slot_ids=[], token="2" * 32)
 
     _wait_for_shared_writer_growth(writes_path, writes_path.stat().st_size)
+
+
+def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    exact_id = "sha256:original"
+    exact_checks = 0
+    calls: list[tuple[list[str], dict]] = []
+    manifest = f"{ACTIVATION_TMPFS}/snapshot-{'d' * 32}.pids"
+
+    def require_exact(_spec, container_id):
+        nonlocal exact_checks
+        assert container_id == exact_id
+        exact_checks += 1
+        if exact_checks == 2:
+            raise RetainedChatLost("same-name replacement")
+        return SimpleNamespace(container_id=exact_id, running=True)
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[2] == 'cat -- "$1"':
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"31 10001 300\n41 11001 400\n",
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "_require_exact", require_exact)
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    with pytest.raises(RetainedChatLost, match="replacement"):
+        manager.thaw_shared_writers(
+            spec,
+            slot_ids=[0],
+            manifest=manifest,
+            expected_container_id=exact_id,
+        )
+
+    assert exact_checks == 2
+    assert all(call[1]["expected_container_id"] == exact_id for call in calls)
+    assert len(calls) == 4
+    assert "kill -CONT" in calls[1][0][2]
+    assert "kill -CONT" in calls[2][0][2]
+    assert calls[-1][0][2] == 'rm -f -- "$1"'
 
 
 @pytest.mark.parametrize(
@@ -1638,6 +2119,10 @@ def test_a_failed_check_is_no_proof(monkeypatch):
         ("sandbox_id", "", "sandbox_id"),
         ("generation", 0, "generation"),
         ("stop_timeout_s", 0, "stop_timeout_s"),
+        ("disk_limit_mib", -1, "disk_limit_mib"),
+        ("disk_limit_mib", 16777217, "disk_limit_mib"),
+        ("disk_limit_mib", True, "disk_limit_mib"),
+        ("disk_limit_mib", 1.5, "disk_limit_mib"),
     ],
 )
 def test_spec_rejects_invalid_identity_or_stop_budget(field, value, message):

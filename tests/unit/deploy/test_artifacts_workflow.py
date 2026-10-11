@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 import yaml
-from deploy.release import release_manifest as rm, smoke
+from deploy.release import build_host_bundle, release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
@@ -266,6 +266,10 @@ def _all_image_inputs() -> set[str]:
         "tests/external/test_upload_edge_limits.py",
         "tests/external/test_retained_command_limits.py",
     }
+    # The control image embeds these reviewed source inputs using a bind
+    # mount, rather than a separate COPY instruction for each archive member.
+    sources.update(build_host_bundle.PACKAGE_ROOTS)
+    sources.update(build_host_bundle.HOST_FILES)
     for cell in cells():
         dockerfile = Path(str(cell["dockerfile"]))
         sources.add(dockerfile.as_posix())
@@ -275,7 +279,7 @@ def _all_image_inputs() -> set[str]:
 
 @pytest.mark.parametrize("entry", sorted(_all_image_inputs()))
 def test_every_release_image_input_selects_image_checks(entry: str) -> None:
-    """Control-only files and every source of a multi-file COPY need coverage."""
+    """COPY and the embedded Host bundle's source inputs all need coverage."""
     probe = f"{entry}/module.py" if (REPO_ROOT / entry).is_dir() else entry
     assert _runs_the_image_jobs(probe), f"image input {entry} selects no image checks"
 

@@ -19,6 +19,7 @@ Replay, ``Last-Event-ID`` and frame safety stay covered in
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,7 @@ from typing import Any
 import pytest
 
 from cloud_agent.api import threads
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.workers.job_event_signal import JobEventSignal
 
 JOB = "ajob_1"
@@ -47,6 +49,8 @@ class Queries:
         }
         self.events: list[dict[str, Any]] = []
         self.reads = 0
+        self.full_job_reads = 0
+        self.state_reads = 0
         self.during_read: Any = None
 
     def store(self, text: str) -> None:
@@ -62,7 +66,14 @@ class Queries:
         )
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
+        self.full_job_reads += 1
         return dict(self.job) if job_id == JOB else None
+
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        self.state_reads += 1
+        if job_id != JOB or self.job["user_id"] != user_id:
+            return None
+        return JobStreamState(self.job["state"], self.job["published_pr_url"])
 
     async def list_events_after(self, *, job_id: str, after_id: int, limit: int) -> list[Any]:
         self.reads += 1
@@ -159,6 +170,34 @@ async def test_a_job_that_ends_closes_its_stream_when_it_says_so(idle_read_never
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
     assert signal.subscribers(JOB) == 0, "a finished stream leaves no subscription behind"
+
+
+async def test_live_wakeups_reload_only_the_minimal_state_and_finish_with_the_current_url(
+    idle_read_never,
+):
+    queries = Queries()
+    signal = _listening()
+    stream = await _open(queries, signal)
+    for number in range(3):
+        frame = asyncio.create_task(anext(stream))
+        await _settle()
+        queries.store(f"message {number}")
+        signal.notified(JOB)
+        assert "event: message" in await asyncio.wait_for(frame, AT_ONCE_S)
+    finish = asyncio.create_task(anext(stream))
+    await _settle()
+    queries.job.update(state="succeeded", published_pr_url="https://example.test/pr/42")
+    signal.notified(JOB)
+    final = await asyncio.wait_for(finish, AT_ONCE_S)
+    assert "event: job_finished" in final
+    assert json.loads(final.split("data: ")[1]) == {
+        "state": "succeeded",
+        "published_pr_url": "https://example.test/pr/42",
+        "last_event_id": 3,
+    }
+    assert queries.full_job_reads == 1, "the full job is read only for stream admission"
+    assert queries.state_reads > 1, "live wakeups still read current state"
+    await stream.aclose()
 
 
 async def test_another_jobs_notification_costs_this_stream_nothing(idle_read_never):

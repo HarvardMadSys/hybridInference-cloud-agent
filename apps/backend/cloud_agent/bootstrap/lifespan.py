@@ -23,6 +23,7 @@ from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
+from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
 from cloud_agent.workers.work_signal import WorkSignal
 
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from cloud_agent.publish_worker import PublishStorage
+    from cloud_agent.workers.pr_archive import PrArchiveStorage
 
 #: The moved lifespan keeps logging under the module it came from: the
 #: deployment's log selection is on ``cloud_agent.app``.
@@ -93,6 +95,30 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
     app.state.publish_task = task
+
+
+def _start_pr_archiver(app: FastAPI, store: PrArchiveStorage) -> None:
+    """Start durable PR merge checks with live source-control credentials."""
+    from cloud_agent.publish_worker import GitHubCredential
+    from cloud_agent.settings import setting_env
+    from cloud_agent.workers.pr_archive import pr_archive_loop
+
+    def credential_provider() -> GitHubCredential | None:
+        """Read the optional deployment credential for each check."""
+        token = setting_env(ENV_GITHUB_TOKEN, "")
+        return GitHubCredential(token) if token else None
+
+    task = asyncio.create_task(
+        pr_archive_loop(
+            store,
+            credential_provider=credential_provider,
+            github_app=app.state.source_control.github,
+            client=app.state.http,
+        )
+    )
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    app.state.pr_archive_task = task
 
 
 @asynccontextmanager
@@ -217,6 +243,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         snapshot_coordinator = asyncio.create_task(
             coordinate_shared_snapshots(storage, wake=app.state.background_wake)
         )
+        sandbox_deletions = asyncio.create_task(coordinate_sandbox_deletions(storage))
         ledger_collector = asyncio.create_task(
             collect_usage_snapshots(
                 storage.ledger, app.state.grants, wake=app.state.background_wake
@@ -231,14 +258,17 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         capacity_history = asyncio.create_task(prune_host_capacity_history(storage.host_capacity))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
+        _BACKGROUND_TASKS.add(sandbox_deletions)
         _BACKGROUND_TASKS.add(ledger_collector)
         _BACKGROUND_TASKS.add(capacity_history)
         reaper.add_done_callback(_BACKGROUND_TASKS.discard)
         snapshot_coordinator.add_done_callback(_BACKGROUND_TASKS.discard)
+        sandbox_deletions.add_done_callback(_BACKGROUND_TASKS.discard)
         ledger_collector.add_done_callback(_BACKGROUND_TASKS.discard)
         capacity_history.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.reaper_task = reaper
         app.state.snapshot_task = snapshot_coordinator
+        app.state.sandbox_deletion_task = sandbox_deletions
         app.state.ledger_task = ledger_collector
         app.state.capacity_task = capacity_history
         # The profiling policy loop runs in every control-plane process, not
@@ -285,6 +315,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # This listener holds no tool call for its owner's decision.
         app.state.mcp_decision_signal = None
         _start_publisher(app, storage)
+        _start_pr_archiver(app, storage)
         logger.info("cloud agent control plane started")
     else:
         # The relay listener roots no file or terminal request, so it has no
@@ -294,10 +325,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.profiling_policy_task = None
         app.state.reaper_task = None
         app.state.snapshot_task = None
+        app.state.sandbox_deletion_task = None
         app.state.ledger_task = None
         app.state.capacity_task = None
         app.state.queue_monitor_task = None
         app.state.publish_task = None
+        app.state.pr_archive_task = None
         app.state.work_signal = None
         app.state.job_event_signal = None
         app.state.owner_change_signal = None
@@ -342,10 +375,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.mcp_catalog_task,
             app.state.reaper_task,
             app.state.snapshot_task,
+            app.state.sandbox_deletion_task,
             app.state.ledger_task,
             app.state.capacity_task,
             app.state.queue_monitor_task,
             app.state.publish_task,
+            app.state.pr_archive_task,
             app.state.profiling_policy_task,
             app.state.compute_resource_task,
             app.state.notification_listener_task,

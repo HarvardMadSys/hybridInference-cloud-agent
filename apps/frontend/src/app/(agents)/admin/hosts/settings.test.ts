@@ -48,6 +48,17 @@ const SESSIONS: HostSettingDefinition = {
   scope: 'broker',
 };
 
+const CPU: HostSettingDefinition = {
+  ...TIMEOUT,
+  key: 'sandbox_cpu_millicores',
+  env: 'AGENT_SANDBOX_CPU_MILLICORES',
+  label: 'Container CPU',
+  unit: 'millicores',
+  default: 2000,
+  minimum: 100,
+  maximum: 256000,
+};
+
 function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
     host: 'runner-a',
@@ -204,6 +215,9 @@ describe('formatSettingValue', () => {
     expect(formatSettingValue(IMPORT, 4096)).toBe('4 GiB');
     expect(formatSettingValue(IMPORT, 1500)).toBe('1500 MiB');
     expect(formatSettingValue(SESSIONS, 64)).toBe('64');
+    expect(formatSettingValue(CPU, 2000)).toBe('2 vCPU');
+    expect(formatSettingValue(CPU, 1250)).toBe('1.25 vCPU');
+    expect(formatSettingValue(CPU, 101)).toBe('0.101 vCPU');
   });
 });
 
@@ -237,6 +251,19 @@ describe('parseSettingInput', () => {
 });
 
 describe('input units', () => {
+  it('uses vCPU input while preserving whole millicores and enforcing CPU bounds', () => {
+    expect(inputUnits(CPU)).toEqual(['vCPU']);
+    expect(unitFor(CPU, 1250)).toBe('vCPU');
+    expect(amountIn(1250, 'vCPU')).toBe('1.25');
+    expect(parseSettingInput(CPU, '1.25', 'vCPU')).toEqual({ value: 1250 });
+    expect(parseSettingInput(CPU, '0.101', 'vCPU')).toEqual({ value: 101 });
+    for (const raw of ['0.099', '256.001', '0.1005']) {
+      expect(parseSettingInput(CPU, raw, 'vCPU')).toEqual({
+        error: 'Enter a value from 0.1 vCPU to 256 vCPU.',
+      });
+    }
+  });
+
   it('reads and formats broker input limits in KiB', () => {
     const inputLimit: HostSettingDefinition = {
       ...SESSIONS,

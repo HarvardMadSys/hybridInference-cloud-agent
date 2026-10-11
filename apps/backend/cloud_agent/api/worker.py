@@ -1218,6 +1218,7 @@ async def worker_reserve_thread_sandbox(
             resident_slot_capacity=body.resident_slot_capacity,
             memory_limit=body.memory_limit,
             cpu_limit=body.cpu_limit,
+            disk_limit_mib=body.disk_limit_mib,
             stop_timeout_seconds=body.stop_timeout_seconds,
             fork_helper_version=body.fork_helper_version,
         )
@@ -1286,6 +1287,10 @@ async def worker_establish_shared_sandbox_residency(
     )
     if row is None:
         raise _lease_lost()
+    previous_grant = row.get("previous_grant_id")
+    if previous_grant and grants is not None:
+        with contextlib.suppress(Exception):
+            await grants.revoke(previous_grant)
     credential = await _mint_residency_grant(job_store.grants, grants, row=row)
     if not credential:
         # Resident processes cannot safely outlive an attempt-scoped token, so

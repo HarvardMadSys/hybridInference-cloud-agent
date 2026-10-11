@@ -190,6 +190,18 @@
             "title": "Request Id",
             "type": "string"
           },
+          "sandbox_storage_path": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Storage Path"
+          },
           "ssh_connection_id": {
             "anyOf": [
               {
@@ -1595,6 +1607,18 @@
             "title": "Active Operation Count",
             "type": "integer"
           },
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
           "container_id": {
             "anyOf": [
               {
@@ -1618,6 +1642,116 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "deletion_archive_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Archive Key"
+          },
+          "deletion_archive_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Archive Version Id"
+          },
+          "deletion_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Error"
+          },
+          "deletion_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Request Id"
+          },
+          "deletion_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Requested At"
+          },
+          "deletion_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Sha256"
+          },
+          "deletion_size_bytes": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Size Bytes"
+          },
+          "deletion_state": {
+            "default": "none",
+            "enum": [
+              "none",
+              "pending",
+              "archived",
+              "deleted",
+              "failed"
+            ],
+            "title": "Deletion State",
+            "type": "string"
+          },
+          "disk_limit_mib": {
+            "default": 0,
+            "maximum": 16777216.0,
+            "minimum": 0.0,
+            "title": "Disk Limit Mib",
+            "type": "integer"
           },
           "execution_profile": {
             "title": "Execution Profile",
@@ -1810,6 +1944,42 @@
         "title": "AdminSandbox",
         "type": "object"
       },
+      "AdminSandboxArchiveRequest": {
+        "additionalProperties": false,
+        "description": "The exact sandbox reviewed for reversible inventory removal or restore.",
+        "properties": {
+          "container_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Container Id"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "container_id",
+          "last_activity_at"
+        ],
+        "title": "AdminSandboxArchiveRequest",
+        "type": "object"
+      },
       "AdminSandboxDetail": {
         "description": "A consistent sandbox inspection with at most 128 current members.",
         "properties": {
@@ -1828,6 +1998,17 @@
           },
           "sandbox": {
             "$ref": "#/components/schemas/AdminSandbox"
+          },
+          "terminal_activity_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Activity Error"
           }
         },
         "required": [
@@ -5452,6 +5633,19 @@
             "description": "Every CLI version this host's image holds, keyed by runtime id, default first. The menu an admin may select from; the control plane cannot serve a version absent from it.",
             "title": "Runtime Versions Available"
           },
+          "sandbox_archive_settings_applied_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Archive-policy revision this host's broker confirmed applying. Null means the host predates database-backed archive settings or has not synchronized yet.",
+            "title": "Sandbox Archive Settings Applied Revision"
+          },
           "sandbox_image_digest": {
             "anyOf": [
               {
@@ -6144,6 +6338,20 @@
             "description": "Uploads for this message's turn. While the message waits they are pinned to it, so they are neither swept nor deletable from the composer.",
             "title": "Attachment Ids"
           },
+          "expected_latest_job_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The newest turn read by an idle-only action; checked atomically on submit.",
+            "title": "Expected Latest Job Id"
+          },
           "model": {
             "anyOf": [
               {
@@ -6174,6 +6382,12 @@
             ],
             "description": "Optional reasoning-effort override for this turn. Omitted inherits the previous turn's; the literal 'auto' resets to Auto.",
             "title": "Reasoning Effort"
+          },
+          "require_idle": {
+            "default": false,
+            "description": "Accept only when every chat sharing the published workspace is idle with an empty queue.",
+            "title": "Require Idle",
+            "type": "boolean"
           },
           "skill_ids": {
             "anyOf": [
@@ -7340,6 +7554,65 @@
           }
         },
         "title": "AuthorizeResponse",
+        "type": "object"
+      },
+      "AutomaticDeploymentSetup": {
+        "additionalProperties": false,
+        "description": "Generate immutable Host setups from the running release and trusted machines.",
+        "properties": {
+          "chat_network_pool": {
+            "title": "Chat Network Pool",
+            "type": "string"
+          },
+          "control": {
+            "$ref": "#/components/schemas/SetupMachine"
+          },
+          "dns_server": {
+            "title": "Dns Server",
+            "type": "string"
+          },
+          "gateway": {
+            "$ref": "#/components/schemas/SetupMachine"
+          },
+          "gateway_port": {
+            "default": 8080,
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Gateway Port",
+            "type": "integer"
+          },
+          "protected_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Protected Cidrs",
+            "type": "array"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "slots": {
+            "default": 2,
+            "maximum": 8.0,
+            "minimum": 1.0,
+            "title": "Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id",
+          "gateway",
+          "control",
+          "chat_network_pool",
+          "dns_server",
+          "protected_cidrs"
+        ],
+        "title": "AutomaticDeploymentSetup",
         "type": "object"
       },
       "BindConnectorRequest": {
@@ -9832,6 +10105,19 @@
             "description": "Every CLI version this image holds, keyed by runtime id, default first — the menu an admin may select from. Null means not reported and leaves the control plane's last knowledge in place.",
             "title": "Runtime Versions Available"
           },
+          "sandbox_archive_settings_applied_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The archive-policy revision the authenticated workspace broker confirmed. Explicit null clears a stale confirmation after restart; omitting the field keeps the last observation for compatibility with older runners.",
+            "title": "Sandbox Archive Settings Applied Revision"
+          },
           "sandbox_image_digest": {
             "anyOf": [
               {
@@ -9961,6 +10247,9 @@
             "title": "Retained Sandboxes Stop",
             "type": "array"
           },
+          "sandbox_archive_settings": {
+            "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+          },
           "settings": {
             "additionalProperties": {
               "type": "integer"
@@ -10005,6 +10294,7 @@
         "required": [
           "host",
           "status",
+          "sandbox_archive_settings",
           "heartbeat_interval_seconds"
         ],
         "title": "HostHeartbeatResponse",
@@ -10208,7 +10498,8 @@
               "seconds",
               "MiB",
               "KiB",
-              "count"
+              "count",
+              "millicores"
             ],
             "title": "Unit",
             "type": "string"
@@ -10524,6 +10815,17 @@
           "thread_id": {
             "title": "Thread Id",
             "type": "string"
+          },
+          "thread_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Title"
           }
         },
         "required": [
@@ -10539,14 +10841,30 @@
         "type": "object"
       },
       "InvocationsResponse": {
-        "description": "The calls waiting on this user, or the history of one job.",
+        "description": "A page of the owner's waiting calls or scoped history, newest first.",
         "properties": {
+          "has_more": {
+            "default": false,
+            "title": "Has More",
+            "type": "boolean"
+          },
           "invocations": {
             "items": {
               "$ref": "#/components/schemas/InvocationView"
             },
             "title": "Invocations",
             "type": "array"
+          },
+          "next_before_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before Id"
           }
         },
         "title": "InvocationsResponse",
@@ -12026,6 +12344,72 @@
         "title": "RuntimeUsage",
         "type": "object"
       },
+      "SandboxArchiveSettingsResponse": {
+        "description": "The revisioned archive policy stored for every sandbox host.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_bucket_owner": {
+            "default": "",
+            "title": "Expected Bucket Owner",
+            "type": "string"
+          },
+          "kms_key_arn": {
+            "default": "",
+            "title": "Kms Key Arn",
+            "type": "string"
+          },
+          "max_archive_bytes": {
+            "default": 2147483648,
+            "title": "Max Archive Bytes",
+            "type": "integer"
+          },
+          "multipart_part_bytes": {
+            "default": 8388608,
+            "title": "Multipart Part Bytes",
+            "type": "integer"
+          },
+          "multipart_threshold_bytes": {
+            "default": 8388608,
+            "title": "Multipart Threshold Bytes",
+            "type": "integer"
+          },
+          "region": {
+            "default": "",
+            "title": "Region",
+            "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "s3_uri": {
+            "const": "s3://freeinference/cloud-agent/sandbox",
+            "default": "s3://freeinference/cloud-agent/sandbox",
+            "title": "S3 Uri",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "title": "SandboxArchiveSettingsResponse",
+        "type": "object"
+      },
       "SandboxResourceSample": {
         "additionalProperties": false,
         "description": "One Docker container reading, with rates over its preceding sample interval.\n\nNull counters mean Docker did not measure them. CPU is expressed in cores,\nso one fully occupied CPU reports ``1.0`` regardless of the host's size.\nNetwork and block I/O byte counters are cumulative Docker counters; their\nrates, and CPU, describe the interval between two usable observations.",
@@ -12478,6 +12862,107 @@
           "runtime"
         ],
         "title": "SetRuntimeVersionRequest",
+        "type": "object"
+      },
+      "SetSandboxArchiveSettingsRequest": {
+        "additionalProperties": false,
+        "description": "Replace the whole archive policy if the displayed revision is current.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_bucket_owner": {
+            "default": "",
+            "maxLength": 12,
+            "title": "Expected Bucket Owner",
+            "type": "string"
+          },
+          "kms_key_arn": {
+            "default": "",
+            "maxLength": 2048,
+            "title": "Kms Key Arn",
+            "type": "string"
+          },
+          "max_archive_bytes": {
+            "default": 2147483648,
+            "maximum": 4294967296.0,
+            "minimum": 1.0,
+            "title": "Max Archive Bytes",
+            "type": "integer"
+          },
+          "multipart_part_bytes": {
+            "default": 8388608,
+            "maximum": 67108864.0,
+            "minimum": 5242880.0,
+            "title": "Multipart Part Bytes",
+            "type": "integer"
+          },
+          "multipart_threshold_bytes": {
+            "default": 8388608,
+            "maximum": 67108864.0,
+            "minimum": 1.0,
+            "title": "Multipart Threshold Bytes",
+            "type": "integer"
+          },
+          "region": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Region",
+            "type": "string"
+          },
+          "revision": {
+            "description": "Revision returned by the last GET.",
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "revision"
+        ],
+        "title": "SetSandboxArchiveSettingsRequest",
+        "type": "object"
+      },
+      "SetupMachine": {
+        "additionalProperties": false,
+        "description": "A stable infrastructure machine reached through an existing verified key.",
+        "properties": {
+          "address": {
+            "maxLength": 253,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]*$",
+            "title": "Address",
+            "type": "string"
+          },
+          "connection_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "port": {
+            "default": 22,
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Port",
+            "type": "integer"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]*$",
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "address",
+          "username"
+        ],
+        "title": "SetupMachine",
         "type": "object"
       },
       "SkillImportPreview": {
@@ -14013,6 +14498,18 @@
             "title": "Runtime Versions Available",
             "type": "object"
           },
+          "sandbox_archive_settings_applied_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Archive Settings Applied Revision"
+          },
           "sandbox_image_digest": {
             "anyOf": [
               {
@@ -15169,6 +15666,13 @@
             "title": "Cpu Limit",
             "type": "string"
           },
+          "disk_limit_mib": {
+            "default": 0,
+            "maximum": 16777216.0,
+            "minimum": 0.0,
+            "title": "Disk Limit Mib",
+            "type": "integer"
+          },
           "execution_profile": {
             "$ref": "#/components/schemas/ExecutionProfile"
           },
@@ -15488,6 +15992,13 @@
             "default": "2",
             "title": "Cpu Limit",
             "type": "string"
+          },
+          "disk_limit_mib": {
+            "default": 0,
+            "maximum": 16777216.0,
+            "minimum": 0.0,
+            "title": "Disk Limit Mib",
+            "type": "integer"
           },
           "execution_profile": {
             "title": "Execution Profile",
@@ -16458,6 +16969,55 @@
         "summary": "Rotate"
       }
     },
+    "/admin/agent/compute-automatic-setup": {
+      "get": {
+        "description": "Expose deployed-release readiness without exposing generated setup inputs.",
+        "operationId": "automatic_setup_status_admin_agent_compute_automatic_setup_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Automatic Setup Status Admin Agent Compute Automatic Setup Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Automatic Setup Status"
+      }
+    },
     "/admin/agent/compute-connections": {
       "get": {
         "description": "List connection metadata without plaintext credentials or ciphertext.",
@@ -16853,6 +17413,65 @@
           }
         },
         "summary": "Create Deployment Profile"
+      }
+    },
+    "/admin/agent/compute-deployment-profiles/automatic": {
+      "post": {
+        "description": "Generate recoverable encrypted setups through explicitly selected SSH access.",
+        "operationId": "create_automatic_setup_admin_agent_compute_deployment_profiles_automatic_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutomaticDeploymentSetup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Automatic Setup Admin Agent Compute Deployment Profiles Automatic Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Automatic Setup"
       }
     },
     "/admin/agent/compute-operations": {
@@ -20005,6 +20624,108 @@
         "summary": "Set Agent Runtime Version"
       }
     },
+    "/admin/agent/sandbox-archive-settings": {
+      "get": {
+        "description": "Read the one database-backed archive policy shared by every host.",
+        "operationId": "get_sandbox_archive_settings_admin_agent_sandbox_archive_settings_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Sandbox Archive Settings"
+      },
+      "put": {
+        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code and credentials are intentionally\nabsent. Brokers authenticate to AWS with their workload identity; this\nroute stores only the non-secret region, KMS key identity, owner fence and\nbounded transfer limits.",
+        "operationId": "set_sandbox_archive_settings_admin_agent_sandbox_archive_settings_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSandboxArchiveSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Sandbox Archive Settings"
+      }
+    },
     "/admin/agent/sandboxes": {
       "get": {
         "description": "List lifecycle metadata, defaulting to retained running containers.",
@@ -20057,6 +20778,16 @@
               ],
               "title": "State",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Archived",
+              "type": "boolean"
             }
           },
           {
@@ -20155,6 +20886,204 @@
           }
         },
         "summary": "Get Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/archive": {
+      "post": {
+        "description": "Remove a stopped sandbox from inventory while retaining native state.",
+        "operationId": "archive_admin_sandbox_admin_agent_sandboxes__sandbox_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxArchiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/delete": {
+      "post": {
+        "description": "Queue archive-before-delete under the exact reviewed stopped-container fence.",
+        "operationId": "delete_admin_sandbox_admin_agent_sandboxes__sandbox_id__delete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxStopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/restore": {
+      "post": {
+        "description": "Return a removed sandbox to inventory without changing its lifecycle.",
+        "operationId": "restore_admin_sandbox_admin_agent_sandboxes__sandbox_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxArchiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Admin Sandbox"
       }
     },
     "/admin/agent/sandboxes/{sandbox_id}/stop": {
@@ -24915,7 +25844,7 @@
     },
     "/v1/agent/mcp/invocations": {
       "get": {
-        "description": "Calls that needed a decision, for one job or one conversation.\n\nThe owner is part of the query, not a check after it. These rows carry the\ntool call's arguments decrypted for display -- code, documents, whatever the\nmodel was about to send -- so a listing that trusts the caller's ``job_id``\nis a way to read another user's calls by guessing an id. The named job is\nchecked first so a caller learns \"not yours\" the same way it learns \"does\nnot exist\": with a 404 that says nothing about which it was.",
+        "description": "Page one job's history, one conversation, or the owner's pending inbox.\n\nThe owner is part of the query, not a check after it. These rows carry the\ntool call's arguments decrypted for display -- code, documents, whatever the\nmodel was about to send -- so a listing that trusts the caller's ``job_id``\nis a way to read another user's calls by guessing an id. The named job is\nchecked first so a caller learns \"not yours\" the same way it learns \"does\nnot exist\": with a 404 that says nothing about which it was.",
         "operationId": "list_invocations_v1_agent_mcp_invocations_get",
         "parameters": [
           {
@@ -24958,6 +25887,36 @@
               "default": false,
               "title": "Pending Only",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9223372036854775807,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
             }
           },
           {
@@ -26922,7 +27881,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or the workspace is\nunpublished at the locked write. An accepted idle-only action creates its\nturn in that same transaction without entering the pending queue.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {

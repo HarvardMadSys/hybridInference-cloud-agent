@@ -264,6 +264,29 @@ describe('mcp api', () => {
     );
   });
 
+  it('reads owner-wide pending pages using the returned keyset cursor', async () => {
+    const response = { invocations: [], has_more: true, next_before_id: 51 };
+    fetchWithAuth.mockResolvedValue(jsonResponse(response));
+    await expect(
+      listMcpInvocations({ pendingOnly: true, limit: 50, beforeId: 100 }),
+    ).resolves.toEqual(response);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/invocations?pending_only=true&limit=50&before_id=100',
+    );
+  });
+
+  it('paginates scoped request history with an encoded conversation ID', async () => {
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ invocations: [], has_more: false, next_before_id: null }),
+    );
+    await listMcpInvocations({ threadId: 'conversation/1', limit: 100, beforeId: 9 });
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/invocations?thread_id=conversation%2F1&limit=100&before_id=9',
+    );
+  });
+
   it('decides a held call with a boolean', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ id: 9, status: 'denied' }));
 

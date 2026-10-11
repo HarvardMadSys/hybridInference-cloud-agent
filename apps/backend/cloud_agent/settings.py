@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -84,6 +85,21 @@ class Setting:
                     and not any(char in value for char in ("?", "#", "\\"))
                     and not any(char.isspace() or ord(char) < 32 for char in value)
                 )
+            if valid and value and self.key == "sandbox_archive.bucket":
+                valid = bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value)) and (
+                    not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value)
+                    and not any(part in value for part in ("..", ".-", "-."))
+                    and not value.startswith(("xn--", "sthree-", "amzn-s3-demo-"))
+                    and not value.endswith(("-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"))
+                )
+            if valid and value and self.key == "sandbox_archive.region":
+                valid = bool(re.fullmatch(r"[a-z0-9-]{1,64}", value))
+            if valid and value and self.key == "sandbox_archive.prefix":
+                valid = (
+                    len(value.encode()) <= 512
+                    and bool(re.fullmatch(r"[a-zA-Z0-9_./-]+", value))
+                    and all(part and part not in {".", ".."} for part in value.split("/"))
+                )
             if valid and self.url and value:
                 try:
                     if any(
@@ -108,6 +124,7 @@ class Setting:
                         "compute.cloudlab_api_url",
                         "compute.registration_url",
                         "mcp_registry_url",
+                        "sandbox_archive.endpoint",
                     }:
                         valid = valid and parsed.scheme == "https" and not parsed.query
                 except (ValueError, ValidationError):
@@ -245,6 +262,57 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     _numeric(
         "publish_pr_timeout_s", "Pull request API timeout (seconds)", "Publication", 30.0, 0.1, 300
+    ),
+    Setting(
+        "pr_archive_enabled",
+        "Archive sessions after PR merge",
+        "Publication",
+        True,
+        kind="boolean",
+        env="AGENT_PR_ARCHIVE_ENABLED",
+        description="Archive settled sessions when their current published GitHub PR is verified merged. Preserves history and shared workspaces.",
+    ),
+    _numeric(
+        "pr_archive_poll_s",
+        "PR merge check interval (seconds)",
+        "Publication",
+        30.0,
+        5,
+        3600,
+        env="AGENT_PR_ARCHIVE_POLL_S",
+    ),
+    _numeric(
+        "pr_archive_timeout_s",
+        "PR merge API timeout (seconds)",
+        "Publication",
+        10.0,
+        0.1,
+        60,
+    ),
+    _numeric(
+        "pr_archive_batch_size",
+        "PR merge checks per batch",
+        "Publication",
+        20,
+        1,
+        500,
+    ),
+    _numeric(
+        "pr_archive_retry_max_s",
+        "Maximum PR merge retry delay (seconds)",
+        "Publication",
+        3600.0,
+        30,
+        86400,
+    ),
+    _numeric(
+        "pr_archive_max_failures",
+        "PR merge integration failures before blocking",
+        "Publication",
+        10,
+        1,
+        100,
+        description="Block repeated access or invalid-response failures. Temporary outages and rate limits keep retrying automatically.",
     ),
     Setting(
         "mcp_registry_url",
@@ -623,6 +691,39 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric("task_titles.max_tokens", "Maximum title output tokens", "Task titles", 256, 16, 256),
 )
 MIGRATED_SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        "sandbox_archive.bucket",
+        "Sandbox archive S3 bucket",
+        "Sandbox archives",
+        "",
+        env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
+        description="Required for sandbox deletion. The control plane verifies the completed archive before the host may remove its stopped container. Empty disables deletion.",
+    ),
+    Setting(
+        "sandbox_archive.region",
+        "Sandbox archive S3 region",
+        "Sandbox archives",
+        "",
+        env="AGENT_SANDBOX_ARCHIVE_S3_REGION",
+        description="Optional AWS region. Empty uses the control plane's standard AWS SDK configuration.",
+    ),
+    Setting(
+        "sandbox_archive.endpoint",
+        "Sandbox archive S3 endpoint",
+        "Sandbox archives",
+        "",
+        env="AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT",
+        url=True,
+        description="Optional HTTPS S3-compatible endpoint supporting conditional PUT and full-object SHA-256 checksums. Empty uses AWS S3.",
+    ),
+    Setting(
+        "sandbox_archive.prefix",
+        "Sandbox archive S3 prefix",
+        "Sandbox archives",
+        "sandbox-archives",
+        env="AGENT_SANDBOX_ARCHIVE_S3_PREFIX",
+        description="Object key prefix for new deletion requests. Each request has an immutable object; completed receipts retain their original bucket and key.",
+    ),
     Setting(
         "pgadmin_url",
         "Private pgAdmin URL",

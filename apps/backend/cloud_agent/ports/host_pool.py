@@ -137,6 +137,8 @@ class HostPoolRepository(Protocol):
         runtime_versions_available: dict[str, list[str]] | None = None,
         settings_applied: Mapping[str, int | float] | None = None,
         settings_local: Mapping[str, int | float] | None = None,
+        sandbox_archive_settings_applied_revision: int | None = None,
+        sandbox_archive_settings_revision_reported: bool = False,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -171,7 +173,8 @@ class HostPoolRepository(Protocol):
         Args:
             host: The authenticated host name.
             credential_hash: Digest the request authenticated with. The
-                capacity write is refused unless the row still holds it.
+                archive revision, capacity write, and legacy settings import
+                are refused unless the row still holds it.
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
@@ -395,6 +398,19 @@ class HostPoolRepository(Protocol):
         another setting. Returns the values before the change, for the audit
         record.
         """
+        ...
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        """Return the normalized deployment-wide archive policy and its timestamp."""
+        ...
+
+    async def set_sandbox_archive_settings(
+        self,
+        *,
+        expected_revision: int,
+        settings: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Atomically replace the archive policy, or return ``None`` on a stale revision."""
         ...
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:

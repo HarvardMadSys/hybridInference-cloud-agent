@@ -51,6 +51,11 @@ from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.task_titles import thread_title_needs_generation
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_CAPABILITY,
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.goals.report import GoalReportEnvelope
@@ -147,6 +152,10 @@ class PostgresAttemptCommands:
         runtime_versions_available = attestation.get("runtime_versions_available")
         if not isinstance(runtime_versions_available, dict):
             runtime_versions_available = {}
+        runner_capabilities = attestation.get("runner_capabilities")
+        if not isinstance(runner_capabilities, list):
+            runner_capabilities = []
+        attested_archive_revision = attestation.get("sandbox_archive_settings_applied_revision")
         host_kernel = attestation.get("host_kernel")
         guest_kernel = attestation.get("guest_kernel")
         shared_attestation = shared_sandbox_claim_attested(
@@ -158,7 +167,11 @@ class PostgresAttemptCommands:
             return None
         async with self._pool.acquire() as conn, conn.transaction():
             policy = await conn.fetchrow(
-                "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id FOR SHARE"
+                """
+                SELECT active_host, runtime_versions, sandbox_archive_settings,
+                       sandbox_archive_revision
+                FROM agent_runner_policy WHERE id FOR SHARE
+                """
             )
             await lock_compute_topology(conn)
             resource_new, resource_claims = await host_compute_admission(conn, host)
@@ -171,6 +184,7 @@ class PostgresAttemptCommands:
             pin_allows_new_sandbox = resource_new and (active_host is None or host == active_host)
             host_row = await conn.fetchrow(
                 "SELECT status, capabilities, slots_total, slots_used, slots_desired, "
+                "sandbox_archive_settings_applied_revision, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
                 "AS credential_matches "
                 "FROM agent_runner_hosts WHERE host = $1",
@@ -184,7 +198,30 @@ class PostgresAttemptCommands:
                 return None
             if host_slots_exhausted(host_row):
                 return None
-            capabilities = host_row["capabilities"]
+            capabilities = load_json(host_row["capabilities"]) or []
+            archive_raw = (
+                {}
+                if policy is None
+                else {
+                    **(load_json(policy["sandbox_archive_settings"]) or {}),
+                    "revision": policy["sandbox_archive_revision"],
+                }
+            )
+            try:
+                archive_policy = SandboxArchivePolicy.from_mapping(archive_raw)
+            except SandboxArchivePolicyError:
+                return None
+            archive_required = archive_policy.enabled
+            archive_revision = archive_policy.revision
+            if archive_required and (
+                SANDBOX_ARCHIVE_CAPABILITY not in capabilities
+                or host_row["sandbox_archive_settings_applied_revision"] != archive_revision
+                or SANDBOX_ARCHIVE_CAPABILITY not in runner_capabilities
+                or isinstance(attested_archive_revision, bool)
+                or not isinstance(attested_archive_revision, int)
+                or attested_archive_revision != archive_revision
+            ):
+                return None
             credential_matches = bool(host_row["credential_matches"])
             secure_attestation = bool(
                 credential_matches
@@ -247,6 +284,11 @@ class PostgresAttemptCommands:
                         OR (
                             s.host = $2
                             AND $6::boolean
+                            AND NOT EXISTS (
+                                SELECT 1 FROM agent_sandboxes deleting
+                                WHERE deleting.id = s.sandbox_id
+                                  AND deleting.deletion_state IN ('pending', 'archived', 'deleted')
+                            )
                             AND s.fork_operation_id IS NULL
                             AND s.context_status <> 'lost'
                             AND s.native_state <> 'lost'
@@ -260,7 +302,7 @@ class PostgresAttemptCommands:
                 LIMIT 1
                 FOR UPDATE OF j SKIP LOCKED
                 """,
-                capabilities,
+                json.dumps(capabilities),
                 host,
                 secure_attestation,
                 shared_attestation,
@@ -277,7 +319,9 @@ class PostgresAttemptCommands:
                 # a stop committed first leaves this job queued.
                 claimable = await conn.fetchval(
                     "SELECT state IN ('provisioning', 'starting', 'running', 'stopped') "
-                    "AND stop_requested_at IS NULL FROM agent_sandboxes "
+                    "AND stop_requested_at IS NULL "
+                    "AND deletion_state NOT IN ('pending', 'archived', 'deleted') "
+                    "FROM agent_sandboxes "
                     "WHERE id = $1 FOR SHARE",
                     thread_sandbox["sandbox_id"],
                 )
@@ -295,10 +339,20 @@ class PostgresAttemptCommands:
                   AND (slots_total IS NULL OR slots_used < slots_total)
                   AND (slots_desired IS NULL OR slots_used < slots_desired)
                   AND credential_hash = $2
+                  AND (
+                        $3::boolean
+                        OR (
+                            sandbox_archive_settings_applied_revision = $4
+                            AND capabilities @> $5::jsonb
+                        )
+                  )
                 RETURNING slots_used
                 """,
                 host,
                 host_credential_hash,
+                not archive_required,
+                archive_revision,
+                json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
             )
             if took_slot is None:
                 return None

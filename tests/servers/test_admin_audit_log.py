@@ -123,6 +123,7 @@ async def test_a_filter_asks_only_for_its_own_actions(audit_api) -> None:
     # change; the Servers filter must not show them twice.
     assert "agent.runner_host.set_settings" in servers["excluded_actions"]
     assert "agent.runner_host.set_settings" in settings["actions"]
+    assert "agent.sandbox_archive_settings." in settings["actions"]
     assert "agent.runner_host.set_settings" not in settings["excluded_actions"]
     assert "agent.compute.cloudlab_defaults.set" in settings["actions"]
 
@@ -131,6 +132,7 @@ async def test_a_filter_asks_only_for_its_own_actions(audit_api) -> None:
 async def test_each_entry_says_which_filter_it_falls_under(audit_api) -> None:
     client, trail, _ = audit_api
     trail.rows = [
+        _row(8, "agent.sandbox_archive_settings.set"),
         _row(7, "agent.host_settings.set"),
         _row(6, "agent.runner_host.set_settings"),
         _row(5, "agent.runtime_version.set"),
@@ -146,14 +148,15 @@ async def test_each_entry_says_which_filter_it_falls_under(audit_api) -> None:
         "settings",
         "settings",
         "settings",
+        "settings",
         "servers",
         "measurements",
         "content",
         None,
     ]
-    assert entries[5]["target_user_id"] == "user-7"
-    assert entries[6]["details"] is None
-    assert entries[6]["success"] is False
+    assert entries[6]["target_user_id"] == "user-7"
+    assert entries[7]["details"] is None
+    assert entries[7]["success"] is False
 
 
 @pytest.mark.asyncio
@@ -188,6 +191,7 @@ async def test_without_a_database_the_route_says_so(audit_api) -> None:
 def test_every_action_falls_under_at_most_one_filter() -> None:
     """The first filter that covers an action wins, so none is shown twice."""
     assert audit_category("agent.runner_host.set_settings") == "settings"
+    assert audit_category("agent.sandbox_archive_settings.set") == "settings"
     assert audit_category("agent.runner_host.set_slots") == "servers"
     assert audit_category("agent.sandbox.stop") == "servers"
     assert audit_category("agent.runner_host_extra.drain") is None

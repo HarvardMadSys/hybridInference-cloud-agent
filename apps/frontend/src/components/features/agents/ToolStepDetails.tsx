@@ -24,15 +24,9 @@ import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
 import { parseToolActivity } from './toolActivity';
 import { ToolActivityDetails } from './ToolActivityDetails';
 
-export type ToolTab = 'summary' | 'payload' | 'result' | 'schema' | 'timing';
+import type { ToolTab } from './trajectoryInspectorTabs';
 
-export const TOOL_TABS: Array<{ key: ToolTab; label: string }> = [
-  { key: 'summary', label: 'Summary' },
-  { key: 'payload', label: 'Payload' },
-  { key: 'result', label: 'Result' },
-  { key: 'schema', label: 'Schema' },
-  { key: 'timing', label: 'Timing' },
-];
+export { TOOL_TABS, type ToolTab } from './trajectoryInspectorTabs';
 
 /** The sandbox's own measurement of one call, when the attempt recorded it. */
 export interface ToolCallTelemetry {

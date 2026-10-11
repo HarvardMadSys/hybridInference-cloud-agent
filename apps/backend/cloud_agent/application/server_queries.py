@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.ports.external.compute_provider import UNCHECKED_CLOUDLAB_HOST_KEY_REF
 from cloud_agent.schemas_compute import RenewalPolicy
 
 if TYPE_CHECKING:
@@ -66,7 +67,7 @@ class ServerQueries:
                     reasons.append(
                         {
                             "code": "inventory_unavailable",
-                            "message": "Attach a deployment profile and verified SSH connection before release.",
+                            "message": "Attach a deployment profile and configured SSH connection before release.",
                         }
                     )
             else:
@@ -105,6 +106,16 @@ class ServerQueries:
             }
             for node in row.get("nodes", [])
         ]
+        configuration = row.get("configuration") or {}
+        ssh_host_key_policy: str | None = None
+        if row["provider_id"] == "cloudlab":
+            if configuration.get("host_key_source") == "registration":
+                ssh_host_key_policy = "registration"
+            elif configuration.get("ssh_known_hosts_ref") == UNCHECKED_CLOUDLAB_HOST_KEY_REF:
+                ssh_host_key_policy = "unchecked"
+            else:
+                # Missing policy data is a legacy strict-known-hosts allocation.
+                ssh_host_key_policy = "known_hosts"
         return {
             "id": row["id"],
             "name": row["name"],
@@ -113,6 +124,11 @@ class ServerQueries:
             # the rest of provider configuration remain private.
             "connection_id": row.get("connection_id"),
             "ssh_connection_id": row.get("ssh_connection_id"),
+            "sandbox_storage_path": (
+                (row.get("deployment_profile") or {}).get("sandbox_storage_path")
+                or (row.get("deployment_profile") or {}).get("data_mount")
+            ),
+            "ssh_host_key_policy": ssh_host_key_policy,
             "state": row.get("observed_state", "unknown"),
             "external_id": row.get("external_id"),
             "expires_at": row.get("expires_at"),

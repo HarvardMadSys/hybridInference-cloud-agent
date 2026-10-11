@@ -27,8 +27,10 @@ settings live in the Agent database and are authoritative across restarts.
 The inventory below records defaults and the environment names used for an
 initial import; registered settings are no longer continuously read from `.env`.
 
-Run `alembic upgrade head` (through `0037_admin_sandbox_stop`) before starting
-this release. The main control-plane listener initializes the settings document
+Run `alembic upgrade head` (through `0046_job_claim_retry`) before starting
+this release. The updated worker claim query requires `agent_jobs.claim_retry_at`;
+existing queued jobs remain immediately eligible after the migration.
+The main control-plane listener initializes the settings document
 once from its existing environment. The MCP-only listener waits for that document and uses the same
 saved values. Later environment edits do not overwrite it. **Reset** restores
 the setting's built-in default, including an empty default for a credential;
@@ -44,6 +46,16 @@ heartbeats, including the broker's report. Admin edits and resets exclude only
 the changed keys from pending imports, preserving unrelated legacy values.
 Global exclusions also apply to newly enrolled hosts. Later environment changes
 are ignored; clearing an override never reactivates an old environment value.
+
+Sandbox archives are configured only in **Admin → Settings → Sandbox** and are
+stored as one revisioned policy in the Agent database. There is deliberately no
+`AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
+`s3://freeinference/cloud-agent/sandbox`; the saved policy contains enablement,
+region, KMS key ARN, expected bucket owner, and bounded upload sizes, but no AWS
+credential. Workspace brokers authenticate with their deployment workload
+identity through the standard AWS SDK credential chain. See
+[Sandbox archives](docs/operations.md#sandbox-archives) for IAM, bucket
+versioning, rollout, and lifecycle semantics.
 
 Control-plane runtime identity, signing/encryption keys, broker credentials,
 cookie/proxy policy, MCP target policy and the default execution profile are also
@@ -111,6 +123,21 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | existing | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | **NEW** | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
 
+### Automatic PR merge archiving
+
+These environment values are imported when the Admin Settings row is first
+created. After that, edit the saved **Publication** settings. See
+[the archiving runbook](docs/automatic-pr-archiving.md).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENT_PR_ARCHIVE_ENABLED` | `true` | Enable automatic archival after verifying that the current published PR merged. |
+| `AGENT_PR_ARCHIVE_POLL_S` | `30` | Seconds between GitHub merge checks; saved setting accepts 5–3600 seconds. |
+
+API timeout, batch size, retry delay limit, and repeated integration-failure
+threshold are saved settings. The worker uses existing GitHub App credentials
+or the configured publication token, and never passes them to the sandbox.
+
 ### pgAdmin database administration
 
 The optional `pgadmin` Compose profile adds **Admin → Database → Open pgAdmin**.
@@ -158,6 +185,19 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 | `AGENT_ALERT_WEBHOOK_URL` | **NEW** | Operator-owned JSON webhook for queue incidents, recovery and compute replacement events. Queue monitoring runs every minute, reports ten-minute-old runnable queue heads after two observations, retries delivery on the next pass and repeats unchanged incidents at most every 30 minutes. Delivery timeout: five seconds. Queue payloads contain event, deployment SHA and aggregate counts; compute events also contain Host identity and reason codes. Unset retains structured logs. Downstream distributions own deployment-workflow alerts. This URL never enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | **NEW** | How long a member's independently fenced live-process residency and short-lived inference grant survive between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
 | `ADMIN_TOKEN` | existing | Optional machine-to-machine admin credential. An unset value opens no token access; admin sessions remain a separate authorization path. |
+
+### Sandbox deletion archives
+
+| Variable | New? | Value / who provisions |
+|---|---|---|
+| `AGENT_SANDBOX_ARCHIVE_S3_BUCKET` | **NEW**, optional initial import | S3 bucket for stopped sandbox archives. Empty disables sandbox deletion. Saved as `sandbox_archive.bucket` in Admin → Settings → Application → Sandbox archives. |
+| `AGENT_SANDBOX_ARCHIVE_S3_REGION` | **NEW**, optional initial import | AWS region for the archive bucket. Empty uses the standard SDK region configuration. |
+| `AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT` | **NEW**, optional initial import | Optional HTTPS S3-compatible endpoint. It must support conditional `PutObject` and full-object SHA-256 checksum retrieval through `HeadObject`; an ETag or user-supplied metadata alone never permits deletion. Empty selects AWS S3. |
+| `AGENT_SANDBOX_ARCHIVE_S3_PREFIX` | **NEW**, optional initial import | Object prefix for new archive requests, default `sandbox-archives`. Each sandbox/request pair receives its own immutable object. Completed receipts retain their original bucket and key after configuration changes. |
+| Standard AWS SDK credentials | **NEW**, deployment infrastructure | Provision only on the main control plane through the standard SDK chain, preferably an IAM workload role. For environment or shared-profile credentials, add a private override to the main `control-plane` service; the base Compose does not forward AWS credential variables. No long-lived AWS credential is sent to a runner host, sandbox, web application or MCP listener. |
+
+See [sandbox archive storage](docs/operations.md#sandbox-archive-storage) for
+permissions, retention and verification requirements.
 
 ### Behaviour switches read by the control plane
 
@@ -225,6 +265,7 @@ relay reachability and connection target policy.
 Host settings can be set from the admin pages instead of in each host's
 `.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
 `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_SHARED_RESIDENT_CAPACITY`,
+`AGENT_SANDBOX_CPU_MILLICORES`, `AGENT_SANDBOX_MEMORY_MIB`, `AGENT_SANDBOX_DISK_MIB`,
 `AGENT_TERMINAL_IDLE_TTL_SECONDS`, `AGENT_TERMINAL_HARD_TTL_SECONDS` and
 `AGENT_TERMINAL_MAX_SESSIONS`. The **Settings** page sets a value for every
 server (`PUT /admin/agent/host-settings`), and a server's details on the
@@ -242,6 +283,24 @@ and remain visible as diagnostic local values. Clearing a per-server value
 uses the global value or built-in default; clearing a global value uses the
 built-in default. The bounds an admin may set are in
 `cloud_agent_shared/host_settings.py` and are typo guards, not capacity statements.
+
+Container CPU, memory, and disk settings apply to new sandbox groups. Resuming a
+chat or forking it preserves the group's original limits; all members share
+those resources. CPU is entered as vCPU in the admin pages and stored in
+millicores (1 vCPU = 1000 millicores). Memory and disk accept MiB or GiB.
+Defaults are 2 vCPU, 4096 MiB memory, and no per-container disk quota. Initial
+environment values are `AGENT_SANDBOX_CPU_MILLICORES=2000`,
+`AGENT_SANDBOX_MEMORY_MIB=4096`, and `AGENT_SANDBOX_DISK_MIB=0`.
+
+A positive disk limit sets Docker's `--storage-opt size=<MiB>M` on the writable
+layer, including the workspace, caches, and installed files. It excludes the
+read-only image and memory-backed temporary files. This requires Docker
+`overlay2` on an XFS backing filesystem mounted with project quotas (`pquota`
+or `prjquota`). Docker refuses container creation when the storage backend does
+not support the requested quota. Set the disk value to 0 to create groups with
+no disk quota; resetting an override inherits the global value or default.
+The runner's existing storage attestation continues to measure the host
+filesystem rather than each sandbox's quota.
 
 The same cards also manage workspace and terminal resource limits. These
 additional environment names supply initial local values only:
@@ -262,7 +321,7 @@ additional environment names supply initial local values only:
 The values ride the heartbeat answer, so a host applies a change within one
 heartbeat (about 30 seconds) with no redeploy. Nothing running is interrupted:
 a turn keeps the time limit it started with, an existing sandbox keeps the
-session capacity it was created with, and the broker's terminal limits apply from its
+session capacity and CPU, memory, and disk limits it was created with, and the broker's terminal limits apply from its
 next sweep. Each host reports what it applies and what its own `.env` gives,
 and the page shows a value as *applying* until the host confirms it. A runner
 that predates this (it does not advertise `host-settings-v1`) keeps its `.env`
@@ -329,6 +388,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_TERMINAL_HARD_TTL_SECONDS` | existing | Absolute lifetime guard for one PTY (default 8 hours), even if it remains active. This bounds a resource and credential exposure window; it is not a chat lifecycle state. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_TERMINAL_MAX_SESSIONS` | existing | How many interactive terminals the broker holds open at once across all chats (default 64, accepted 1–4096). Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_RETAINED_DOCKER_DATA_ROOT` | **NEW** | Expected daemon-side `DockerRootDir`. Supported host/local Compose default: `/var/lib/docker`; direct broker execution only checks it when configured. A mismatch at broker startup fails retained mode closed. For same-host disk durability, configure Docker's own `data-root` on a mounted durable block volume and set this to that exact path. Bootstrap separately verifies the mount with `findmnt --target …`. The path is never mounted into brokers or sandboxes; Docker alone manages container layers. This supports stop/start and host reboots. Automatic CloudLab replacement uses a separate stopped-daemon transfer protocol; this setting is not a checkpoint or off-node backup. |
+| `AGENT_SANDBOX_ARCHIVE_STATE_DIR` | **NEW** | Broker-only directory for temporary stopped-container exports and immutable per-request deletion receipts. Code default `/var/lib/hybridinference/broker-archives`; host Compose binds `${AGENT_HOST_STATE_ROOT}/sandbox-archives` there. Keep this directory on durable storage so a broker replacement can finish a verified deletion after a lost response. It must never be mounted into a sandbox. Exports use mode 0600 within mode 0700 request directories; the full archive contains repository files and native session state, while credential tmpfs and secret-bearing Docker configuration fields are omitted. Archives over 5 GiB are refused and the original retained; at most four requests retain pending archives per broker. Temporary files are removed after abort or successful deletion, and phase receipts remain. |
 | `AGENT_SHARED_RESIDENT_CAPACITY` | **NEW** | Number of credential-isolated member UID/private-tmpfs slots built into each new shared container. Default 8; accepted range 2–128. Fork reserves a free slot before any native mutation. This bounds resident chats in one group, while `AGENT_HOST_SLOTS` separately bounds simultaneously claimed turns on the machine. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_CHAT_IDLE_TIMEOUT_S` | **NEW** | The single product-level inactivity clock for a retained chat group. Defaults to 1800 seconds (30 minutes). Turn/file/Git completion and terminal activity advance the same group deadline; activity tokens prevent a mid-operation stop without stacking another full timeout. When the settled clock expires, the host issues `docker stop`, releases that group's bridge, and retains the same container/writable layer. It never authorizes `docker rm`. Wake rebuilds the group's bridge, host rules first, before `docker start`. `AGENT_TIMEOUT_S` and terminal TTLs are resource watchdogs, not alternate chat lifecycle clocks. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_ENROLL_TOKEN` | **NEW** | One-time host enrollment token (task G2). Minted at `POST /admin/agent/runner-hosts/enroll-token`, redeemed once at `POST /v1/agent/host/register`, then replaced by the returned host credential. 15-minute TTL, hashed at rest, and shown exactly once — losing it means issuing another, not looking it up. **The token names the host it may register**: the admin minting it supplies `host`, and registration under any other name is refused without spending the token, so a typo cannot revoke a live machine's credential. The runner-side enrollment client is implemented: it serializes first registration across restarts, writes the host credential mode 0600 at `AGENT_HOST_CREDENTIAL_FILE`, and uses authenticated heartbeats thereafter. |

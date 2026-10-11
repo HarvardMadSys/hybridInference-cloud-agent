@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type ClipboardEvent } from 'react';
 import {
   DEFAULT_ATTACHMENT_LIMITS,
   formatBytes,
   type AttachmentLimits,
 } from '@/lib/attachmentLimits';
 import { isSafeUploadPath, uploadPathFor } from '@/lib/attachmentPath';
+import { imagesFromClipboard } from '@/lib/clipboardImages';
 import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
 import { getErrorMessage } from '@/lib/utils/errors';
 import type { Translator } from '@/lib/i18n/translate';
@@ -129,6 +130,16 @@ export function useAttachments(
     [limits, release, t],
   );
 
+  const onPaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const images = imagesFromClipboard(event.clipboardData);
+      if (images.length === 0) return;
+      event.preventDefault();
+      add(images);
+    },
+    [add],
+  );
+
   const remove = useCallback(
     (key: string) => {
       const going = release(key);
@@ -150,6 +161,7 @@ export function useAttachments(
   return {
     entries,
     add,
+    onPaste,
     remove,
     reset,
     /** What the create request sends. Empty until every upload has landed. */

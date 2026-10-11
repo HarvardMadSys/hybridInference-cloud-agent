@@ -23,7 +23,7 @@ def known_hosts_line(address: str, port: int, host_key: str) -> str:
 
 
 class OpenSshTransport:
-    """Use isolated strict SSH trust files and suppress secret-bearing diagnostics."""
+    """Use isolated SSH credentials and suppress secret-bearing diagnostics."""
 
     def __init__(self, resolver: SecretResolver) -> None:
         self._resolver = resolver
@@ -38,23 +38,44 @@ class OpenSshTransport:
     ) -> str:
         # Do not inherit the daemon user's SSH config, agents, forwarding or
         # trust-on-first-use policy. Each request has isolated temporary files.
-        """Run a trusted remote command without exposing credentials or error output."""
+        """Run a trusted script without exposing credentials or error output."""
         key = await self._resolver.resolve(connection.credential_ref)
-        if connection.host_key:
-            # A key the node registered with its one-time token: trust exactly it.
-            known_hosts = known_hosts_line(connection.address, connection.port, connection.host_key)
-        elif connection.known_hosts_ref:
-            known_hosts = await self._resolver.resolve(connection.known_hosts_ref)
-        else:
-            known_hosts = ""
-        if not key.strip() or not known_hosts.strip():
-            raise ProviderError("ssh_configuration", "SSH key and verified host keys are required")
+        if not key.strip():
+            raise ProviderError("ssh_configuration", "SSH key is required")
+        known_hosts = ""
+        verify_host_key = connection.verify_host_key
+        if verify_host_key:
+            if connection.host_key:
+                # A key the node registered with its one-time token: trust exactly it.
+                known_hosts = known_hosts_line(
+                    connection.address, connection.port, connection.host_key
+                )
+            elif connection.known_hosts_ref:
+                known_hosts = await self._resolver.resolve(connection.known_hosts_ref)
+            if not known_hosts.strip():
+                raise ProviderError("ssh_configuration", "Verified SSH host keys are required")
         with tempfile.TemporaryDirectory(prefix="agent-compute-ssh-") as directory:
             key_path = Path(directory) / "identity"
-            known_path = Path(directory) / "known_hosts"
-            for path, content in ((key_path, key), (known_path, known_hosts)):
-                path.write_text(content.rstrip() + "\n", encoding="utf-8")
-                path.chmod(0o600)
+            key_path.write_text(key.rstrip() + "\n", encoding="utf-8")
+            key_path.chmod(0o600)
+            host_key_args: list[str]
+            if verify_host_key:
+                known_path = Path(directory) / "known_hosts"
+                known_path.write_text(known_hosts.rstrip() + "\n", encoding="utf-8")
+                known_path.chmod(0o600)
+                host_key_args = [
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    f"UserKnownHostsFile={known_path}",
+                ]
+            else:
+                host_key_args = [
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                ]
             args = [
                 "ssh",
                 "-F",
@@ -66,10 +87,7 @@ class OpenSshTransport:
                 "IdentitiesOnly=yes",
                 "-o",
                 "IdentityAgent=none",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                f"UserKnownHostsFile={known_path}",
+                *host_key_args,
                 "-o",
                 "GlobalKnownHostsFile=/dev/null",
                 "-o",

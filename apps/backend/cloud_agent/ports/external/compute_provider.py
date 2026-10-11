@@ -11,6 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 # One OpenSSH public key: algorithm and base64 body, without a comment.
 HOST_KEY_PATTERN = r"^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/]+={0,2}$"
 
+# An old-model-valid, fail-closed reference used only for explicit CloudLab SSH.
+UNCHECKED_CLOUDLAB_HOST_KEY_REF = "cloudlab:unchecked-host-key-v1"
+
 
 class ComputeValue(BaseModel):
     """Immutable, JSON-serializable value at the provider boundary."""
@@ -77,11 +80,14 @@ class ResourceRef(ComputeValue):
 
 
 class SshConnection(ComputeValue):
-    """Verified SSH destination with references rather than credential values.
+    """SSH destination with references rather than credential values.
 
     Host trust comes from an administrator-verified known_hosts reference, or
     from ``host_key``: one public key the node registered with a one-time
-    token at its first boot. A connection with neither is refused.
+    token at its first boot. CloudLab may explicitly disable this identity
+    check with a reserved known-hosts reference; all other connections remain
+    strict by default. The marker uses an existing field so persisted
+    observations remain readable by the immediately previous release.
     """
 
     address: str = Field(min_length=1, max_length=253, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9.:-]*$")
@@ -90,6 +96,11 @@ class SshConnection(ComputeValue):
     credential_ref: str = Field(min_length=1)
     known_hosts_ref: str | None = Field(default=None, min_length=1)
     host_key: str | None = Field(default=None, max_length=8192, pattern=HOST_KEY_PATTERN)
+
+    @property
+    def verify_host_key(self) -> bool:
+        """Keep strict checking unless the exact CloudLab marker is present."""
+        return self.host_key is not None or self.known_hosts_ref != UNCHECKED_CLOUDLAB_HOST_KEY_REF
 
 
 class NodeObservation(ComputeValue):

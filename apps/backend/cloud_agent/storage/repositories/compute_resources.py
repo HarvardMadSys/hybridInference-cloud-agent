@@ -87,7 +87,7 @@ class PostgresComputeResourceRepository:
                 """INSERT INTO agent_compute_deployment_profiles
                 (id,label,configuration,source_bundle,source_sha256,secret_ciphertext)
                 VALUES ($1,$2,$3::jsonb,$4,$5,$6)
-                ON CONFLICT (id) DO NOTHING RETURNING *""",
+                ON CONFLICT DO NOTHING RETURNING *""",
                 profile_id,
                 label,
                 _json(configuration),
@@ -98,6 +98,37 @@ class PostgresComputeResourceRepository:
         if row is None:
             raise ValueError("deployment_profile_exists")
         return _row(row)
+
+    async def activate_automatic_profiles(
+        self,
+        *,
+        profile_ids: list[str],
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
+        """Atomically admit provisioned slots while keeping release inputs immutable."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                "SELECT id,configuration FROM agent_compute_deployment_profiles WHERE id=ANY($1::text[]) FOR UPDATE",
+                profile_ids,
+            )
+            if len(rows) != len(profile_ids):
+                raise ValueError("record_not_found")
+            for row in rows:
+                configuration = load_json(row["configuration"]) or {}
+                metadata = configuration.get("automatic_setup", {})
+                if (
+                    metadata.get("request_id") != request_id
+                    or metadata.get("fingerprint") != request_fingerprint
+                ):
+                    raise ValueError("idempotency_conflict")
+            await conn.execute(
+                """UPDATE agent_compute_deployment_profiles
+                SET configuration=jsonb_set(configuration,'{automatic_setup,ready}','true'::jsonb),
+                    revision=revision+1,updated_at=NOW()
+                WHERE id=ANY($1::text[]) AND configuration #>> '{automatic_setup,ready}' = 'false'""",
+                profile_ids,
+            )
 
     async def provider_defaults(self, provider_id: str) -> dict[str, Any]:
         """Return the saved non-secret form defaults for one provider."""

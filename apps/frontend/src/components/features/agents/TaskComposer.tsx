@@ -661,6 +661,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           ref={taskBox}
           rows={5}
           value={task}
+          onPaste={(event) => {
+            if (disconnected || busy) return;
+            attachments.onPaste(event);
+          }}
           onChange={(event) => {
             setTask(event.target.value);
             if (goalHint) setGoalHint(null);

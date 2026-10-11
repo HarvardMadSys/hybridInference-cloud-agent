@@ -168,7 +168,43 @@ the same verified target. A failed host rollout remains a failed rollout even
 if it restored the recorded generation. Control-plane failure leaves compatible
 migrations in place; there is no automatic database downgrade.
 
+A hard-cancelled host activation may leave the readiness marker pending while
+Docker Engine continues the unbounded graceful runner stop. Running turns still
+finish; after the runner exits, the host remains unavailable until activation
+is rerun for the same verified target. Do not publish readiness by hand.
+
 If the host succeeds before the control plane fails, the exact-SHA gate can keep
 new work queued until the retry succeeds. The queue monitor detects this state.
 These checks protect and expose interrupted deployments; activation still spans
 two machines and PostgreSQL without a single transaction.
+
+### Snapshot publication failures
+
+Snapshot publication currently has no owner retry action or automatic recovery
+after a failure. A rejected patch, unavailable GitHub credential, or failed
+Git/PR request marks the snapshot `failed` and its sandbox group `dirty`; the
+included Agent turns remain successful. Capture and publication require every
+earlier snapshot in that group to be `published`, and later turn settlement
+preserves `dirty`. A transient publication failure can therefore stop all
+subsequent snapshots in the same retained workspace. Capture retries and
+published-commit import retries do not recover this state. See
+[`publish_worker.py`](../apps/backend/cloud_agent/publish_worker.py),
+[`snapshot.py`](../apps/backend/cloud_agent/storage/repositories/snapshot.py)
+and [`sandbox.py`](../apps/backend/cloud_agent/storage/repositories/sandbox.py).
+
+Inspect the snapshot's `last_error`, the anchor job's
+`shared_snapshot_publish_rejected` event, and GitHub's branch/PR state while
+preserving the retained workspace and snapshot. Restoring GitHub access or
+network availability does not requeue an already failed snapshot. There is no
+supported database reset: marking it published or clearing the group's dirty
+state would bypass the ordered publication lineage. Resetting it to captured
+also cannot safely recover an ambiguous push: if the push succeeded before the
+PR request failed, the publisher treats that remote commit as branch movement
+and refuses it.
+
+A future recovery path should persist the exact prepared commit SHA before
+pushing, then offer an owner-authorized retry of the earliest failed snapshot.
+Retries must repeat entitlement and patch checks, recognize only the persisted
+commit as a prior push, preserve snapshot order, and continue to reject other
+branch movement without force-pushing. Commit-message text and the patch hash
+alone are insufficient evidence of the publisher's prior commit.

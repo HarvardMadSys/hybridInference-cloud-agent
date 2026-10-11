@@ -1,13 +1,13 @@
 """Delay transient credential retries without blocking later queued jobs.
 
-Revision ID: 0040_job_claim_retry
-Revises: 0039_compute_defaults
+Revision ID: 0046_job_claim_retry
+Revises: 0045_admin_sandbox_deletion
 """
 
 from alembic import op
 
-revision = "0040_job_claim_retry"
-down_revision = "0039_compute_defaults"
+revision = "0046_job_claim_retry"
+down_revision = "0045_admin_sandbox_deletion"
 branch_labels = None
 depends_on = None
 

@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -11,6 +12,7 @@ import {
 } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import toast from 'react-hot-toast';
 
 import { Markdown, WorkspaceLinkProvider } from '@/components/ui/Markdown';
@@ -26,6 +28,7 @@ import {
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
+import { APIError } from '@/lib/utils/errors';
 
 import { ownerFailureMessage, siteMisconfiguredReason, toDiffFileDetails } from './adapt';
 import {
@@ -56,7 +59,6 @@ import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
-import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { ActivityIcon, ActivityWindow } from './ActivityWindow';
@@ -67,21 +69,18 @@ import { NativeQuestionPrompt } from './NativeQuestionPrompt';
 import type { AgentEvent, AgentJob } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
-import { TrajectoryView } from './TrajectoryView';
 import {
-  TrajectoryInspector,
   normalizeStepTab,
   type InspectorSelection,
   type RunTab,
   type StepTab,
-} from './TrajectoryInspector';
-import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
+} from './trajectoryInspectorTabs';
+import { buildTrajectorySteps, toolStepKey, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { notDeliveredText, PendingMessageQueue } from './PendingMessageQueue';
 import { isSteerChord } from './composerKeys';
 import { usePendingMessages } from './usePendingMessages';
 import { useResizablePane } from './useResizablePane';
-import { WorkspaceFiles } from './WorkspaceFiles';
 import {
   composerModels,
   composerOverrides,
@@ -91,12 +90,17 @@ import {
 import { useComposerDraft } from './useComposerDraft';
 import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
 import { TurnDeliverables } from './TurnDeliverables';
-import { recordedTurnOutputs, type RecordedFileSelection } from './turnDeliverables';
-import { RecordedDiffPanel } from './RecordedDiffPanel';
-import { hasLostContext, latestJob, ownerRunNote } from './conversationJob';
+import { createRecordedOutputsSelector, type RecordedFileSelection } from './turnDeliverables';
+import {
+  hasLostContext,
+  isActiveConversationState,
+  isBusyJob,
+  latestJob,
+  ownerRunNote,
+} from './conversationJob';
 import { useFirstRun } from './firstRun';
-import { SideChat } from './SideChat';
 import { codeReviewPrompt } from './codeReview';
+import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
 import { WorkspaceTabBar } from './WorkspaceTabBar';
 import { useWorkspaceTabs, type WorkspaceTab } from './useWorkspaceTabs';
 import {
@@ -110,6 +114,45 @@ import {
   EventList,
   HistoryTurn,
 } from './ChatMessages';
+
+function PanelLoading({ children }: { children: string }) {
+  return (
+    <p role="status" className="p-4 text-sm text-gray-500 dark:text-gray-400">
+      {children}
+    </p>
+  );
+}
+
+// These panels are optional: loading a conversation should not also load its
+// terminal, file browser, side chats, and execution inspectors. Each loading
+// view also keeps its suspended import inside the panel in the App Router.
+const TerminalWorkspace = dynamic(
+  () => import('./TerminalWorkspace').then((module) => module.TerminalWorkspace),
+  { loading: () => <PanelLoading>Loading terminal…</PanelLoading> },
+);
+const WorkspaceFiles = dynamic(
+  () => import('./WorkspaceFiles').then((module) => module.WorkspaceFiles),
+  { loading: () => <PanelLoading>Loading files…</PanelLoading> },
+);
+const TrajectoryView = dynamic(
+  () => import('./TrajectoryView').then((module) => module.TrajectoryView),
+  { loading: () => <PanelLoading>Loading trajectory…</PanelLoading> },
+);
+const TrajectoryInspector = dynamic(
+  () => import('./TrajectoryInspector').then((module) => module.TrajectoryInspector),
+  { loading: () => <PanelLoading>Loading details…</PanelLoading> },
+);
+const RecordedDiffPanel = dynamic(
+  () => import('./RecordedDiffPanel').then((module) => module.RecordedDiffPanel),
+  { loading: () => <PanelLoading>Loading changes…</PanelLoading> },
+);
+const SideChat = dynamic(() => import('./SideChat').then((module) => module.SideChat), {
+  loading: () => <PanelLoading>Loading side chat…</PanelLoading>,
+});
+
+const EMPTY_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
+const EMPTY_THREAD_JOBS: AgentJobApi[] = [];
+const EMPTY_TRAJECTORY_STEPS: ReturnType<typeof buildTrajectorySteps> = [];
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -193,15 +236,32 @@ function ReviewButton({ onReview }: { onReview?: () => void }) {
   );
 }
 
+function WatchPullRequestButton({ onWatchPr }: { onWatchPr?: () => void }) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      onClick={onWatchPr}
+      disabled={!onWatchPr}
+      title={t(onWatchPr ? 'watchPr.start' : 'watchPr.unavailable')}
+      className="rounded-md bg-white dark:bg-gray-900 px-3 py-1.5 text-[13px] font-medium text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-inset ring-gray-200 dark:ring-white/10 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+    >
+      {t('watchPr.action')}
+    </button>
+  );
+}
+
 function RunActions({
   job,
   onOpenDiff,
   onReview,
+  onWatchPr,
   showChanges = job.diffFiles.length > 0,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
+  onWatchPr?: () => void;
   showChanges?: boolean;
 }) {
   return (
@@ -226,6 +286,7 @@ function RunActions({
             Open draft PR
           </a>
           <ReviewButton onReview={onReview} />
+          <WatchPullRequestButton onWatchPr={onWatchPr} />
         </>
       ) : null}
     </>
@@ -256,10 +317,12 @@ function FirstRunOutcome({
   job,
   onOpenDiff,
   onReview,
+  onWatchPr,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
+  onWatchPr?: () => void;
 }) {
   const t = useT();
   return (
@@ -286,7 +349,7 @@ function FirstRunOutcome({
           {t('firstRun.doneBody')}
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} />
+          <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} onWatchPr={onWatchPr} />
         </div>
       </div>
     </div>
@@ -333,11 +396,13 @@ function OutcomeCard({
   job,
   onOpenDiff,
   onReview,
+  onWatchPr,
   firstRun = false,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
+  onWatchPr?: () => void;
   firstRun?: boolean;
 }) {
   if (job.state === 'running' || job.state === 'queued') return null;
@@ -346,12 +411,24 @@ function OutcomeCard({
     const hasActions = job.diffFiles.length > 0 || Boolean(job.prUrl);
     if (!hasActions && !hasLostContext(job)) return null;
     if (firstRun && job.prUrl)
-      return <FirstRunOutcome job={job} onOpenDiff={onOpenDiff} onReview={onReview} />;
+      return (
+        <FirstRunOutcome
+          job={job}
+          onOpenDiff={onOpenDiff}
+          onReview={onReview}
+          onWatchPr={onWatchPr}
+        />
+      );
     return (
       <div className="mt-6">
         {hasActions ? (
           <div className="flex flex-wrap items-center gap-3">
-            <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} />
+            <RunActions
+              job={job}
+              onOpenDiff={onOpenDiff}
+              onReview={onReview}
+              onWatchPr={onWatchPr}
+            />
           </div>
         ) : null}
         <RunGuidance job={job} />
@@ -388,12 +465,15 @@ function GitPanel({
   job,
   active,
   onReview,
+  onWatchPr,
 }: {
   job: AgentJob;
   active: boolean;
   onReview?: () => void;
+  onWatchPr?: () => void;
 }) {
   const [view, setView] = useState<GitView>('diff');
+  const gitId = useId();
   const [live, setLive] = useState<AgentGitWorkspaceApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -443,7 +523,7 @@ function GitPanel({
   }, [files, selectedPath]);
 
   return (
-    <div className="space-y-4" aria-label="Git workspace">
+    <div className="agent-git-workspace min-w-0 space-y-4" aria-label="Git workspace">
       <header className="flex flex-wrap items-center gap-3 border-b border-gray-200 dark:border-white/10 pb-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">
@@ -473,15 +553,35 @@ function GitPanel({
       <div
         className="flex items-center gap-5 border-b border-gray-200 dark:border-white/10"
         role="tablist"
+        aria-label="Git views"
       >
-        {(['diff', 'review', 'commits'] as GitView[]).map((item) => (
+        {(['diff', 'review', 'commits'] as GitView[]).map((item, index, views) => (
           <button
             key={item}
             type="button"
             role="tab"
+            id={`${gitId}-tab-${item}`}
+            aria-controls={`${gitId}-panel-${item}`}
             aria-selected={view === item}
+            tabIndex={view === item ? 0 : -1}
             onClick={() => setView(item)}
-            className={`border-b-2 px-1 pb-2 text-xs font-medium capitalize ${
+            onKeyDown={(event) => {
+              const next =
+                event.key === 'ArrowRight'
+                  ? (index + 1) % views.length
+                  : event.key === 'ArrowLeft'
+                    ? (index + views.length - 1) % views.length
+                    : event.key === 'Home'
+                      ? 0
+                      : event.key === 'End'
+                        ? views.length - 1
+                        : null;
+              if (next === null) return;
+              event.preventDefault();
+              setView(views[next]);
+              document.getElementById(`${gitId}-tab-${views[next]}`)?.focus();
+            }}
+            className={`ui-tab min-h-9 px-2 py-2 text-xs font-medium capitalize ${
               view === item
                 ? 'border-gray-900 dark:border-gray-100 text-gray-900 dark:text-gray-50'
                 : 'border-transparent text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'
@@ -502,146 +602,170 @@ function GitPanel({
         <p className="text-xs text-red-600 dark:text-red-400">{ownerFailureMessage(error)}</p>
       ) : null}
 
-      {view === 'diff' && files.length ? (
-        <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 lg:grid lg:grid-cols-[minmax(14rem,0.35fr)_minmax(0,1fr)]">
-          <div className="border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-gray-900/60 lg:border-b-0 lg:border-r">
-            <div className="flex items-center px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400">
-              <span>
-                {files.length} changed file{files.length === 1 ? '' : 's'}
-              </span>
-              <span className="ml-auto font-mono">Changes</span>
-            </div>
-            <div className="max-h-[34rem] overflow-auto border-t border-gray-200 dark:border-white/10">
-              {files.map((file) => (
-                <button
-                  key={file.path}
-                  type="button"
-                  onClick={() => setSelectedPath(file.path)}
-                  className={`flex w-full items-center gap-3 border-b border-gray-100 dark:border-white/5 px-3 py-2.5 text-left text-xs last:border-b-0 ${
-                    selected?.path === file.path
-                      ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-50'
-                      : 'text-gray-600 dark:text-gray-400 hover:bg-white dark:hover:bg-white/10'
-                  }`}
-                >
-                  <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
-                  <span className="shrink-0 font-mono">
-                    <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>{' '}
-                    <span className="text-red-500 dark:text-red-400">−{file.del}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="min-w-0 bg-white dark:bg-gray-900">
-            <div className="border-b border-gray-100 dark:border-white/5 px-4 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400">
-              {selected?.path}
-            </div>
-            <pre className="max-h-[34rem] overflow-auto font-mono text-xs leading-relaxed">
-              <code>
-                {selected?.lines.map((line, index) => (
-                  <span
-                    key={index}
-                    className={`block min-w-max px-4 ${DIFF_LINE_CLASS[line.marker]}`}
+      <div id={`${gitId}-panel-${view}`} role="tabpanel" aria-labelledby={`${gitId}-tab-${view}`}>
+        {view === 'diff' && files.length ? (
+          <section className="agent-git-diff overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
+            <div className="agent-git-file-list border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-gray-900/60">
+              <div className="flex items-center px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400">
+                <span>
+                  {files.length} changed file{files.length === 1 ? '' : 's'}
+                </span>
+                <span className="ml-auto font-mono">Changes</span>
+              </div>
+              <div className="max-h-[34rem] overflow-auto border-t border-gray-200 dark:border-white/10">
+                {files.map((file) => (
+                  <button
+                    key={file.path}
+                    type="button"
+                    onClick={() => setSelectedPath(file.path)}
+                    aria-pressed={selected?.path === file.path}
+                    title={file.path}
+                    className={`ui-focus-ring flex w-full items-center gap-3 border-b border-gray-100 dark:border-white/5 px-3 py-2.5 text-left text-xs last:border-b-0 ${
+                      selected?.path === file.path
+                        ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-50'
+                        : 'text-gray-600 dark:text-gray-400 hover:bg-white dark:hover:bg-white/10'
+                    }`}
                   >
-                    {line.text || ' '}
-                  </span>
-                ))}
-              </code>
-            </pre>
-          </div>
-        </section>
-      ) : view === 'diff' ? (
-        <div className="rounded-xl border border-dashed border-gray-200 dark:border-white/10 px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
-          No changes yet.
-        </div>
-      ) : view === 'review' ? (
-        <section className="space-y-4 rounded-xl border border-gray-200 dark:border-white/10 p-5">
-          <div className="flex items-center gap-3">
-            <div>
-              <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
-                {files.length} changed file{files.length === 1 ? '' : 's'}
-              </p>
-              <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
-                Compared with {job.baseRef || job.baseSha || 'the pinned base'}
-              </p>
-            </div>
-            <p className="ml-auto font-mono text-xs">
-              <span className="text-emerald-600 dark:text-emerald-400">+{stat.add}</span>{' '}
-              <span className="text-red-500 dark:text-red-400">−{stat.del}</span>
-            </p>
-          </div>
-          {files.length ? (
-            <ul className="divide-y divide-gray-100 dark:divide-white/5 border-y border-gray-100 dark:border-white/5">
-              {files.map((file) => (
-                <li key={file.path} className="flex gap-3 py-2.5 font-mono text-xs">
-                  <span className="min-w-0 flex-1 truncate text-gray-600 dark:text-gray-400">
-                    {file.path}
-                  </span>
-                  <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>
-                  <span className="text-red-500 dark:text-red-400">−{file.del}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {job.prUrl ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <a
-                href={job.prUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-xs font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
-              >
-                Open pull request
-              </a>
-              <ReviewButton onReview={onReview} />
-            </div>
-          ) : (
-            <p className="text-xs text-gray-400 dark:text-gray-500">
-              Pull request not published yet.
-            </p>
-          )}
-        </section>
-      ) : (
-        <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
-          {live?.available && live.commits.length ? (
-            <ul className="divide-y divide-gray-100 dark:divide-white/5">
-              {live.commits.map((commit) => (
-                <li key={commit.sha} className="px-4 py-3">
-                  <div className="flex items-start gap-3">
-                    <span className="font-mono text-xs text-gray-400 dark:text-gray-500">
-                      {commit.short_sha}
+                    <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
+                    <span className="shrink-0 font-mono">
+                      <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>{' '}
+                      <span className="text-red-500 dark:text-red-400">−{file.del}</span>
                     </span>
-                    <div className="min-w-0">
-                      <p className="truncate text-sm text-gray-700 dark:text-gray-300">
-                        {commit.subject}
-                      </p>
-                      <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
-                        {commit.author} · {commit.authored_at}
-                      </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="min-w-0 bg-white dark:bg-gray-900">
+              <label className="agent-git-file-picker border-b border-border bg-surface-muted px-3 py-2 text-xs text-muted">
+                <span>
+                  {files.length} changed file{files.length === 1 ? '' : 's'}
+                </span>
+                <select
+                  aria-label="Changed file"
+                  value={selected?.path ?? ''}
+                  onChange={(event) => setSelectedPath(event.target.value)}
+                  className="ui-input mt-1 w-full min-w-0 py-2 font-mono text-xs"
+                >
+                  {files.map((file) => (
+                    <option key={file.path} value={file.path}>
+                      {file.path} (+{file.add} −{file.del})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="agent-git-selected-path border-b border-gray-100 dark:border-white/5 px-4 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400">
+                {selected?.path}
+              </div>
+              <pre
+                tabIndex={0}
+                role="region"
+                aria-label={`Diff for ${selected?.path ?? 'selected file'}`}
+                className="ui-focus-ring max-h-[34rem] overflow-auto font-mono text-xs leading-relaxed"
+              >
+                <code>
+                  {selected?.lines.map((line, index) => (
+                    <span
+                      key={index}
+                      className={`block min-w-max px-4 ${DIFF_LINE_CLASS[line.marker]}`}
+                    >
+                      {line.text || ' '}
+                    </span>
+                  ))}
+                </code>
+              </pre>
+            </div>
+          </section>
+        ) : view === 'diff' ? (
+          <div className="rounded-xl border border-dashed border-gray-200 dark:border-white/10 px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
+            No changes yet.
+          </div>
+        ) : view === 'review' ? (
+          <section className="space-y-4 rounded-xl border border-gray-200 dark:border-white/10 p-5">
+            <div className="flex items-center gap-3">
+              <div>
+                <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                  {files.length} changed file{files.length === 1 ? '' : 's'}
+                </p>
+                <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                  Compared with {job.baseRef || job.baseSha || 'the pinned base'}
+                </p>
+              </div>
+              <p className="ml-auto font-mono text-xs">
+                <span className="text-emerald-600 dark:text-emerald-400">+{stat.add}</span>{' '}
+                <span className="text-red-500 dark:text-red-400">−{stat.del}</span>
+              </p>
+            </div>
+            {files.length ? (
+              <ul className="divide-y divide-gray-100 dark:divide-white/5 border-y border-gray-100 dark:border-white/5">
+                {files.map((file) => (
+                  <li key={file.path} className="flex gap-3 py-2.5 font-mono text-xs">
+                    <span className="min-w-0 flex-1 truncate text-gray-600 dark:text-gray-400">
+                      {file.path}
+                    </span>
+                    <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>
+                    <span className="text-red-500 dark:text-red-400">−{file.del}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {job.prUrl ? (
+              <div className="flex flex-wrap items-center gap-3">
+                <a
+                  href={job.prUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-xs font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
+                >
+                  Open pull request
+                </a>
+                <ReviewButton onReview={onReview} />
+                <WatchPullRequestButton onWatchPr={onWatchPr} />
+              </div>
+            ) : (
+              <p className="text-xs text-gray-400 dark:text-gray-500">
+                Pull request not published yet.
+              </p>
+            )}
+          </section>
+        ) : (
+          <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
+            {live?.available && live.commits.length ? (
+              <ul className="divide-y divide-gray-100 dark:divide-white/5">
+                {live.commits.map((commit) => (
+                  <li key={commit.sha} className="px-4 py-3">
+                    <div className="flex items-start gap-3">
+                      <span className="font-mono text-xs text-gray-400 dark:text-gray-500">
+                        {commit.short_sha}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm text-gray-700 dark:text-gray-300">
+                          {commit.subject}
+                        </p>
+                        <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
+                          {commit.author} · {commit.authored_at}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
-              Commit history is available for live workspaces.
-            </p>
-          )}
-        </section>
-      )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
+                Commit history is available for live workspaces.
+              </p>
+            )}
+          </section>
+        )}
+      </div>
     </div>
   );
 }
 
-const NO_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
-const NO_THREAD_JOBS: AgentJobApi[] = [];
-
 export function JobDetail({
   job,
   userId,
-  events = NO_STORED_EVENTS,
-  threadJobs = NO_THREAD_JOBS,
+  events = EMPTY_STORED_EVENTS,
+  threadJobs = EMPTY_THREAD_JOBS,
   onReload,
 }: {
   job: AgentJob;
@@ -655,6 +779,8 @@ export function JobDetail({
   const router = useRouter();
   const t = useT();
   const usage = useLedgerUsage(job);
+  const threadId = job.threadId ?? job.id;
+  const workspaceScope = JSON.stringify([userId, threadId]);
   const liveAttempt = useMemo(
     () => (job.attempts.length > 0 ? job.attempts[job.attempts.length - 1].no : 0),
     [job.attempts],
@@ -673,7 +799,20 @@ export function JobDetail({
   const [title, setTitle] = useState(job.title);
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [openWorkspaceScope, setOpenWorkspaceScope] = useState<string | null>(null);
+  const workspaceOpen = openWorkspaceScope === workspaceScope;
+  const setWorkspaceOpen = useCallback(
+    (open: boolean) => setOpenWorkspaceScope(open ? workspaceScope : null),
+    [workspaceScope],
+  );
+  const [initializedWorkspace, setInitializedWorkspace] = useState<{
+    scope: string;
+    tabs: ReadonlySet<WorkspaceTab>;
+  } | null>(null);
+  useEffect(() => {
+    setOpenWorkspaceScope(null);
+    setInitializedWorkspace(null);
+  }, [workspaceScope]);
   const workspaceTriggerRef = useRef<HTMLElement | null>(null);
   const focusWorkspaceRef = useRef(false);
   const [activityOpen, setActivityOpen] = useState(true);
@@ -689,40 +828,59 @@ export function JobDetail({
   const activityToggleRef = useRef<HTMLButtonElement>(null);
   const workspaceTabs = useWorkspaceTabs(userId, job, threadJobs);
   const workspaceTab = workspaceTabs.selected;
+  // Mount a panel only when first used, then retain it while hidden so closing
+  // the workspace preserves terminals, file previews, and side chat drafts.
+  const workspaceInitialized = workspaceOpen || initializedWorkspace?.scope === workspaceScope;
+  const terminalInitialized =
+    (workspaceOpen && workspaceTab === 'terminal') ||
+    (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('terminal'));
+  const filesInitialized =
+    (workspaceOpen && workspaceTab === 'files') ||
+    (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('files'));
+  useEffect(() => {
+    if (!workspaceOpen) return;
+    setInitializedWorkspace((current) => {
+      if (current?.scope === workspaceScope && current.tabs.has(workspaceTab)) return current;
+      const tabs = new Set(current?.scope === workspaceScope ? current.tabs : []);
+      tabs.add(workspaceTab);
+      return { scope: workspaceScope, tabs };
+    });
+  }, [workspaceOpen, workspaceScope, workspaceTab]);
   // The workspace and the step inspector take turns in the same right region.
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
   const focusInspectorRef = useRef(false);
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
-  // Chat does not need a second projection of the entire stored stream. Build
-  // it on the first inspection or trajectory visit, and reuse it until the
-  // source changes. Activity links request it only when they have a subagent.
+  const trajectoryContext = useMemo(() => {
+    const context = turnContextFromJobs(threadJobs);
+    if (
+      !context.inputs?.some((input) => input.jobId === job.id) &&
+      typeof job.prompt === 'string'
+    ) {
+      context.inputs = [
+        ...(context.inputs ?? []),
+        {
+          jobId: job.id,
+          turnNo: job.turnNo ?? 1,
+          text: job.prompt,
+          at: job.createdAt ?? null,
+        },
+      ];
+    }
+    return context;
+  }, [threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
+  // The diagnostic projection can be large. Keep a getter for transcript
+  // clicks, and construct it only while a reader uses the trajectory/details.
   const getTrajectorySteps = useMemo(() => {
-    let cached: ReturnType<typeof buildTrajectorySteps> | undefined;
+    let steps: ReturnType<typeof buildTrajectorySteps> | undefined;
     return () => {
-      if (cached) return cached;
-      const context = turnContextFromJobs(threadJobs);
-      if (
-        !context.inputs?.some((input) => input.jobId === job.id) &&
-        typeof job.prompt === 'string'
-      ) {
-        context.inputs = [
-          ...(context.inputs ?? []),
-          {
-            jobId: job.id,
-            turnNo: job.turnNo ?? 1,
-            text: job.prompt,
-            at: job.createdAt ?? null,
-          },
-        ];
-      }
-      cached = buildTrajectorySteps(events, context);
-      return cached;
+      steps ??= buildTrajectorySteps(events, trajectoryContext);
+      return steps;
     };
-  }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
-  const trajectorySteps = tab === 'trajectory' || inspector ? getTrajectorySteps() : [];
-  const threadId = job.threadId ?? job.id;
+  }, [events, trajectoryContext]);
+  const trajectorySteps =
+    tab === 'trajectory' || inspector !== null ? getTrajectorySteps() : EMPTY_TRAJECTORY_STEPS;
   const draft = useComposerDraft({ userId, threadId });
   const { value: followUp, setValue: setFollowUp } = draft;
   const currentDraftScope = useRef(draft.capture().scope);
@@ -735,7 +893,6 @@ export function JobDetail({
     };
   }, []);
   const [presentation, setPresentation] = useTranscriptPresentation(userId, threadId);
-  const workspaceScope = JSON.stringify([userId, threadId]);
   const [requestedFile, setRequestedFile] = useState<{
     scope: string;
     path: string;
@@ -747,30 +904,11 @@ export function JobDetail({
   } | null>(null);
   const recordedFile =
     recordedSelection?.scope === workspaceScope ? recordedSelection.selection : null;
-  const recordedOutputs = useMemo(() => {
-    // Partition once rather than scanning every event again for every turn.
-    const byJob = new Map<string, (AgentJobEventApi | AgentThreadEventApi)[]>();
-    let hasUnlabeled = false;
-    for (const event of events) {
-      if (!('job_id' in event)) {
-        hasUnlabeled = true;
-        continue;
-      }
-      const group = byJob.get(event.job_id) ?? [];
-      group.push(event);
-      byJob.set(event.job_id, group);
-    }
-    return new Map(
-      threadJobs.map((turn) => {
-        const own = byJob.get(turn.id) ?? [];
-        return [
-          turn.id,
-          // Legacy unlabeled logs retain their original event order.
-          recordedTurnOutputs(turn, hasUnlabeled ? events : own),
-        ];
-      }),
-    );
-  }, [threadJobs, events]);
+  const recordedOutputsSelector = useMemo(() => createRecordedOutputsSelector(), []);
+  const recordedOutputs = useMemo(
+    () => recordedOutputsSelector.select(threadJobs, events),
+    [recordedOutputsSelector, threadJobs, events],
+  );
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
@@ -787,7 +925,9 @@ export function JobDetail({
         : latest,
     { turnNo: job.turnNo ?? 1, skills: job.skills ?? [] },
   ).skills;
-  useEffect(() => setChosenSkills(null), [job.id]);
+  // Unsent composer choices belong to the conversation, including when a PR
+  // action advances it to another turn without sending the owner's draft.
+  useEffect(() => setChosenSkills(null), [threadId]);
   // The same rule for the goal guidance. This component is deliberately not
   // remounted when the conversation moves to its next turn, so anything that
   // belongs to *one* message has to be reset explicitly when that turn does.
@@ -806,6 +946,8 @@ export function JobDetail({
   const [submitting, setSubmitting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const sendRequestedRef = useRef(false);
+  const watchPrRequestedRef = useRef(false);
+  const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -972,6 +1114,7 @@ export function JobDetail({
     setStopping(false);
     forkRequestedRef.current = false;
     setForking(false);
+    setWatchPrAcceptedJobId(null);
   }, [job.id]);
 
   useEffect(() => {
@@ -1026,7 +1169,7 @@ export function JobDetail({
       setInspector(null);
       setWorkspaceOpen(true);
     }
-  }, [workspaceOpen]);
+  }, [workspaceOpen, setWorkspaceOpen]);
 
   useEffect(() => {
     if (!workspaceOpen || !focusWorkspaceRef.current) return;
@@ -1074,7 +1217,7 @@ export function JobDetail({
         return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step, tab) : 'summary' };
       });
     },
-    [rememberInspectorTrigger, getTrajectorySteps],
+    [rememberInspectorTrigger, setWorkspaceOpen, getTrajectorySteps],
   );
 
   const inspectTranscriptEvent = useCallback(
@@ -1102,7 +1245,7 @@ export function JobDetail({
       setTab('trajectory');
       setFocusJobId(jobId);
     },
-    [rememberInspectorTrigger],
+    [rememberInspectorTrigger, setWorkspaceOpen],
   );
 
   const selectInspectorTab = useCallback((next: StepTab | RunTab) => {
@@ -1262,6 +1405,7 @@ export function JobDetail({
     if (
       sendRequestedRef.current ||
       rewriting ||
+      watchPrRequestedRef.current ||
       contextLost ||
       isArchived ||
       attachments.uploading ||
@@ -1292,6 +1436,7 @@ export function JobDetail({
       if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return result;
       queue.apply(result);
       // The queued message retains its uploads; the next draft starts without them.
+      setChosenSkills(null);
       attachments.reset();
       return result;
     } catch (cause: unknown) {
@@ -1394,13 +1539,14 @@ export function JobDetail({
     <LedgerUsage job={job} usage={usage} />
   ) : undefined;
 
-  // Turns the transcript renders, described once. The Chat below and the rail
-  // beside it read the same description, so a mark cannot address a turn the
-  // body does not draw. The stored turns are memoized because they are
-  // immutable; the newest one is rebuilt when its source or selected attempt
-  // changes, so typing in the composer does not rescan the transcript.
+  // The transcript and rail share descriptions. Composer edits cannot change
+  // them; streaming updates rebuild only the description whose source changed.
   const currentAttemptNo = job.currentAttemptNo;
-  const historyTurns = useMemo(() => describeHistoryTurns(job), [job]);
+  const historicalRows = job.historyTurns;
+  const historyTurns = useMemo(
+    () => describeHistoryTurns({ historyTurns: historicalRows }),
+    [historicalRows],
+  );
   const currentTurn = useMemo(
     () => describeCurrentTurn(job, { attemptNo, currentAttemptNo }),
     [job, attemptNo, currentAttemptNo],
@@ -1423,17 +1569,35 @@ export function JobDetail({
     setInspector(null);
     setFocusJobId(null);
     setActivityOpen(true);
-  }, [activityVisible, closeActivity]);
+  }, [activityVisible, closeActivity, setWorkspaceOpen]);
+  const activitySources = useMemo(() => {
+    const wanted = new Set(
+      activityOverview.subagents.map((agent) => agent.sourceEvent.sourceEventId),
+    );
+    const sources = new Map<number, AgentJobEventApi | AgentThreadEventApi>();
+    if (!wanted.size) return sources;
+    for (const source of events) {
+      if (wanted.has(source.id)) sources.set(source.id, source);
+    }
+    return sources;
+  }, [activityOverview, events]);
   const activityStepKey = useCallback(
-    (event: Extract<AgentEvent, { kind: 'tool_use' }>) =>
-      getTrajectorySteps().find(
-        (step) =>
-          step.kind === 'tool' &&
-          step.jobId === job.id &&
-          event.sourceEventId !== undefined &&
-          step.sourceEvents.some((source) => source.id === event.sourceEventId),
-      )?.key,
-    [job.id, getTrajectorySteps],
+    (event: Extract<AgentEvent, { kind: 'tool_use' }>) => {
+      const source =
+        event.sourceEventId === undefined ? undefined : activitySources.get(event.sourceEventId);
+      if (!source) return undefined;
+      const sourceJobId =
+        'job_id' in source
+          ? source.job_id
+          : trajectoryContext.inputs?.length === 1
+            ? trajectoryContext.inputs[0].jobId
+            : undefined;
+      if (sourceJobId !== job.id) return undefined;
+      // The adapted tool row already identifies its source call. Computing its
+      // stable key does not need the full diagnostic projection during render.
+      return toolStepKey({ ...source, job_id: sourceJobId }, event.id);
+    },
+    [activitySources, job.id, trajectoryContext],
   );
   useEffect(() => {
     if (!activityVisible) return;
@@ -1453,7 +1617,7 @@ export function JobDetail({
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [activityVisible, closeActivity]);
+  }, [activityVisible, closeActivity, setWorkspaceOpen]);
   const currentRewindAnchor = job.historyTurns
     ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
@@ -1506,6 +1670,71 @@ export function JobDetail({
       if (how.requested || how.after === viewedJobId) followTurn(jobId);
     },
   });
+  const watchPrPrompt = watchPullRequestPrompt(job);
+  // These live fields describe the entire conversation/workspace. Other
+  // thread rows can retain older pending/running values after it settles.
+  const publicationState =
+    job.workspacePublicationState ?? latestQuestionTurn?.workspace_publication_state;
+  const publicationPending = Boolean(publicationState && publicationState !== 'published');
+  const conversationBusy =
+    job.conversationState !== undefined
+      ? isActiveConversationState(job.conversationState)
+      : Boolean(latestQuestionTurn && isBusyJob(latestQuestionTurn));
+  // An idle send resumes a paused queue oldest-first. This action must start
+  // its own request, so wait until the queue is known to have no other work.
+  const canWatchPr = Boolean(
+    userId &&
+    job.prUrl &&
+    isSuccessful &&
+    !isActive &&
+    !isArchived &&
+    !contextLost &&
+    !submitting &&
+    !rewriting &&
+    !mcp.saving &&
+    !publicationPending &&
+    watchPrAcceptedJobId !== job.id &&
+    queue.loaded &&
+    queue.latestJobId &&
+    ['succeeded', 'failed', 'cancelled'].includes(queue.latestJobState ?? '') &&
+    queue.messages.length === 0 &&
+    !queue.resuming &&
+    !conversationBusy,
+  );
+
+  async function watchPr() {
+    const latestJobId = queue.latestJobId;
+    if (!canWatchPr || !latestJobId || watchPrRequestedRef.current || sendRequestedRef.current)
+      return;
+    const watchScope = currentDraftScope.current;
+    watchPrRequestedRef.current = true;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      // This action sends its own message. Unsent text, uploads and composer
+      // selections belong to the owner's next message and stay in place.
+      // The server replays this receipt under the thread lock, including for
+      // another tab viewing a different turn of the same conversation. Fresh
+      // requests refuse atomically if its queue or published boundary changes.
+      const result = await submitThreadMessage(
+        threadId,
+        { prompt: watchPrPrompt, require_idle: true, expected_latest_job_id: latestJobId },
+        { requestId: watchPullRequestRequestId(threadId, latestJobId) },
+      );
+      if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
+      // Keep the completed source action closed while the next turn loads.
+      if (result.job && !result.pending) setWatchPrAcceptedJobId(job.id);
+      queue.apply(result);
+    } catch (cause: unknown) {
+      if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
+      if (cause instanceof APIError && cause.code === 'conversation_changed') void queue.refresh();
+      setActionError(cause instanceof Error ? cause.message : t('watchPr.sendFailed'));
+    } finally {
+      watchPrRequestedRef.current = false;
+      if (composerMounted.current) setSubmitting(false);
+    }
+  }
+
   // Announced only for a jump the reader asked for, never for a streamed
   // event: a transcript that talks on every token is one nobody can listen to.
   const [announcedTurn, setAnnouncedTurn] = useState<string | null>(null);
@@ -1566,7 +1795,7 @@ export function JobDetail({
   const panelOpen = workspaceOpen || inspector !== null;
   const content = (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
-      <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
         {isArchived ? (
           <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
             <Link
@@ -1579,114 +1808,126 @@ export function JobDetail({
             <span>{t('sessionArchive.badge')}</span>
           </div>
         ) : null}
-        <div className="flex w-full flex-wrap items-center gap-2 py-3.5 pr-14 sm:flex-nowrap sm:gap-3">
-          <div className="min-w-0 basis-full flex-1 sm:basis-auto">
-            <h1 className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50">
-              {title}
-            </h1>
-            <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <svg
-                aria-hidden="true"
-                className="h-3.5 w-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
+        <div className="agent-conversation-toolbar flex w-full items-center gap-3 py-3.5 pr-14">
+          <div className="agent-conversation-context flex min-w-0 flex-1 items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <h1
+                title={title}
+                className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
-                />
-              </svg>
-              <span className="truncate">{job.repo}</span>
+                {title}
+              </h1>
+              <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <svg
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
+                  />
+                </svg>
+                <span className="truncate">{job.repo}</span>
+              </div>
             </div>
+            <ThreadActions
+              key={job.threadId ?? job.id}
+              job={{ ...job, title }}
+              canFork={canForkCurrent}
+              forking={forking}
+              onFork={() => void forkFrom(job.id)}
+              onRename={setTitle}
+            />
           </div>
-          <ThreadActions
-            key={job.threadId ?? job.id}
-            job={{ ...job, title }}
-            canFork={canForkCurrent}
-            forking={forking}
-            onFork={() => void forkFrom(job.id)}
-            onRename={setTitle}
-          />
-          <nav aria-label="Run views" className="mr-3 flex shrink-0 items-center gap-1 text-[13px]">
-            {(['chat', 'trajectory'] as const).map((view) => (
+          <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-2">
+            <nav
+              aria-label="Run views"
+              className="mr-3 flex shrink-0 items-center gap-1 text-[13px]"
+            >
+              {(['chat', 'trajectory'] as const).map((view) => (
+                <button
+                  key={view}
+                  type="button"
+                  onClick={() => setTab(view)}
+                  aria-current={tab === view ? 'page' : undefined}
+                  className={`ui-focus-ring min-h-9 rounded-lg px-2.5 py-1 capitalize transition-colors ${
+                    tab === view
+                      ? 'bg-gray-100 dark:bg-white/5 font-medium text-gray-900 dark:text-gray-50'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                  }`}
+                >
+                  {view}
+                </button>
+              ))}
+            </nav>
+            {tab === 'chat' ? (
+              <TranscriptPresentationControl
+                value={presentation}
+                onChange={(mode) => {
+                  scroll.holdReading();
+                  setPresentation(mode);
+                }}
+              />
+            ) : null}
+            {hasActivity ? (
               <button
-                key={view}
+                ref={activityToggleRef}
                 type="button"
-                onClick={() => setTab(view)}
-                aria-current={tab === view ? 'page' : undefined}
-                className={`rounded-lg px-2.5 py-1 capitalize transition-colors ${
-                  tab === view
-                    ? 'bg-gray-100 dark:bg-white/5 font-medium text-gray-900 dark:text-gray-50'
-                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                onClick={toggleActivity}
+                aria-label={
+                  activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'
+                }
+                aria-expanded={activityVisible}
+                aria-controls="job-activity-window"
+                title="Tasks and subagents"
+                className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-crimson ${
+                  activityVisible
+                    ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
+                    : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
                 }`}
               >
-                {view}
+                <ActivityIcon />
               </button>
-            ))}
-          </nav>
-          {tab === 'chat' ? (
-            <TranscriptPresentationControl
-              value={presentation}
-              onChange={(mode) => {
-                scroll.holdReading();
-                setPresentation(mode);
-              }}
-            />
-          ) : null}
-          {hasActivity ? (
-            <button
-              ref={activityToggleRef}
-              type="button"
-              onClick={toggleActivity}
-              aria-label={activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'}
-              aria-expanded={activityVisible}
-              aria-controls="job-activity-window"
-              title="Tasks and subagents"
-              className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-crimson ${
-                activityVisible
-                  ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
-                  : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
-              }`}
-            >
-              <ActivityIcon />
-            </button>
-          ) : null}
-          {job.diffFiles.length ? (
-            <button
-              type="button"
-              onClick={() => openWorkspace('git')}
-              className="hidden rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 sm:block"
-            >
-              Changes
-              <span className="ml-1 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[11px]">
-                {job.diffFiles.length}
-              </span>
-            </button>
-          ) : null}
-          {isActive ? (
-            <button
-              type="button"
-              onClick={() => void stop()}
-              disabled={stopping}
-              aria-label="Stop"
-              title="Stop run (Esc)"
-              className="inline-flex items-center gap-1.5 rounded-md bg-gray-900 dark:bg-gray-100 px-2.5 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 transition-colors hover:bg-gray-800 dark:hover:bg-white disabled:opacity-60"
-            >
-              <span className="h-2.5 w-2.5 rounded-sm bg-white dark:bg-gray-900" />
-              {stopping ? 'Stopping…' : 'Stop'}
-              {!stopping ? (
-                <kbd
-                  aria-hidden="true"
-                  className="rounded bg-white/15 px-1 text-[10px] dark:bg-gray-900/15"
-                >
-                  Esc
-                </kbd>
-              ) : null}
-            </button>
-          ) : null}
+            ) : null}
+            {job.diffFiles.length ? (
+              <button
+                type="button"
+                onClick={() => openWorkspace('git')}
+                className="ui-focus-ring hidden min-h-9 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 sm:block"
+              >
+                Changes
+                <span className="ml-1 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[11px]">
+                  {job.diffFiles.length}
+                </span>
+              </button>
+            ) : null}
+            {isActive ? (
+              <button
+                type="button"
+                onClick={() => void stop()}
+                disabled={stopping}
+                aria-label="Stop"
+                title="Stop run (Esc)"
+                className="inline-flex items-center gap-1.5 rounded-md bg-gray-900 dark:bg-gray-100 px-2.5 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 transition-colors hover:bg-gray-800 dark:hover:bg-white disabled:opacity-60"
+              >
+                <span className="h-2.5 w-2.5 rounded-sm bg-white dark:bg-gray-900" />
+                {stopping ? 'Stopping…' : 'Stop'}
+                {!stopping ? (
+                  <kbd
+                    aria-hidden="true"
+                    className="rounded bg-white/15 px-1 text-[10px] dark:bg-gray-900/15"
+                  >
+                    Esc
+                  </kbd>
+                ) : null}
+              </button>
+            ) : null}
+          </div>
         </div>
         <button
           type="button"
@@ -1696,7 +1937,7 @@ export function JobDetail({
           aria-controls="job-workspace-pane"
           aria-keyshortcuts="Meta+J Control+J"
           title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'} (⌘J / Ctrl+J)`}
-          className={`absolute right-6 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md border transition-colors ${
+          className={`ui-focus-ring absolute right-6 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md border transition-colors ${
             workspaceOpen
               ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'
               : 'border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100'
@@ -1984,6 +2225,7 @@ export function JobDetail({
                       firstRun={firstRun}
                       onOpenDiff={() => openWorkspace('git')}
                       onReview={canReview ? openReview : undefined}
+                      onWatchPr={canWatchPr ? () => void watchPr() : undefined}
                     />
                     {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
                     {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
@@ -2128,6 +2370,10 @@ export function JobDetail({
                         textareaRef={followUpBox}
                         rows={2}
                         value={followUp}
+                        onPaste={(event) => {
+                          if (contextLost || submitting) return;
+                          attachments.onPaste(event);
+                        }}
                         onChange={(event) => {
                           setFollowUp(event.target.value);
                           if (goalHint) setGoalHint(null);
@@ -2391,6 +2637,7 @@ export function JobDetail({
         ) : null}
 
         <aside
+          key={workspaceScope}
           id="job-workspace-pane"
           role="region"
           aria-label="Job workspace"
@@ -2400,101 +2647,112 @@ export function JobDetail({
             workspaceOpen ? 'flex' : 'hidden'
           } h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
         >
-          <WorkspaceTabBar
-            key={`${userId}:${job.threadId ?? job.id}`}
-            selected={workspaceTab}
-            chats={workspaceTabs.chats}
-            diffCount={job.diffFiles.length}
-            onSelect={openWorkspace}
-            onAdd={workspaceTabs.add}
-            onClose={workspaceTabs.close}
-          />
-          <div
-            id="workspace-panel-git"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-git"
-            hidden={workspaceTab !== 'git'}
-            className="min-h-0 flex-1 overflow-y-auto p-5"
-          >
-            {recordedFile ? (
-              <RecordedDiffPanel
-                selection={recordedFile}
-                turnNo={
-                  threadJobs.find((turn) => turn.id === recordedFile.jobId)?.turn_no ??
-                  job.turnNo ??
-                  1
-                }
-                onClose={() => setRecordedFile(null)}
+          {workspaceInitialized ? (
+            <>
+              <WorkspaceTabBar
+                key={`${userId}:${job.threadId ?? job.id}`}
+                selected={workspaceTab}
+                chats={workspaceTabs.chats}
+                diffCount={job.diffFiles.length}
+                onSelect={openWorkspace}
+                onAdd={workspaceTabs.add}
+                onClose={workspaceTabs.close}
+                onBack={toggleWorkspace}
               />
-            ) : (
-              <GitPanel
-                job={job}
-                active={workspaceOpen && workspaceTab === 'git'}
-                onReview={canReview ? openReview : undefined}
-              />
-            )}
-          </div>
-          <div
-            id="workspace-panel-terminal"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-terminal"
-            hidden={workspaceTab !== 'terminal'}
-            className="min-h-0 flex-1 p-3"
-          >
-            {isArchived ? (
-              <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
-                {t('sessionArchive.terminal')}
-              </p>
-            ) : (
-              // Keyed by the chat, not the turn: every turn shares the one
-              // workspace, and a new turn must not tear its terminals down.
-              <TerminalWorkspace
-                key={job.threadId ?? job.id}
-                jobId={job.id}
-                workspaceKey={job.threadId ?? job.id}
-                active={workspaceOpen && workspaceTab === 'terminal'}
-                ready={terminalWorkspaceReady}
-              />
-            )}
-          </div>
-          <div
-            id="workspace-panel-files"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-files"
-            hidden={workspaceTab !== 'files'}
-            className="min-h-0 flex-1 overflow-y-auto p-5"
-          >
-            <WorkspaceFiles
-              job={job}
-              active={workspaceOpen && workspaceTab === 'files'}
-              requestedPath={
-                requestedFile?.scope === workspaceScope ? requestedFile.path : undefined
-              }
-              requestToken={
-                requestedFile?.scope === workspaceScope ? requestedFile.token : undefined
-              }
-            />
-          </div>
-          {workspaceTabs.chats.map((chat) => (
-            <div
-              key={chat.id}
-              id={`workspace-panel-${chat.id}`}
-              data-side-chat-id={chat.id}
-              role="tabpanel"
-              aria-labelledby={`workspace-tab-${chat.id}`}
-              hidden={workspaceTab !== chat.id}
-              className="min-h-0 flex-1"
-            >
-              <SideChat
-                tab={chat}
-                sourceJob={job}
-                sourceJobs={threadJobs}
-                userId={userId}
-                config={config}
-                active={workspaceOpen && workspaceTab === chat.id}
-              />
-            </div>
-          ))}
+              <div
+                id="workspace-panel-git"
+                role="tabpanel"
+                aria-labelledby="workspace-tab-git"
+                hidden={workspaceTab !== 'git'}
+                className="min-h-0 flex-1 overflow-y-auto p-5"
+              >
+                {recordedFile ? (
+                  <RecordedDiffPanel
+                    selection={recordedFile}
+                    turnNo={
+                      threadJobs.find((turn) => turn.id === recordedFile.jobId)?.turn_no ??
+                      job.turnNo ??
+                      1
+                    }
+                    onClose={() => setRecordedFile(null)}
+                  />
+                ) : (
+                  <GitPanel
+                    job={job}
+                    active={workspaceOpen && workspaceTab === 'git'}
+                    onReview={canReview ? openReview : undefined}
+                    onWatchPr={canWatchPr ? () => void watchPr() : undefined}
+                  />
+                )}
+              </div>
+              <div
+                id="workspace-panel-terminal"
+                role="tabpanel"
+                aria-labelledby="workspace-tab-terminal"
+                hidden={workspaceTab !== 'terminal'}
+                className="min-h-0 flex-1 p-3"
+              >
+                {terminalInitialized ? (
+                  isArchived ? (
+                    <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
+                      {t('sessionArchive.terminal')}
+                    </p>
+                  ) : (
+                    // Keyed by the chat, not the turn: every turn shares the one
+                    // workspace, and a new turn must not tear its terminals down.
+                    <TerminalWorkspace
+                      key={workspaceScope}
+                      jobId={job.id}
+                      workspaceKey={workspaceScope}
+                      active={workspaceOpen && workspaceTab === 'terminal'}
+                      ready={terminalWorkspaceReady}
+                    />
+                  )
+                ) : null}
+              </div>
+              <div
+                id="workspace-panel-files"
+                role="tabpanel"
+                aria-labelledby="workspace-tab-files"
+                hidden={workspaceTab !== 'files'}
+                className="min-h-0 flex-1 overflow-y-auto p-5"
+              >
+                {filesInitialized ? (
+                  <WorkspaceFiles
+                    key={workspaceScope}
+                    job={job}
+                    active={workspaceOpen && workspaceTab === 'files'}
+                    requestedPath={
+                      requestedFile?.scope === workspaceScope ? requestedFile.path : undefined
+                    }
+                    requestToken={
+                      requestedFile?.scope === workspaceScope ? requestedFile.token : undefined
+                    }
+                  />
+                ) : null}
+              </div>
+              {workspaceTabs.chats.map((chat) => (
+                <div
+                  key={chat.id}
+                  id={`workspace-panel-${chat.id}`}
+                  data-side-chat-id={chat.id}
+                  role="tabpanel"
+                  aria-labelledby={`workspace-tab-${chat.id}`}
+                  hidden={workspaceTab !== chat.id}
+                  className="min-h-0 flex-1"
+                >
+                  <SideChat
+                    tab={chat}
+                    sourceJob={job}
+                    sourceJobs={threadJobs}
+                    userId={userId}
+                    config={config}
+                    active={workspaceOpen && workspaceTab === chat.id}
+                  />
+                </div>
+              ))}
+            </>
+          ) : null}
         </aside>
 
         {inspector ? (

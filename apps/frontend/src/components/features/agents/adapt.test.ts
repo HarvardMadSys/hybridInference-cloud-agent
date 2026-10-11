@@ -193,6 +193,14 @@ describe('conversation display state', () => {
 });
 
 describe('toDisplayEvent', () => {
+  it('preserves recorded reasoning text separately from assistant output', () => {
+    expect(toDisplayEvent(event(1, 'thinking', { text: 'Check the failing assertion.' }))).toEqual({
+      kind: 'thinking',
+      text: 'Check the failing assertion.',
+      sourceEventId: 1,
+    });
+  });
+
   it('keeps raw runtime protocol events out of the terminal transcript', () => {
     expect(
       toDisplayEvent(
@@ -359,6 +367,235 @@ describe('toDisplayEvent', () => {
       });
       expect(lifecyclePhaseLabel(phase).milestone).toBe(true);
     }
+  });
+});
+
+describe('recorded reasoning', () => {
+  const notification = (
+    id: number,
+    method: string,
+    params: Record<string, unknown>,
+    attemptId = 1,
+  ) =>
+    event(id, 'raw', { protocol: 'codex-app-server', notification: { method, params } }, attemptId);
+
+  it('keeps consecutive reasoning blocks and the answer as distinct rows', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'thinking', { text: 'First recorded block.', usage_id: 'response' }),
+        event(2, 'thinking', { text: 'Second recorded block.', usage_id: 'response' }),
+        event(3, 'message', { text: 'The result.', usage_id: 'response' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      { kind: 'thinking', text: 'First recorded block.', sourceEventId: 1, attemptNo: 1 },
+      { kind: 'thinking', text: 'Second recorded block.', sourceEventId: 2, attemptNo: 1 },
+      { kind: 'message', text: 'The result.', sourceEventId: 3, attemptNo: 1 },
+    ]);
+  });
+
+  it('folds native deltas, snapshots and completion into the first stored row', () => {
+    const events = [
+      notification(1, 'item/started', { item: { id: 'r', type: 'reasoning' } }),
+      notification(2, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'First ' }),
+      notification(3, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'pass.' }),
+    ];
+    const live = toDisplayJob(JOB, { events }).events;
+    expect(live).toEqual([
+      {
+        kind: 'thinking',
+        text: 'First pass.',
+        reasoningBlocks: [{ channel: 'summary', text: 'First pass.' }],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+    const complete = toDisplayJob(JOB, {
+      events: [
+        ...events,
+        notification(4, 'item/updated', {
+          item: { id: 'r', type: 'reasoning', summary: ['A revised plan.'] },
+        }),
+        event(5, 'thinking', { native_item_id: 'r', text: 'The complete plan.' }),
+        event(6, 'message', { text: 'Done.' }),
+      ],
+    }).events;
+    expect(complete).toEqual([
+      {
+        ...live[0],
+        text: 'The complete plan.',
+        reasoningBlocks: [{ channel: 'summary', text: 'The complete plan.' }],
+      },
+      { kind: 'message', text: 'Done.', sourceEventId: 6, attemptNo: 1 },
+    ]);
+  });
+
+  it('preserves summary and detailed reasoning channels through completion', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Short plan.' }),
+        notification(2, 'item/reasoning/textDelta', { itemId: 'r', delta: 'Detailed ' }),
+        notification(3, 'item/reasoning/textDelta', { itemId: 'r', delta: 'reasoning.' }),
+        event(4, 'thinking', { native_item_id: 'r', text: 'Complete summary.' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Complete summary.\n\nDetailed reasoning.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Complete summary.' },
+          { channel: 'reasoning', text: 'Detailed reasoning.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('reads both channels from native item snapshots without normalized completion', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/started', { item: { id: 'r', type: 'reasoning' } }),
+        notification(2, 'item/completed', {
+          item: {
+            id: 'r',
+            type: 'reasoning',
+            summary: ['Summary one.', 'Summary two.'],
+            content: ['Detailed text.'],
+          },
+        }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Summary one.\nSummary two.\n\nDetailed text.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Summary one.\nSummary two.' },
+          { channel: 'reasoning', text: 'Detailed text.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('keeps indexed channel parts ordered through snapshots and later deltas', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/started', {
+          item: { id: 'r', type: 'reasoning', summary: ['First', 'Second'] },
+        }),
+        notification(2, 'item/reasoning/summaryTextDelta', {
+          itemId: 'r',
+          summaryIndex: 0,
+          delta: ' expanded.',
+        }),
+        notification(3, 'item/reasoning/summaryTextDelta', {
+          itemId: 'r',
+          summaryIndex: 1,
+          delta: ' expanded.',
+        }),
+        notification(4, 'item/reasoning/textDelta', {
+          itemId: 'r',
+          contentIndex: 1,
+          delta: 'Later detail.',
+        }),
+        notification(5, 'item/reasoning/textDelta', {
+          itemId: 'r',
+          contentIndex: 0,
+          delta: 'Earlier detail.',
+        }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'First expanded.\nSecond expanded.\n\nEarlier detail.\nLater detail.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'First expanded.\nSecond expanded.' },
+          { channel: 'reasoning', text: 'Earlier detail.\nLater detail.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('scopes reused native IDs and empty statuses to their attempt', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'First.' }),
+        notification(2, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Second.' }, 2),
+        event(3, 'thinking', {}, 2),
+        event(4, 'thinking', {}, 3),
+      ],
+    }).events;
+    expect(rows.map((row) => [row.kind, 'text' in row ? row.text : '', row.attemptNo])).toEqual([
+      ['thinking', 'First.', 1],
+      ['thinking', 'Second.', 2],
+      ['thinking', '', 2],
+      ['thinking', '', 3],
+    ]);
+  });
+
+  it('suppresses delegated reasoning and projects no extra assistant message fragments', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'thinking', { text: 'Delegated plan.', parent_tool_use_id: 'task' }),
+        {
+          ...notification(2, 'item/reasoning/summaryTextDelta', {
+            itemId: 'child',
+            delta: 'Child.',
+          }),
+          payload: {
+            ...notification(2, 'item/reasoning/summaryTextDelta', {
+              itemId: 'child',
+              delta: 'Child.',
+            }).payload,
+            parent_tool_use_id: 'task',
+          },
+        },
+        notification(3, 'item/agentMessage/delta', { itemId: 'm', delta: 'Raw duplicate.' }),
+        event(4, 'raw', { protocol: 'reply-preview', preview_id: 'm', delta: 'The answer.' }),
+        event(5, 'message', { text: 'The answer.', preview_id: 'm', native_item_id: 'm' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      { kind: 'message', text: 'The answer.', previewId: 'm', sourceEventId: 4, attemptNo: 1 },
+    ]);
+  });
+
+  it('joins historical deltas only when the same attempt recorded their native owner', () => {
+    const historical = (id: number, attemptId: number) =>
+      event(
+        id,
+        'raw',
+        {
+          text: JSON.stringify({
+            method: 'item/reasoning/summaryTextDelta',
+            params: { itemId: 'r', delta: 'Partial ' },
+          }),
+        },
+        attemptId,
+      );
+    const rows = toDisplayJob(JOB, {
+      events: [
+        historical(1, 1),
+        historical(2, 2),
+        event(3, 'thinking', { native_item_id: 'r', text: 'Complete.' }, 2),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Complete.',
+        reasoningBlocks: [{ channel: 'summary', text: 'Complete.' }],
+        sourceEventId: 2,
+        attemptNo: 2,
+      },
+    ]);
   });
 });
 

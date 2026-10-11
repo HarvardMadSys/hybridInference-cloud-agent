@@ -24,6 +24,106 @@ function round(goalTurn: GoalTurn) {
 
 afterEach(cleanup);
 
+describe('reasoning in the transcript', () => {
+  it('starts collapsed, renders Markdown, and keeps reply actions on the answer', () => {
+    const onFork = vi.fn();
+    render(
+      <>
+        <EventRow
+          event={{ kind: 'thinking', text: 'Inspect **the parser** first.', sourceEventId: 1 }}
+          blockKey="ajob_1:event:1"
+          onFork={onFork}
+        />
+        <EventRow event={{ kind: 'message', text: 'The parser is fixed.' }} onFork={onFork} />
+      </>,
+    );
+
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).toHaveAttribute('data-block-key', 'ajob_1:event:1');
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('the parser').tagName).toBe('STRONG');
+    expect(within(reasoning).getByText('the parser')).not.toBeVisible();
+    expect(within(reasoning).queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.getByText('The parser is fixed.')).toBeVisible();
+    expect(screen.getAllByRole('button', { name: 'Copy message' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
+    expect(onFork).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps streamed reasoning open as its content completes', () => {
+    const view = render(
+      <EventRow
+        event={{ kind: 'thinking', text: 'Inspect the parser', sourceEventId: 1 }}
+        blockKey="ajob_1:event:1"
+      />,
+    );
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    reasoning.open = true;
+    expect(screen.getByText('Inspect the parser')).toBeVisible();
+
+    view.rerender(
+      <EventRow
+        event={{ kind: 'thinking', text: 'Inspect the parser first.', sourceEventId: 1 }}
+        blockKey="ajob_1:event:1"
+      />,
+    );
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    expect(screen.getByText('Inspect the parser first.')).toBeVisible();
+  });
+
+  it('separates a recorded summary from detailed reasoning', () => {
+    render(
+      <EventRow
+        event={{
+          kind: 'thinking',
+          text: 'Inspect the parser.',
+          reasoningBlocks: [
+            { channel: 'summary', text: 'Inspect the parser.' },
+            { channel: 'reasoning', text: 'Compare the token boundaries.' },
+          ],
+        }}
+      />,
+    );
+    const reasoning = within(screen.getByLabelText('Agent reasoning'));
+    expect(reasoning.getByText('Summary')).toBeInTheDocument();
+    expect(reasoning.getByText('Detailed reasoning')).toBeInTheDocument();
+    expect(reasoning.getAllByText('Inspect the parser.')).toHaveLength(1);
+    expect(reasoning.getByText('Compare the token boundaries.')).toBeInTheDocument();
+  });
+
+  it('uses a compact status when no reasoning text is available', () => {
+    render(<EventRow event={{ kind: 'thinking', text: '   ' }} />);
+    expect(screen.getByLabelText('Agent reasoning')).toHaveTextContent('Agent is reasoning');
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+});
+
+describe('per-message actions', () => {
+  it.each([
+    { role: 'assistant' as const, label: 'Fork from here' },
+    { role: 'user' as const, label: 'Edit & rewind' },
+  ])('keeps the $label action keyboard reachable and respects busy state', ({ role, label }) => {
+    const onAction = vi.fn();
+    const message = { ...ROUND, role, content: 'Review this message.' };
+    const props = role === 'assistant' ? { onFork: onAction } : { onRewind: onAction };
+    const { rerender } = render(<ThreadTurn message={message} {...props} />);
+
+    const action = screen.getByRole('button', { name: label });
+    action.focus();
+    expect(action).toHaveFocus();
+    fireEvent.click(action);
+    expect(onAction).toHaveBeenCalledTimes(1);
+
+    rerender(<ThreadTurn message={message} {...props} busy />);
+    expect(screen.getByRole('button', { name: label })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: label }));
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeEnabled();
+  });
+});
+
 describe('an automatic round', () => {
   it('is a system marker, not a message somebody sent', () => {
     round({ source: 'goal', round: 3 });
@@ -188,7 +288,9 @@ describe('grouped tool calls', () => {
     ];
     render(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
 
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).not.toHaveAttribute('open');
     const calls = screen.getByRole('list', { name: 'Tool calls' });
     const chips = within(calls).getAllByRole('listitem');
     expect(chips.map((chip) => within(chip).getByText(/^(Bash|Read|Glob):/).textContent)).toEqual([
@@ -212,8 +314,14 @@ describe('grouped tool calls', () => {
       expect(
         document.querySelectorAll(`[data-block-key="ajob_1:e${event.sourceEventId}"]`),
       ).toHaveLength(1);
-      if (event.kind === 'thinking') expect(screen.queryByText(event.text)).not.toBeInTheDocument();
+      if (event.kind === 'thinking') {
+        expect(within(reasoning).getByText(event.text)).not.toBeVisible();
+      }
       if (event.kind === 'tool_use') expect(screen.getByText(event.output![0])).not.toBeVisible();
+    }
+    reasoning.open = true;
+    for (const event of events) {
+      if (event.kind === 'thinking') expect(within(reasoning).getByText(event.text)).toBeVisible();
     }
     fireEvent.click(screen.getByRole('button', { name: 'Show tool calls' }));
     const hide = screen.getByRole('button', { name: 'Hide tool calls' });
@@ -285,7 +393,14 @@ describe('grouped tool calls', () => {
     expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Show process (5)' }));
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning).not.toHaveAttribute('open');
+    for (const event of events) {
+      if (event.kind === 'thinking') {
+        expect(within(reasoning).getByText(event.text)).not.toBeVisible();
+      }
+    }
+    reasoning.open = true;
     const calls = screen.getByRole('list', { name: 'Tool calls' });
     const chips = within(calls).getAllByRole('listitem');
     expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
@@ -311,12 +426,99 @@ describe('grouped tool calls', () => {
     expect(screen.getByText('Project documentation')).toBeVisible();
     expect(screen.getByText('Tests passed')).toBeVisible();
     expect(screen.getByText('The change is ready.')).toBeVisible();
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    for (const event of events) {
+      if (event.kind === 'thinking') expect(within(reasoning).getByText(event.text)).toBeVisible();
+    }
     expect(
       screen.queryByRole('button', { name: /Show process|Hide process/ }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Inspect Bash: npm test' }));
     expect(inspect).toHaveBeenCalledWith(events[3], jobId);
+  });
+
+  it('keeps all grouped plain text and native reasoning channels in one collapsed section', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the entry point.', attemptNo: 1, sourceEventId: 1 },
+      { kind: 'tool_use', tool: 'Read', detail: 'main.ts', attemptNo: 1, sourceEventId: 2 },
+      {
+        kind: 'thinking',
+        text: 'Combined native text should not be repeated.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Verify the token boundaries.' },
+          { channel: 'reasoning', text: 'Compare each token with the parser state.' },
+        ],
+        attemptNo: 1,
+        sourceEventId: 3,
+      },
+      { kind: 'tool_use', tool: 'Bash', detail: 'npm test', attemptNo: 1, sourceEventId: 4 },
+      { kind: 'thinking', text: 'Review the coverage.', attemptNo: 1, sourceEventId: 5 },
+      { kind: 'message', text: 'The parser is verified.', attemptNo: 1, sourceEventId: 6 },
+    ];
+    render(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
+
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    const anchor = reasoning.closest('[data-block-key]');
+    expect(anchor).toHaveAttribute('data-block-key', 'ajob_1:e1');
+    expect(anchor).toBeVisible();
+    expect(reasoning).not.toHaveAttribute('open');
+    const texts = [
+      'Inspect the entry point.',
+      'Verify the token boundaries.',
+      'Compare each token with the parser state.',
+      'Review the coverage.',
+    ].map((text) => within(reasoning).getByText(text));
+    for (const text of texts) expect(text).not.toBeVisible();
+    expect(within(reasoning).getByText('Summary')).not.toBeVisible();
+    expect(within(reasoning).getByText('Detailed reasoning')).not.toBeVisible();
+    expect(
+      screen.queryByText('Combined native text should not be repeated.'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('The parser is verified.')).toBeVisible();
+
+    reasoning.open = true;
+    for (const text of texts) expect(text).toBeVisible();
+    for (let index = 1; index < texts.length; index += 1) {
+      expect(
+        texts[index - 1].compareDocumentPosition(texts[index]) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+    for (const event of events) {
+      expect(
+        document.querySelectorAll(`[data-block-key="ajob_1:e${event.sourceEventId}"]`),
+      ).toHaveLength(1);
+    }
+  });
+
+  it('keeps grouped reasoning navigation anchors visible while its disclosure stays collapsed', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the files.', sourceEventId: 1 },
+      { kind: 'thinking', text: 'Verify the change.', sourceEventId: 2 },
+      { kind: 'message', text: 'The change is ready.', sourceEventId: 3 },
+    ];
+    const props = { events, jobId, renderEvent };
+    const { rerender } = render(<EventList {...props} presentation="standard" />);
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    const anchors = events.map((event) =>
+      document.querySelector(`[data-block-key="${jobId}:e${event.sourceEventId}"]`),
+    );
+
+    for (const presentation of ['compact', 'detailed', 'standard'] as const) {
+      rerender(<EventList {...props} presentation={presentation} />);
+      expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+      expect(reasoning).not.toHaveAttribute('open');
+      expect(within(reasoning).getByText('Inspect the files.')).not.toBeVisible();
+      expect(within(reasoning).getByText('Verify the change.')).not.toBeVisible();
+      expect(document.querySelectorAll('[data-block-key]')).toHaveLength(events.length);
+      for (const [index, event] of events.entries()) {
+        const anchor = document.querySelector(
+          `[data-block-key="${jobId}:e${event.sourceEventId}"]`,
+        );
+        expect(anchor).toBe(anchors[index]);
+        expect(anchor).toBeVisible();
+      }
+    }
   });
 
   it('extends a reasoning activity during streaming without replacing its expanded tools', () => {
@@ -351,14 +553,20 @@ describe('grouped tool calls', () => {
     const { rerender } = render(
       <EventList events={[thought]} jobId={jobId} renderEvent={renderEvent} />,
     );
-    const reasoning = screen.getByText('Agent is reasoning');
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(screen.getByText('Start inspecting.')).not.toBeVisible();
+    reasoning.open = true;
+    expect(screen.getByText('Start inspecting.')).toBeVisible();
     expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Show tool calls?/ })).not.toBeInTheDocument();
 
     rerender(
       <EventList events={[thought, first, middle]} jobId={jobId} renderEvent={renderEvent} />,
     );
-    expect(screen.getByText('Agent is reasoning')).toBe(reasoning);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    expect(screen.getByText('Start inspecting.')).toBeVisible();
+    expect(screen.getByText('Run the tests next.')).toBeVisible();
     const calls = screen.getByRole('list', { name: 'Tool calls' });
     const firstChip = screen.getByRole('listitem');
     const show = screen.getByRole('button', { name: 'Show tool call' });
@@ -379,7 +587,9 @@ describe('grouped tool calls', () => {
     expect(hide).toHaveAttribute('aria-controls', detailsId);
     expect(screen.getByRole('list', { name: 'Tool calls' })).toBe(calls);
     expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
-    expect(screen.getByText('Agent is reasoning')).toBe(reasoning);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    expect(screen.getByText('Review the results.')).toBeVisible();
     expect(screen.getByText('Project documentation')).toBeVisible();
     expect(screen.getByText('Waiting for the tool result…')).toBeVisible();
 
@@ -396,7 +606,11 @@ describe('grouped tool calls', () => {
     expect(screen.getByText('Tests passed')).toBeVisible();
     expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
     expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    for (const event of growing) {
+      if (event.kind === 'thinking') expect(within(reasoning).getByText(event.text)).toBeVisible();
+    }
     expect(document.querySelectorAll('[data-block-key]')).toHaveLength(5);
   });
 
@@ -439,7 +653,15 @@ describe('grouped tool calls', () => {
     expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual([
       1, 2, 1, 1, 1, 1,
     ]);
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(5);
+    const reasoningSections = screen.getAllByLabelText('Agent reasoning');
+    expect(reasoningSections).toHaveLength(5);
+    for (const section of reasoningSections) {
+      expect(section.tagName).toBe('DETAILS');
+      expect(section).not.toHaveAttribute('open');
+    }
+    for (const event of events) {
+      if (event.kind === 'thinking') expect(screen.getByText(event.text)).not.toBeVisible();
+    }
     expect(within(groups[1]).getAllByText('Subagent tool')).toHaveLength(2);
     for (const group of [groups[0], ...groups.slice(2)]) {
       expect(within(group).queryByText('Subagent tool')).not.toBeInTheDocument();
@@ -506,7 +728,11 @@ describe('grouped tool calls', () => {
     expect(hide).toHaveAttribute('aria-expanded', 'true');
     expect(hide).toHaveAttribute('aria-controls', detailsId);
     expect(screen.getAllByRole('listitem')[0]).toBe(chip);
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('Run verification.')).not.toBeVisible();
+    reasoning.open = true;
+    expect(within(reasoning).getByText('Run verification.')).toBeVisible();
     expect(screen.getByText('Project documentation')).toBeVisible();
     expect(screen.getByText('Tests passed')).toBeVisible();
     expect(document.querySelectorAll('[data-block-key]')).toHaveLength(3);
@@ -542,7 +768,15 @@ describe('grouped tool calls', () => {
       expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual(
         showActivityDetails ? [1, 1] : [3],
       );
-      expect(screen.getAllByText('Agent is reasoning')).toHaveLength(showActivityDetails ? 2 : 1);
+      const reasoningSections = screen.getAllByLabelText('Agent reasoning');
+      expect(reasoningSections).toHaveLength(showActivityDetails ? 2 : 1);
+      for (const section of reasoningSections) {
+        expect(section.tagName).toBe('DETAILS');
+        expect(section).not.toHaveAttribute('open');
+      }
+      for (const text of ['Inspect first.', 'Delegate the review.', 'Run the tests.']) {
+        expect(screen.getByText(text)).not.toBeVisible();
+      }
       expect(document.querySelectorAll('[data-block-key]')).toHaveLength(6);
       if (showActivityDetails) {
         const card = screen.getByRole('region', { name: 'Subagent activity' });
@@ -1145,6 +1379,102 @@ describe('transcript work details', () => {
     expect(screen.getByText('Bash: npm test')).not.toBeVisible();
     expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
     expect(screen.getByText('The change is ready.')).toBeVisible();
+  });
+
+  it.each<AgentEvent>([
+    { ...call, resultState: 'failed', outputIsError: true, sourceEventId: 3 },
+    { ...call, resultState: 'unknown', sourceEventId: 3 },
+    { ...call, resultState: 'waiting', output: undefined, sourceEventId: 3 },
+    {
+      kind: 'tool_use',
+      tool: 'update_plan',
+      detail: 'Review changes',
+      input: { plan: [{ step: 'Review changes', status: 'pending' }] },
+      resultState: 'received',
+      output: ['Plan recorded.'],
+      sourceEventId: 3,
+    },
+    { kind: 'terminal', text: 'Unclassified terminal output', sourceEventId: 3 },
+  ])('folds successful activity around an attention record ($kind, $resultState)', (attention) => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the change.', sourceEventId: 10 },
+      call,
+      attention,
+      {
+        ...call,
+        tool: 'Read',
+        input: { file_path: 'README.md' },
+        output: ['Project documentation'],
+        sourceEventId: 4,
+      },
+      answer,
+    ];
+    const props = {
+      events,
+      jobId: 'mixed',
+      completed: true,
+      showActivityDetails: false,
+      renderEvent,
+    };
+    const { rerender } = render(<EventList {...props} presentation="standard" />);
+    const anchors = events.map((event) =>
+      document.querySelector(`[data-block-key="mixed:e${event.sourceEventId}"]`),
+    );
+    const reasoning = anchors[0];
+    const reasoningSummary = reasoning?.querySelector(':scope > summary') ?? reasoning;
+    expect(reasoningSummary).toBeVisible();
+    for (const anchor of anchors.slice(1)) expect(anchor).toBeVisible();
+    if (reasoning?.tagName === 'DETAILS') {
+      expect(reasoning).not.toHaveAttribute('open');
+      expect(screen.getByText('Inspect the change.')).not.toBeVisible();
+    }
+
+    rerender(<EventList {...props} presentation="compact" />);
+    expect(reasoningSummary).not.toBeVisible();
+    expect(anchors[1]).not.toBeVisible();
+    expect(anchors[2]).toBeVisible();
+    expect(anchors[3]).not.toBeVisible();
+    expect(anchors[4]).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show process (2)' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Show process (1)' }));
+    expect(anchors[3]).toBeVisible();
+    for (const [index, event] of events.entries()) {
+      expect(document.querySelector(`[data-block-key="mixed:e${event.sourceEventId}"]`)).toBe(
+        anchors[index],
+      );
+    }
+
+    rerender(<EventList {...props} presentation="detailed" />);
+    expect(reasoningSummary).toBeVisible();
+    expect(screen.getByText('Project documentation')).toBeVisible();
+    for (const output of screen.getAllByText('Checks passed')) expect(output).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: /Show process|Hide process/ }),
+    ).not.toBeInTheDocument();
+    rerender(<EventList {...props} presentation="compact" />);
+    expect(reasoningSummary).not.toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
+    expect(anchors[3]).not.toBeVisible();
+    expect(screen.getByText('The change is ready.')).toBeVisible();
+  });
+
+  it('keeps mixed successful and pending activity visible while the turn is running', () => {
+    render(
+      <EventList
+        events={[
+          call,
+          { ...call, resultState: 'waiting', output: undefined, sourceEventId: 3 },
+          { ...call, tool: 'Read', input: { file_path: 'README.md' }, sourceEventId: 4 },
+        ]}
+        jobId="running"
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByRole('list', { name: 'Tool calls' })).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    expect(screen.getByText('Waiting for result')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
   });
 
   it('opens the existing inspector from a descriptive summary with its original event and job', () => {

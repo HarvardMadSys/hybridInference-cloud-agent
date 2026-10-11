@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
+import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi, AgentSessionListOptions } from '@/lib/api/agents';
@@ -15,6 +16,9 @@ const api = vi.hoisted(() => ({
   sessions: vi.fn(),
   setArchived: vi.fn(),
   pin: vi.fn(),
+  events: vi.fn(),
+  git: vi.fn(),
+  stream: vi.fn(),
   replace: vi.fn(),
   pathname: '/',
   params: '',
@@ -45,6 +49,9 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentConfig: api.config,
   getAgentJob: api.get,
   getAgentJobThread: api.thread,
+  listAllAgentThreadEvents: api.events,
+  getAgentJobGit: api.git,
+  streamAgentJob: api.stream,
   archiveAgentJob: api.archive,
   restoreAgentJob: api.restore,
   listAgentSessions: api.sessions,
@@ -53,6 +60,9 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   unpinAgentJob: api.pin,
 }));
 import { AgentsSidebar } from './AgentsSidebar';
+import { SkillDialog } from './skills/SkillDialog';
+import { AgentReadProvider } from './AgentReadProvider';
+import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
@@ -81,6 +91,14 @@ function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   };
 }
 const base = [conversation('a'), conversation('b')];
+function DetailRequestReader() {
+  const { job } = useAgentJob(api.pathname.slice(1));
+  return (
+    <p data-testid="detail-request-reader">
+      {job?.id ?? 'loading'}:{job?.title}
+    </p>
+  );
+}
 beforeEach(() => {
   resetAgentPush();
   localStorage.clear();
@@ -98,6 +116,8 @@ beforeEach(() => {
   ]);
   api.get.mockRejectedValue(new Error('not a task'));
   api.thread.mockResolvedValue(null);
+  api.events.mockResolvedValue([]);
+  api.git.mockResolvedValue({ available: false });
   api.archive.mockResolvedValue({});
 });
 afterEach(() => {
@@ -107,6 +127,131 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('does not resolve the approval inbox route as a conversation job', async () => {
+    api.pathname = '/approvals';
+    render(
+      <AgentReadProvider userId={api.user}>
+        <AgentsSidebar />
+      </AgentReadProvider>,
+    );
+    await screen.findByText('Task a');
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.thread).not.toHaveBeenCalled();
+  });
+
+  it('keeps a late previous-owner response out of the sidebar and detail', async () => {
+    api.pathname = '/a';
+    let resolveOldJob!: (job: AgentJobApi) => void;
+    let resolveOldThread!: (thread: {
+      thread_id: string;
+      title: string;
+      jobs: AgentJobApi[];
+    }) => void;
+    api.get.mockReturnValueOnce(
+      new Promise<AgentJobApi>((resolve) => {
+        resolveOldJob = resolve;
+      }),
+    );
+    api.thread.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOldThread = resolve;
+      }),
+    );
+    const app = () => (
+      <AgentReadProvider userId={api.user}>
+        <AgentsSidebar />
+        <DetailRequestReader key={api.user} />
+      </AgentReadProvider>
+    );
+    const view = render(app());
+    expect(api.get).toHaveBeenCalledOnce();
+    expect(api.thread).toHaveBeenCalledOnce();
+
+    const bobJob = { ...base[0].job, title: 'Bob task', title_source: 'manual' } as AgentJobApi;
+    api.get.mockResolvedValue(bobJob);
+    api.thread.mockResolvedValue({ thread_id: 'thread-a', title: 'Bob task', jobs: [bobJob] });
+    api.list.mockResolvedValue({
+      conversations: [{ ...base[0], job: bobJob, title: 'Bob task' }],
+      next_cursor: null,
+    });
+    api.user = 'bob';
+    view.rerender(app());
+    await waitFor(() =>
+      expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('Bob task'),
+    );
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(api.thread).toHaveBeenCalledTimes(2);
+    await screen.findByRole('link', { name: 'Bob task' });
+
+    const aliceJob = { ...base[0].job, title: 'Alice task', title_source: 'manual' } as AgentJobApi;
+    await act(async () => {
+      resolveOldJob(aliceJob);
+      resolveOldThread({ thread_id: 'thread-a', title: 'Alice task', jobs: [aliceJob] });
+    });
+    expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('Bob task');
+    expect(screen.queryByText('Alice task')).not.toBeInTheDocument();
+  });
+
+  it('shares startup and navigation metadata while preserving the initial owner resync', async () => {
+    api.pathname = '/a';
+    const job = { ...base[0].job, title_source: 'manual' };
+    let resolveJob!: (job: AgentJobApi) => void;
+    let resolveThread!: (thread: { thread_id: string; title: string; jobs: AgentJobApi[] }) => void;
+    api.get.mockReturnValueOnce(
+      new Promise<AgentJobApi>((resolve) => {
+        resolveJob = resolve;
+      }),
+    );
+    api.thread.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveThread = resolve;
+      }),
+    );
+    const app = () => (
+      <AgentReadProvider userId={api.user}>
+        <AgentsSidebar />
+        <DetailRequestReader />
+      </AgentReadProvider>
+    );
+    const view = render(app());
+    expect(api.get).toHaveBeenCalledOnce();
+    expect(api.thread).toHaveBeenCalledOnce();
+    expect(api.events).not.toHaveBeenCalled();
+    await act(async () => resolveJob(job as AgentJobApi));
+    expect(api.events).not.toHaveBeenCalled();
+    await act(async () =>
+      resolveThread({ thread_id: 'thread-a', title: 'Task a', jobs: [job as AgentJobApi] }),
+    );
+    await waitFor(() => expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('a'));
+    expect(api.events).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledOnce();
+
+    api.get.mockImplementation(async (id: string) => ({
+      ...base.find((row) => row.job.id === id)!.job,
+      title_source: 'manual',
+    }));
+    api.thread.mockImplementation(async (id: string) => ({
+      thread_id: `thread-${id}`,
+      title: `Task ${id}`,
+      jobs: [{ ...base.find((row) => row.job.id === id)!.job, title_source: 'manual' }],
+    }));
+    act(() => receiveSync());
+    await waitFor(() => expect(api.projects).toHaveBeenCalledTimes(2));
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(api.thread).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(4);
+
+    api.pathname = '/b';
+    view.rerender(app());
+    await waitFor(() => expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('b'));
+    expect(api.get).toHaveBeenCalledTimes(3);
+    expect(api.thread).toHaveBeenCalledTimes(2);
+    expect(api.events).toHaveBeenCalledTimes(2);
+    expect(api.list).toHaveBeenCalledTimes(6);
+    expect(api.projects).toHaveBeenCalledTimes(3);
+  });
+
   it.each(['project', 'flat'] as const)(
     'keeps the %s sidebar steady while archiving, navigating and receiving the archive push',
     async (group) => {
@@ -515,6 +660,94 @@ describe('sidebar navigation interactions', () => {
     act(() => announceAgentSessionsChanged({ threadIds: [deleted.job.thread_id!], deleted: true }));
     await waitFor(() => expect(screen.queryByText('Deleted conversation')).not.toBeInTheDocument());
     expect(screen.queryByText('Current')).not.toBeInTheDocument();
+  });
+
+  it.each([{ ctrlKey: true }, { metaKey: true }])(
+    'preserves a portaled modal focus cycle when search is requested with %j',
+    async (modifier) => {
+      function Workspace() {
+        const [open, setOpen] = useState(true);
+        return open ? (
+          <SkillDialog title="Skills" onClose={() => setOpen(false)}>
+            <input aria-label="Find skills" />
+          </SkillDialog>
+        ) : null;
+      }
+      render(
+        <>
+          <AgentsSidebar />
+          <Workspace />
+        </>,
+      );
+      await screen.findByText('Task a');
+      const input = screen.getByRole('textbox', { name: 'Find skills' });
+      expect(input).toHaveFocus();
+
+      fireEvent.keyDown(input, { key: 'k', ...modifier });
+      await act(async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      });
+
+      expect(input).toHaveFocus();
+      expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Search tasks' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+
+      fireEvent.keyDown(input, { key: 'Tab' });
+      expect(screen.getByRole('button', { name: 'Close skill dialog' })).toHaveFocus();
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: 'k', ...modifier });
+      await waitFor(() =>
+        expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+      );
+    },
+  );
+
+  it('waits until a native dialog closes before moving focus to search', async () => {
+    render(
+      <>
+        <AgentsSidebar />
+        <dialog open aria-label="Task details">
+          <input aria-label="Task title" />
+        </dialog>
+      </>,
+    );
+    await screen.findByText('Task a');
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    input.focus();
+
+    fireEvent.keyDown(input, { key: 'k', ctrlKey: true });
+
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+
+    screen.getByRole('dialog', { name: 'Task details' }).removeAttribute('open');
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
+  });
+
+  it('can search while an inactive modal remains hidden', async () => {
+    render(
+      <>
+        <AgentsSidebar />
+        <div hidden>
+          <div role="dialog" aria-modal="true" aria-label="Inactive dialog" />
+        </div>
+      </>,
+    );
+    await screen.findByText('Task a');
+
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
   });
 
   it('searches server history including archived results, escapes highlights, and restores grouping', async () => {

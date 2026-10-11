@@ -2,7 +2,15 @@
 import receiptContract from '../../../../../../tests/fixtures/side_chat_job_receipt.json';
 import { installSideChatLocks } from './sideChatTestSupport';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -30,6 +38,12 @@ import { conversationReadStorageKey } from './useConversationReadState';
 import { sideChatStorageKey } from './useSideChatSession';
 import { answerThreadQuestion, listThreadQuestions } from '@/lib/api/questions';
 import type { SideChatTab } from './useWorkspaceTabs';
+import { deleteAttachment, uploadAttachment, type AttachmentApi } from '@/lib/api/attachments';
+
+vi.mock('@/lib/api/attachments', () => ({
+  uploadAttachment: vi.fn(),
+  deleteAttachment: vi.fn(),
+}));
 
 vi.mock('@/lib/api/questions', () => ({
   listThreadQuestions: vi.fn(),
@@ -117,6 +131,13 @@ const userId = 'side-test-user';
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(uploadAttachment).mockImplementation(async (file, path) => ({
+    id: 42,
+    path: path ?? file.name,
+    size_bytes: file.size,
+    content_type: file.type,
+  }));
+  vi.mocked(deleteAttachment).mockResolvedValue(undefined);
   vi.mocked(listThreadQuestions).mockResolvedValue({
     questions: [],
     job_id: 'side-3',
@@ -216,7 +237,143 @@ async function send() {
   await screen.findByRole('button', { name: 'Stop side chat' });
 }
 
+function pasteImage() {
+  const image = new File(['image bytes'], 'image.png', { type: 'image/png' });
+  const event = createEvent.paste(screen.getByRole('textbox', { name: 'Message side chat' }), {
+    clipboardData: {
+      items: [{ kind: 'file', type: image.type, getAsFile: () => image }],
+      files: [image],
+    },
+  });
+  fireEvent(screen.getByRole('textbox', { name: 'Message side chat' }), event);
+  return event;
+}
+
 describe('Side Chat', () => {
+  it('waits for a pasted image upload before sending its attachment ID and clears it after success', async () => {
+    let resolveUpload!: (attachment: AttachmentApi) => void;
+    vi.mocked(uploadAttachment).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    render(<SideChat {...props()} />);
+    await ready();
+    const paste = pasteImage();
+    expect(paste.defaultPrevented).toBe(true);
+    expect(uploadAttachment).toHaveBeenCalledTimes(1);
+    const [file, path] = vi.mocked(uploadAttachment).mock.calls[0]!;
+    expect(file.name).toMatch(/^pasted-image-.+\.png$/);
+    expect(path).toBe(file.name);
+    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByText('uploading…')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      key: 'Enter',
+    });
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveUpload({ id: 42, path: file.name, size_bytes: file.size, content_type: file.type });
+    });
+    expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
+        prompt: 'Why keep the files?',
+        attachment_ids: [42],
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText(file.name)).not.toBeInTheDocument());
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
+  });
+
+  it('keeps a pasted image and draft when sending fails so the same attachment can be retried', async () => {
+    vi.mocked(submitThreadMessage).mockRejectedValueOnce(new Error('Try sending again'));
+    render(<SideChat {...props()} />);
+    await ready();
+    pasteImage();
+    const [file] = vi.mocked(uploadAttachment).mock.calls[0]!;
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Try sending again');
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
+      'Why keep the files?',
+    );
+    expect(screen.getByText(file.name)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+    expect(submitThreadMessage).toHaveBeenLastCalledWith('side', {
+      prompt: 'Why keep the files?',
+      attachment_ids: [42],
+    });
+    expect(uploadAttachment).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText(file.name)).not.toBeInTheDocument());
+  });
+
+  it('removes a pasted image before sending and preserves ordinary text paste', async () => {
+    render(<SideChat {...props()} />);
+    await ready();
+    const textPaste = createEvent.paste(
+      screen.getByRole('textbox', { name: 'Message side chat' }),
+      {
+        clipboardData: {
+          items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+          files: [],
+        },
+      },
+    );
+    fireEvent(screen.getByRole('textbox', { name: 'Message side chat' }), textPaste);
+    expect(textPaste.defaultPrevented).toBe(false);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    pasteImage();
+    const [file] = vi.mocked(uploadAttachment).mock.calls[0]!;
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: `Remove ${file.name}` }));
+    await waitFor(() => expect(deleteAttachment).toHaveBeenCalledExactlyOnceWith(42));
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
+        prompt: 'Why keep the files?',
+      }),
+    );
+  });
+
+  it('clears staged images together with side chat drafts', async () => {
+    render(<SideChat {...props()} />);
+    await ready();
+    pasteImage();
+    const [file] = vi.mocked(uploadAttachment).mock.calls[0]!;
+    expect(screen.getByText(file.name)).toBeVisible();
+    act(() => {
+      window.dispatchEvent(new CustomEvent('agents:side-chat-drafts-cleared', { detail: userId }));
+    });
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
+    expect(screen.queryByText(file.name)).not.toBeInTheDocument();
+  });
+
+  it('does not stage another image while the message is being submitted', async () => {
+    let releaseSubmission!: () => void;
+    const submit = vi.mocked(submitThreadMessage).getMockImplementation()!;
+    vi.mocked(submitThreadMessage).mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => {
+        releaseSubmission = resolve;
+      });
+      return submit(...args);
+    });
+    render(<SideChat {...props()} />);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    const paste = pasteImage();
+    expect(paste.defaultPrevented).toBe(false);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    await act(async () => releaseSubmission());
+    await screen.findByRole('button', { name: 'Stop side chat' });
+  });
+
   it('opens and answers the child agent question without sending a chat message or stopping the child', async () => {
     vi.mocked(listThreadQuestions).mockResolvedValue({
       job_id: next.id,
@@ -289,6 +446,8 @@ describe('Side Chat', () => {
   it('keeps a draft and explains an Enter submission while preparing', async () => {
     vi.mocked(forkAgentJob).mockReturnValueOnce(new Promise(() => {}));
     render(<SideChat {...props()} />);
+    pasteImage();
+    expect(uploadAttachment).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Still preparing' } });
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
     expect(await screen.findByRole('alert')).toHaveTextContent('Preparing side chat…');
@@ -661,6 +820,11 @@ describe('fixing completed side chat reviews', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
       target: { value: 'Unsent follow-up question' },
     });
+    pasteImage();
+    const [file] = vi.mocked(uploadAttachment).mock.calls[0]!;
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
     fireEvent.change(screen.getByRole('combobox', { name: 'Side chat model' }), {
       target: { value: 'model-b' },
     });
@@ -692,6 +856,7 @@ describe('fixing completed side chat reviews', () => {
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
       'Unsent follow-up question',
     );
+    expect(screen.getByText(file.name)).toBeVisible();
     expect(screen.getByRole('combobox', { name: 'Side chat model' })).toHaveValue('model-b');
   });
 

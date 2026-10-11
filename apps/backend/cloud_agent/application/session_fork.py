@@ -230,6 +230,7 @@ async def materialize_session_fork(
             resident_slot_capacity=int(operation["resident_slot_capacity"]),
             memory_limit=str(operation["memory_limit"]),
             cpu_limit=str(operation["cpu_limit"]),
+            disk_limit_mib=int(operation.get("disk_limit_mib", 0)),
             stop_timeout_s=int(operation["stop_timeout_seconds"]),
             members=members,
             operation_id=operation_id,

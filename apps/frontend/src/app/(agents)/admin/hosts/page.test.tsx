@@ -1633,6 +1633,65 @@ describe('runtime settings', () => {
     ).toBeInTheDocument();
   });
 
+  it('sets fractional container CPU for one server and resets it to the global value', async () => {
+    const cpuDefinition = {
+      key: 'sandbox_cpu_millicores',
+      env: 'AGENT_SANDBOX_CPU_MILLICORES',
+      label: 'Container CPU',
+      description: 'CPU limit for new sandboxes. Existing sandboxes keep their limit.',
+      unit: 'millicores',
+      default: 2000,
+      minimum: 100,
+      maximum: 256000,
+      scope: 'runner',
+    } as const;
+    const resourcePool = (settings: Record<string, number>) => ({
+      ...settingsPool([
+        settingsHost({
+          settings_desired: settings,
+          settings_applied: { sandbox_cpu_millicores: 2000 },
+        }),
+      ]),
+      host_settings: { sandbox_cpu_millicores: 4000 },
+      host_setting_definitions: [cpuDefinition],
+    });
+    mocked.list.mockResolvedValue(resourcePool({}));
+    mocked.serverSettings.mockResolvedValueOnce(resourcePool({ sandbox_cpu_millicores: 1250 }));
+    mocked.serverSettings.mockResolvedValueOnce(resourcePool({}));
+    renderPage();
+    await openPanel();
+
+    const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
+    const input = within(panel).getByLabelText('Container CPU for runner-a');
+    expect(input).toHaveAttribute('placeholder', '4');
+    expect(within(panel).getByLabelText('Container CPU for runner-a unit')).toHaveValue('vCPU');
+    expect(within(panel).getByText('2 vCPU')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '1.25' } });
+    fireEvent.submit(input.closest('form')!);
+
+    await waitFor(() =>
+      expect(mocked.serverSettings).toHaveBeenCalledWith('runner-a', {
+        sandbox_cpu_millicores: 1250,
+      }),
+    );
+    expect(
+      await within(panel).findByText('set for this server · applying 1.25 vCPU'),
+    ).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Use default' }));
+    await waitFor(() =>
+      expect(mocked.serverSettings).toHaveBeenCalledWith('runner-a', {
+        sandbox_cpu_millicores: null,
+      }),
+    );
+    expect(
+      await within(panel).findByText('set for all servers · applying 4 vCPU'),
+    ).toBeInTheDocument();
+    expect(within(panel).getByLabelText('Container CPU for runner-a')).toHaveAttribute(
+      'placeholder',
+      '4',
+    );
+  });
+
   it('offers the deployment default after reset even when the host reports an old environment value', async () => {
     mocked.list.mockResolvedValue(
       settingsPool([settingsHost({ settings_local: { agent_timeout_s: 999 } })]),

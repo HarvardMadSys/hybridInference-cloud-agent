@@ -327,7 +327,9 @@ function historyTurnDescription(
  * link into turn four does not list turn eight — nothing would be there to
  * scroll to.
  */
-export function describeHistoryTurns(job: AgentJob): ConversationTurnDescription[] {
+export function describeHistoryTurns(
+  job: Pick<AgentJob, 'historyTurns'>,
+): ConversationTurnDescription[] {
   const historyTurns = job.historyTurns;
   if (historyTurns === undefined) return [];
   return historyTurns.map((turn, index) =>

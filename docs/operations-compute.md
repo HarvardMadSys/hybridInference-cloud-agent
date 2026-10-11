@@ -58,26 +58,97 @@ CloudLab experiments can be observed, but automatic deployment refuses them
 rather than selecting one node. Failed or unsupported installation leaves the
 resource visible and does not destroy it.
 
+### Sandbox storage path
+
+When adding or creating a server, enter **Sandbox storage path**, for example
+`/mydata`. This must be an existing writable mounted data disk on the remote
+server.
+Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
+and `<path>/containerd`, binding these directories to the daemons' standard
+`/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
+saved choice. Observation-only imports do not need a storage path.
+Attachment preflight checks the selected disk without changing the host;
+deployment checks it again before preparing storage.
+
+The path is saved with the allocation and reused on retries and replacement
+nodes, where the same mount must exist. A missing or read-only mount, symlink or
+conflicting existing store blocks setup. Any nonempty Docker or containerd store
+outside the selected mount also blocks setup. New hosts require empty `docker`
+and `containerd` directories on the selected disk. Deployment retries can reuse
+nonempty directories only when the existing deployment identity matches and
+both daemon directories are already bound to those same storage directories.
+Retained data with missing binds requires operator repair before retrying.
+Existing `/etc/fstab` entries for either daemon directory must match the selected
+storage bind; conflicting or duplicate entries block setup before host changes.
+Native systemd mount units, masks, or mount overrides for these directories also
+block setup; ordinary `fstab`-generated mount units remain supported.
+Preflight does not query or start these daemons, and bootstrap never deletes or
+moves existing sandbox data to a different disk. Docker and containerd must use
+their default `/var/lib/docker`
+and `/var/lib/containerd` data directories. Setup rejects custom daemon storage
+configuration before restarting services.
+Daemon startup requires the configured disk and bind mount after
+a reboot. Older API clients that omit `sandbox_storage_path` continue to
+use the operator profile's `data_mount` configuration.
+
 ## Prepare a trusted deployment profile
 
-### Admin-managed setup
+### Automatic setup
 
-For new deployments, open **Admin → Servers → Server setup**. Upload the
-reviewed source archive, enter its exact 40-character revision and remote
-installation directory, paste the completed Host environment, and provide the
-three tunnel keys plus their verified known-hosts files. The control plane
-validates the archive before it becomes selectable, encrypts every environment
-and credential value with `AGENT_COMPUTE_SECRET_KEY`, and stores the bundle and
-ciphertext in Postgres. Read APIs return only the profile ID and label.
+Open **Admin → Servers → Server setup** and use **Automatic setup**. The
+control-plane image includes the Host source bundle for its own release; the
+application supplies the revision, environment and existing workspace broker
+token, generates three separate tunnel keys per setup slot, and discovers the
+control-plane listener ports and Docker bridge.
 
-Profiles are immutable so admitted operations and retries keep their exact
-deployment inputs. To rotate or replace one, create a profile under a new ID.
+Supply the infrastructure inputs once:
 
-The file-backed configuration below remains supported for existing deployments
-and recovery, but is no longer required for initial setup through Admin.
+1. Add and validate management SSH connections for the stable gateway machine
+   and control-plane machine, including independently verified host keys.
+2. Select those connections and enter the machines' SSH addresses and users.
+   Both machines need Python 3 and passwordless `sudo`. The control machine
+   must run the supported Docker Compose deployment, and the gateway must
+   already listen on the selected inference port.
+3. Enter an approved private IPv4 pool for chat networks, a reachable DNS
+   resolver outside that pool, and the protected infrastructure CIDRs. These
+   values depend on your network and require an administrator's decision.
+4. Choose the number of setup slots and prepare the setups. Two slots allow
+   separate broker routes for a current node and its replacement.
 
+The application creates dedicated restricted SSH accounts on the two stable
+machines. Inference and MCP credentials permit only their respective local
+service destinations; the control credential permits the main API and its
+assigned reverse broker route. Management credentials stay in the control
+plane. Existing SSH policies must permit these restricted accounts; setup
+refuses incompatible policies instead of broadening them. Co-located gateway
+and control services must use separate inference, MCP and main API ports.
 
-Start with these operator templates:
+Generated keys and configuration are encrypted in Postgres before remote
+authorization begins. A setup becomes selectable only after all its slots
+finish. If a request fails or the browser closes, reopen Server setup and retry
+the pending setup to reuse its exact credentials and routes. Infrastructure
+defaults are saved for future setups. **Start new setup** retains those inputs
+and creates a new request on submission; it leaves an unfinished setup
+unavailable. Profiles are immutable so later deployment operations keep their
+exact inputs.
+
+Automatic setup requires a control-plane image built with its full release
+revision, the compute encryption key and the existing broker token. The form
+shows missing prerequisites. Rebuild or update older images to include the
+Host bundle, or use advanced manual setup.
+
+### Manual and file-backed setup
+
+**Advanced manual setup** retains the existing form: upload a reviewed source
+archive, enter its exact 40-character revision and installation directory, paste the
+Host environment, and provide the three tunnel keys and verified known-hosts
+files. The control plane validates the archive, encrypts all environment and
+credential values, and stores them in Postgres. Profile read APIs expose only
+IDs and labels, never generated credentials. Create a new profile to replace
+immutable inputs.
+
+File-backed configuration remains supported for existing deployments and
+recovery. Start with these operator templates:
 
 - [`compute.example.json`](../deploy/control-plane/compute.example.json)
 - [`compute-host.env.example`](../deploy/control-plane/compute-host.env.example)
@@ -161,18 +232,31 @@ control-plane container. Add its hostname/IP to
 `AGENT_BROKER_URL_ALLOWED_HOSTS` when that allowlist is enabled. Every
 simultaneously deployed Host needs a distinct reverse port.
 
-Verify node and tunnel-server host keys through a trusted source before adding
-them to their respective `known_hosts` files. `ssh-keyscan` collects a candidate
-key; it does not authenticate it. Transport uses strict host-key checking,
-isolated keys, no ambient SSH configuration or agent, and no trust-on-first-use.
-CloudLab VMs use the manifest's SSH port. Unknown keys block deployment until
-an administrator verifies and updates the selected SSH connection; retry uses
-the same resource.
+Verify existing-server and tunnel-server host keys through a trusted source
+before adding them to their respective `known_hosts` files. `ssh-keyscan`
+collects a candidate key; it does not authenticate it. Those transports use
+strict host-key checking, isolated keys, no ambient SSH configuration or agent,
+and no trust-on-first-use.
+
+CloudLab VMs use the manifest's SSH port and, by default, the control plane
+connects without verifying the VM host key. This permits automatic setup but is
+vulnerable to machine-in-the-middle impersonation of the CloudLab node. Select
+**SSH host-key checking → Registered by the node at first boot** when the
+Cloud Agent profile is available and host identity must be pinned.
+
+Unchecked intent is stored in a shape the immediately previous release can
+read, but that release deliberately fails closed when an SSH-dependent action
+encounters it. After an application rollback, existing resource observation,
+lease and provider operations remain readable; bootstrap, inventory or
+retirement that needs SSH must wait until this release is restored. Redeploy
+forward before retrying the operation rather than replacing the marker with
+unverified key material.
 
 ### CloudLab nodes that register their own host keys
 
-For automatic replacement, select **Node host keys → Registered by the node at
-first boot** in the CloudLab server's advanced options. This applies only to
+For automatic replacement, select **SSH host-key checking → Registered by the
+node at first boot** in the CloudLab server's advanced options. This applies
+only to
 experiments created by this control plane from the Cloud Agent profile:
 
 1. Publish [`deploy/cloudlab/cloud-agent-node.py`](../deploy/cloudlab/cloud-agent-node.py)
@@ -248,20 +332,22 @@ Use **Admin → CloudLab** to set the project, initial duration, template projec
 template name and SSH user that new CloudLab server forms start with. These are
 non-secret defaults only; an administrator can change them for one allocation.
 
-1. In **Admin → Servers → Connections**, add the management SSH private key and
-   verified node host keys. For CloudLab, separately add and validate the API
-   token. Credential responses expose metadata only.
-2. Choose **Add server** and existing SSH or CloudLab. SSH needs address, port and
-   user. CloudLab needs an exact experiment UUID to attach, or a profile and
-   explicitly selected project to provision. Select the SSH connection,
-   CloudLab SSH username and trusted deployment profile.
-3. Run preflight and submit. Follow the durable operation until ready. HTTP 202
-   confirms only that the operation was recorded; allocation, installation,
-   enrollment and readiness are separate steps.
-4. Select the ready Host as the **global sandbox location** if desired. Becoming
+1. In **Admin → Servers**, choose **Add server** and select existing SSH or
+   CloudLab.
+2. Create or select credentials inline. Existing SSH needs a private key and
+   verified node host keys. CloudLab needs an API token and a management SSH
+   private key; its advanced options can replace the default unchecked host with
+   first-boot host-key registration. Credential responses expose metadata only.
+3. Enter the resource details. Existing SSH needs an address, port and user.
+   CloudLab needs an exact experiment UUID to attach, or a profile and explicitly
+   selected project to provision, plus its SSH user.
+4. Submit and follow the durable operation until ready. HTTP 202 confirms only
+   that the operation was recorded; allocation, installation, enrollment and
+   readiness are separate steps.
+5. Select the ready Host as the **global sandbox location** if desired. Becoming
    ready does not change the saved location. New unassigned groups follow it;
    retained groups remain on their original Host.
-5. Review the allocation's complete scope before enabling renewal. Attached or
+6. Review the allocation's complete scope before enabling renewal. Attached or
    imported resources require explicit lifecycle adoption. Supply a real reason
    and ordered lead times. Confirm extensions from observed expiry and the last
    result; saving policy alone does not extend a lease.
@@ -279,7 +365,7 @@ creates a new command.
 
 | Result | Recovery |
 | --- | --- |
-| SSH key or identity refused | Verify the machine/key, update the selected connection and retry the same operation. Keep host-key checks enabled. |
+| SSH key or identity refused | Verify the machine/key, update the selected connection and retry the same operation. Existing-SSH and registered CloudLab connections keep host-key checks enabled. |
 | Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. |
 | UUID saved, later observation failed | Repair access and resume the same resource. |
 | Installation or readiness failed | Inspect deployment checks, repair prerequisites/profile and retry the same resource. Failure does not destroy it. |

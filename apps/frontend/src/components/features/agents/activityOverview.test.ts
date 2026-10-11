@@ -66,6 +66,114 @@ describe('task overview', () => {
     ).toMatchObject([{ id: '9', subject: 'Run checks', status: 'pending' }]);
   });
 
+  it('links a native text create acknowledgement to later task updates by its explicit ID', () => {
+    const overview = buildActivityOverview([
+      tool(
+        'TaskCreate',
+        { subject: 'Run checks', description: 'Validate the settings JSON.' },
+        { resultState: 'received', output: ['Task #9 created successfully: Run checks'] },
+      ),
+      tool('TaskUpdate', { taskId: '9', status: 'completed' }),
+    ]);
+
+    expect(overview.taskActivity?.tasks).toMatchObject([
+      {
+        id: '9',
+        subject: 'Run checks',
+        description: 'Validate the settings JSON.',
+        status: 'completed',
+      },
+    ]);
+    expect(overview.taskActivity?.tasks).toHaveLength(1);
+  });
+
+  it('does not derive task completion from a native creation acknowledgement', () => {
+    expect(
+      buildActivityOverview([
+        tool(
+          'TaskCreate',
+          { subject: 'Run checks' },
+          { resultState: 'received', output: ['Task #9 created successfully: Run checks'] },
+        ),
+      ]).taskActivity?.tasks,
+    ).toMatchObject([{ id: '9', subject: 'Run checks', status: undefined }]);
+  });
+
+  it('prefers the recorded structured result over a legacy text acknowledgement', () => {
+    expect(
+      buildActivityOverview([
+        tool(
+          'TaskCreate',
+          { subject: 'Run checks' },
+          {
+            resultState: 'received',
+            structuredOutput: { task: { id: '7', status: 'pending' } },
+            output: ['Task #9 created successfully: Run checks'],
+          },
+        ),
+        tool('TaskUpdate', { taskId: '7', status: 'completed' }),
+      ]).taskActivity?.tasks,
+    ).toMatchObject([{ id: '7', subject: 'Run checks', status: 'completed' }]);
+  });
+
+  it('keeps identically named creations distinct by their acknowledged task IDs', () => {
+    expect(
+      buildActivityOverview([
+        tool(
+          'TaskCreate',
+          { subject: 'Run checks' },
+          { output: ['Task #7 created successfully: Run checks'] },
+        ),
+        tool(
+          'TaskCreate',
+          { subject: 'Run checks' },
+          { output: ['Task #9 created successfully: Run checks'] },
+        ),
+        tool('TaskUpdate', { taskId: '9', status: 'completed' }),
+      ]).taskActivity?.tasks,
+    ).toMatchObject([
+      { id: '7', subject: 'Run checks', status: undefined },
+      { id: '9', subject: 'Run checks', status: 'completed' },
+    ]);
+  });
+
+  it.each([
+    'Task created successfully.',
+    'Task #9 created successfully: Another task',
+    'Log output\nTask #9 created successfully: Run checks',
+    'Task #9 created successfully: Run checks\nAll tasks completed',
+    'Task #9 [completed] Run checks',
+  ])('does not guess task identity from an unrecognized acknowledgement: %s', (output) => {
+    const overview = buildActivityOverview([
+      tool('TaskCreate', { subject: 'Run checks' }, { resultState: 'received', output: [output] }),
+      tool('TaskUpdate', { taskId: '9', status: 'completed' }),
+    ]);
+    expect(overview.taskActivity?.tasks).toMatchObject([
+      { subject: 'Run checks', status: undefined },
+      { id: '9', subject: 'Task #9', status: 'completed' },
+    ]);
+    expect(overview.taskActivity?.tasks[0].id).toBeUndefined();
+  });
+
+  it.each(['waiting', 'not_recorded'] as const)(
+    'does not consume a text creation result while the call is %s',
+    (resultState) => {
+      const overview = buildActivityOverview([
+        tool(
+          'TaskCreate',
+          { subject: 'Run checks' },
+          {
+            resultState,
+            output: ['Task #9 created successfully: Run checks'],
+            structuredOutput: { task: { id: '9', status: 'pending' } },
+          },
+        ),
+      ]);
+      expect(overview.taskActivity?.tasks).toMatchObject([{ subject: 'Run checks' }]);
+      expect(overview.taskActivity?.tasks[0].id).toBeUndefined();
+    },
+  );
+
   it('replaces earlier full snapshots and clears a recorded empty snapshot', () => {
     const events = [
       tool('TodoWrite', { todos: [{ content: 'Old work', status: 'completed' }] }),

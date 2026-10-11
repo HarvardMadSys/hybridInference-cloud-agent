@@ -31,6 +31,41 @@ function entry(action: string, details: Record<string, unknown> | null = null): 
 }
 
 describe('describeAuditEntry', () => {
+  it('describes archive policy changes from snapshot and legacy audit details', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_settings: { enabled: false, region: 'us-east-1' },
+          new_settings: { enabled: true, region: 'us-east-1' },
+        }),
+      ),
+    ).toBe('Enabled sandbox archives');
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_settings: { enabled: true },
+          new_settings: { enabled: false },
+        }),
+      ),
+    ).toBe('Disabled sandbox archives');
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_settings: { enabled: true, region: 'us-east-1' },
+          new_settings: { enabled: true, region: 'us-west-2' },
+        }),
+      ),
+    ).toBe('Changed sandbox archive settings');
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_enabled: false,
+          new_enabled: true,
+        }),
+      ),
+    ).toBe('Enabled sandbox archives');
+  });
+
   it('describes a sandbox stop as a request, before the host confirms the result', () => {
     expect(
       describeAuditEntry(

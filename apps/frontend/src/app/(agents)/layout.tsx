@@ -6,11 +6,15 @@ import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
+import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
+import { AgentReadProvider } from '@/components/features/agents/AgentReadProvider';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
+import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
+import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
@@ -37,7 +41,7 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   // app, and an `/admin/*` page added later without a nav entry of its own
   // lights neither item instead of wrongly lighting `Agents`.
   const onAdmin = pathname.startsWith('/admin/');
-  const onTasks = !pathname.startsWith('/admin');
+  const onTasks = !pathname.startsWith('/admin') && pathname !== '/approvals';
 
   const handleLogout = async () => {
     await logout();
@@ -114,6 +118,12 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
         >
           {t('nav.agents')}
         </Link>
+        {hasAgentPermission(state.user?.agent_access, 'agent.use') && (
+          <McpApprovalsLink
+            current={pathname === '/approvals'}
+            className={pathname === '/approvals' ? NAV_ITEM_CURRENT : NAV_ITEM}
+          />
+        )}
         {/* This service's own operations page, so it is a route rather than a
             link back to the gateway. Admin-only, matching the endpoints it
             calls — the guard on the page is the one that counts; hiding the
@@ -222,31 +232,35 @@ function AgentsShell({
   // rather than by each of them. Keyed by account, so another one starts over.
   return (
     <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
-      <AgentChangeStream userId={state.user?.id} />
-      <div className="flex min-h-0 flex-1">
-        <div
-          className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}
-          onClick={(event) => {
-            if (mobileSidebarOpen && (event.target as HTMLElement).closest('a[href]'))
-              onSidebarNavigate();
-          }}
-        >
-          <AgentsSidebar collapsed={sidebarCollapsed} headerAction={sidebarToggle} />
+      <AgentReadProvider userId={state.user?.id}>
+        <AgentChangeStream userId={state.user?.id} />
+        <AgentNotifications />
+        <div className="flex min-h-0 flex-1">
+          <div
+            className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}
+            onClick={(event) => {
+              if (mobileSidebarOpen && (event.target as HTMLElement).closest('a[href]'))
+                onSidebarNavigate();
+            }}
+          >
+            <AgentsSidebar collapsed={sidebarCollapsed} headerAction={sidebarToggle} />
+          </div>
+          <main
+            id="agents-workspace"
+            hidden={mobileSidebarOpen}
+            tabIndex={-1}
+            className="min-w-0 flex-1 overflow-y-auto bg-white/70 outline-none dark:bg-gray-950"
+          >
+            {children}
+          </main>
         </div>
-        <main
-          id="agents-workspace"
-          hidden={mobileSidebarOpen}
-          tabIndex={-1}
-          className="min-w-0 flex-1 overflow-y-auto bg-white/70 outline-none dark:bg-gray-950"
-        >
-          {children}
-        </main>
-      </div>
+      </AgentReadProvider>
     </FirstRunProvider>
   );
 }
 
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
+  const { state } = useAuth();
   const pathname = usePathname();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
@@ -354,31 +368,36 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
 
   return (
     <ProtectedRoute>
-      <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
-        <AgentsHeader
-          sidebarToggle={
-            mobile || sidebarCollapsed ? (
-              <SidebarToggleButton
-                sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
-                onToggleSidebar={toggleSidebar}
-              />
-            ) : undefined
-          }
-        />
-        <AgentsShell
-          sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
-          sidebarToggle={
-            !mobile && !sidebarCollapsed ? (
-              <SidebarToggleButton sidebarCollapsed={false} onToggleSidebar={toggleSidebar} />
-            ) : undefined
-          }
-          mobileSidebarOpen={mobileSidebarOpen}
-          onSidebarNavigate={closeMobileSidebar}
-        >
-          {children}
-        </AgentsShell>
-        <DeploymentFooter />
-      </div>
+      <McpApprovalsProvider
+        ownerId={state.user?.id}
+        enabled={hasAgentPermission(state.user?.agent_access, 'agent.use')}
+      >
+        <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
+          <AgentsHeader
+            sidebarToggle={
+              mobile || sidebarCollapsed ? (
+                <SidebarToggleButton
+                  sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+                  onToggleSidebar={toggleSidebar}
+                />
+              ) : undefined
+            }
+          />
+          <AgentsShell
+            sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+            sidebarToggle={
+              !mobile && !sidebarCollapsed ? (
+                <SidebarToggleButton sidebarCollapsed={false} onToggleSidebar={toggleSidebar} />
+              ) : undefined
+            }
+            mobileSidebarOpen={mobileSidebarOpen}
+            onSidebarNavigate={closeMobileSidebar}
+          >
+            {children}
+          </AgentsShell>
+          <DeploymentFooter />
+        </div>
+      </McpApprovalsProvider>
     </ProtectedRoute>
   );
 }

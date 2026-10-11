@@ -33,6 +33,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     USER_MESSAGE_EVENT,
@@ -335,6 +336,7 @@ async def _reserve_shared_chat(
     metadata: dict | None = None,
     task_prompt: str = "fix the flaky test",
     fork_helper_version: str | None = None,
+    disk_limit_mib: int = 0,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -371,6 +373,7 @@ async def _reserve_shared_chat(
         sandbox_image_digest=claim.get("sandbox_image_digest"),
         execution_profile=job["execution_profile"],
         fork_helper_version=fork_helper_version,
+        disk_limit_mib=disk_limit_mib,
     )
     assert sandbox is not None and sandbox["shared_live"] is True
     return job, claim, sandbox
@@ -384,6 +387,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     job, claim, sandbox = await _reserve_shared_chat(
         store,
         metadata={"_agent_base_ref": "release/x"},
+        disk_limit_mib=16384,
     )
     fence = {
         "thread_id": job["thread_id"],
@@ -422,6 +426,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert capture["sandbox_id"] == sandbox["sandbox_id"]
     assert capture["anchor_job_id"] == job["id"]
     assert capture["base_sha"] == job["base_sha"]
+    assert capture["disk_limit_mib"] == 16384
     patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
     digest = hashlib.sha256(patch.encode()).hexdigest()
     assert (
@@ -445,6 +450,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert publication["included_job_ids"] == [job["id"]]
     assert publication["branch_id"] == job["thread_id"]
     assert publication["patch"] == patch
+    assert publication["disk_limit_mib"] == 16384
     assert publication["metadata"] == {"_agent_base_ref": "release/x"}
     assert publication["session_summaries"] == []
     # Publication is group bookkeeping, not another state of the model turn.
@@ -465,6 +471,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert pending_import is not None
     assert pending_import["snapshot_id"] == capture["snapshot_id"]
     assert pending_import["published_commit_sha"] == commit_sha
+    assert pending_import["disk_limit_mib"] == 16384
     assert await store.snapshot.complete_snapshot_base_import(
         snapshot_id=capture["snapshot_id"],
         commit_sha=commit_sha,
@@ -1202,7 +1209,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     store: Storage,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
-    job, claim, sandbox = await _reserve_shared_chat(store)
+    job, claim, sandbox = await _reserve_shared_chat(store, disk_limit_mib=16384)
     saved_skills = [
         {
             "id": 42,
@@ -1281,6 +1288,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert operation["state"] == "preparing"
     assert operation["sandbox_id"] == sandbox["sandbox_id"]
     assert operation["container_id"] == "container-shared-one"
+    assert operation["disk_limit_mib"] == 16384
     assert operation["target_thread_id"] != job["thread_id"]
     await store.conversation_commands.set_thread_archived(
         job_id=job["id"], user_id=job["user_id"], archived=True
@@ -1581,13 +1589,15 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         source_follow_up["id"],
         child_follow_up["id"],
     }
+    assert first_claim["thread_sandbox"]["disk_limit_mib"] == 16384
+    assert second_claim["thread_sandbox"]["disk_limit_mib"] == 16384
 
 
 async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_failed(
     store: Storage,
 ):
     """Provider history and platform terminal state cannot drift by one turn."""
-    first, first_claim, sandbox = await _reserve_shared_chat(store)
+    first, first_claim, sandbox = await _reserve_shared_chat(store, disk_limit_mib=16384)
     first_fence = {
         "thread_id": first["thread_id"],
         "attempt_id": first_claim["attempt_id"],
@@ -1628,6 +1638,8 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     assert (await store.conversation_queries.get_job(first["id"]))["native_turn_no"] == 1
     assert (await store.conversation_queries.get_job(second["id"]))["state"] == "queued"
 
+    await store.host_pool.set_host_settings(changes={"sandbox_disk_mib": 32768})
+    assert (await store.host_pool.host_settings())["sandbox_disk_mib"] == 32768
     second_claim = await _claim(
         store,
         worker_id="shared-worker-second",
@@ -1637,6 +1649,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         claim_attestation=_shared_claim_attestation(),
     )
     assert second_claim is not None and second_claim["id"] == second["id"]
+    assert second_claim["thread_sandbox"]["disk_limit_mib"] == 16384
     activated = await store.sandbox.reserve_thread_sandbox(
         thread_id=first["thread_id"],
         attempt_id=second_claim["attempt_id"],
@@ -1648,8 +1661,10 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         runtime_version=sandbox["runtime_version"],
         sandbox_image_digest=sandbox["sandbox_image_digest"],
         execution_profile=sandbox["execution_profile"],
+        disk_limit_mib=second_claim["thread_sandbox"]["disk_limit_mib"],
     )
     assert activated is not None
+    assert activated["disk_limit_mib"] == 16384
     second_fence = {
         "thread_id": first["thread_id"],
         "attempt_id": second_claim["attempt_id"],
@@ -1687,6 +1702,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     )
     assert operation is not None and operation.get("error") is None
     assert operation["source_native_turn_no"] == 2
+    assert operation["disk_limit_mib"] == 16384
 
 
 async def test_create_get_list_round_trip(store: Storage):
@@ -2493,6 +2509,109 @@ async def test_concurrent_claims_keep_queued_turns_in_order(store: Storage):
     claims = await race_claims()
     assert len(claims) == 1 and claims[0]["id"] == second["id"]
     assert (await store.host_pool.get_host(host="runner-a"))["slots_used"] == 2
+
+
+async def test_enabled_archive_policy_requires_exact_host_and_replica_revision(store: Storage):
+    job = await _create_job(store, task_prompt="archive-fenced work")
+    configured = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings={
+            "enabled": True,
+            "region": "us-east-1",
+            "kms_key_arn": (
+                "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+            ),
+            "expected_bucket_owner": "123456789012",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+        },
+    )
+    assert configured is not None and configured["revision"] == 1
+
+    # A legacy host cannot claim while the deployment requires archiving.
+    assert await _claim(store, worker_id="legacy", lease_ttl_seconds=60) is None
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="runner-a-credential-hash",
+        capabilities=[*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY],
+        sandbox_archive_settings_applied_revision=1,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    # An old process cannot borrow the supporting sibling's mutable host row.
+    assert await _claim(store, worker_id="old-replica", lease_ttl_seconds=60) is None
+    replica = {
+        **_shared_claim_attestation(),
+        "runner_capabilities": [*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY],
+    }
+    for revision in (None, 0, 2):
+        assert (
+            await _claim(
+                store,
+                worker_id=f"wrong-revision-{revision}",
+                lease_ttl_seconds=60,
+                claim_attestation={
+                    **replica,
+                    "sandbox_archive_settings_applied_revision": revision,
+                },
+            )
+            is None
+        )
+    exact = {**replica, "sandbox_archive_settings_applied_revision": 1}
+    claim = await _claim(
+        store,
+        worker_id="current-replica",
+        lease_ttl_seconds=60,
+        claim_attestation=exact,
+    )
+    assert claim is not None and claim["id"] == job["id"]
+
+    next_job = await _create_job(store, task_prompt="archive revision changed")
+    next_policy = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=1,
+        settings={
+            "enabled": True,
+            "region": "us-east-1",
+            "kms_key_arn": (
+                "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+            ),
+            "expected_bucket_owner": "123456789012",
+            "max_archive_bytes": 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+        },
+    )
+    assert next_policy is not None and next_policy["revision"] == 2
+    assert (
+        await _claim(
+            store,
+            worker_id="prior-policy",
+            lease_ttl_seconds=60,
+            claim_attestation=exact,
+        )
+        is None
+    )
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="runner-a-credential-hash",
+        sandbox_archive_settings_applied_revision=2,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    current = await _claim(
+        store,
+        worker_id="next-policy",
+        lease_ttl_seconds=60,
+        claim_attestation={**replica, "sandbox_archive_settings_applied_revision": 2},
+    )
+    assert current is not None and current["id"] == next_job["id"]
+
+
+async def test_disabled_archive_policy_allows_legacy_host_and_replica(store: Storage):
+    job = await _create_job(store, task_prompt="archives disabled")
+
+    claim = await _claim(store, worker_id="legacy", lease_ttl_seconds=60)
+
+    assert claim is not None and claim["id"] == job["id"]
 
 
 @pytest.mark.parametrize("parent_already_running", [False, True])

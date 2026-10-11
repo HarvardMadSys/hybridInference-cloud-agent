@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
     AcquireRequest,
     ExtendRequest,
     NodeRegistration,
@@ -174,13 +175,51 @@ async def test_cloudlab_attach_collects_full_node_scope_and_manifest_vm_ssh_port
     receipt = await adapter.acquire(AcquireRequest(mode="attach", config=config), intent())
     assert receipt.outcome == "confirmed"
     assert receipt.observation.scope_complete
-    assert receipt.observation.nodes[0].connection.port == 2207
+    connection = receipt.observation.nodes[0].connection
+    assert connection.port == 2207
+    assert connection.known_hosts_ref == "ssh-1:known_hosts"
+    assert connection.verify_host_key and "verify_host_key" not in connection.model_dump(
+        mode="json"
+    )
     assert (
         receipt.observation.nodes[0].instance_identity
         == EXPERIMENT + ":urn:aggregate:vm1:urn:node:1"
     )
     assert all(request.method == "GET" for request in requests)
     assert TOKEN not in receipt.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_explicitly_allows_ssh_without_host_key_verification():
+    def respond(request):
+        if request.url.path.endswith("/manifests"):
+            return httpx.Response(
+                200,
+                json={
+                    "urn:aggregate": '<rspec xmlns="http://www.geni.net/resources/rspec/3"><node client_id="vm1"><services><login authentication="ssh-keys" username="agent" hostname="node.example.org" port="2207"/></services></node></rspec>'
+                },
+            )
+        return httpx.Response(200, json=resource())
+
+    observation = await provider(respond).inspect(
+        ResourceRef(
+            external_id=EXPERIMENT,
+            config={
+                **CONFIG,
+                "ssh_username": "agent",
+                "ssh_credential_ref": "ssh-1",
+                "host_key_source": "known_hosts",
+                "ssh_known_hosts_ref": UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+            },
+        )
+    )
+    connection = observation.nodes[0].connection
+    assert connection.credential_ref == "ssh-1"
+    assert connection.port == 2207
+    assert connection.known_hosts_ref == UNCHECKED_CLOUDLAB_HOST_KEY_REF
+    assert connection.host_key is None
+    assert connection.verify_host_key is False
+    assert "verify_host_key" not in connection.model_dump(mode="json")
 
 
 @pytest.mark.asyncio
@@ -500,6 +539,60 @@ async def test_openssh_uses_pinned_host_keys_and_does_not_place_key_in_arguments
 
 
 @pytest.mark.asyncio
+async def test_openssh_explicitly_unchecked_mode_uses_no_host_key_files(monkeypatch):
+    resolver = AsyncMock()
+    resolver.resolve.return_value = "PRIVATE KEY\n"
+    process = AsyncMock(returncode=0)
+    process.communicate.return_value = (b"identity", b"")
+    captured = {}
+
+    async def launch(*args, **_kwargs):
+        captured["args"] = args
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", launch)
+    connection = SshConnection(
+        address="node.example.org",
+        username="agent",
+        credential_ref="ssh-1",
+        known_hosts_ref=UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+    )
+    assert await OpenSshTransport(resolver).run(connection, "cat /etc/machine-id") == "identity"
+    resolver.resolve.assert_awaited_once_with("ssh-1")
+    args = captured["args"]
+    assert "StrictHostKeyChecking=no" in args
+    assert "UserKnownHostsFile=/dev/null" in args
+    assert "GlobalKnownHostsFile=/dev/null" in args
+    assert not any(str(argument).startswith("UserKnownHostsFile=/tmp/") for argument in args)
+
+
+def test_unchecked_marker_does_not_override_a_registered_host_key():
+    connection = SshConnection(
+        address="node.example.org",
+        username="agent",
+        credential_ref="ssh-1",
+        known_hosts_ref=UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+        host_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG9vcHNpZGFpc3k=",
+    )
+    assert connection.verify_host_key
+
+
+@pytest.mark.asyncio
+async def test_openssh_strict_mode_refuses_missing_host_material_before_launch(monkeypatch):
+    resolver = AsyncMock()
+    resolver.resolve.return_value = "PRIVATE KEY\n"
+    launch = AsyncMock()
+    monkeypatch.setattr("asyncio.create_subprocess_exec", launch)
+    connection = SshConnection(address="node.example.org", username="agent", credential_ref="ssh-1")
+
+    with pytest.raises(ProviderError) as refused:
+        await OpenSshTransport(resolver).run(connection, "cat /etc/machine-id")
+
+    assert refused.value.code == "ssh_configuration"
+    launch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_successful_extend_followed_by_read_failure_is_unknown_not_retryable():
     def respond(request):
         return (
@@ -665,6 +758,7 @@ async def test_a_registering_node_is_reached_through_its_registered_key_only():
     )
     connection = observation.nodes[0].connection
     assert connection.known_hosts_ref is None and connection.host_key is None
+    assert connection.verify_host_key is True
 
 
 def test_registration_applies_only_to_nodes_this_control_plane_creates():

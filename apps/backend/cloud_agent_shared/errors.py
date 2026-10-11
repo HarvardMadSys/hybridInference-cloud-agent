@@ -18,3 +18,7 @@ from __future__ import annotations
 
 class SandboxError(Exception):
     """Raised when a sandbox cannot be created or configured."""
+
+
+class SandboxArchiveBlocked(SandboxError):
+    """Raised when unflushed native history permanently forbids final archival."""

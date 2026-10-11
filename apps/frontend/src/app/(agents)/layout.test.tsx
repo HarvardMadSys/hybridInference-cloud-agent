@@ -6,19 +6,28 @@ import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { listMcpInvocations, type McpInvocationsApi } from '@/lib/api/mcp';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
+let userId: string | undefined;
 
 beforeEach(() => {
   access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   role = 'internal';
+  userId = undefined;
+  vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
 });
 
 let pathname = '/';
 let statusUrl = '/status';
+
+vi.mock('@/lib/api/mcp', async (original) => ({
+  ...(await original<typeof import('@/lib/api/mcp')>()),
+  listMcpInvocations: vi.fn(),
+}));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -29,11 +38,27 @@ vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+vi.mock('@/components/features/agents/firstRun', () => ({
+  FirstRunProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+vi.mock('@/components/features/agents/agentPush', async (original) => ({
+  ...(await original<typeof import('@/components/features/agents/agentPush')>()),
+  useAgentChangeStream: vi.fn(),
+}));
+
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
   return {
     useAuth: () => ({
-      state: { user: { user_name: 'Ada', email: 'ada@example.com', role, agent_access: access } },
+      state: {
+        user: {
+          id: userId,
+          user_name: 'Ada',
+          email: 'ada@example.com',
+          role,
+          agent_access: access,
+        },
+      },
       logout: vi.fn(),
     }),
     useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
@@ -539,4 +564,70 @@ describe('AgentsLayout permissions', () => {
       expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     },
   );
+});
+
+describe('AgentsLayout owner approval navigation', () => {
+  afterEach(cleanup);
+  it('keeps the global pending badge in the header when the sidebar is collapsed', async () => {
+    localStorage.clear();
+    pathname = '/approvals';
+    userId = 'ada';
+    vi.mocked(listMcpInvocations).mockResolvedValue({
+      invocations: Array.from({ length: 50 }, (_, id) => ({ id, status: 'pending' })),
+      has_more: true,
+      next_before_id: 1,
+    } as McpInvocationsApi);
+    render(
+      <AgentsLayout>
+        <p>approvals</p>
+      </AgentsLayout>,
+    );
+    const link = await screen.findByRole('link', { name: 'Approvals (50+ pending)' });
+    expect(link).toHaveAttribute('href', '/approvals');
+    expect(link).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Agents' })).not.toHaveAttribute('aria-current');
+    fireEvent.click(toggle());
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('banner')).toContainElement(link);
+    expect(listMcpInvocations).toHaveBeenCalledWith({ pendingOnly: true, limit: 50 });
+  });
+
+  it('resets counts when the owner changes and removes approvals when admission is revoked', async () => {
+    localStorage.clear();
+    pathname = '/';
+    userId = 'ada';
+    vi.mocked(listMcpInvocations).mockResolvedValueOnce({
+      invocations: [{ id: 1, status: 'pending' }],
+    } as McpInvocationsApi);
+    const { rerender } = render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    await screen.findByRole('link', { name: 'Approvals (1 pending)' });
+    let finish!: (response: McpInvocationsApi) => void;
+    vi.mocked(listMcpInvocations).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    userId = 'bob';
+    rerender(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    expect(screen.queryByRole('link', { name: 'Approvals (1 pending)' })).not.toBeInTheDocument();
+    await act(async () => finish({ invocations: [] }));
+    expect(screen.getByRole('link', { name: 'Approvals' })).toBeInTheDocument();
+    access = { allowed: true, permissions: [] };
+    vi.mocked(listMcpInvocations).mockClear();
+    rerender(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
+    expect(listMcpInvocations).not.toHaveBeenCalled();
+  });
 });

@@ -128,6 +128,8 @@ class Bridge:
         self._turn_saw_busy = False
         self._turn_failed = False
         self._questions: set[str] = set()
+        self._permission_sessions: set[str] = set()
+        self._events_connected = threading.Event()
 
     @staticmethod
     def _available_port() -> int:
@@ -242,6 +244,7 @@ class Bridge:
                 raise BridgeError("server did not return a native session id")
             self.session_id = str(created["id"])
 
+        self._permission_sessions = {str(self.session_id)}
         endpoints = json.loads(os.environ.get("AGENT_MCP_SERVERS") or "{}")
         if endpoints:
             statuses = self.request("GET", "/mcp", timeout=35)
@@ -253,7 +256,7 @@ class Bridge:
                 raise BridgeError(f"{self.runtime} could not initialize the session MCP relay")
 
         threading.Thread(target=self._watch_child, daemon=True).start()
-        threading.Thread(target=self._events, daemon=True).start()
+        self._start_event_stream()
         self.emit(
             {
                 "bridge": "ready",
@@ -279,6 +282,12 @@ class Bridge:
         self.emit({"bridge": "fatal", "detail": f"serve exited with status {code}"})
         os._exit(code or 1)
 
+    def _start_event_stream(self) -> None:
+        """Subscribe before advertising readiness; native events are not replayed."""
+        threading.Thread(target=self._events, daemon=True).start()
+        if not self._events_connected.wait(timeout=30):
+            raise BridgeError(f"{self.runtime} event stream did not become ready")
+
     def _events(self) -> None:
         failures = 0
         while not self._stopping.is_set():
@@ -287,43 +296,178 @@ class Bridge:
                 headers={**self._headers(), "Accept": "text/event-stream"},
                 method="GET",
             )
+            reason = "closed by server"
+            healthy = False
             try:
                 with urllib.request.urlopen(request, timeout=60) as response:
-                    failures = 0
                     data: list[str] = []
                     for raw in response:
                         if self._stopping.is_set():
                             return
                         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                        if line.startswith("data:"):
+                        if line.startswith(":"):
+                            # Both pinned servers emit SSE heartbeat comments.
+                            # Unlike the eager connected frame, a heartbeat
+                            # proves this subscription stayed alive.
+                            healthy = True
+                        elif line.startswith("data:"):
                             data.append(line[5:].lstrip())
                         elif not line and data:
-                            self._event_payload("\n".join(data))
+                            event_type = self._event_payload("\n".join(data))
+                            healthy = healthy or event_type not in {
+                                None,
+                                "server.connected",
+                            }
                             data.clear()
             except Exception as exc:
-                if self._stopping.is_set():
-                    return
-                failures += 1
-                if failures in (1, 5, 20):
-                    self.emit(
-                        {
-                            "bridge": "diagnostic",
-                            "detail": f"event stream reconnect {failures}: {exc}",
-                        }
-                    )
-                time.sleep(min(1.0, failures * 0.05))
+                reason = str(exc)
+            if self._stopping.is_set():
+                return
 
-    def _event_payload(self, payload: str) -> None:
+            if healthy:
+                failures = 0
+            self._event_stream_lost(reason)
+            failures += 1
+            if failures in (1, 5, 20):
+                # A failed active turn has already emitted its fenced
+                # diagnostic and settlement. Keep this ownerless reconnect
+                # notice off stdout so a later turn cannot consume it.
+                sys.stderr.write(
+                    f"[{self.runtime} bridge] event stream reconnect {failures}: {reason}\n"
+                )
+                sys.stderr.flush()
+            time.sleep(min(1.0, failures * 0.05))
+
+    def _event_stream_lost(self, detail: str) -> None:
+        """Close the admission gate and terminate any turn whose events were lost."""
+        # Clear before taking the turn lock: a prompt request may hold that lock,
+        # but no waiter may continue believing this live-only stream is usable.
+        self._events_connected.clear()
+        with self._turn_lock:
+            turn_id = self._turn_id
+        if turn_id is not None:
+            self._fail_active_turn(
+                turn_id,
+                f"event stream lost: {detail}",
+                settle_without_idle=True,
+            )
+
+    def _fail_active_turn(
+        self,
+        turn_id: str,
+        detail: str,
+        *,
+        settle_without_idle: bool,
+    ) -> None:
+        """Own one captured turn through its session-wide abort."""
+        with self._turn_lock:
+            if self._turn_id != turn_id:
+                return
+            self.emit({"bridge": "diagnostic", "detail": detail})
+
+            abort_path = f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/abort"
+            try:
+                # Both pinned servers finish cancellation before this request
+                # returns. Keep ownership throughout so the session-wide abort
+                # cannot race with admission of a replacement turn.
+                self.request("POST", abort_path, timeout=5)
+            except BridgeError as abort_error:
+                self._events_connected.clear()
+                self._turn_id = None
+                self._turn_saw_busy = False
+                self._turn_failed = False
+                self._questions.clear()
+                self._permission_sessions = {str(self.session_id)}
+                self.emit(
+                    {
+                        "bridge": "fatal",
+                        "detail": f"{detail}; native abort failed: {abort_error}",
+                    }
+                )
+                return
+
+            self._turn_failed = True
+            self._turn_saw_busy = True
+            if settle_without_idle:
+                # The stream is gone, so its abort-generated cleanup frames
+                # cannot be observed. The synchronous abort is the boundary.
+                self._settle_locked(turn_id)
+                return
+
+            # On a healthy stream, cancellation has already queued tool-error
+            # and idle frames. Preserve ownership until the reader drains them.
+            timer = threading.Timer(
+                10,
+                self._abort_settlement_timeout,
+                args=(turn_id, detail),
+            )
+            timer.daemon = True
+            timer.start()
+
+    def _abort_settlement_timeout(self, turn_id: str, detail: str) -> None:
+        """Fail the bridge if a successful abort never produces native idle."""
+        with self._turn_lock:
+            if self._turn_id != turn_id:
+                return
+            self._events_connected.clear()
+            self._turn_id = None
+            self._turn_saw_busy = False
+            self._turn_failed = False
+            self._questions.clear()
+            self._permission_sessions = {str(self.session_id)}
+            self.emit(
+                {
+                    "bridge": "fatal",
+                    "detail": f"{detail}; native idle did not follow abort",
+                }
+            )
+
+    def _reply_permission(self, session_id: str, request_id: str, turn_id: str) -> bool:
+        """Answer a one-shot request or terminate its turn instead of hanging."""
+        path = (
+            "/session/"
+            + urllib.parse.quote(session_id, safe="")
+            + "/permissions/"
+            + urllib.parse.quote(request_id, safe="")
+        )
+        last_error: BridgeError | None = None
+        for attempt in range(3):
+            try:
+                self.request(
+                    "POST",
+                    path,
+                    {"response": "once"},
+                    timeout=5,
+                )
+                return True
+            except BridgeError as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+
+        assert last_error is not None
+        self._fail_active_turn(
+            turn_id,
+            f"permission reply failed after 3 attempts: {last_error}",
+            settle_without_idle=False,
+        )
+        return False
+
+    def _event_payload(self, payload: str) -> str | None:
         try:
             event = json.loads(payload)
         except json.JSONDecodeError:
             self.emit({"bridge": "diagnostic", "detail": "invalid SSE JSON"})
-            return
+            return None
         if not isinstance(event, dict):
-            return
+            return None
         properties = event.get("properties")
         if not isinstance(properties, dict):
-            return
+            return None
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            return None
+
         session_id = properties.get("sessionID")
         part = properties.get("part")
         if not session_id and isinstance(part, dict):
@@ -331,31 +475,52 @@ class Bridge:
         info = properties.get("info")
         if not session_id and isinstance(info, dict):
             session_id = info.get("sessionID")
-        if session_id != self.session_id:
-            return
 
-        event_type = event.get("type")
-        if event_type == "permission.asked":
-            # New sessions carry a wildcard allow rule. Keep this fail-safe for
-            # a resumed historical session whose older rule set still asks.
-            request_id = properties.get("id")
-            if request_id:
-                try:
-                    self.request(
-                        "POST",
-                        "/session/"
-                        + urllib.parse.quote(str(self.session_id), safe="")
-                        + "/permissions/"
-                        + urllib.parse.quote(str(request_id), safe=""),
-                        {"response": "once"},
-                    )
-                except BridgeError as exc:
-                    self.emit({"bridge": "diagnostic", "detail": str(exc)})
-
+        if event_type == "server.connected":
+            # Both pinned servers register their bus listener before emitting
+            # this frame, so it proves that a new turn cannot outrun SSE.
+            with self._turn_lock:
+                self._events_connected.set()
+            return event_type
         with self._turn_lock:
             active = self._turn_id
             if active is None:
-                return
+                return event_type
+            if (
+                event_type == "message.part.updated"
+                and session_id == self.session_id
+                and isinstance(part, dict)
+                and part.get("type") == "tool"
+                and part.get("tool") == "task"
+            ):
+                state = part.get("state")
+                state = state if isinstance(state, dict) else {}
+                metadata = state.get("metadata")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                child_session_id = metadata.get("sessionId")
+                if isinstance(child_session_id, str) and child_session_id:
+                    # OpenCode and Kilo create Task children outside the root
+                    # session's permission rules. Follow only the relationship
+                    # the root reports, without granting an unrelated session.
+                    self._permission_sessions.add(child_session_id)
+            approve_permission = (
+                event_type == "permission.asked" and session_id in self._permission_sessions
+            )
+
+        if approve_permission:
+            # The outer sandbox is the permission boundary. New root sessions
+            # already carry a wildcard rule; this also covers resumed roots and
+            # the explicitly tracked child session a Task tool creates.
+            request_id = properties.get("id")
+            if request_id and not self._reply_permission(str(session_id), str(request_id), active):
+                return event_type
+
+        if session_id != self.session_id:
+            return event_type
+
+        with self._turn_lock:
+            if self._turn_id != active:
+                return event_type
             if event_type == "question.asked" and isinstance(properties.get("id"), str):
                 self._questions.add(properties["id"])
             elif event_type in {"question.replied", "question.rejected"}:
@@ -366,13 +531,14 @@ class Bridge:
                     self._turn_saw_busy = True
                 if isinstance(status, dict) and status.get("type") == "idle":
                     self._settle_locked(active)
-                    return
+                    return event_type
             elif event_type == "session.idle":
                 self._settle_locked(active)
-                return
+                return event_type
             elif event_type == "session.error":
                 self._turn_failed = True
         self.emit({"bridge": "event", "turn_id": active, "event": event})
+        return event_type
 
     def _settle_locked(self, turn_id: str) -> None:
         # The server emits busy/status before its matching idle. Ignore a
@@ -395,26 +561,39 @@ class Bridge:
             prompt = command.get("prompt")
             if not isinstance(prompt, str):
                 raise BridgeError("turn prompt must be text")
+            if not self._events_connected.wait(timeout=30):
+                raise BridgeError(f"{self.runtime} event stream is not ready")
             with self._turn_lock:
+                if not self._events_connected.is_set():
+                    raise BridgeError(f"{self.runtime} event stream is reconnecting")
                 if self._turn_id is not None:
                     raise BridgeError("a turn is already active")
                 self._turn_id = command_id
+                self._permission_sessions = {str(self.session_id)}
                 self._turn_saw_busy = False
                 self._turn_failed = False
-            try:
-                self.request(
-                    "POST",
-                    f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/prompt_async",
-                    {
-                        "model": {"providerID": "freeinference", "modelID": self.model},
-                        "parts": [{"type": "text", "text": prompt}],
-                    },
-                )
-            except Exception:
-                with self._turn_lock:
+                try:
+                    # Hold the ownership lock through admission. A concurrent
+                    # stream loss clears readiness first, then waits here and
+                    # aborts this captured turn after prompt_async returns.
+                    self.request(
+                        "POST",
+                        f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/prompt_async",
+                        {
+                            "model": {
+                                "providerID": "freeinference",
+                                "modelID": self.model,
+                            },
+                            "parts": [{"type": "text", "text": prompt}],
+                        },
+                    )
+                except Exception:
                     self._turn_id = None
-                raise
-            self.emit({"bridge": "turn_accepted", "turn_id": command_id})
+                    self._turn_saw_busy = False
+                    self._turn_failed = False
+                    self._questions.clear()
+                    raise
+                self.emit({"bridge": "turn_accepted", "turn_id": command_id})
             return
         if kind == "interrupt":
             with self._turn_lock:

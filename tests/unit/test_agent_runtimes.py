@@ -69,6 +69,97 @@ def test_tool_use_carries_name_and_input():
     assert tool_use.payload["input"] == {"cmd": "pwd"}
 
 
+@pytest.mark.parametrize("content_blocks", [False, True])
+def test_claude_task_create_preserves_the_assigned_id_in_structured_output(content_blocks):
+    """A native result links a task's recorded name to subsequent ID updates."""
+    runtime = ClaudeCodeRuntime()
+    input_fields = {"subject": "Build", "description": "Build the notification helper."}
+    tool_use = runtime.parse_event(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "create-call",
+                            "name": "TaskCreate",
+                            "input": input_fields,
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    acknowledgement = "Task #1 created successfully: Build"
+    content = [{"type": "text", "text": acknowledgement}] if content_blocks else acknowledgement
+    structured_output = {"task": {"id": "1", "subject": "Build"}}
+    result = runtime.parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "create-call",
+                            "content": content,
+                        }
+                    ]
+                },
+                "tool_use_result": structured_output,
+            }
+        )
+    )
+
+    assert tool_use.payload["input"] == input_fields
+    assert result.event_type == "tool_result"
+    assert result.payload == {
+        "tool_use_id": tool_use.payload["id"],
+        "is_error": False,
+        "content": json.dumps(content) if content_blocks else acknowledgement,
+        "structured_output": structured_output,
+    }
+
+
+@pytest.mark.parametrize("metadata", [None, "not structured", 1, False])
+def test_claude_tool_result_omits_unstructured_metadata(metadata):
+    """Malformed optional result metadata never replaces the native content."""
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call", "content": "Tool output"}
+                    ]
+                },
+                "tool_use_result": metadata,
+            }
+        )
+    )
+    assert event.payload == {"tool_use_id": "call", "is_error": False, "content": "Tool output"}
+
+
+def test_claude_replayed_user_message_does_not_republish_structured_output():
+    """Native stdin echoes remain ignored even when they contain result data."""
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "isReplay": True,
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call", "content": "Tool output"}
+                    ]
+                },
+                "tool_use_result": {"task": {"id": "1", "subject": "Build"}},
+            }
+        )
+    )
+    assert event is None
+
+
 def test_final_result_reports_cost_as_untrusted():
     """The runtime's self-reported cost is exposed but labelled as such."""
     runtime = ClaudeCodeRuntime()

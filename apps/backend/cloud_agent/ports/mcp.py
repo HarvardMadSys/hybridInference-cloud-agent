@@ -384,6 +384,7 @@ class McpConnectionRepository(Protocol):
         statuses: list[str] | None = None,
         user_id: str | None = None,
         limit: int = 50,
+        before_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Invocations filtered by job, thread, state or owner, newest first.
 
@@ -392,7 +393,13 @@ class McpConnectionRepository(Protocol):
         made it. Filtering the *list* is not a convenience: the rows carry the
         decrypted arguments, so a listing that does not scope by owner hands one
         user another user's tool call bodies. Callers that serve a request must
-        pass it.
+        pass it. Owner-scoped reads omit deleted conversations; unscoped
+        internal audit reads retain their invocation history.
+
+        ``before_id`` continues strictly below the previous page's last id,
+        so new calls cannot shift rows between pages. A pending state filter
+        omits calls whose deadline has passed, even before the expiry worker
+        persists that transition. Reads never change invocation state.
         """
         ...
 

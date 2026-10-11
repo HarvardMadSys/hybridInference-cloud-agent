@@ -182,7 +182,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('recorded results in the conversation', () => {
-  it('defers trajectory work in chat, reuses it while inspecting, and rebuilds after new events', () => {
+  it('defers trajectory work in chat, reuses it while inspecting, and rebuilds after new events', async () => {
     vi.mocked(buildTrajectorySteps).mockClear();
     const props = fixture();
     const { rerender } = render(<JobDetail {...props} />);
@@ -190,7 +190,7 @@ describe('recorded results in the conversation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
     expect(buildTrajectorySteps).toHaveBeenCalledTimes(1);
-    fireEvent.change(screen.getByLabelText('Search steps'), {
+    fireEvent.change(await screen.findByLabelText('Search steps'), {
       target: { value: 'current' },
     });
     expect(buildTrajectorySteps).toHaveBeenCalledTimes(1);
@@ -216,7 +216,7 @@ describe('recorded results in the conversation', () => {
     const git = screen.getByRole('tab', { name: /^Git/ });
     expect(git).toHaveAttribute('aria-selected', 'true');
     expect(git).toHaveFocus();
-    expect(screen.getByRole('region', { name: 'Recorded changes · Turn 1' })).toBeVisible();
+    expect(await screen.findByRole('region', { name: 'Recorded changes · Turn 1' })).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
     await waitFor(() => expect(opener).toHaveFocus());
@@ -233,7 +233,7 @@ describe('recorded results in the conversation', () => {
     fireEvent.click(
       within(result).getByRole('button', { name: 'Open recorded diff for src/history.tsx' }),
     );
-    const recorded = screen.getByRole('region', { name: 'Recorded changes · Turn 1' });
+    const recorded = await screen.findByRole('region', { name: 'Recorded changes · Turn 1' });
     expect(recorded).toHaveTextContent('src/history.tsx');
     expect(recorded).toHaveTextContent('+history-turn recorded content');
     expect(recorded).not.toHaveTextContent('live workspace content');
@@ -311,7 +311,9 @@ describe('recorded results in the conversation', () => {
       fireEvent.click(
         screen.getByRole('button', { name: 'Open recorded diff for src/history.tsx' }),
       );
-      expect(screen.getByRole('region', { name: 'Recorded changes · Turn 1' })).toBeInTheDocument();
+      expect(
+        await screen.findByRole('region', { name: 'Recorded changes · Turn 1' }),
+      ).toBeInTheDocument();
       rerender(
         <JobDetail
           {...props}

@@ -17,6 +17,14 @@ editor for review and can be edited before sending. Cancel or an unsuccessful
 rewrite preserves the original draft. Rewriting uses the account's normal model
 permissions and inference quota.
 
+To receive desktop alerts when an agent asks a question or a turn finishes,
+open **Settings → Notifications**, select **Enable notifications**, and allow
+the browser permission prompt. Questions and turn completions can be toggled
+separately. Alerts follow all your chats while the app remains open, including
+chats you are not viewing; clicking an alert opens its turn. These browser
+preferences are saved separately for each account. A closed browser does not
+receive alerts.
+
 ## Getting started
 
 Choose a path based on what you want to do:
@@ -125,6 +133,17 @@ from the conversation's original base, including current workspace changes,
 and is instructed to return findings without editing files. Clicking Review
 again reopens that chat's review. Review requires an available native Fork;
 archived chats and chats with lost context cannot start one.
+
+**Watch PR and merge** beside the published PR starts a follow-up in the same
+chat to monitor tests and reviews, address failures and feedback, and merge
+when the current PR head passes required checks and review requirements. It
+preserves unsent composer text and attachments. Chats sharing the workspace
+must have no active work or waiting messages before watching starts. Enable
+source-control tools that can read checks and reviews, mark drafts ready, and
+merge; the supplied GitHub MCP template is read-only, so merging needs a
+writable connection. The agent reports missing access or other blockers. Watching runs within the
+agent turn's timeout. If it makes fixes, the turn ends so the platform can
+publish them; click the button again after publication to resume watching.
 
 | Context status | Meaning |
 |---|---|

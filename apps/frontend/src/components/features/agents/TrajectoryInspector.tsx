@@ -10,8 +10,8 @@ import { useEffect, useMemo, useRef, useState, type Ref } from 'react';
 
 import { getAgentAttemptTelemetry, type AgentJobApi } from '@/lib/api/agents';
 
-import { AssistantStepDetails, ASSISTANT_TABS, type AssistantTab } from './AssistantStepDetails';
-import { HarnessDetails, HARNESS_TABS, type HarnessTab } from './HarnessDetails';
+import { AssistantStepDetails } from './AssistantStepDetails';
+import { HarnessDetails } from './HarnessDetails';
 import {
   DetailRow,
   DetailRows,
@@ -23,13 +23,19 @@ import {
   ValueBlock,
   recordedAt,
 } from './StepDetailParts';
-import { RunDetails, RUN_TABS, type RunTab } from './RunDetails';
+import { RunDetails } from './RunDetails';
+import { ToolStepDetails, type ToolCallTelemetry } from './ToolStepDetails';
 import {
-  ToolStepDetails,
-  TOOL_TABS,
-  type ToolCallTelemetry,
+  RUN_TABS,
+  normalizeStepTab,
+  tabsForStep,
+  type AssistantTab,
+  type EventTab,
+  type InspectorSelection,
+  type RunTab,
+  type StepTab,
   type ToolTab,
-} from './ToolStepDetails';
+} from './trajectoryInspectorTabs';
 import {
   STATUS_LABEL,
   stepSearchText,
@@ -39,48 +45,14 @@ import {
 import type { AgentJob } from './types';
 import { Markdown } from '@/components/ui/Markdown';
 
-export type EventTab = 'summary' | 'raw';
-export type StepTab = AssistantTab | ToolTab | EventTab | HarnessTab;
-
-export type { RunTab };
-
-export type InspectorSelection =
-  | { kind: 'step'; stepKey: string; tab: StepTab }
-  /** `turnNo` comes from whatever opened the panel, so a turn stays itself
-   *  even when the conversation's rows have not been read yet. */
-  | { kind: 'run'; jobId: string; turnNo: number; tab: RunTab };
-
-const EVENT_TABS: Array<{ key: EventTab; label: string }> = [
-  { key: 'summary', label: 'Summary' },
-  { key: 'raw', label: 'Raw' },
-];
-
-/**
- * The tabs a step actually has.
- *
- * A step takes a tab only when it holds something to put in it. An event whose
- * runtime reported a harness is that report and nothing else — the two tabs
- * that read it, with no Summary or Raw around them — and an event that
- * reported none keeps Summary and Raw rather than opening views that would
- * have to explain their own emptiness.
- */
-export function tabsForStep(step: TrajectoryStep): Array<{ key: StepTab; label: string }> {
-  if (step.kind === 'assistant') return ASSISTANT_TABS;
-  if (step.kind === 'tool') return TOOL_TABS;
-  return step.harness ? HARNESS_TABS : EVENT_TABS;
-}
-
-/**
- * Whether a tab belongs to the newly selected step, or must fall back.
- *
- * The fallback is the step's own first tab rather than a fixed name: a step
- * whose views do not include Summary must not silently land on one that is not
- * offered, or the strip and the panel would disagree about what is open.
- */
-export function normalizeStepTab(step: TrajectoryStep, tab: StepTab): StepTab {
-  const tabs = tabsForStep(step);
-  return tabs.some((item) => item.key === tab) ? tab : tabs[0].key;
-}
+export {
+  normalizeStepTab,
+  tabsForStep,
+  type EventTab,
+  type InspectorSelection,
+  type RunTab,
+  type StepTab,
+} from './trajectoryInspectorTabs';
 
 /**
  * The sandbox's own measurement of the selected call.

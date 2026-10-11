@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -37,6 +46,7 @@ import {
   type AgentJobApi,
   type AgentJobFilesApi,
   type AgentJobUsageApi,
+  type AgentThreadEventApi,
 } from '@/lib/api/agents';
 
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -71,9 +81,46 @@ vi.mock('@/lib/api/questions', () => ({
 
 import { installSideChatLocks } from './sideChatTestSupport';
 import { FirstRunProvider } from './firstRun';
+import { receiveHint } from './agentPush';
 import { sideChatKeys } from './sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
+import { IDLE_QUEUE_POLL_MS } from './usePendingMessages';
+import { watchPullRequestPrompt } from './watchPullRequest';
 import type { AgentJob } from './types';
+import { toDisplayEvent } from './adapt';
+import { projectProtocolEvents } from './trajectoryProtocol';
+
+const renderingWork = vi.hoisted(() => ({
+  trajectory: vi.fn(),
+  history: vi.fn(),
+  current: vi.fn(),
+}));
+
+vi.mock('./trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectorySteps')>();
+  return {
+    ...original,
+    buildTrajectorySteps: (...args: Parameters<typeof original.buildTrajectorySteps>) => {
+      renderingWork.trajectory();
+      return original.buildTrajectorySteps(...args);
+    },
+  };
+});
+
+vi.mock('./conversationTurnNavigation', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversationTurnNavigation')>();
+  return {
+    ...original,
+    describeHistoryTurns: (...args: Parameters<typeof original.describeHistoryTurns>) => {
+      renderingWork.history();
+      return original.describeHistoryTurns(...args);
+    },
+    describeCurrentTurn: (...args: Parameters<typeof original.describeCurrentTurn>) => {
+      renderingWork.current();
+      return original.describeCurrentTurn(...args);
+    },
+  };
+});
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
@@ -102,14 +149,18 @@ vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
 }));
 
 /** The queue a conversation with nothing waiting reads back. */
-function emptyQueue(threadId: string) {
+function emptyQueue(
+  threadId: string,
+  latestJobId: string | null = null,
+  latestJobState: string | null = latestJobId ? 'succeeded' : null,
+) {
   return {
     thread_id: threadId,
     pending_messages: [],
     queue_paused_reason: null,
-    latest_job_id: null,
+    latest_job_id: latestJobId,
     latest_turn_no: null,
-    latest_job_state: null,
+    latest_job_state: latestJobState,
   };
 }
 
@@ -657,6 +708,713 @@ describe('JobDetail', () => {
     expect(submitThreadMessage).not.toHaveBeenCalled();
   });
 
+  it('watches the published PR in the same thread and follows the resulting turn', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_watch' },
+    } as never);
+    window.history.pushState(null, '', '/ajob_1');
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'original-thread',
+          workspacePublicationState: 'published',
+          prUrl,
+        })}
+        userId="alice"
+      />,
+    );
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    expect(watch.parentElement).toContainElement(
+      screen.getByRole('link', { name: 'Open draft PR' }),
+    );
+    fireEvent.click(watch);
+
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    const [threadId, body, options] = vi.mocked(submitThreadMessage).mock.calls[0];
+    expect(threadId).toBe('original-thread');
+    expect(body).toEqual({
+      prompt: expect.any(String),
+      require_idle: true,
+      expected_latest_job_id: 'ajob_1',
+    });
+    expect(options).toEqual({ requestId: 'watch-pr:v2:original-thread:ajob_1' });
+    expect(body.prompt).toContain(prUrl);
+    expect(body.prompt).toContain('owner/repository');
+    expect(body.prompt).toContain('agent/ajob_1');
+    expect(body.prompt).toMatch(/checks|tests/i);
+    expect(body.prompt).toMatch(/reviews|approvals/i);
+    expect(body.prompt).toMatch(/latest.*head|head.*latest/i);
+    expect(body.prompt).toMatch(/merge/i);
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('watches from the Git PR action, prevents duplicate sends and applies a queued result', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    let finishSend!: (value: Awaited<ReturnType<typeof submitThreadMessage>>) => void;
+    vi.mocked(submitThreadMessage).mockReturnValue(
+      new Promise((resolve) => {
+        finishSend = resolve;
+      }),
+    );
+    window.history.pushState(null, '', '/ajob_1');
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done', threadId: 'original-thread', prUrl })}
+        userId="alice"
+      />,
+    );
+    openWorkspace();
+    const git = screen.getByLabelText('Git workspace');
+    fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+    const watch = within(git).getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    expect(watch.parentElement).toContainElement(
+      within(git).getByRole('link', { name: 'Open pull request' }),
+    );
+    fireEvent.click(watch);
+    expect(watch).toBeDisabled();
+    for (const button of screen.getAllByRole('button', { name: 'Watch PR and merge' })) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(submitThreadMessage).toHaveBeenCalledWith(
+      'original-thread',
+      {
+        prompt: expect.stringContaining(prUrl),
+        require_idle: true,
+        expected_latest_job_id: 'ajob_1',
+      },
+      { requestId: 'watch-pr:v2:original-thread:ajob_1' },
+    );
+    const prompt = vi.mocked(submitThreadMessage).mock.calls[0][1].prompt;
+    await act(async () =>
+      finishSend({
+        pending: {
+          id: 'apmsg_watch',
+          thread_id: 'original-thread',
+          position: 1,
+          state: 'queued',
+          revision: 1,
+          prompt,
+        },
+        job: null,
+      }),
+    );
+
+    const queue = await screen.findByRole('region', { name: 'Queued messages' });
+    expect(within(queue).getByTitle(prompt, { normalizer: (value) => value })).toBeInTheDocument();
+    expect(within(queue).getByText('1 pending')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/ajob_1');
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses live idle and published state over stale thread rows and re-enables watching after a turn change', async () => {
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      conversationState: 'idle',
+      workspacePublicationState: 'published',
+      prUrl: 'https://github.com/owner/repository/pull/7',
+    });
+    const threadJobs = [
+      {
+        id: 'ajob_stale',
+        thread_id: 'original-thread',
+        turn_no: 2,
+        state: 'running',
+        conversation_state: 'running',
+        workspace_publication_state: 'pending',
+        runtime: 'claude-code',
+        model: 'qwen-test',
+      } as AgentJobApi,
+    ];
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_watch' },
+    } as never);
+    window.history.pushState(null, '', '/ajob_1');
+    const { rerender } = render(<JobDetail job={job} userId="alice" threadJobs={threadJobs} />);
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    fireEvent.click(watch);
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
+    expect(watch).toBeDisabled();
+
+    rerender(
+      <JobDetail
+        job={{ ...job, id: 'ajob_watch', turnNo: 3 }}
+        userId="alice"
+        threadJobs={threadJobs}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Watch PR and merge' })).toBeEnabled();
+    rerender(<JobDetail job={job} userId="alice" threadJobs={threadJobs} />);
+    const originalWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(originalWatch).toBeEnabled();
+    fireEvent.click(originalWatch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+  });
+
+  it('reuses the queue latest turn across historical mounts without epochs and uses a new key after the latest turn changes', async () => {
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      conversationState: 'idle',
+      workspacePublicationState: 'published',
+      prUrl: 'https://github.com/owner/repository/pull/7',
+    });
+    let latestJobId = 'ajob_latest';
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+      emptyQueue(threadId, latestJobId),
+    );
+    const existingReceipt = { pending: null, job: { id: 'ajob_watch_shared' } } as never;
+    vi.mocked(submitThreadMessage)
+      .mockResolvedValueOnce(existingReceipt)
+      .mockResolvedValueOnce(existingReceipt)
+      .mockResolvedValueOnce({ pending: null, job: { id: 'ajob_watch_next' } } as never);
+    const first = render(<JobDetail job={job} userId="alice" />);
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    fireEvent.click(watch);
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
+    const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
+    expect(firstRequestId).toBe('watch-pr:v2:original-thread:ajob_latest');
+    expect(vi.mocked(submitThreadMessage).mock.calls[0][1]).toMatchObject({
+      require_idle: true,
+      expected_latest_job_id: 'ajob_latest',
+    });
+    first.unmount();
+
+    window.history.pushState(null, '', '/ajob_older');
+    const second = render(
+      <JobDetail job={{ ...job, id: 'ajob_older', turnNo: 2 }} userId="alice" />,
+    );
+    const historicalWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(historicalWatch).toBeEnabled());
+    fireEvent.click(historicalWatch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
+    const [, historicalBody, historicalOptions] = vi.mocked(submitThreadMessage).mock.calls[1];
+    expect(historicalOptions?.requestId).toBe(firstRequestId);
+    expect(historicalBody).toEqual(vi.mocked(submitThreadMessage).mock.calls[0][1]);
+
+    latestJobId = 'ajob_published_next';
+    second.rerender(
+      <JobDetail job={{ ...job, id: 'ajob_published_next', turnNo: 3 }} userId="alice" />,
+    );
+    const priorReads = vi.mocked(getThreadQueue).mock.calls.length;
+    receiveHint('queue', 'original-thread');
+    await waitFor(() =>
+      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(priorReads),
+    );
+    const nextWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(nextWatch).toBeEnabled());
+    fireEvent.click(nextWatch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_next'));
+    const nextRequestId = vi.mocked(submitThreadMessage).mock.calls[2][2]?.requestId;
+    expect(nextRequestId).toBe('watch-pr:v2:original-thread:ajob_published_next');
+    expect(nextRequestId).not.toBe(firstRequestId);
+    expect(vi.mocked(submitThreadMessage).mock.calls[2][1]).toMatchObject({
+      require_idle: true,
+      expected_latest_job_id: 'ajob_published_next',
+    });
+  });
+
+  it.each([
+    ['archived', { archivedAt: '2026-09-10T00:00:00Z' }, 'alice', undefined, undefined],
+    ['lost native context', { nativeState: 'lost' }, 'alice', undefined, undefined],
+    ['lost attempt context', { contextStatus: 'lost' }, 'alice', undefined, undefined],
+    ['signed out', {}, undefined, undefined, undefined],
+    ['queued', { state: 'queued' }, 'alice', undefined, undefined],
+    ['running', { state: 'running' }, 'alice', undefined, undefined],
+    ['a later queued turn', {}, 'alice', 'queued', undefined],
+    ['a later running turn', {}, 'alice', 'running', undefined],
+    [
+      'pending publication',
+      { workspacePublicationState: 'pending' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    [
+      'capturing publication',
+      { workspacePublicationState: 'capturing' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    [
+      'captured publication',
+      { workspacePublicationState: 'captured' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    [
+      'publishing changes',
+      { workspacePublicationState: 'publishing' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    ['failed publication', { workspacePublicationState: 'failed' }, 'alice', undefined, undefined],
+    ['a later pending publication', {}, 'alice', 'succeeded', 'pending'],
+    ['a later capturing publication', {}, 'alice', 'succeeded', 'capturing'],
+    ['a later captured publication', {}, 'alice', 'succeeded', 'captured'],
+    ['a later publishing turn', {}, 'alice', 'succeeded', 'publishing'],
+    ['a later failed publication', {}, 'alice', 'succeeded', 'failed'],
+  ] as const)(
+    'disables PR watching when the conversation is %s',
+    async (_reason, overrides, userId, latestState, latestPublicationState) => {
+      const threadJobs: AgentJobApi[] = [];
+      if (latestState) {
+        threadJobs.push({
+          id: 'ajob_later',
+          thread_id: 'original-thread',
+          turn_no: 2,
+          state: latestState,
+          runtime: 'claude-code',
+          model: 'qwen-test',
+          workspace_publication_state: latestPublicationState,
+        } as AgentJobApi);
+      }
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+            ...overrides,
+          })}
+          userId={userId}
+          threadJobs={threadJobs}
+        />,
+      );
+      openWorkspace();
+      const git = screen.getByLabelText('Git workspace');
+      fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+      const watch = within(git).getByRole('button', { name: 'Watch PR and merge' });
+      await act(async () => undefined);
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+      expect(forkAgentJob).not.toHaveBeenCalled();
+    },
+  );
+
+  it('waits for the initial queue read before offering to watch a PR', async () => {
+    let finishRead!: (value: Awaited<ReturnType<typeof getThreadQueue>>) => void;
+    vi.mocked(getThreadQueue).mockReturnValue(
+      new Promise((resolve) => {
+        finishRead = resolve;
+      }),
+    );
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'original-thread',
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        })}
+        userId="alice"
+      />,
+    );
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+    await act(async () => finishRead(emptyQueue('original-thread', 'ajob_1')));
+    await waitFor(() => expect(watch).toBeEnabled());
+  });
+
+  it('keeps PR watching disabled when a successful queue read has no latest turn', async () => {
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) => emptyQueue(threadId));
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'original-thread',
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        })}
+        userId="alice"
+      />,
+    );
+    await act(async () => undefined);
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 'queued', 'running', 'publishing'])(
+    'keeps PR watching disabled when the latest queue turn state is %s',
+    async (latestJobState) => {
+      vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+        emptyQueue(threadId, 'ajob_1', latestJobState),
+      );
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            conversationState: 'idle',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+          })}
+          userId="alice"
+        />,
+      );
+      await act(async () => undefined);
+
+      const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refreshes a changed conversation after refusing the watch without retrying or disturbing the draft', async () => {
+    let latestJobId = 'ajob_1';
+    let latestJobState = 'succeeded';
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+      emptyQueue(threadId, latestJobId, latestJobState),
+    );
+    vi.mocked(submitThreadMessage).mockImplementation(async () => {
+      latestJobId = 'ajob_newest';
+      latestJobState = 'running';
+      throw new APIError('conversation_changed', 'The conversation changed before watching', 409);
+    });
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          conversationState: 'idle',
+          threadId: 'original-thread',
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        })}
+        userId="alice"
+      />,
+    );
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Keep this draft for later' } });
+    const model = await screen.findByLabelText('Model for this turn');
+    fireEvent.change(model, { target: { value: 'glm-test' } });
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
+    fireEvent.click(watch);
+
+    expect(await screen.findByText('The conversation changed before watching')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(initialReads),
+    );
+    expect(watch).toBeDisabled();
+    expect(box).toHaveValue('Keep this draft for later');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.queryByRole('region', { name: 'Queued messages' })).not.toBeInTheDocument();
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(submitThreadMessage).toHaveBeenCalledWith(
+      'original-thread',
+      {
+        prompt: expect.stringContaining('https://github.com/owner/repository/pull/7'),
+        require_idle: true,
+        expected_latest_job_id: 'ajob_1',
+      },
+      { requestId: 'watch-pr:v2:original-thread:ajob_1' },
+    );
+    expect(forkAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('retries an idle conversation queue after initial read failures before enabling PR watching', async () => {
+    vi.useFakeTimers();
+    try {
+      let recovered = false;
+      vi.mocked(getThreadQueue).mockImplementation(async (threadId) => {
+        if (!recovered) throw new Error('Temporary queue outage');
+        return emptyQueue(threadId, 'ajob_1');
+      });
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            conversationState: 'idle',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+          })}
+          userId="alice"
+        />,
+      );
+      await act(async () => undefined);
+
+      const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+      const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
+      expect(initialReads).toBeGreaterThan(0);
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+
+      recovered = true;
+      await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(initialReads);
+      expect(watch).toBeEnabled();
+      const verifiedReads = vi.mocked(getThreadQueue).mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+      expect(getThreadQueue).toHaveBeenCalledTimes(verifiedReads);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['queued', 'running', 'publishing'] as const)(
+    'polls a historical conversation while the latest queue turn is %s until it settles',
+    async (initialState) => {
+      vi.useFakeTimers();
+      try {
+        let latestJobState: string = initialState;
+        vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
+          emptyQueue(threadId, 'ajob_latest', latestJobState),
+        );
+        render(
+          <JobDetail
+            job={makeJob({
+              state: 'done',
+              conversationState: 'idle',
+              threadId: 'original-thread',
+              prUrl: 'https://github.com/owner/repository/pull/7',
+            })}
+            userId="alice"
+          />,
+        );
+        await act(async () => undefined);
+
+        const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+        expect(watch).toBeDisabled();
+        const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
+        latestJobState = 'succeeded';
+        await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+
+        expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(initialReads);
+        expect(watch).toBeEnabled();
+        expect(submitThreadMessage).not.toHaveBeenCalled();
+        const verifiedReads = vi.mocked(getThreadQueue).mock.calls.length;
+        await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+        expect(getThreadQueue).toHaveBeenCalledTimes(verifiedReads);
+      } finally {
+        cleanup();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['queued', 'held'] as const)(
+    'keeps PR watching disabled while an unrelated %s message waits in a paused queue',
+    async (state) => {
+      let messages: PendingMessageApi[] = [
+        {
+          id: 'apmsg_unrelated',
+          thread_id: 'original-thread',
+          position: 1,
+          state,
+          revision: 1,
+          prompt: 'Update the documentation next',
+        },
+      ];
+      vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
+        ...emptyQueue(threadId, 'ajob_1'),
+        pending_messages: messages,
+        queue_paused_reason: messages.length ? 'stopped' : null,
+      }));
+      vi.mocked(submitThreadMessage).mockResolvedValue({
+        pending: null,
+        job: { id: 'ajob_watch' },
+      } as never);
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+          })}
+          userId="alice"
+        />,
+      );
+
+      const queue = await screen.findByRole('region', { name: 'Queued messages' });
+      expect(within(queue).getByText('Update the documentation next')).toBeInTheDocument();
+      const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+
+      messages = [];
+      receiveHint('queue', 'original-thread');
+      await waitFor(() => expect(watch).toBeEnabled());
+      expect(screen.queryByRole('region', { name: 'Queued messages' })).not.toBeInTheDocument();
+      fireEvent.click(watch);
+      await waitFor(() =>
+        expect(submitThreadMessage).toHaveBeenCalledWith(
+          'original-thread',
+          {
+            prompt: expect.stringContaining('https://github.com/owner/repository/pull/7'),
+            require_idle: true,
+            expected_latest_job_id: 'ajob_1',
+          },
+          { requestId: 'watch-pr:v2:original-thread:ajob_1' },
+        ),
+      );
+    },
+  );
+
+  it('does not resubmit a matching watch already waiting in the thread queue', async () => {
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      prUrl: 'https://github.com/owner/repository/pull/7',
+    });
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
+      ...emptyQueue(threadId, 'ajob_1'),
+      pending_messages: [
+        {
+          id: 'apmsg_existing_watch',
+          thread_id: threadId,
+          position: 1,
+          state: 'queued',
+          revision: 1,
+          prompt: watchPullRequestPrompt(job),
+        },
+      ],
+    }));
+    render(<JobDetail job={job} userId="alice" />);
+
+    await screen.findByRole('region', { name: 'Queued messages' });
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the draft and its controls through a failed PR watch and a successful retry', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    vi.mocked(listSkills).mockResolvedValue([
+      {
+        id: 7,
+        name: 'Review',
+        description: 'Review changes',
+        revision: 2,
+        source: 'created',
+        source_url: null,
+        source_revision: null,
+        default_enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      id: 42,
+      path: 'spec.txt',
+      size_bytes: 12,
+      content_type: 'text/plain',
+    });
+    vi.mocked(submitThreadMessage)
+      .mockRejectedValueOnce(new Error('Could not start watching'))
+      .mockResolvedValueOnce({ pending: null, job: { id: 'ajob_watch' } } as never)
+      .mockResolvedValue({ pending: null, job: { id: 'ajob_draft' } } as never);
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      prUrl,
+      skills: [{ id: 7, name: 'Review', description: 'Review changes', revision: 1 }],
+    });
+    const { container, rerender } = render(<JobDetail job={job} userId="alice" />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use this spec next' } });
+    const model = await screen.findByLabelText('Model for this turn');
+    fireEvent.change(model, { target: { value: 'glm-test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Skills\s*1/ }));
+    fireEvent.click(await screen.findByRole('switch'));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const file = new File(['requirements'], 'spec.txt');
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled(),
+    );
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    fireEvent.click(watch);
+    expect(await screen.findByText('Could not start watching')).toBeInTheDocument();
+    expect(watch).toBeEnabled();
+    expect(box).toHaveValue('Use this spec next');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    fireEvent.click(watch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
+    expect(watch).toBeDisabled();
+    expect(screen.queryByText('Could not start watching')).not.toBeInTheDocument();
+    expect(box).toHaveValue('Use this spec next');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    for (const [, body] of vi.mocked(submitThreadMessage).mock.calls) {
+      expect(body).toEqual({
+        prompt: expect.stringContaining(prUrl),
+        require_idle: true,
+        expected_latest_job_id: 'ajob_1',
+      });
+    }
+    const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
+    expect(firstRequestId).toBe('watch-pr:v2:original-thread:ajob_1');
+    expect(vi.mocked(submitThreadMessage).mock.calls[1][2]?.requestId).toBe(firstRequestId);
+    expect(deleteAttachment).not.toHaveBeenCalled();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+
+    rerender(
+      <JobDetail job={{ ...job, id: 'ajob_watch', turnNo: 2, state: 'running' }} userId="alice" />,
+    );
+    expect(box).toHaveValue('Use this spec next');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenLastCalledWith('original-thread', {
+        prompt: 'Use this spec next',
+        model: 'glm-test',
+        skill_ids: [],
+        attachment_ids: [42],
+      }),
+    );
+  });
+
+  it('omits PR watching in both outcome and Git actions when there is no published PR', () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} userId="alice" />);
+    expect(screen.queryByRole('button', { name: 'Watch PR and merge' })).not.toBeInTheDocument();
+    openWorkspace();
+    const git = screen.getByLabelText('Git workspace');
+    fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+    expect(screen.queryByRole('button', { name: 'Watch PR and merge' })).not.toBeInTheDocument();
+  });
+
   it('closes all side tabs, remembers closure after refresh and can create a fresh chat', async () => {
     const { source, job, userId } = sideChatFixture();
     const props = { job, userId, threadJobs: [source] };
@@ -904,7 +1662,7 @@ describe('JobDetail', () => {
     vi.mocked(sendPendingMessageNow).mockReset();
     vi.mocked(getThreadQueue)
       .mockReset()
-      .mockImplementation(async (threadId) => emptyQueue(threadId));
+      .mockImplementation(async (threadId) => emptyQueue(threadId, 'ajob_1'));
     vi.mocked(forkAgentJob).mockReset();
     vi.mocked(restoreAgentJob).mockReset();
     vi.mocked(renameAgentJob).mockReset();
@@ -1166,6 +1924,103 @@ describe('JobDetail', () => {
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenLastCalledWith('ajob_1', { prompt: 'Next message' }),
     );
+  });
+
+  it('pastes clipboard file images and waits for their uploads before sending a follow-up', async () => {
+    let finishUpload!: (value: Awaited<ReturnType<typeof uploadAttachment>>) => void;
+    vi.mocked(uploadAttachment).mockReturnValue(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use this screenshot' } });
+    const image = new File(['pixels'], 'image.png', { type: 'image/png' });
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [image, new File(['notes'], 'notes.txt', { type: 'text/plain' })],
+      },
+    });
+    fireEvent(box, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(uploadAttachment).toHaveBeenCalledOnce();
+    const [uploaded, path] = vi.mocked(uploadAttachment).mock.calls[0];
+    expect(uploaded).toEqual(
+      expect.objectContaining({ name: path, type: 'image/png', size: image.size }),
+    );
+    expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
+    expect(screen.getByText(path!)).toBeInTheDocument();
+    expect(box).toHaveValue('Use this screenshot');
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishUpload({ id: 43, path: path!, size_bytes: image.size, content_type: image.type });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Use this screenshot',
+        attachment_ids: [43],
+      }),
+    );
+    await waitFor(() => expect(box).toHaveValue(''));
+    expect(screen.queryByText(path!)).not.toBeInTheDocument();
+    expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('leaves plain text follow-up pastes to the browser', () => {
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Existing follow-up' } });
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        files: [],
+        getData: () => 'Pasted text',
+      },
+    });
+    fireEvent(box, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(box).toHaveValue('Existing follow-up');
+  });
+
+  it('does not upload pasted images after native context is lost', () => {
+    render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    expect(box).toBeDisabled();
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload pasted images while a follow-up is being submitted', async () => {
+    vi.mocked(submitThreadMessage).mockReturnValue(new Promise(() => {}));
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Send the follow-up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledOnce());
+    fireEvent.paste(box, {
+      clipboardData: {
+        items: [],
+        files: [new File(['pixels'], 'image.png', { type: 'image/png' })],
+      },
+    });
+    expect(uploadAttachment).not.toHaveBeenCalled();
   });
 
   it('accepts dropped files and removes them before sending', async () => {
@@ -1580,17 +2435,37 @@ describe('JobDetail', () => {
     expect(history.getByText('Agent finished')).toBeInTheDocument();
   });
 
-  it('shows reasoning as a status without rendering raw thinking text', () => {
+  it('shows reasoning as a status when no reasoning content was recorded', () => {
     render(
       <JobDetail
         job={makeJob({
-          events: [{ kind: 'thinking', text: 'private chain of thought', attemptNo: 1 }],
+          events: [{ kind: 'thinking', text: '', attemptNo: 1 }],
         })}
       />,
     );
 
     expect(screen.getByLabelText('Agent reasoning')).toHaveTextContent('Agent is reasoning');
-    expect(screen.queryByText('private chain of thought')).not.toBeInTheDocument();
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  it('keeps recorded reasoning collapsed and separate from the assistant reply', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          events: [
+            { kind: 'thinking', text: 'Check the parser before editing.', attemptNo: 1 },
+            { kind: 'message', text: 'Fixed the parser.', attemptNo: 1 },
+          ],
+        })}
+      />,
+    );
+
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('Check the parser before editing.')).toBeInTheDocument();
+    expect(within(reasoning).queryByText('Fixed the parser.')).not.toBeInTheDocument();
+    expect(screen.getByText('Fixed the parser.')).toBeVisible();
   });
 
   it('shows inline tool activity with its complete call and result available on demand', () => {
@@ -2013,6 +2888,10 @@ describe('JobDetail', () => {
     expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
     // Its milestones say what they mean, this once.
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch.parentElement).toContainElement(
+      screen.getByRole('link', { name: 'Open draft PR' }),
+    );
     expect(screen.getByText(/keeps going if you close this page/)).toBeInTheDocument();
   });
 
@@ -2412,7 +3291,7 @@ describe('JobDetail', () => {
       fireEvent.click(chip, { detail: 0 });
 
       const inspector = await screen.findByRole('region', { name: 'Step details' });
-      const close = within(inspector).getByRole('button', { name: 'Close details' });
+      const close = await within(inspector).findByRole('button', { name: 'Close details' });
       expect(close).toHaveFocus();
       expect(inspector).toHaveTextContent('pytest -q');
       expect(screen.queryByLabelText('Search steps')).not.toBeInTheDocument();
@@ -2700,6 +3579,107 @@ describe('JobDetail', () => {
       expect(within(activity).queryByText('Current implementation plan')).not.toBeInTheDocument();
     });
 
+    it.each(['native', 'duplicate'] as const)(
+      'opens %s subagent call details from chat without constructing a trajectory during overview rendering',
+      async (kind) => {
+        renderingWork.trajectory.mockClear();
+        const currentAttemptNo = kind === 'native' ? 2 : 1;
+        vi.mocked(getAgentAttemptTelemetry).mockResolvedValue({
+          attempt_id: currentAttemptNo,
+          attempt_no: currentAttemptNo,
+          continuity_mode: null,
+          context_status: null,
+          duration_ms: null,
+          resources: null,
+        });
+        function nativeRecord(
+          id: number,
+          attempt: number,
+          worker: string,
+          completed = false,
+        ): AgentThreadEventApi {
+          return {
+            id,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: attempt,
+            seq: completed ? 2 : 1,
+            event_type: 'raw',
+            created_at: null,
+            payload: {
+              protocol: 'codex-app-server',
+              notification: {
+                method: completed ? 'item/completed' : 'item/started',
+                params: {
+                  item: {
+                    type: 'collabAgentToolCall',
+                    id: 'native-reviewer',
+                    tool: 'spawnAgent',
+                    receiverThreadIds: [worker],
+                    status: completed ? 'completed' : 'inProgress',
+                    agentsStates: {
+                      [worker]: { status: 'completed', message: 'Review complete' },
+                    },
+                  },
+                },
+              },
+            },
+          };
+        }
+        let stored: AgentThreadEventApi[];
+        if (kind === 'native') {
+          stored = [
+            nativeRecord(699, 1, 'superseded-worker'),
+            nativeRecord(700, 2, 'worker-one'),
+            nativeRecord(701, 2, 'worker-one', true),
+          ];
+        } else {
+          stored = ['First review', 'Second review'].map((task, index) => ({
+            id: 700 + index,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: 1,
+            seq: index + 1,
+            event_type: 'tool_use',
+            created_at: null,
+            payload: {
+              id: 'repeated-reviewer',
+              name: 'spawn_agent',
+              input: { task_name: task },
+            },
+          }));
+        }
+        const displayEvents = projectProtocolEvents(stored).map((event) => ({
+          ...toDisplayEvent(event)!,
+          attemptNo: event.attempt_id ?? currentAttemptNo,
+        }));
+        const attempts: AgentJob['attempts'] = [{ no: currentAttemptNo, status: 'live' }];
+        if (kind === 'native') attempts.unshift({ no: 1, status: 'superseded' });
+        render(
+          <JobDetail
+            job={makeJob({ currentAttemptNo, attempts, events: displayEvents })}
+            events={stored}
+          />,
+        );
+        const actions = screen.getAllByRole('button', { name: 'View subagent execution' });
+        expect(renderingWork.trajectory).not.toHaveBeenCalled();
+        fireEvent.click(actions.at(-1)!);
+        const inspector = screen.getByRole('region', { name: 'Step details' });
+        await within(inspector).findByRole('button', { name: 'Close details' });
+        expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+        if (kind === 'native') {
+          expect(inspector).toHaveTextContent('worker-one');
+          expect(inspector).toHaveTextContent('spawn_agent');
+          expect(inspector).toHaveTextContent('Review complete');
+          expect(inspector).not.toHaveTextContent('superseded-worker');
+          expect(inspector).not.toHaveTextContent('pairing below is not verified');
+        } else {
+          expect(inspector).toHaveTextContent('This call id was stored more than once');
+          expect(inspector).toHaveTextContent('pairing below is not verified');
+        }
+      },
+    );
+
     it('moves focus into subagent execution details and restores it to the toggle', async () => {
       render(
         <JobDetail
@@ -2758,6 +3738,248 @@ describe('JobDetail', () => {
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
     expect(screen.getByLabelText('Add a follow-up')).toBeInTheDocument();
   });
+
+  it('defers a large diagnostic history until inspection and avoids derivation work while typing', async () => {
+    renderingWork.trajectory.mockClear();
+    renderingWork.history.mockClear();
+    renderingWork.current.mockClear();
+    vi.mocked(getAgentAttemptTelemetry).mockResolvedValue({
+      attempt_id: 51,
+      attempt_no: 1,
+      continuity_mode: null,
+      context_status: null,
+      duration_ms: null,
+      resources: null,
+    });
+    const historicalJobs = Array.from({ length: 50 }, (_, index) => ({
+      id: `past-${index}`,
+      state: 'succeeded',
+      turn_no: index + 1,
+      current_attempt_id: index + 1,
+      task_prompt: `Completed task ${index}`,
+      published_pr_url: null,
+    })) as AgentJobApi[];
+    const threadJobs = [
+      ...historicalJobs,
+      {
+        id: 'ajob_1',
+        state: 'running',
+        turn_no: 51,
+        current_attempt_id: 51,
+        task_prompt: 'Current task',
+        published_pr_url: null,
+      } as AgentJobApi,
+    ];
+    const historicalEvents: AgentThreadEventApi[] = historicalJobs.flatMap((turn, index) =>
+      Array.from({ length: 100 }, (_, offset) => ({
+        id: index * 100 + offset,
+        job_id: turn.id,
+        turn_no: turn.turn_no!,
+        attempt_id: turn.current_attempt_id!,
+        seq: offset,
+        event_type: 'message',
+        payload: {
+          text: `Stored historical reply ${index}/${offset}`,
+          native_item_id: `native-reply-${index}`,
+        },
+        created_at: null,
+      })),
+    );
+    const source: AgentThreadEventApi = {
+      id: 6000,
+      job_id: 'ajob_1',
+      turn_no: 51,
+      attempt_id: 51,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 'review-worker', name: 'spawn_agent', input: { task_name: 'Review scaling' } },
+      created_at: null,
+    };
+    const job = makeJob({
+      threadId: 'large-conversation',
+      turnNo: 51,
+      currentAttemptId: 51,
+      historyTurns: historicalJobs.map((turn) => ({
+        jobId: turn.id,
+        turnNo: turn.turn_no!,
+        forkable: false,
+        state: 'done',
+        events: [{ kind: 'message', text: `Completed task ${turn.turn_no}` }],
+        messages: [],
+      })),
+      events: [
+        {
+          kind: 'tool_use',
+          tool: 'spawn_agent',
+          id: 'review-worker',
+          input: { task_name: 'Review scaling' },
+          detail: 'Review scaling',
+          attemptNo: 1,
+          sourceEventId: source.id,
+        },
+      ],
+    });
+    const events = [...historicalEvents, source];
+    const { rerender } = render(<JobDetail job={job} events={events} threadJobs={threadJobs} />);
+    await screen.findByRole('button', { name: 'View subagent execution' });
+    expect(renderingWork.trajectory).not.toHaveBeenCalled();
+    expect(renderingWork.history).toHaveBeenCalledTimes(1);
+    expect(renderingWork.current).toHaveBeenCalledTimes(1);
+    const composer = screen.getByRole('textbox', { name: 'Add a follow-up' });
+    for (const value of ['h', 'he', 'hel', 'hello']) {
+      fireEvent.change(composer, { target: { value } });
+    }
+    expect(composer).toHaveValue('hello');
+    expect(renderingWork.trajectory).not.toHaveBeenCalled();
+    expect(renderingWork.history).toHaveBeenCalledTimes(1);
+    expect(renderingWork.current).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'View subagent execution' }));
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Close details' });
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    const reply: AgentThreadEventApi = {
+      ...source,
+      id: 6001,
+      seq: 2,
+      event_type: 'message',
+      payload: { text: 'Fresh streamed reply' },
+    };
+    const updatedJob = {
+      ...job,
+      events: [
+        ...job.events,
+        {
+          kind: 'message' as const,
+          text: 'Fresh streamed reply',
+          sourceEventId: reply.id,
+          attemptNo: 1,
+        },
+      ],
+    };
+    rerender(<JobDetail job={updatedJob} events={[...events, reply]} threadJobs={threadJobs} />);
+    expect(screen.getByText('Fresh streamed reply')).toBeInTheDocument();
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+    expect(renderingWork.history).toHaveBeenCalledTimes(1);
+    expect(renderingWork.current).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(await screen.findByText('Fresh streamed reply')).toBeInTheDocument();
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(2);
+    const result: AgentThreadEventApi = {
+      ...source,
+      id: 6002,
+      seq: 3,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'review-worker', content: 'Review finished', is_error: false },
+    };
+    rerender(
+      <JobDetail job={updatedJob} events={[...events, reply, result]} threadJobs={threadJobs} />,
+    );
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(3);
+    fireEvent.click(await screen.findByText('spawn_agent'));
+    const inspector = screen.getByRole('region', { name: 'Step details' });
+    await within(inspector).findByRole('button', { name: 'Close details' });
+    expect(inspector).toHaveTextContent('Review finished');
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(3);
+  });
+
+  it('initializes terminal and file panels only when selected and preserves them across closing', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (path === '') {
+        return {
+          path: '',
+          kind: 'directory',
+          entries: [{ name: 'preview.txt', path: 'preview.txt', kind: 'file' }],
+        };
+      }
+      return {
+        path,
+        kind: 'file',
+        content: 'retained preview',
+        size: 16,
+        binary: false,
+        truncated: false,
+      };
+    });
+    render(<JobDetail job={makeJob({ state: 'done', threadId: 'retained-thread' })} />);
+
+    expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Workspace files')).not.toBeInTheDocument();
+    expect(listAgentTerminals).not.toHaveBeenCalled();
+    expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+    openWorkspace();
+    expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Workspace files')).not.toBeInTheDocument();
+    expect(listAgentTerminals).not.toHaveBeenCalled();
+    expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+    const terminal = await screen.findByLabelText('Workspace terminal');
+    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+    expect(screen.getByLabelText('Workspace terminal')).toBe(terminal);
+    expect(terminal).not.toBeVisible();
+    openWorkspace();
+    expect(screen.getByLabelText('Workspace terminal')).toBe(terminal);
+    expect(terminal).toBeVisible();
+    expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+    expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+    const files = await screen.findByLabelText('Workspace files');
+    fireEvent.click(await within(files).findByRole('button', { name: /preview.txt/ }));
+    await waitFor(() => expect(files).toHaveTextContent('retained preview'));
+    fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+    expect(screen.getByLabelText('Workspace files')).toBe(files);
+    expect(files).not.toBeVisible();
+    openWorkspace();
+    expect(screen.getByLabelText('Workspace files')).toBe(files);
+    expect(files).toBeVisible();
+    expect(getAgentJobFiles).toHaveBeenLastCalledWith('ajob_1', 'preview.txt');
+    await waitFor(() => expect(files).toHaveTextContent('retained preview'));
+  });
+
+  it.each(['thread', 'account'] as const)(
+    'defers the new workspace and clears initialized panels when its %s changes',
+    async (scope) => {
+      const job = makeJob({ state: 'done', threadId: 'initial-thread' });
+      const { rerender } = render(<JobDetail job={job} userId="initial-owner" />);
+      openWorkspace();
+      fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+      const terminal = await screen.findByLabelText('Workspace terminal');
+      await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledTimes(1));
+
+      rerender(
+        <JobDetail
+          job={scope === 'thread' ? { ...job, threadId: 'new-thread' } : job}
+          userId={scope === 'account' ? 'new-owner' : 'initial-owner'}
+        />,
+      );
+      expect(terminal).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Workspace files')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+      expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+      expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+      rerender(<JobDetail job={job} userId="initial-owner" />);
+      expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+      expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+      expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('opens and closes from a stable control while preserving the selected tab', () => {
     render(<JobDetail job={makeJob()} />);
@@ -2969,6 +4191,79 @@ describe('JobDetail', () => {
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
   });
 
+  it('navigates Git views from the keyboard and associates the selected panel', async () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    openWorkspace();
+    const tabs = within(screen.getByRole('tablist', { name: 'Git views' })).getAllByRole('tab');
+    tabs[0].focus();
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[0]]);
+    fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
+    expect(tabs[2]).toHaveFocus();
+    expect(tabs[2]).toHaveAttribute('aria-selected', 'true');
+    expect(document.getElementById(tabs[2].getAttribute('aria-controls')!)).toHaveAttribute(
+      'aria-labelledby',
+      tabs[2].id,
+    );
+    fireEvent.keyDown(tabs[2], { key: 'Home' });
+    expect(tabs[0]).toHaveFocus();
+    fireEvent.keyDown(tabs[0], { key: 'ArrowRight' });
+    expect(tabs[1]).toHaveFocus();
+    fireEvent.keyDown(tabs[1], { key: 'End' });
+    expect(tabs[2]).toHaveFocus();
+  });
+
+  it('selects full changed paths without a tall file list and exposes a keyboard-scrollable diff', async () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          diffFileDetails: [
+            {
+              path: 'src/auth/index.ts',
+              add: 1,
+              del: 0,
+              lines: [{ marker: 'add', text: '+auth' }],
+            },
+            { path: 'src/ui/index.ts', add: 1, del: 0, lines: [{ marker: 'add', text: '+ui' }] },
+          ],
+        })}
+      />,
+    );
+    openWorkspace();
+    const picker = screen.getByRole('combobox', { name: 'Changed file' });
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['src/auth/index.ts (+1 −0)', 'src/ui/index.ts (+1 −0)']);
+    fireEvent.change(picker, { target: { value: 'src/ui/index.ts' } });
+    const diff = screen.getByRole('region', { name: 'Diff for src/ui/index.ts' });
+    expect(diff).toHaveTextContent('+ui');
+    expect(diff).not.toHaveTextContent('+auth');
+    expect(diff).toHaveAttribute('tabindex', '0');
+  });
+
+  it('returns to the conversation from the workspace without losing its selected view', async () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    const trigger = screen.getByRole('button', { name: 'Open workspace' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(
+      within(screen.getByRole('tablist', { name: 'Workspace views' })).getByRole('tab', {
+        name: 'Files',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Back to conversation' }));
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+    fireEvent.click(trigger);
+    expect(
+      within(screen.getByRole('tablist', { name: 'Workspace views' })).getByRole('tab', {
+        name: 'Files',
+      }),
+    ).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('says nothing in the Git header while the live workspace is still answering', async () => {
     let settle: (value: Awaited<ReturnType<typeof getAgentJobGit>>) => void = () => {};
     vi.mocked(getAgentJobGit)
@@ -3020,7 +4315,7 @@ describe('JobDetail', () => {
     openWorkspace();
     fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
 
-    const terminal = screen.getByLabelText('Workspace terminal');
+    const terminal = await screen.findByLabelText('Workspace terminal');
     expect(terminal).toHaveTextContent('Loading terminals…');
     expect(listAgentTerminals).not.toHaveBeenCalled();
     expect(within(terminal).queryByRole('note')).not.toBeInTheDocument();
@@ -3264,17 +4559,22 @@ describe('JobDetail', () => {
       render(<JobDetail job={makeJob()} />);
       openWorkspace();
       fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
-      fireEvent.click(await screen.findByRole('button', { name: /README\.md/ }));
+      const row = await screen.findByRole('button', { name: /README\.md/ });
+      row.focus();
+      fireEvent.click(row);
 
       // The file takes the pane rather than sharing it with a 200px sidebar…
       await waitFor(() =>
         expect(screen.getByLabelText('Workspace files')).toHaveTextContent('# Narrow'),
       );
       expect(screen.queryByRole('button', { name: /README\.md/ })).not.toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Preview of README.md' })).toHaveFocus();
 
       // …and the header button walks back to the tree instead of hiding it.
-      fireEvent.click(screen.getByRole('button', { name: 'Show file tree' }));
-      expect(await screen.findByRole('button', { name: /README\.md/ })).toBeInTheDocument();
+      const back = screen.getByRole('button', { name: 'Back to file list' });
+      expect(back).toHaveTextContent('Back');
+      fireEvent.click(back);
+      expect(await screen.findByRole('button', { name: /README\.md/ })).toHaveFocus();
     } finally {
       if (clientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth);
       else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
@@ -3298,10 +4598,12 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
     fireEvent.click(await screen.findByRole('tab', { name: /Changes/ }));
 
-    fireEvent.click(screen.getByRole('button', { name: /example\.ts/ }));
+    const changedFile = screen.getByRole('button', { name: 'src/example.ts' });
+    expect(within(changedFile).getByText('src')).toBeVisible();
+    fireEvent.click(changedFile);
 
     await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledWith('ajob_1', 'src/example.ts'));
-    expect(await screen.findByText('src')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Preview of src/example.ts' })).toBeVisible();
     expect(screen.getByLabelText('Workspace files')).toHaveTextContent('modified');
   });
 
@@ -3315,6 +4617,83 @@ describe('JobDetail', () => {
     rerender(<JobDetail job={makeJob({ state: 'done' })} />);
 
     await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledTimes(2));
+  });
+
+  it.each(['conversation', 'account'] as const)(
+    'clears the workspace preview and cached tree when the %s changes',
+    async (scope) => {
+      vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+        if (path)
+          return {
+            path,
+            kind: 'file',
+            content: 'Previous workspace contents',
+            size: 27,
+            binary: false,
+            truncated: false,
+          };
+        return {
+          path: '',
+          kind: 'directory',
+          entries: [{ name: 'private.txt', path: 'private.txt', kind: 'file' }],
+        };
+      });
+      const job = makeJob({ threadId: 'thread-1' });
+      const { rerender } = render(<JobDetail job={job} userId="owner-1" />);
+      openWorkspace();
+      fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+      fireEvent.click(await screen.findByRole('button', { name: /private\.txt/ }));
+      await screen.findByText('Previous workspace contents');
+
+      let finishRoot!: (value: AgentJobFilesApi) => void;
+      vi.mocked(getAgentJobFiles).mockClear();
+      vi.mocked(getAgentJobFiles).mockReturnValue(
+        new Promise((resolve) => {
+          finishRoot = resolve;
+        }),
+      );
+      const nextJob =
+        scope === 'conversation' ? { ...job, id: 'ajob_2', threadId: 'thread-2' } : job;
+      rerender(<JobDetail job={nextJob} userId={scope === 'account' ? 'owner-2' : 'owner-1'} />);
+
+      expect(screen.queryByText('Previous workspace contents')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /private\.txt/ })).not.toBeInTheDocument();
+      expect(getAgentJobFiles).not.toHaveBeenCalled();
+      openWorkspace();
+      fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+      expect(getAgentJobFiles).toHaveBeenCalledExactlyOnceWith(nextJob.id, '');
+      await act(async () => finishRoot({ path: '', kind: 'directory', entries: [] }));
+    },
+  );
+
+  it('keeps the selected workspace file when a new turn opens in the same conversation', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (jobId, path = '') => {
+      if (path)
+        return {
+          path,
+          kind: 'file',
+          content: jobId,
+          size: jobId.length,
+          binary: false,
+          truncated: false,
+        };
+      return {
+        path: '',
+        kind: 'directory',
+        entries: [{ name: 'notes.txt', path: 'notes.txt', kind: 'file' }],
+      };
+    });
+    const job = makeJob({ threadId: 'thread-1' });
+    const { rerender } = render(<JobDetail job={job} userId="owner-1" />);
+    openWorkspace();
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+    fireEvent.click(await screen.findByRole('button', { name: /notes\.txt/ }));
+    await screen.findByText('ajob_1');
+
+    rerender(<JobDetail job={{ ...job, id: 'ajob_2', turnNo: 2 }} userId="owner-1" />);
+
+    await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledWith('ajob_2', 'notes.txt'));
+    expect(await screen.findByText('ajob_2')).toBeInTheDocument();
   });
 
   it('copies a message to the clipboard', async () => {
@@ -4153,7 +5532,7 @@ describe('the trajectory tab', () => {
     },
   ] as never;
 
-  it('switches between the reading of the stream and the stream itself', () => {
+  it('switches between the reading of the stream and the stream itself', async () => {
     const job = makeJob({ events: [{ kind: 'message', text: 'the build passes' }] });
     const stored = [
       {
@@ -4173,7 +5552,7 @@ describe('the trajectory tab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByLabelText('Search steps')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Search steps')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
@@ -4181,7 +5560,7 @@ describe('the trajectory tab', () => {
     expect(screen.queryByLabelText('Search steps')).toBeNull();
   });
 
-  it('separates stored events by conversation turn', () => {
+  it('separates stored events by conversation turn', async () => {
     const stored = [
       {
         id: 1,
@@ -4208,32 +5587,33 @@ describe('the trajectory tab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByText('Turn 1')).toBeInTheDocument();
+    expect(await screen.findByText('Turn 1')).toBeInTheDocument();
     expect(screen.getByText('Turn 2')).toBeInTheDocument();
     expect(screen.getByText('Read')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
   });
 
-  it('still renders when no stored stream was handed down', () => {
+  it('still renders when no stored stream was handed down', async () => {
     // Even without runtime events, the recorded turn input remains readable.
     render(<JobDetail job={makeJob()} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByText('user')).toBeInTheDocument();
+    expect(await screen.findByText('user')).toBeInTheDocument();
     expect(screen.getByText('Current task with all of its detail.')).toBeInTheDocument();
     expect(screen.getByText('1 step')).toBeInTheDocument();
   });
 
-  it('opens the selected step in the right-hand region, not under the row', () => {
+  it('opens the selected step in the right-hand region, not under the row', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     const panel = screen.getByRole('region', { name: 'Step details' });
     // The turn's User input is step 1; its joined tool call/result is step 2.
-    expect(screen.getByText('user')).toBeInTheDocument();
+    expect(await screen.findByText('user')).toBeInTheDocument();
     expect(within(panel).getByText(/Tool · Turn 1 · Step 2/)).toBeInTheDocument();
     expect(within(panel).getByRole('tab', { name: 'Schema' })).toBeInTheDocument();
     // The result joined its call rather than becoming a second row.
@@ -4241,11 +5621,12 @@ describe('the trajectory tab', () => {
     expect(screen.getAllByRole('tab')).toHaveLength(5);
   });
 
-  it('keeps one right-hand region: opening the workspace closes the details', () => {
+  it('keeps one right-hand region: opening the workspace closes the details', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
     expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
 
     openWorkspace();
@@ -4253,17 +5634,19 @@ describe('the trajectory tab', () => {
     expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
   });
 
-  it('closes the details on Escape without also stopping the run', () => {
+  it('closes the details on Escape without also stopping the run', async () => {
     render(<JobDetail job={makeJob({ state: 'running' })} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     fireEvent.keyDown(document.body, { key: 'Escape' });
 
@@ -4271,11 +5654,12 @@ describe('the trajectory tab', () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
-  it('leaves Escape alone while the reader is typing', () => {
+  it('leaves Escape alone while the reader is typing', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     const search = screen.getByLabelText('Search steps');
     search.focus();
@@ -4284,7 +5668,7 @@ describe('the trajectory tab', () => {
     expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
   });
 
-  it('opens the turn the chat footer points at, even for an older turn', () => {
+  it('opens the turn the chat footer points at, even for an older turn', async () => {
     const job = makeJob({
       turnNo: 2,
       threadMessages: HISTORY,
@@ -4305,15 +5689,17 @@ describe('the trajectory tab', () => {
     );
 
     const panel = screen.getByRole('region', { name: 'Run details' });
+    await within(panel).findByRole('button', { name: 'Close details' });
     expect(within(panel).getByRole('heading', { name: 'Run details' })).toBeInTheDocument();
     expect(within(panel).getByText('Run · Turn 1')).toBeInTheDocument();
   });
 
-  it('closes the details when the reader goes back to the conversation', () => {
+  it('closes the details when the reader goes back to the conversation', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
 
     expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();

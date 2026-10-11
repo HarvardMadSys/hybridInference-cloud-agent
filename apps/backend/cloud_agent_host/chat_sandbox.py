@@ -20,16 +20,21 @@ import contextlib
 import errno
 import fcntl
 import hashlib
+import io
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import secrets
+import selectors
 import shlex
 import signal
 import struct
 import subprocess
+import tarfile
+import tempfile
 import termios
 import threading
 import time
@@ -66,7 +71,7 @@ from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
     from cloud_agent_shared.egress import SandboxNetwork
@@ -82,6 +87,7 @@ CHAT_RUNTIME_VERSION_LABEL = "org.freeinference.chat-runtime-version"
 CHAT_IMAGE_DIGEST_LABEL = "org.freeinference.chat-image-digest"
 CHAT_MEMORY_LIMIT_LABEL = "org.freeinference.chat-memory-limit"
 CHAT_CPU_LIMIT_LABEL = "org.freeinference.chat-cpu-limit"
+CHAT_DISK_LIMIT_LABEL = "org.freeinference.chat-disk-limit-mib"
 CHAT_STOP_TIMEOUT_LABEL = "org.freeinference.chat-stop-timeout-seconds"
 CHAT_SHARED_LABEL = "org.freeinference.chat-shared-live"
 CHAT_RESIDENT_CAPACITY_LABEL = "org.freeinference.chat-resident-slot-capacity"
@@ -131,10 +137,155 @@ CHAT_UPLOADS_DIR = "/uploads"
 #: a smaller one: the two minutes a 1 GiB checkout always had, kept in step with
 #: a host that raised its source import limit.
 ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S = 120.0
+#: Export gets the same per-GiB allowance as import. The floor also bounds a
+#: Docker daemon that accepts the request but never produces the first tar
+#: header; callers additionally provide a byte ceiling for the path itself.
+ARCHIVE_EXPORT_TIMEOUT_PER_GIB_S = ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S
 CHAT_STATE_DIR = "/agent-state"
 CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
+#: Broker-owned durable receipt for the immutable pre-prompt archive.  It is
+#: deliberately outside every agent-writable or archived root.  Guest root
+#: creates this directory as 0700 and the one marker as 0600; all operations
+#: validate those exact properties without following symlinks.
+INITIAL_ARCHIVE_MARKER_ROOT = "/var/lib/freeinference-broker"
+INITIAL_ARCHIVE_MARKER_NAME = "initial-archive-v1.json"
+INITIAL_ARCHIVE_MARKER_MAX_BYTES = 4096
+#: Root-owned policy fence written before a final Docker stop. Unlike the
+#: initial receipt, a newer running lifecycle deliberately replaces this file:
+#: the retained bridge, not marker presence alone, distinguishes pending from
+#: completed final archival after a broker restart.
+FINAL_ARCHIVE_MARKER_NAME = "final-archive-v1.json"
+# The canonical uploaded receipt can exceed 4 KiB at the accepted policy and
+# S3 VersionId field bounds. Keep the broker-private record tightly bounded,
+# but leave enough room for every schema-valid marker.
+FINAL_ARCHIVE_MARKER_MAX_BYTES = 8192
+
+# Runs only through an exact-container, guest-root ``docker exec``.  Keeping
+# the filesystem checks in one source-controlled program makes read, publish,
+# and delete agree on the same trust boundary.  The immediate parent is also
+# checked because ``O_NOFOLLOW`` protects only the final path component.
+_INITIAL_ARCHIVE_MARKER_PREAMBLE = r"""
+import fcntl
+import os
+import stat
+import sys
+
+root, name, limit_text, uid_text, gid_text = sys.argv[1:6]
+limit = int(limit_text)
+expected_uid = int(uid_text)
+expected_gid = int(gid_text)
+
+def same_identity(left, right):
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_mode,
+        left.st_uid,
+        left.st_gid,
+        left.st_nlink,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_mode,
+        right.st_uid,
+        right.st_gid,
+        right.st_nlink,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
+
+def checked_parent():
+    parent = os.path.dirname(root)
+    leaf = os.path.basename(root)
+    if not parent or not leaf or leaf in ('.', '..'):
+        raise RuntimeError('invalid marker root')
+    before = os.lstat(parent)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != expected_uid
+        or before.st_gid != expected_gid
+        or stat.S_IMODE(before.st_mode) & 0o022
+    ):
+        raise RuntimeError('marker parent cannot be trusted')
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    after = os.fstat(descriptor)
+    if not same_identity(before, after):
+        os.close(descriptor)
+        raise RuntimeError('marker parent changed while opening')
+    return descriptor, leaf
+
+def checked_root():
+    parent_fd, leaf = checked_parent()
+    try:
+        try:
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        else:
+            os.fsync(parent_fd)
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or before.st_uid != expected_uid
+            or before.st_gid != expected_gid
+            or stat.S_IMODE(before.st_mode) != 0o700
+        ):
+            raise RuntimeError('marker directory cannot be trusted')
+        descriptor = os.open(
+            leaf,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        after = os.fstat(descriptor)
+        if not same_identity(before, after):
+            os.close(descriptor)
+            raise RuntimeError('marker directory changed while opening')
+    finally:
+        os.close(parent_fd)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+def read_checked(descriptor):
+    try:
+        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != expected_uid
+        or before.st_gid != expected_gid
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or not 0 < before.st_size <= limit
+    ):
+        raise RuntimeError('marker file cannot be trusted')
+    marker_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+    try:
+        opened = os.fstat(marker_fd)
+        if not same_identity(before, opened):
+            raise RuntimeError('marker file changed while opening')
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(marker_fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b''.join(chunks)
+        after = os.fstat(marker_fd)
+        if not same_identity(opened, after) or len(payload) != before.st_size:
+            raise RuntimeError('marker file changed while reading')
+        return payload
+    finally:
+        os.close(marker_fd)
+"""
 #: This module is a library boundary: it reports what it observed and
 #: leaves the decision to the caller, so a warning here is the only
 #: record an operator gets of a partially capable guest.
@@ -285,6 +436,14 @@ class RetainedChatLost(SandboxError):
     """The durable chat container is missing or is no longer the same object."""
 
 
+class RetainedChatFailStopped(SandboxError):
+    """Activation failed after the exact retained container was cleanly stopped."""
+
+    def __init__(self, detail: str, inspection: ChatSandboxInspection) -> None:
+        super().__init__(detail)
+        self.inspection = inspection
+
+
 @dataclass(frozen=True)
 class ChatSandboxSpec:
     """Immutable identity and resource policy of one chat container."""
@@ -297,6 +456,7 @@ class ChatSandboxSpec:
     sandbox_image_digest: str | None = None
     memory_limit: str = "4g"
     cpu_limit: str = "2"
+    disk_limit_mib: int = 0
     stop_timeout_s: int = 10
     shared_live: Literal[True] = True
     resident_slot_capacity: int = 8
@@ -328,6 +488,12 @@ class ChatSandboxSpec:
             raise ValueError("generation must be positive")
         if not 1 <= self.stop_timeout_s <= 300:
             raise ValueError("stop_timeout_s must be between 1 and 300")
+        if (
+            not isinstance(self.disk_limit_mib, int)
+            or isinstance(self.disk_limit_mib, bool)
+            or not 0 <= self.disk_limit_mib <= 16777216
+        ):
+            raise ValueError("disk_limit_mib must be a whole number between 0 and 16777216")
         if not 2 <= self.resident_slot_capacity <= MEMBER_UID_LIMIT:
             raise ValueError(f"resident_slot_capacity must be between 2 and {MEMBER_UID_LIMIT}")
         reserved = {
@@ -341,6 +507,7 @@ class ChatSandboxSpec:
             CHAT_IMAGE_DIGEST_LABEL,
             CHAT_MEMORY_LIMIT_LABEL,
             CHAT_CPU_LIMIT_LABEL,
+            CHAT_DISK_LIMIT_LABEL,
             CHAT_STOP_TIMEOUT_LABEL,
             CHAT_SHARED_LABEL,
             CHAT_RESIDENT_CAPACITY_LABEL,
@@ -371,6 +538,8 @@ class ChatSandboxSpec:
             labels[CHAT_RUNTIME_VERSION_LABEL] = self.runtime_version
         if self.sandbox_image_digest:
             labels[CHAT_IMAGE_DIGEST_LABEL] = self.sandbox_image_digest
+        if self.disk_limit_mib:
+            labels[CHAT_DISK_LIMIT_LABEL] = str(self.disk_limit_mib)
         labels[CHAT_SHARED_LABEL] = "true"
         labels[CHAT_RESIDENT_CAPACITY_LABEL] = str(self.resident_slot_capacity)
         labels.update(self.labels)
@@ -1150,6 +1319,7 @@ class ChatSandboxManager:
         *,
         only_if_sandbox_unattached: bool = False,
         expected_network_id: str | None = None,
+        expected_container_id: str | None = None,
     ) -> None:
         """Disconnect exact owned endpoints and delete one inactive bridge."""
         network = self._inspect_network(network_name)
@@ -1177,6 +1347,10 @@ class ChatSandboxManager:
         sandbox = self.inspect(spec.container_name)
         if sandbox is not None:
             self._verify_identity(sandbox, spec)
+        if expected_container_id is not None and (
+            sandbox is None or sandbox.container_id != expected_container_id
+        ):
+            raise RetainedChatLost("chat sandbox container identity changed during network release")
         sandbox_id = sandbox.container_id if sandbox is not None else None
         if only_if_sandbox_unattached and sandbox_id in containers:
             # Opportunistic orphan pruning must never detach a sandbox that
@@ -1283,10 +1457,18 @@ class ChatSandboxManager:
         self,
         spec: ChatSandboxSpec,
         current: ChatSandboxInspection,
+        *,
+        expected_container_id: str | None = None,
     ) -> ChatSandboxInspection:
         """Release the group bridge after the retained container stops."""
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
+        if expected_container_id is not None:
+            named = self._require(spec)
+            if named.container_id != expected_container_id:
+                raise RetainedChatLost(
+                    "chat sandbox container identity changed during network release"
+                )
         for network_name in current.networks:
             if network_name == CHAT_NULL_NETWORK:
                 # There is no connectivity here to withdraw. Docker reports the
@@ -1308,7 +1490,11 @@ class ChatSandboxManager:
             if network_name == self.network_for(spec) or self._owned_network_matches(
                 network_name, spec
             ):
-                self._release_owned_network(network_name, spec)
+                self._release_owned_network(
+                    network_name,
+                    spec,
+                    expected_container_id=expected_container_id,
+                )
                 continue
             # A network that no longer exists cannot be an ownership violation:
             # there is nothing left to release and nothing left to leak. The
@@ -1326,7 +1512,10 @@ class ChatSandboxManager:
                 "group bridge; a sandbox from before the single-network change needs the "
                 "one-time cleanup"
             )
-        return self._require(spec)
+        released = self._require(spec)
+        if expected_container_id is not None and released.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during network release")
+        return released
 
     @staticmethod
     def _network_is_stale_for_prune(network: dict[str, Any]) -> bool:
@@ -1563,7 +1752,13 @@ class ChatSandboxManager:
                 return refreshed
         return self._attach_to_group_network(spec, current, snapshot)
 
-    def _verify_guest_network(self, spec: ChatSandboxSpec) -> None:
+    def _verify_guest_network(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str | None = None,
+        defer_network_release: bool = False,
+    ) -> None:
         """Check, from inside the guest, that it sits behind the group's rules.
 
         The guard proves the host's rules exist; this proves the guest is
@@ -1597,13 +1792,20 @@ class ChatSandboxManager:
             else result.stderr.decode(errors="replace").strip()[:300]
         )
         try:
-            self.stop(spec)
+            stopped = self.stop(
+                spec,
+                expected_container_id=expected_container_id,
+                release_networks=not defer_network_release,
+            )
         except SandboxError as exc:
             raise SandboxError(
                 f"group network check failed inside the sandbox ({detail}), and stopping "
                 f"it failed too: {exc}"
             ) from exc
-        raise SandboxError(f"group network check failed inside the sandbox: {detail}")
+        raise RetainedChatFailStopped(
+            f"group network check failed inside the sandbox: {detail}",
+            stopped,
+        )
 
     def verify_host_rules(self) -> None:
         """Prove the host still enforces this deployment's rules, repairing them if not.
@@ -1711,6 +1913,11 @@ class ChatSandboxManager:
                 f"uid={self.backend.uid},gid={self.backend.gid}"
             ),
         ]
+        if spec.disk_limit_mib:
+            # Docker enforces this against the writable layer. Unsupported
+            # drivers/backing filesystems reject creation; never retry without
+            # the requested quota or pretend it was applied.
+            argv += ["--storage-opt", f"size={spec.disk_limit_mib}M"]
         for slot_id in range(spec.resident_slot_capacity):
             uid = MEMBER_UID_BASE + slot_id
             argv += [
@@ -1811,6 +2018,156 @@ class ChatSandboxManager:
                 "retained chat container id does not match its durable sandbox record"
             )
         return current
+
+    def require_stopped_archive(
+        self, spec: ChatSandboxSpec, *, container_id: str
+    ) -> ChatSandboxInspection:
+        """Fence archival and removal to an exact, stopped, owned container."""
+        current = self.require_existing(spec, container_id=container_id)
+        if not self._belongs_to_namespace(current):
+            raise SandboxError("sandbox archive requires this deployment's ownership label")
+        if current.running or current.status is not ChatSandboxStatus.STOPPED:
+            raise SandboxError("sandbox archive requires a stopped container")
+        return current
+
+    def export_stopped_archive(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        container_id: str,
+        output: BinaryIO,
+        max_bytes: int,
+        timeout_s: float = 600,
+    ) -> dict[str, Any]:
+        """Export the Docker-owned filesystem without starting user processes.
+
+        The normal mount fence rejects bind/volume state. Docker export
+        includes workspace and all providers' native state in the writable
+        layer, while stopped credential tmpfs mounts contain no retained data.
+        Inspect configuration accompanies the export for offline recovery.
+        """
+        self.require_stopped_archive(spec, container_id=container_id)
+        metadata_result = self._run(
+            [self.backend.docker_binary, "container", "inspect", container_id], timeout=30
+        )
+        if metadata_result.returncode != 0:
+            raise SandboxError("sandbox archive metadata inspection failed")
+        try:
+            metadata = json.loads(metadata_result.stdout)[0]
+            if not isinstance(metadata, dict) or metadata.get("Id") != container_id:
+                raise ValueError("container identity changed")
+        except (IndexError, TypeError, ValueError) as exc:
+            raise SandboxError("sandbox archive metadata is invalid") from exc
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            with tempfile.TemporaryFile() as errors:
+                process = subprocess.Popen(
+                    [self.backend.docker_binary, "container", "export", container_id],
+                    stdout=output,
+                    stderr=errors,
+                )
+                deadline = time.monotonic() + timeout_s
+                while process.poll() is None:
+                    if os.fstat(output.fileno()).st_size > max_bytes:
+                        raise SandboxError("sandbox archive exceeds the S3 upload size limit")
+                    if time.monotonic() >= deadline:
+                        raise SandboxError("sandbox archive export timed out")
+                    time.sleep(0.1)
+                if process.returncode != 0:
+                    raise SandboxError("sandbox archive filesystem export failed")
+                output.flush()
+                if os.fstat(output.fileno()).st_size > max_bytes:
+                    raise SandboxError("sandbox archive exceeds the S3 upload size limit")
+        except OSError as exc:
+            raise SandboxError("sandbox archive filesystem export failed") from exc
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+        self.require_stopped_archive(spec, container_id=container_id)
+        config = metadata.get("Config") or {}
+        host_config = metadata.get("HostConfig") or {}
+        owned_label_keys = {
+            CHAT_SANDBOX_LABEL,
+            CHAT_NAMESPACE_LABEL,
+            CHAT_THREAD_LABEL,
+            CHAT_SANDBOX_ID_LABEL,
+            CHAT_GENERATION_LABEL,
+            CHAT_RUNTIME_LABEL,
+            CHAT_RUNTIME_VERSION_LABEL,
+            CHAT_IMAGE_DIGEST_LABEL,
+            CHAT_MEMORY_LIMIT_LABEL,
+            CHAT_CPU_LIMIT_LABEL,
+            CHAT_STOP_TIMEOUT_LABEL,
+            CHAT_SHARED_LABEL,
+            CHAT_RESIDENT_CAPACITY_LABEL,
+        }
+        # Docker inspect also includes environment values, host paths, mounts,
+        # and arbitrary labels. Offline recovery needs image identity and
+        # container policy, not those potential secret-bearing values.
+        return {
+            **{key: metadata[key] for key in ("Id", "Name", "Image", "Created") if key in metadata},
+            "Config": {
+                **{
+                    key: config[key]
+                    for key in ("Image", "User", "WorkingDir", "Entrypoint", "Cmd")
+                    if key in config
+                },
+                "Labels": {
+                    key: value
+                    for key, value in (config.get("Labels") or {}).items()
+                    if key in owned_label_keys
+                },
+            },
+            "HostConfig": {
+                key: host_config[key]
+                for key in (
+                    "Runtime",
+                    "Memory",
+                    "MemorySwap",
+                    "NanoCpus",
+                    "CpuQuota",
+                    "CpuPeriod",
+                    "CpuShares",
+                    "PidsLimit",
+                    "ReadonlyRootfs",
+                    "CapDrop",
+                    "CapAdd",
+                    "SecurityOpt",
+                )
+                if key in host_config
+            },
+        }
+
+    def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
+        """Remove only a verified archive's exact stopped container, without force."""
+        current = self.require_stopped_archive(spec, container_id=container_id)
+        self.require_stopped_archive(spec, container_id=container_id)
+        result = self._run(
+            [self.backend.docker_binary, "container", "rm", container_id], timeout=60
+        )
+        if result.returncode != 0:
+            raise SandboxError("archived sandbox removal failed")
+        if self.inspect(container_id) is not None:
+            raise SandboxError("archived sandbox still exists after removal")
+        # Remove first, without force: a start after the stopped fence makes
+        # Docker refuse removal. Generic stop/network release before rm could
+        # stop a newly running original and discard post-backup writes.
+        network_ids = dict(current.network_ids)
+        for network_name in current.networks:
+            if network_name in {CHAT_NULL_NETWORK, CHAT_BOOTSTRAP_NETWORK}:
+                continue
+            try:
+                self._release_owned_network(
+                    network_name,
+                    spec,
+                    only_if_sandbox_unattached=True,
+                    expected_network_id=network_ids.get(network_name),
+                )
+            except SandboxError:
+                # The container is already absent. Normal orphan-network
+                # pruning can retry cleanup, fenced to that network's labels.
+                logger.warning("archived sandbox network cleanup needs reconciliation")
 
     def inspect(
         self, container: str, *, verify_mounts: bool = True
@@ -1926,6 +2283,9 @@ class ChatSandboxManager:
         *,
         facts: SandboxActionFacts | None = None,
         observer: StageObserver | None = None,
+        expected_container_id: str | None = None,
+        defer_network_release_on_fail_stop: bool = False,
+        before_stopped_start: Callable[[ChatSandboxInspection], None] | None = None,
     ) -> ChatSandboxInspection:
         """Start the exact stopped container and verify it reached RUNNING.
 
@@ -1934,9 +2294,14 @@ class ChatSandboxManager:
         :meth:`_verify_guest_network`.
         """
         current = self._require(spec)
+        exact_container_id = expected_container_id or current.container_id
+        if current.container_id != exact_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before start")
         network_snapshot = _GroupNetworkSnapshot()
         with substage(observer, "group_network"):
             current = self._require_group_network(spec, current, network_snapshot)
+        if current.container_id != exact_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during start")
         if current.running:
             if facts is not None:
                 facts.note("reuse")
@@ -1947,6 +2312,11 @@ class ChatSandboxManager:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
         if current.status is ChatSandboxStatus.DEAD:
             raise SandboxError("a dead chat sandbox cannot be resumed")
+        if before_stopped_start is not None:
+            # The callback owns the durable pre-start fence. Invoke it only
+            # after the exact object has been re-inspected and proven stopped,
+            # immediately before this method performs the Docker transition.
+            before_stopped_start(current)
         with substage(observer, "container_start"):
             result = self._run(
                 [self.backend.docker_binary, "start", current.container_id], timeout=120
@@ -1956,6 +2326,8 @@ class ChatSandboxManager:
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be started: " + result.stderr.strip()[:300])
         started = self._require(spec)
+        if started.container_id != exact_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during start")
         if not started.running or started.status is not ChatSandboxStatus.RUNNING:
             raise SandboxError(
                 f"chat sandbox started into unexpected state {started.status.value!r}"
@@ -1963,16 +2335,37 @@ class ChatSandboxManager:
         with substage(observer, "guest_network_sync"):
             self._sync_kata_guest_network(spec, started)
         with substage(observer, "guest_network_check"):
-            self._verify_guest_network(spec)
-        return started
+            self._verify_guest_network(
+                spec,
+                expected_container_id=exact_container_id,
+                defer_network_release=defer_network_release_on_fail_stop,
+            )
+        verified = self._require(spec)
+        if verified.container_id != exact_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during start")
+        return verified
 
-    def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+    def stop(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str | None = None,
+        release_networks: bool = True,
+    ) -> ChatSandboxInspection:
         """Deactivate, release private networking, and retain the writable layer."""
         current = self._require(spec)
+        exact_container_id = expected_container_id or current.container_id
+        if current.container_id != exact_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before stop")
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("refusing to treat a paused chat sandbox as cleanly stopped")
         if not current.running:
-            return self._release_sandbox_networks(spec, current)
+            if not release_networks:
+                return current
+            return self.release_stopped_networks(
+                spec,
+                expected_container_id=exact_container_id,
+            )
         result = self._run(
             [
                 self.backend.docker_binary,
@@ -1986,6 +2379,8 @@ class ChatSandboxManager:
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be stopped: " + result.stderr.strip()[:300])
         stopped = self._require(spec)
+        if stopped.container_id != exact_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during stop")
         if stopped.running or stopped.status not in {
             ChatSandboxStatus.STOPPED,
             ChatSandboxStatus.CREATED,
@@ -1993,7 +2388,33 @@ class ChatSandboxManager:
             raise SandboxError(
                 f"chat sandbox stopped into unexpected state {stopped.status.value!r}"
             )
-        return self._release_sandbox_networks(spec, stopped)
+        if not release_networks:
+            return stopped
+        return self.release_stopped_networks(
+            spec,
+            expected_container_id=exact_container_id,
+        )
+
+    def release_stopped_networks(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> ChatSandboxInspection:
+        """Release networking only for one exact, already-stopped container."""
+        current = self._require(spec)
+        if current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during stop")
+        if current.running:
+            raise SandboxError("refusing to release networking from a running chat sandbox")
+        released = self._release_sandbox_networks(
+            spec,
+            current,
+            expected_container_id=expected_container_id,
+        )
+        if released.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during stop")
+        return released
 
     def require_network(
         self, spec: ChatSandboxSpec, *, observer: StageObserver | None = None
@@ -2028,6 +2449,7 @@ class ChatSandboxManager:
         tty: bool = False,
         user_uid: int | None = None,
         user_gid: int | None = None,
+        container_id: str | None = None,
     ) -> builtins.list[str]:
         """Compose ``docker exec`` after identity/running checks at spawn time."""
         if not argv:
@@ -2048,7 +2470,7 @@ class ChatSandboxManager:
             if not key or "=" in key or "\x00" in key or "\x00" in value:
                 raise ValueError(f"invalid environment entry {key!r}")
             command += ["--env", f"{key}={value}"]
-        command.append(spec.container_name)
+        command.append(container_id or spec.container_name)
         if self.backend.runtime == KATA_RUNTIME:
             command += list(_UNPRIVILEGED_EXEC)
             if not interactive:
@@ -2076,25 +2498,26 @@ class ChatSandboxManager:
             raise SandboxError("chat sandbox must be started before exec")
         exec_argv = argv
         if process_pidfile is not None:
-            self._validate_process_pidfile(spec, process_pidfile, user_uid=user_uid)
+            self._validate_member_pidfile(spec, process_pidfile, user_uid=user_uid)
             # The CLI is a session leader, so its complete child tree can be
             # interrupted without stopping sibling sessions in this container.
             # Persist both PID and Linux start time: a stale numeric PID must
             # never be allowed to signal a later, unrelated process.
             wrapper = (
-                'pidfile="$1"; shift; umask 0002; '
-                'cleanup() { rm -f -- "$pidfile"; }; '
+                'pidfile="$1"; shift; temporary="$pidfile.tmp.$$"; umask 0077; '
+                'cleanup() { rm -f -- "$pidfile" "$temporary"; }; '
                 "trap cleanup EXIT; "
                 "setsid --fork --wait /bin/sh -c '"
-                'pidfile="$1"; shift; '
+                'pidfile="$1"; temporary="$2"; shift 2; '
                 'fields=$(sed "s/^[^)]*) //" "/proc/$$/stat") || exit 126; '
                 # Read field 22 (start time; field 20 after stripping pid and
                 # comm) in a subshell.  Doing ``set -- $fields`` in this shell
                 # would overwrite the CLI argv that must remain in ``$@``.
                 'started=$(set -- $fields; printf "%s" "${20:-}"); '
                 'case "$started" in ""|*[!0-9]*) exit 126;; esac; '
-                'printf "%s %s\\n" "$$" "$started" > "$pidfile" || exit 126; '
-                'exec "$@"\' sh "$pidfile" "$@"'
+                'printf "%s %s\\n" "$$" "$started" > "$temporary" || exit 126; '
+                'mv -f -- "$temporary" "$pidfile" || exit 126; '
+                'exec "$@"\' sh "$pidfile" "$temporary" "$@"'
             )
             exec_argv = ["/bin/sh", "-c", wrapper, "sh", process_pidfile, *argv]
         command = self.build_exec_command(
@@ -2131,7 +2554,15 @@ class ChatSandboxManager:
         *,
         user_uid: int | None,
     ) -> int:
-        """Validate one shared member or legacy retained agent PID path."""
+        """Validate one member resident or bounded retained-command PID path."""
+        command_match = re.fullmatch(
+            rf"{re.escape(ACTIVATION_TMPFS)}/command-[0-9a-f]{{32}}\.pid",
+            pidfile,
+        )
+        if command_match is not None:
+            if user_uid != self.backend.uid:
+                raise ValueError("command PID file does not match the sandbox uid")
+            return -1
         member_match = re.fullmatch(
             rf"{re.escape(MEMBER_TMPFS_ROOT)}/([0-9]+)/resident-[0-9a-f]{{32}}\.pid",
             pidfile,
@@ -2144,15 +2575,6 @@ class ChatSandboxManager:
         if user_uid != MEMBER_UID_BASE + slot_id:
             raise ValueError("resident PID file does not match its member uid")
         return slot_id
-
-    def _validate_process_pidfile(
-        self, spec: ChatSandboxSpec, pidfile: str, *, user_uid: int | None
-    ) -> None:
-        if re.fullmatch(rf"{re.escape(ACTIVATION_TMPFS)}/command-[0-9a-f]{{32}}\.pid", pidfile):
-            if user_uid != self.backend.uid:
-                raise ValueError("command PID file does not match the workspace uid")
-            return
-        self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
 
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
         """Install the immutable helper into retained pre-upgrade containers."""
@@ -2518,6 +2940,7 @@ class ChatSandboxManager:
         *,
         slot_ids: builtins.list[int],
         token: str,
+        expected_container_id: str | None = None,
     ) -> str:
         """Stop every existing shared-workspace writer for one short capture.
 
@@ -2532,6 +2955,8 @@ class ChatSandboxManager:
         unique_slots = sorted(set(slot_ids))
         if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
             raise ValueError("snapshot member slot is outside sandbox capacity")
+        if expected_container_id is not None:
+            self._require_exact(spec, expected_container_id)
         manifest = f"{ACTIVATION_TMPFS}/snapshot-{token}.pids"
         target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
         # The container drops every capability.  Even UID 0 therefore cannot
@@ -2580,6 +3005,7 @@ class ChatSandboxManager:
                     timeout_s=20,
                     user_uid=uid,
                     user_gid=self.backend.gid,
+                    expected_container_id=expected_container_id,
                 )
                 if result.returncode != 0:
                     raise SandboxError(
@@ -2604,12 +3030,15 @@ class ChatSandboxManager:
                 input_bytes=payload,
                 user_uid=self.backend.uid,
                 user_gid=self.backend.gid,
+                expected_container_id=expected_container_id,
             )
             if written.returncode != 0:
                 raise SandboxError(
                     "shared snapshot writer manifest failed: "
                     + written.stderr.decode("utf-8", "replace")[:300]
                 )
+            if expected_container_id is not None:
+                self._require_exact(spec, expected_container_id)
         except BaseException:
             with contextlib.suppress(Exception):
                 self._resume_frozen_processes(
@@ -2617,6 +3046,7 @@ class ChatSandboxManager:
                     target_uids=target_uids,
                     frozen=frozen,
                     require_exact_census=False,
+                    expected_container_id=expected_container_id,
                 )
             raise
         return manifest
@@ -2628,6 +3058,7 @@ class ChatSandboxManager:
         slot_ids: builtins.list[int],
         manifest: str,
         require_exact_census: bool = True,
+        expected_container_id: str | None = None,
     ) -> None:
         """Resume exactly the frozen PID/start pairs and detect new writers."""
         if not re.fullmatch(
@@ -2637,6 +3068,8 @@ class ChatSandboxManager:
         unique_slots = sorted(set(slot_ids))
         if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
             raise ValueError("snapshot member slot is outside sandbox capacity")
+        if expected_container_id is not None:
+            self._require_exact(spec, expected_container_id)
         target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
         read = self.exec_capture(
             spec,
@@ -2645,6 +3078,7 @@ class ChatSandboxManager:
             timeout_s=20,
             user_uid=self.backend.uid,
             user_gid=self.backend.gid,
+            expected_container_id=expected_container_id,
         )
         if read.returncode != 0:
             raise SandboxError(
@@ -2659,6 +3093,7 @@ class ChatSandboxManager:
                 target_uids=target_uids,
                 frozen=frozen,
                 require_exact_census=require_exact_census,
+                expected_container_id=expected_container_id,
             )
         except BaseException as exc:
             resume_error = exc
@@ -2669,6 +3104,7 @@ class ChatSandboxManager:
             timeout_s=20,
             user_uid=self.backend.uid,
             user_gid=self.backend.gid,
+            expected_container_id=expected_container_id,
         )
         if resume_error is not None:
             raise resume_error
@@ -2677,6 +3113,8 @@ class ChatSandboxManager:
                 "shared snapshot writer manifest cleanup failed: "
                 + removed.stderr.decode("utf-8", "replace")[:300]
             )
+        if expected_container_id is not None:
+            self._require_exact(spec, expected_container_id)
 
     @staticmethod
     def _parse_frozen_processes(
@@ -2718,6 +3156,7 @@ class ChatSandboxManager:
         target_uids: builtins.list[int],
         frozen: builtins.list[tuple[int, int, int]],
         require_exact_census: bool,
+        expected_container_id: str | None = None,
     ) -> None:
         """Resume each receipt as its owner and report any changed census."""
         by_uid = {
@@ -2761,6 +3200,7 @@ class ChatSandboxManager:
                     timeout_s=20,
                     user_uid=uid,
                     user_gid=self.backend.gid,
+                    expected_container_id=expected_container_id,
                 )
             except BaseException as exc:
                 errors.append(str(exc))
@@ -2780,7 +3220,7 @@ class ChatSandboxManager:
         user_gid: int,
     ) -> None:
         """Signal one verified resident or command process group, never the container."""
-        self._validate_process_pidfile(spec, pidfile, user_uid=user_uid)
+        self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
         argv = [
             "/bin/sh",
             "-c",
@@ -2811,7 +3251,7 @@ class ChatSandboxManager:
 
     @staticmethod
     def _member_reaper_script(pidfile_expression: str) -> str:
-        """Build the in-container PID/start-time verification and group kill."""
+        """Build an exact PID/start receipt wait, verification, and group kill."""
         return (
             'set -eu; expected_uid="$1"; '
             # kill -0 sees zombies too. Docker's init normally reaps them,
@@ -2824,18 +3264,20 @@ class ChatSandboxManager:
             'case "${1:-}" in Z|X) continue;; esac; return 0; '
             "done; return 1; }; "
             f"for pidfile in {pidfile_expression}; do "
-            '[ -e "$pidfile" ] || continue; '
-            'read -r pid started extra < "$pidfile" || { rm -f -- "$pidfile"; continue; }; '
-            'case "$pid" in ""|*[!0-9]*) rm -f -- "$pidfile"; continue;; esac; '
-            'case "$started" in ""|*[!0-9]*) '
-            'rm -f -- "$pidfile"; continue;; esac; '
-            '[ -z "$extra" ] || { rm -f -- "$pidfile"; continue; }; '
+            'attempt=0; ready=0; pid=""; started=""; '
+            'while [ "$attempt" -lt 40 ]; do '
+            'receipt=$(cat -- "$pidfile" 2>/dev/null || :); set -- $receipt; '
+            'if [ "$#" -eq 2 ]; then pid="$1"; started="$2"; '
+            'case "$pid" in ""|*[!0-9]*) ;; *) case "$started" in '
+            '""|*[!0-9]*) ;; *) ready=1; break;; esac;; esac; fi; '
+            "attempt=$((attempt + 1)); sleep 0.05; done; "
+            '[ "$ready" = 1 ] || exit 125; '
             '[ "$(stat -c %u "/proc/$pid" 2>/dev/null || :)" = "$expected_uid" ] '
             '|| { rm -f -- "$pidfile"; continue; }; '
             'fields=$(sed "s/^[^)]*) //" "/proc/$pid/stat" 2>/dev/null || :); '
             "set -- $fields; current_pgid=${3:-}; current_started=${20:-}; "
             '[ "$current_pgid" = "$pid" ] && [ "$current_started" = "$started" ] '
-            '|| { rm -f -- "$pidfile"; continue; }; '
+            '|| { rm -f -- "$pidfile"; exit 126; }; '
             'kill -TERM "-$pid" 2>/dev/null || :; attempt=0; '
             "while group_alive; do attempt=$((attempt + 1)); "
             '[ "$attempt" -lt 40 ] || { kill -KILL "-$pid" 2>/dev/null || :; '
@@ -2995,6 +3437,7 @@ class ChatSandboxManager:
         user_uid: int | None = None,
         user_gid: int | None = None,
         observer: StageObserver | None = None,
+        expected_container_id: str | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one bounded command and capture bytes without opening a host path.
 
@@ -3004,7 +3447,11 @@ class ChatSandboxManager:
         splitting it further would need the exec'd helper to report its own
         sub-durations rather than a second exec to probe them.
         """
-        current = self._require(spec)
+        current = (
+            self._require_exact(spec, expected_container_id)
+            if expected_container_id is not None
+            else self._require(spec)
+        )
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
         interactive = input_bytes is not None
@@ -3020,6 +3467,7 @@ class ChatSandboxManager:
             interactive=interactive,
             user_uid=user_uid,
             user_gid=user_gid,
+            container_id=current.container_id,
         )
         try:
             with substage(observer, "exec"):
@@ -3693,6 +4141,517 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[-300:]
             )
 
+    def read_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read the bounded broker-private marker from one exact container.
+
+        Absence is the only soft outcome.  A symlink, non-regular file,
+        unexpected owner/mode/link count, oversized payload, or identity race
+        fails closed before any S3 decision can cause workspace preparation to
+        be skipped.
+        """
+        script = (
+            _INITIAL_ARCHIVE_MARKER_PREAMBLE
+            + r"""
+descriptor = checked_root()
+try:
+    payload = read_checked(descriptor)
+    if payload is None:
+        raise SystemExit(44)
+    sys.stdout.buffer.write(payload)
+finally:
+    os.close(descriptor)
+"""
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                INITIAL_ARCHIVE_MARKER_ROOT,
+                INITIAL_ARCHIVE_MARKER_NAME,
+                str(INITIAL_ARCHIVE_MARKER_MAX_BYTES),
+                "0",
+                "0",
+            ],
+            workdir="/",
+            timeout_s=20,
+            user_uid=0,
+            user_gid=0,
+            expected_container_id=expected_container_id,
+        )
+        if result.returncode == 44:
+            return None
+        if result.returncode != 0:
+            raise SandboxError(
+                "initial archive marker cannot be trusted: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+        payload = result.stdout
+        if not 0 < len(payload) <= INITIAL_ARCHIVE_MARKER_MAX_BYTES:
+            raise SandboxError("initial archive marker has an invalid size")
+        return payload
+
+    def write_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Atomically publish and fsync one exact immutable marker.
+
+        An identical existing marker is idempotent.  A different marker is
+        never overwritten: it may describe an initial object whose commit
+        response was lost, so replacing it would destroy the only safe retry
+        proof.
+        """
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= (
+            INITIAL_ARCHIVE_MARKER_MAX_BYTES
+        ):
+            raise ValueError("initial archive marker payload has an invalid size")
+        self._write_archive_marker(
+            spec,
+            payload,
+            marker_name=INITIAL_ARCHIVE_MARKER_NAME,
+            marker_max_bytes=INITIAL_ARCHIVE_MARKER_MAX_BYTES,
+            expected_container_id=expected_container_id,
+            replace_existing=False,
+        )
+
+    def write_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Atomically fence a pending final archive to one immutable policy.
+
+        A marker from a completed prior stop may remain in the writable layer.
+        The caller invokes this only while the exact container is running and
+        before its next stop, so replacing that stale marker is both necessary
+        and safe. The owned bridge remains the durable pending/completed bit.
+        """
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= (
+            FINAL_ARCHIVE_MARKER_MAX_BYTES
+        ):
+            raise ValueError("final archive marker payload has an invalid size")
+        current = self._require(spec)
+        if current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before archive marker")
+        if not current.running:
+            raise SandboxError("final archive marker requires the exact running container")
+        self._write_archive_marker(
+            spec,
+            payload,
+            marker_name=FINAL_ARCHIVE_MARKER_NAME,
+            marker_max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES,
+            expected_container_id=expected_container_id,
+            replace_existing=True,
+        )
+
+    def read_running_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read a trusted final marker before replacing it on a running stop."""
+        current = self._require(spec)
+        if current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before marker read")
+        if not current.running:
+            raise SandboxError("running final archive marker requires a running container")
+        script = (
+            _INITIAL_ARCHIVE_MARKER_PREAMBLE
+            + r"""
+descriptor = checked_root()
+try:
+    payload = read_checked(descriptor)
+    if payload is None:
+        raise SystemExit(44)
+    sys.stdout.buffer.write(payload)
+finally:
+    os.close(descriptor)
+"""
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                INITIAL_ARCHIVE_MARKER_ROOT,
+                FINAL_ARCHIVE_MARKER_NAME,
+                str(FINAL_ARCHIVE_MARKER_MAX_BYTES),
+                "0",
+                "0",
+            ],
+            workdir="/",
+            timeout_s=20,
+            user_uid=0,
+            user_gid=0,
+            expected_container_id=expected_container_id,
+        )
+        if result.returncode == 44:
+            return None
+        if result.returncode != 0:
+            raise SandboxError(
+                "running final archive marker cannot be trusted: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+        payload = result.stdout
+        if not 0 < len(payload) <= FINAL_ARCHIVE_MARKER_MAX_BYTES:
+            raise SandboxError("running final archive marker has an invalid size")
+        return payload
+
+    def _write_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        marker_name: str,
+        marker_max_bytes: int,
+        expected_container_id: str,
+        replace_existing: bool,
+    ) -> None:
+        """Publish one fsynced broker-private marker through guest root."""
+        script = (
+            _INITIAL_ARCHIVE_MARKER_PREAMBLE
+            + r"""
+payload = sys.stdin.buffer.read(limit + 1)
+if not 0 < len(payload) <= limit:
+    raise RuntimeError('marker payload has an invalid size')
+replace_existing = sys.argv[6] == '1'
+descriptor = checked_root()
+temporary = '.%s.%s.tmp' % (name, os.getpid())
+try:
+    existing = read_checked(descriptor)
+    if existing is not None:
+        if existing == payload:
+            raise SystemExit(0)
+        if not replace_existing:
+            raise RuntimeError('a different marker already exists')
+    marker_fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=descriptor,
+    )
+    try:
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(marker_fd, payload[offset:])
+        os.fchmod(marker_fd, 0o600)
+        written = os.fstat(marker_fd)
+        if (
+            written.st_uid != expected_uid
+            or written.st_gid != expected_gid
+            or stat.S_IMODE(written.st_mode) != 0o600
+            or written.st_nlink != 1
+            or written.st_size != len(payload)
+        ):
+            raise RuntimeError('temporary marker cannot be trusted')
+        os.fsync(marker_fd)
+    finally:
+        os.close(marker_fd)
+    os.replace(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+    os.fsync(descriptor)
+    if read_checked(descriptor) != payload:
+        raise RuntimeError('published marker failed verification')
+finally:
+    try:
+        os.unlink(temporary, dir_fd=descriptor)
+    except FileNotFoundError:
+        pass
+    os.close(descriptor)
+"""
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                INITIAL_ARCHIVE_MARKER_ROOT,
+                marker_name,
+                str(marker_max_bytes),
+                "0",
+                "0",
+                "1" if replace_existing else "0",
+            ],
+            workdir="/",
+            timeout_s=20,
+            input_bytes=payload,
+            user_uid=0,
+            user_gid=0,
+            expected_container_id=expected_container_id,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "sandbox archive marker could not be persisted: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
+    def read_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes:
+        """Read and validate the root-owned marker from a stopped container.
+
+        ``docker cp`` works without starting the retained container. Its tar
+        metadata is checked before reading bytes; nothing is extracted onto the
+        host filesystem and the exact immutable container id fences the copy.
+        Absence or any malformed ownership/mode/type fails closed.
+        """
+        current = self._require(spec)
+        if current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before marker read")
+        if current.running:
+            raise SandboxError("final archive recovery requires the exact stopped container")
+        marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+        with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-") as archive:
+            self.export_archive(
+                spec,
+                marker_path,
+                archive,
+                max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES + 32 * 1024,
+                expected_container_id=expected_container_id,
+            )
+            archive.seek(0)
+            try:
+                with tarfile.open(fileobj=archive, mode="r:*") as copied:
+                    entries = copied.getmembers()
+                    if len(entries) != 1:
+                        raise SandboxError("final archive marker copy has unexpected entries")
+                    entry = entries[0]
+                    if (
+                        not entry.isreg()
+                        or entry.name.rsplit("/", 1)[-1] != FINAL_ARCHIVE_MARKER_NAME
+                        or entry.uid != 0
+                        or entry.gid != 0
+                        or entry.mode & 0o7777 != 0o600
+                        or not 0 < entry.size <= FINAL_ARCHIVE_MARKER_MAX_BYTES
+                    ):
+                        raise SandboxError("final archive marker cannot be trusted")
+                    source = copied.extractfile(entry)
+                    if source is None:
+                        raise SandboxError("final archive marker has no readable payload")
+                    payload = source.read(FINAL_ARCHIVE_MARKER_MAX_BYTES + 1)
+            except (tarfile.TarError, OSError) as exc:
+                raise SandboxError("final archive marker copy is invalid") from exc
+        if len(payload) != entry.size:
+            raise SandboxError("final archive marker changed while being read")
+        return payload
+
+    def read_stopped_final_archive_marker_optional(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read a stopped marker, softening only an explicit fixed-path absence."""
+        try:
+            return self.read_final_archive_marker(
+                spec,
+                expected_container_id=expected_container_id,
+            )
+        except SandboxError as exc:
+            detail = str(exc).lower()
+            if FINAL_ARCHIVE_MARKER_NAME in detail and any(
+                phrase in detail
+                for phrase in (
+                    "could not find the file",
+                    "no such file or directory",
+                    "no such file",
+                )
+            ):
+                return None
+            raise
+
+    def write_stopped_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Replace the trusted marker in one exact stopped writable layer.
+
+        This is used only to publish the post-upload receipt or to arm a
+        possible start fail-stop. A partial Docker copy leaves an invalid
+        marker and therefore fails closed; the read-back must exactly match
+        before the caller can release the retained bridge.
+        """
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= (
+            FINAL_ARCHIVE_MARKER_MAX_BYTES
+        ):
+            raise ValueError("final archive marker payload has an invalid size")
+        current = self._require(spec)
+        if current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before marker write")
+        if current.running:
+            raise SandboxError("stopped final archive marker requires a stopped container")
+        with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-write-") as archive:
+            with tarfile.open(fileobj=archive, mode="w") as payload_archive:
+                marker_root = INITIAL_ARCHIVE_MARKER_ROOT.rsplit("/", 1)[-1]
+                directory = tarfile.TarInfo(marker_root)
+                directory.type = tarfile.DIRTYPE
+                directory.mode = 0o700
+                directory.uid = 0
+                directory.gid = 0
+                directory.mtime = 0
+                payload_archive.addfile(directory)
+                entry = tarfile.TarInfo(f"{marker_root}/{FINAL_ARCHIVE_MARKER_NAME}")
+                entry.size = len(payload)
+                entry.mode = 0o600
+                entry.uid = 0
+                entry.gid = 0
+                entry.mtime = 0
+                payload_archive.addfile(entry, io.BytesIO(payload))
+            archive.seek(0)
+            result = self._run_bytes(
+                [
+                    self.backend.docker_binary,
+                    "cp",
+                    "-",
+                    f"{current.container_id}:{INITIAL_ARCHIVE_MARKER_ROOT.rsplit('/', 1)[0]}",
+                ],
+                timeout=30,
+                stdin=archive,
+            )
+        if result.returncode != 0:
+            raise SandboxError(
+                "stopped final archive marker could not be persisted: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+        if (
+            self.read_final_archive_marker(
+                spec,
+                expected_container_id=expected_container_id,
+            )
+            != payload
+        ):
+            raise SandboxError("stopped final archive marker failed verification")
+
+    def clear_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Remove any trusted stale completion marker while the container runs."""
+        current = self._require(spec)
+        if current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed before marker clear")
+        if not current.running:
+            raise SandboxError("final archive marker can be cleared only while running")
+        script = (
+            _INITIAL_ARCHIVE_MARKER_PREAMBLE
+            + r"""
+descriptor = checked_root()
+try:
+    if read_checked(descriptor) is None:
+        raise SystemExit(0)
+    os.unlink(name, dir_fd=descriptor)
+    os.fsync(descriptor)
+    if read_checked(descriptor) is not None:
+        raise RuntimeError('marker deletion was not durable')
+finally:
+    os.close(descriptor)
+"""
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                INITIAL_ARCHIVE_MARKER_ROOT,
+                FINAL_ARCHIVE_MARKER_NAME,
+                str(FINAL_ARCHIVE_MARKER_MAX_BYTES),
+                "0",
+                "0",
+            ],
+            workdir="/",
+            timeout_s=20,
+            user_uid=0,
+            user_gid=0,
+            expected_container_id=expected_container_id,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "final archive marker could not be cleared safely: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
+    def delete_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        expected_payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Atomically unlink and fsync only the marker the caller read."""
+        if not isinstance(expected_payload, bytes) or not 0 < len(expected_payload) <= (
+            INITIAL_ARCHIVE_MARKER_MAX_BYTES
+        ):
+            raise ValueError("initial archive marker payload has an invalid size")
+        script = (
+            _INITIAL_ARCHIVE_MARKER_PREAMBLE
+            + r"""
+expected = sys.stdin.buffer.read(limit + 1)
+if not 0 < len(expected) <= limit:
+    raise RuntimeError('expected marker has an invalid size')
+descriptor = checked_root()
+try:
+    if read_checked(descriptor) != expected:
+        raise RuntimeError('marker changed before deletion')
+    os.unlink(name, dir_fd=descriptor)
+    os.fsync(descriptor)
+    try:
+        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError('marker deletion was not durable')
+finally:
+    os.close(descriptor)
+"""
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                INITIAL_ARCHIVE_MARKER_ROOT,
+                INITIAL_ARCHIVE_MARKER_NAME,
+                str(INITIAL_ARCHIVE_MARKER_MAX_BYTES),
+                "0",
+                "0",
+            ],
+            workdir="/",
+            timeout_s=20,
+            input_bytes=expected_payload,
+            user_uid=0,
+            user_gid=0,
+            expected_container_id=expected_container_id,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "initial archive marker could not be removed safely: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
     def reset_unsettled_state(self, spec: ChatSandboxSpec) -> None:
         """Clear a never-settled first-turn import before an idempotent retry.
 
@@ -3794,11 +4753,134 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
+    def export_archive(
+        self,
+        spec: ChatSandboxSpec,
+        path: str,
+        destination: BinaryIO,
+        *,
+        max_bytes: int,
+        expected_container_id: str | None = None,
+        deadline: float | None = None,
+    ) -> int:
+        """Stream one container-owned path as Docker's tar archive.
+
+        The exact inspected container id is used rather than its reusable
+        name, and the writable layer is read through Docker's archive
+        boundary rather than by walking the daemon's overlay directory. The
+        method works for both running and stopped containers. Callers own the
+        lifecycle barrier that makes the selected point in time consistent.
+        """
+        if max_bytes <= 0:
+            raise ValueError("chat sandbox archive export limit must be positive")
+        if deadline is not None and (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+        ):
+            raise ValueError("chat sandbox archive deadline must be a finite monotonic time")
+        current = self._require(spec)
+        if expected_container_id and current.container_id != expected_container_id:
+            raise RetainedChatLost("chat sandbox container identity changed during archive export")
+        self._validate_container_path(path)
+        command = [
+            self.backend.docker_binary,
+            "cp",
+            f"{current.container_id}:{path}",
+            "-",
+        ]
+        timeout_s = ARCHIVE_EXPORT_TIMEOUT_PER_GIB_S * max(1.0, max_bytes / (1 << 30))
+        local_deadline = time.monotonic() + timeout_s
+        export_deadline = (
+            local_deadline if deadline is None else min(local_deadline, float(deadline))
+        )
+        if export_deadline <= time.monotonic():
+            raise SandboxError("chat sandbox archive export timed out")
+        total = 0
+        with tempfile.TemporaryFile(prefix="freeinference-docker-cp-error-") as stderr:
+            try:
+                process = subprocess.Popen(
+                    command,
+                    env={**os.environ},
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                )
+            except OSError as exc:
+                raise SandboxError(f"chat sandbox archive export failed: {exc}") from exc
+            assert process.stdout is not None
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            try:
+                while True:
+                    remaining = export_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SandboxError("chat sandbox archive export timed out")
+                    ready = selector.select(timeout=min(remaining, 1.0))
+                    if not ready:
+                        if process.poll() is None:
+                            continue
+                        chunk = os.read(process.stdout.fileno(), 1024 * 1024)
+                    else:
+                        chunk = os.read(process.stdout.fileno(), 1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise SandboxError(
+                            f"chat sandbox archive for {path!r} exceeds its byte limit"
+                        )
+                    if destination.write(chunk) != len(chunk):
+                        raise SandboxError(
+                            "chat sandbox archive destination accepted a short write"
+                        )
+                remaining = export_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SandboxError("chat sandbox archive export timed out")
+                try:
+                    returncode = process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired as exc:
+                    raise SandboxError("chat sandbox archive export timed out") from exc
+            except BaseException:
+                process.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=5)
+                raise
+            finally:
+                selector.close()
+                process.stdout.close()
+            if returncode != 0:
+                stderr.seek(0)
+                detail = stderr.read(4096).decode("utf-8", "replace").strip()
+                missing = f"Could not find the file {path} in container {current.container_id}"
+                if total == 0 and detail in {
+                    missing,
+                    f"Error response from daemon: {missing}",
+                }:
+                    raise FileNotFoundError(path)
+                raise SandboxError(
+                    "chat sandbox archive export failed: " + (detail[:300] or "Docker cp failed")
+                )
+        return total
+
     def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
         current = self.inspect(spec.container_name)
         if current is None:
             raise SandboxError("chat sandbox is missing")
         self._verify_identity(current, spec)
+        return current
+
+    def _require_exact(
+        self,
+        spec: ChatSandboxSpec,
+        container_id: str,
+    ) -> ChatSandboxInspection:
+        """Require the original Docker object even after its name is reused."""
+        current = self.inspect(container_id)
+        if current is None:
+            raise RetainedChatLost("chat sandbox exact container is missing")
+        if current.container_id != container_id:
+            raise RetainedChatLost("chat sandbox container identity changed")
+        self._verify_identity(current, spec, require_name=False)
         return current
 
     @staticmethod
@@ -3829,13 +4911,24 @@ class ChatSandboxManager:
                     f"retained chat state path {destination!r} is mounted, not Docker-layer owned"
                 )
 
-    def _verify_identity(self, inspection: ChatSandboxInspection, spec: ChatSandboxSpec) -> None:
+    def _verify_identity(
+        self,
+        inspection: ChatSandboxInspection,
+        spec: ChatSandboxSpec,
+        *,
+        require_name: bool = True,
+    ) -> None:
         expected = spec.docker_labels()
         mismatched = {
             key: (inspection.labels.get(key), value)
             for key, value in expected.items()
             if inspection.labels.get(key) != value
         }
+        # Groups created before disk limits have no label and no quota. An
+        # unexpected positive quota is still an immutable policy mismatch.
+        disk_limit = inspection.labels.get(CHAT_DISK_LIMIT_LABEL, "0")
+        if disk_limit != str(spec.disk_limit_mib):
+            mismatched[CHAT_DISK_LIMIT_LABEL] = (disk_limit, str(spec.disk_limit_mib))
         namespace = inspection.labels.get(CHAT_NAMESPACE_LABEL)
         if namespace is not None and namespace != self.backend.sandbox_namespace:
             mismatched[CHAT_NAMESPACE_LABEL] = (
@@ -3847,7 +4940,7 @@ class ChatSandboxManager:
                 inspection.image,
                 spec.sandbox_image_digest,
             )
-        if inspection.name != spec.container_name or mismatched:
+        if (require_name and inspection.name != spec.container_name) or mismatched:
             raise SandboxError(
                 "Docker name is occupied by a container outside this chat/generation"
             )
@@ -3874,10 +4967,23 @@ class ChatSandboxManager:
             "--pid",
             "--ipc",
             "--uts",
+            "--memory",
+            "-m",
+            "--memory-swap",
+            "--memory-reservation",
+            "--cpus",
+            "--cpu-period",
+            "--cpu-quota",
+            "--cpu-shares",
+            "-c",
+            "--storage-opt",
         }
         for token in self.backend.extra_args:
             option = token.split("=", 1)[0]
-            if option in refused:
+            short_override = not token.startswith("--") and any(
+                token.startswith(short) for short in ("-m", "-c", "-e", "-v")
+            )
+            if option in refused or short_override:
                 raise SandboxError(
                     f"AGENT_SANDBOX_EXTRA_ARGS option {option!r} is unsafe for retained chats"
                 )
@@ -3991,18 +5097,17 @@ class _RetainedExecProcess(SandboxProcess):
         return self._process.poll()
 
     def kill(self) -> None:
-        """Kill one shared member, stopping the container only as a backstop."""
+        """Kill only this verified exec process group, never its container."""
         try:
-            if self._process_pidfile is not None:
-                assert self._user_uid is not None and self._user_gid is not None
-                self._manager.kill_member_process(
-                    self._spec,
-                    pidfile=self._process_pidfile,
-                    user_uid=self._user_uid,
-                    user_gid=self._user_gid,
-                )
-            else:
-                self._manager.stop(self._spec)
+            if self._process_pidfile is None:
+                raise SandboxError("retained exec has no process-scoped kill receipt")
+            assert self._user_uid is not None and self._user_gid is not None
+            self._manager.kill_member_process(
+                self._spec,
+                pidfile=self._process_pidfile,
+                user_uid=self._user_uid,
+                user_gid=self._user_gid,
+            )
         finally:
             if self._process.poll() is None:
                 self._process.kill()
@@ -4301,6 +5406,7 @@ class RetainedChatBackend(SandboxBackend):
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
         """Execute one Agent CLI or bounded command in the retained container."""
         self.require_network()
+        pidfile = f"{ACTIVATION_TMPFS}/command-{secrets.token_hex(16)}.pid"
         return self.manager.spawn(
             self.spec,
             spec.argv,
@@ -4309,7 +5415,7 @@ class RetainedChatBackend(SandboxBackend):
             live_input=spec.live_input,
             user_uid=self.manager.backend.uid,
             user_gid=self.manager.backend.gid,
-            process_pidfile=f"{ACTIVATION_TMPFS}/command-{secrets.token_hex(16)}.pid",
+            process_pidfile=pidfile,
         )
 
     def spawn_terminal(self, spec: SandboxSpec, *, rows: int, cols: int) -> TerminalProcess:
@@ -4358,5 +5464,6 @@ __all__ = [
     "ChatSandboxSpec",
     "ChatSandboxStatus",
     "RetainedChatBackend",
+    "RetainedChatFailStopped",
     "RetainedChatLost",
 ]

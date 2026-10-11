@@ -96,6 +96,7 @@ export function CredentialPicker({
   onChange,
   serverName,
   error = null,
+  suppressUnverified = false,
 }: {
   provider: ComputeProvider;
   connections: ComputeConnection[];
@@ -103,6 +104,7 @@ export function CredentialPicker({
   onChange: (value: CredentialDraft) => void;
   serverName: string;
   error?: string | null;
+  suppressUnverified?: boolean;
 }) {
   const [editingSelection, setEditingSelection] = useState<string | null>(null);
   const fieldset = useRef<HTMLFieldSetElement>(null);
@@ -185,11 +187,13 @@ export function CredentialPicker({
         />
       )}
       <ErrorNotice error={error} />
-      {selected?.blocked_reasons.map((reason) => (
-        <p key={reason.code} className="text-sm text-amber-700 dark:text-amber-300">
-          {reason.message}
-        </p>
-      ))}
+      {selected?.blocked_reasons
+        .filter((reason) => !suppressUnverified || reason.code !== 'connection_unverified')
+        .map((reason) => (
+          <p key={reason.code} className="text-sm text-amber-700 dark:text-amber-300">
+            {reason.message}
+          </p>
+        ))}
     </fieldset>
   );
 }

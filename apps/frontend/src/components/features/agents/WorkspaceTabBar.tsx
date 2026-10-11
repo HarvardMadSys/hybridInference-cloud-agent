@@ -11,6 +11,7 @@ export function WorkspaceTabBar({
   onSelect,
   onAdd,
   onClose,
+  onBack,
 }: {
   selected: WorkspaceTab;
   chats: SideChatTab[];
@@ -18,6 +19,7 @@ export function WorkspaceTabBar({
   onSelect: (tab: WorkspaceTab) => void;
   onAdd: () => WorkspaceTab;
   onClose: (id: SideChatTab['id']) => WorkspaceTab;
+  onBack?: () => void;
 }) {
   const t = useT();
   const [focusTab, setFocusTab] = useState<WorkspaceTab | null>(null);
@@ -42,90 +44,114 @@ export function WorkspaceTabBar({
     setFocusTab(null);
   }, [focusTab]);
   return (
-    <div className="relative z-10 flex shrink-0 border-b border-border bg-surface px-4 text-[13px] font-medium">
-      <nav
-        aria-label="Workspace views"
-        role="tablist"
-        className="flex min-w-0 gap-1 overflow-x-auto"
-      >
-        {tabs.map((tab, index) => (
-          <div
-            key={tab.key}
-            data-side-chat-id={tab.chat?.id}
-            className="flex shrink-0 items-center"
+    <div className="relative z-10 flex shrink-0 flex-col border-b border-border bg-surface text-[13px] font-medium">
+      {onBack ? (
+        <div className="border-b border-border px-3 py-1.5 lg:hidden">
+          <button
+            type="button"
+            onClick={onBack}
+            className="ui-button ui-button-ghost min-h-9 px-2 py-1 text-xs"
           >
-            <button
-              id={`workspace-tab-${tab.key}`}
-              type="button"
-              role="tab"
-              aria-controls={`workspace-panel-${tab.key}`}
-              aria-selected={selected === tab.key}
-              tabIndex={selected === tab.key ? 0 : -1}
-              onClick={() => onSelect(tab.key)}
-              onKeyDown={(event) => {
-                const target =
-                  event.key === 'ArrowRight'
-                    ? (index + 1) % tabs.length
-                    : event.key === 'ArrowLeft'
-                      ? (index + tabs.length - 1) % tabs.length
-                      : event.key === 'Home'
-                        ? 0
-                        : event.key === 'End'
-                          ? tabs.length - 1
-                          : null;
-                if (target !== null) {
-                  event.preventDefault();
-                  onSelect(tabs[target].key);
-                  setFocusTab(tabs[target].key);
-                }
-              }}
-              className={`ui-tab py-3 pl-3 ${tab.chat ? 'pr-1' : 'pr-3'}`}
-            >
-              {tab.label}
-              {tab.key === 'git' && diffCount ? (
-                <span className="ml-1.5 rounded bg-surface-muted px-1.5 py-0.5 text-[10px] text-muted">
-                  {diffCount}
-                </span>
-              ) : null}
-            </button>
-            {tab.chat ? (
-              <button
-                type="button"
-                aria-label={t('sideChat.close', { name: tab.label })}
-                title={t('sideChat.close', { name: tab.label })}
-                onClick={() => setFocusTab(onClose(tab.chat!.id))}
-                className="ui-icon-button ui-button-ghost mr-1 p-1"
-              >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path
-                    d="m4 4 8 8m0-8-8 8"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  />
-                </svg>
-              </button>
-            ) : null}
-          </div>
-        ))}
-      </nav>
-      <div className="flex shrink-0 items-center pl-1">
-        <button
-          type="button"
-          aria-label={t('sideChat.new')}
-          title={t('sideChat.new')}
-          onClick={() => setFocusTab(onAdd())}
-          className="ui-icon-button ui-button-ghost"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path
-              d="M8 2v12M2 8h12"
+            <svg
+              aria-hidden="true"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
               stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          </svg>
-        </button>
+              strokeWidth="1.8"
+            >
+              <path d="m14 6-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Back to conversation
+          </button>
+        </div>
+      ) : null}
+      <div className="flex min-w-0 px-3">
+        <nav
+          aria-label="Workspace views"
+          role="tablist"
+          className="flex min-w-0 gap-1 overflow-x-auto"
+        >
+          {tabs.map((tab, index) => (
+            <div
+              key={tab.key}
+              data-side-chat-id={tab.chat?.id}
+              className="flex shrink-0 items-center"
+            >
+              <button
+                id={`workspace-tab-${tab.key}`}
+                type="button"
+                role="tab"
+                aria-controls={`workspace-panel-${tab.key}`}
+                aria-selected={selected === tab.key}
+                tabIndex={selected === tab.key ? 0 : -1}
+                onClick={() => onSelect(tab.key)}
+                onKeyDown={(event) => {
+                  const target =
+                    event.key === 'ArrowRight'
+                      ? (index + 1) % tabs.length
+                      : event.key === 'ArrowLeft'
+                        ? (index + tabs.length - 1) % tabs.length
+                        : event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? tabs.length - 1
+                            : null;
+                  if (target !== null) {
+                    event.preventDefault();
+                    onSelect(tabs[target].key);
+                    setFocusTab(tabs[target].key);
+                  }
+                }}
+                className={`ui-tab py-3 pl-3 ${tab.chat ? 'pr-1' : 'pr-3'}`}
+              >
+                {tab.label}
+                {tab.key === 'git' && diffCount ? (
+                  <span className="ml-1.5 rounded bg-surface-muted px-1.5 py-0.5 text-[10px] text-muted">
+                    {diffCount}
+                  </span>
+                ) : null}
+              </button>
+              {tab.chat ? (
+                <button
+                  type="button"
+                  aria-label={t('sideChat.close', { name: tab.label })}
+                  title={t('sideChat.close', { name: tab.label })}
+                  onClick={() => setFocusTab(onClose(tab.chat!.id))}
+                  className="ui-icon-button ui-button-ghost mr-1 p-1"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="m4 4 8 8m0-8-8 8"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </nav>
+        <div className="flex shrink-0 items-center pl-1">
+          <button
+            type="button"
+            aria-label={t('sideChat.new')}
+            title={t('sideChat.new')}
+            onClick={() => setFocusTab(onAdd())}
+            className="ui-icon-button ui-button-ghost"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M8 2v12M2 8h12"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   );

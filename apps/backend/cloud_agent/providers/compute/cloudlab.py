@@ -55,8 +55,9 @@ class CloudLabConfig(ComputeValue):
     ssh_credential_ref: str | None = None
     ssh_known_hosts_ref: str | None = None
     # "known_hosts": every node key must already be in the administrator's
-    # verified list. "registration": the profile's boot script registers the
-    # node's keys with a one-time token (deploy/cloudlab/cloud-agent-node.py).
+    # verified list. The registry also uses this old, rollback-readable value
+    # with a reserved reference for explicitly unchecked CloudLab SSH.
+    # "registration" pins the key supplied by the node's first-boot script.
     host_key_source: Literal["known_hosts", "registration"] = "known_hosts"
 
     @field_validator("external_id")
@@ -149,7 +150,7 @@ class CloudLabProvider(ComputeProvider):
         ):
             raise ProviderError(
                 "invalid_configuration",
-                "SSH username, credential and verified host keys must be supplied together",
+                "SSH username, credential and host-key policy must be supplied together",
             )
         if not trusts_list and mode != "provision":
             raise ProviderError(

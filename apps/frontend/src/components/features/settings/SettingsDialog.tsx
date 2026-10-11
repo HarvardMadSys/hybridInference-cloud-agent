@@ -8,6 +8,7 @@ import { useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
 import { CheckIcon, CloseIcon, HelpIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
+import { NotificationSettings } from './NotificationSettings';
 
 const THEME_ICONS: Record<ThemePreference, typeof SunIcon> = {
   light: SunIcon,
@@ -161,6 +162,8 @@ export function SettingsDialog({
               </label>
             </div>
           </section>
+
+          <NotificationSettings />
 
           {/* Only for a newcomer who skipped the sidebar's getting-started
               row: the one way back to it. Nobody else has anything here. */}

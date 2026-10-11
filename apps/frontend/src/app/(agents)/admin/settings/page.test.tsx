@@ -1,14 +1,34 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useSyncExternalStore } from 'react';
 
 import type { AgentRunnerHost, AgentRunnerHostPool, HostSettingDefinition } from '@/lib/api/admin';
+import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
 const auth = vi.hoisted(() => ({ id: 'admin-a', access: undefined as AgentAccessApi | undefined }));
+const search = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  return {
+    value: '',
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    read: () => search.value,
+    set(next: string) {
+      search.value = next;
+      for (const listener of listeners) listener();
+    },
+  };
+});
+vi.mock('next/navigation', () => ({
+  useSearchParams: () => new URLSearchParams(useSyncExternalStore(search.subscribe, search.read)),
+}));
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: auth.id, role: 'free', agent_access: auth.access } } }),
 }));
@@ -28,15 +48,52 @@ vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
   setAgentAdminSettings: vi.fn(),
 }));
+vi.mock('@/lib/api/compute', () => ({
+  getCloudLabDefaults: vi.fn(),
+  saveCloudLabDefaults: vi.fn(),
+}));
+vi.mock('@/lib/api/adminArchiveSettings', () => ({
+  getSandboxArchiveSettings: vi.fn(),
+  updateSandboxArchiveSettings: vi.fn(),
+  SANDBOX_ARCHIVE_SETTINGS_CAPABILITY: 'sandbox-archive-settings-v1',
+}));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
+import {
+  getSandboxArchiveSettings,
+  updateSandboxArchiveSettings,
+} from '@/lib/api/adminArchiveSettings';
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
+import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
 import AdminSettingsPage from './page';
 
 const list = vi.mocked(getAgentRunnerHosts);
 const setLimit = vi.mocked(setAgentHostSettings);
 const setVersion = vi.mocked(setAgentRuntimeVersion);
+const cloudLabDefaults = {
+  project: 'mad-cloudlab',
+  duration: 4,
+  profile_project: 'cloud-agent',
+  profile_name: 'kata-node',
+  ssh_username: 'researcher',
+};
+
+const getArchiveSettings = vi.mocked(getSandboxArchiveSettings);
+const updateArchiveSettings = vi.mocked(updateSandboxArchiveSettings);
+
+const archiveSettings: SandboxArchiveSettings = {
+  enabled: false,
+  s3_uri: 's3://freeinference/cloud-agent/sandbox',
+  region: 'us-east-1',
+  kms_key_arn: 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000',
+  expected_bucket_owner: '123456789012',
+  max_archive_bytes: 2_147_483_648,
+  multipart_threshold_bytes: 8_388_608,
+  multipart_part_bytes: 8_388_608,
+  revision: 1,
+  updated_at: null,
+};
 
 const definitions: HostSettingDefinition[] = [
   {
@@ -118,6 +175,42 @@ const definitions: HostSettingDefinition[] = [
   },
 ];
 
+const resourceDefinitions: HostSettingDefinition[] = [
+  {
+    key: 'sandbox_cpu_millicores',
+    env: 'AGENT_SANDBOX_CPU_MILLICORES',
+    label: 'Container CPU',
+    description: 'CPU limit for new sandboxes. Existing sandboxes keep their limit.',
+    unit: 'millicores',
+    default: 2000,
+    minimum: 100,
+    maximum: 256000,
+    scope: 'runner',
+  },
+  {
+    key: 'sandbox_memory_mib',
+    env: 'AGENT_SANDBOX_MEMORY_MIB',
+    label: 'Container memory',
+    description: 'Memory limit for new sandboxes. Existing sandboxes keep their limit.',
+    unit: 'MiB',
+    default: 4096,
+    minimum: 128,
+    maximum: 1048576,
+    scope: 'runner',
+  },
+  {
+    key: 'sandbox_disk_mib',
+    env: 'AGENT_SANDBOX_DISK_MIB',
+    label: 'Container disk',
+    description: 'Disk quota for new sandboxes. Zero disables the per-container quota.',
+    unit: 'MiB',
+    default: 0,
+    minimum: 0,
+    maximum: 16777216,
+    scope: 'runner',
+  },
+];
+
 function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
     host: 'runner-a',
@@ -126,12 +219,13 @@ function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
     active: false,
     sandbox_runtime: 'io.containerd.kata.v2',
     labels: {},
-    capabilities: ['host-settings-v1'],
+    capabilities: ['host-settings-v1', 'sandbox-archive-settings-v1'],
     runtime_versions: { 'claude-code': '2.1.220' },
     runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'] },
     settings_desired: {},
     settings_applied: { agent_timeout_s: 3600, terminal_max_sessions: 64 },
     settings_local: { agent_timeout_s: 3600, terminal_max_sessions: 64 },
+    sandbox_archive_settings_applied_revision: 1,
     ...over,
   } as AgentRunnerHost;
 }
@@ -153,7 +247,7 @@ function submit(control: HTMLElement) {
   fireEvent.submit(control.closest('form')!);
 }
 
-type SettingsTab = 'Application' | 'Agent versions' | 'Sandbox';
+type SettingsTab = 'Application' | 'Agent versions' | 'Sandbox' | 'CloudLab';
 
 function selectSettingsTab(name: SettingsTab) {
   fireEvent.click(screen.getByRole('tab', { name }));
@@ -169,9 +263,20 @@ beforeEach(() => {
   auth.id = 'admin-a';
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   vi.clearAllMocks();
+  window.history.replaceState(null, '', '/admin/settings');
+  search.value = '';
+  const replace = window.history.replaceState.bind(window.history);
+  vi.spyOn(window.history, 'replaceState').mockImplementation((data, unused, url) => {
+    replace(data, unused, url);
+    search.set(window.location.search);
+  });
   list.mockReset().mockResolvedValue(pool());
   setLimit.mockReset();
   setVersion.mockReset();
+  vi.mocked(getCloudLabDefaults).mockReset().mockResolvedValue({ defaults: cloudLabDefaults });
+  vi.mocked(saveCloudLabDefaults).mockReset();
+  getArchiveSettings.mockReset().mockResolvedValue(archiveSettings);
+  updateArchiveSettings.mockReset();
   vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
     revision: 1,
     definitions: [],
@@ -194,7 +299,9 @@ describe('admin Settings', () => {
     render(<AdminSettingsPage />);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(list).not.toHaveBeenCalled();
+    expect(getArchiveSettings).not.toHaveBeenCalled();
     expect(getAgentAdminSettings).not.toHaveBeenCalled();
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
   });
 
   it('admits a free account with admin permission and opens Application settings', async () => {
@@ -215,15 +322,16 @@ describe('admin Settings', () => {
     expect(screen.queryByText(/EXTRA_VERSIONS/)).not.toBeInTheDocument();
     selectSettingsTab('Sandbox');
     expect(screen.getByRole('heading', { name: 'Sandbox' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Sandbox archives' })).toBeVisible();
   });
 
   it('exposes one selected tab and its related panel at a time', async () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
-    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox'];
-    expect(within(tablist).getAllByRole('tab')).toHaveLength(3);
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(3);
+    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox', 'CloudLab'];
+    expect(within(tablist).getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(4);
 
     for (const name of names) {
       selectSettingsTab(name);
@@ -256,10 +364,76 @@ describe('admin Settings', () => {
       expect(screen.getByRole('tabpanel', { name })).toBeVisible();
     };
     move('ArrowRight', 'Agent versions');
-    move('End', 'Sandbox');
+    move('End', 'CloudLab');
     move('ArrowRight', 'Application');
-    move('ArrowLeft', 'Sandbox');
+    move('ArrowLeft', 'CloudLab');
     move('Home', 'Application');
+  });
+
+  it('opens CloudLab from a deep link and keeps it out of the main Admin navigation', async () => {
+    window.history.replaceState(null, '', '/admin/settings?tab=cloudlab');
+    renderSettings();
+    expect(screen.getByRole('tab', { name: 'CloudLab' })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByLabelText('CloudLab project')).toHaveValue('mad-cloudlab');
+    expect(screen.getByRole('tabpanel', { name: 'CloudLab' })).toBeVisible();
+    const admin = screen.getByRole('navigation', { name: 'Admin sections' });
+    expect(within(admin).queryByRole('link', { name: 'CloudLab' })).not.toBeInTheDocument();
+    expect(within(admin).getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+
+  it('loads CloudLab on first selection and keeps its draft when switching tabs', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
+    selectSettingsTab('CloudLab');
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'draft-project' } });
+    selectSettingsTab('Application');
+    selectSettingsTab('CloudLab');
+    expect(screen.getByLabelText('CloudLab project')).toHaveValue('draft-project');
+    expect(getCloudLabDefaults).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps tab selection in the URL and follows external navigation without losing drafts', async () => {
+    window.history.replaceState(null, '', '/admin/settings?context=keep#details');
+    renderSettings();
+    selectSettingsTab('CloudLab');
+    expect(window.location.search).toBe('?context=keep&tab=cloudlab');
+    expect(window.location.hash).toBe('#details');
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'draft-project' } });
+    act(() => window.history.replaceState(null, '', '/admin/settings?tab=versions'));
+    expect(screen.getByRole('tab', { name: 'Agent versions' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    act(() => window.history.replaceState(null, '', '/admin/settings?tab=cloudlab'));
+    expect(screen.getByRole('tabpanel', { name: 'CloudLab' })).toBeVisible();
+    expect(screen.getByLabelText('CloudLab project')).toHaveValue('draft-project');
+    selectSettingsTab('Application');
+    expect(window.location.search).toBe('');
+  });
+
+  it('uses Application for an unknown tab', async () => {
+    window.history.replaceState(null, '', '/admin/settings?tab=unknown');
+    renderSettings();
+    expect(screen.getByRole('tab', { name: 'Application' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await screen.findByText('No application settings are available.');
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
+  });
+
+  it('hides all Settings content when CloudLab administration is revoked', async () => {
+    vi.mocked(getCloudLabDefaults).mockRejectedValue(new APIError('FORBIDDEN', 'Forbidden', 403));
+    renderSettings('CloudLab');
+    await screen.findByRole('heading', { name: 'Admin access required' });
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('CloudLab project')).not.toBeInTheDocument();
   });
 
   it('preserves unsaved application, version, and sandbox drafts when switching tabs', async () => {
@@ -450,6 +624,54 @@ describe('agent versions', () => {
 });
 
 describe('global limits', () => {
+  it.each([
+    ['Container CPU', 'sandbox_cpu_millicores', 'vCPU', '1.25', 1250],
+    ['Container memory', 'sandbox_memory_mib', 'GiB', '8', 8192],
+    ['Container disk', 'sandbox_disk_mib', 'GiB', '20', 20480],
+  ] as const)(
+    'saves %s in the API unit and tracks application separately',
+    async (label, key, unit, amount, value) => {
+      const defaults = Object.fromEntries(
+        resourceDefinitions.map((definition) => [definition.key, definition.default]),
+      );
+      const resourcePool = pool({
+        host_setting_definitions: resourceDefinitions,
+        hosts: [host({ settings_applied: defaults })],
+      });
+      list.mockResolvedValue(resourcePool);
+      setLimit.mockResolvedValue({ ...resourcePool, host_settings: { [key]: value } });
+      renderSettings('Sandbox');
+
+      const input = await screen.findByLabelText(`${label} for all servers`);
+      fireEvent.change(screen.getByLabelText(`${label} for all servers unit`), {
+        target: { value: unit },
+      });
+      fireEvent.change(input, { target: { value: amount } });
+      submit(input);
+
+      await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ [key]: value }));
+      expect(await screen.findByText('Applied on 0 of 1 server')).toBeInTheDocument();
+    },
+  );
+
+  it('saves zero disk quota as a value and clears it separately', async () => {
+    const resourcePool = pool({
+      host_setting_definitions: resourceDefinitions,
+      host_settings: { sandbox_disk_mib: 20480 },
+    });
+    list.mockResolvedValue(resourcePool);
+    setLimit.mockResolvedValueOnce({ ...resourcePool, host_settings: { sandbox_disk_mib: 0 } });
+    setLimit.mockResolvedValueOnce({ ...resourcePool, host_settings: {} });
+    renderSettings('Sandbox');
+
+    const input = await screen.findByLabelText('Container disk for all servers');
+    fireEvent.change(input, { target: { value: '0' } });
+    submit(input);
+    await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ sandbox_disk_mib: 0 }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
+    await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ sandbox_disk_mib: null }));
+  });
+
   it('does not offer controls when no limits were reported', async () => {
     list.mockResolvedValue(pool({ host_setting_definitions: undefined }));
     renderSettings('Sandbox');
@@ -496,7 +718,8 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     await screen.findByLabelText('Turn time limit for all servers');
-    expect(screen.getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
+    const sandboxCard = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
+    expect(within(sandboxCard).getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
 
   it('retains a draft after a rejected save so it can be retried', async () => {
@@ -541,6 +764,71 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
+  });
+
+  it('saves archive policy atomically and waits for broker rollout', async () => {
+    updateArchiveSettings.mockResolvedValue({ ...archiveSettings, enabled: true, revision: 2 });
+    renderSettings('Sandbox');
+
+    fireEvent.click(await screen.findByLabelText('Enable sandbox archives'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    await waitFor(() =>
+      expect(updateArchiveSettings).toHaveBeenCalledWith({
+        enabled: true,
+        region: archiveSettings.region,
+        kms_key_arn: archiveSettings.kms_key_arn,
+        expected_bucket_owner: archiveSettings.expected_bucket_owner,
+        max_archive_bytes: archiveSettings.max_archive_bytes,
+        multipart_threshold_bytes: archiveSettings.multipart_threshold_bytes,
+        multipart_part_bytes: archiveSettings.multipart_part_bytes,
+        revision: 1,
+      }),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent('Sandbox archives enabled.');
+    expect(screen.getByLabelText('Enable sandbox archives')).toBeChecked();
+    expect(screen.getByText(/Waiting for runner-a/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save archive settings' })).toBeDisabled();
+  });
+
+  it('retains the archive draft after a rejected save', async () => {
+    updateArchiveSettings.mockRejectedValue(new Error('Archive settings conflict'));
+    renderSettings('Sandbox');
+
+    fireEvent.click(await screen.findByLabelText('Enable sandbox archives'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Archive settings conflict');
+    expect(screen.getByLabelText('Enable sandbox archives')).toBeChecked();
+  });
+
+  it('labels a configuration-only archive save without claiming enablement changed', async () => {
+    updateArchiveSettings.mockResolvedValue({
+      ...archiveSettings,
+      max_archive_bytes: 1_073_741_824,
+      revision: 2,
+    });
+    renderSettings('Sandbox');
+
+    fireEvent.change(await screen.findByLabelText('Maximum archive bytes'), {
+      target: { value: '1073741824' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Sandbox archive settings saved.');
+  });
+
+  it('resets a normalized draft after an idempotent save keeps the same revision', async () => {
+    updateArchiveSettings.mockResolvedValue(archiveSettings);
+    renderSettings('Sandbox');
+
+    const maximum = await screen.findByLabelText('Maximum archive bytes');
+    fireEvent.change(maximum, { target: { value: '02147483648' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    await waitFor(() => expect(updateArchiveSettings).toHaveBeenCalledTimes(1));
+    expect(screen.getByLabelText('Maximum archive bytes')).toHaveValue(2_147_483_648);
+    expect(screen.getByRole('button', { name: 'Save archive settings' })).toBeDisabled();
   });
 });
 

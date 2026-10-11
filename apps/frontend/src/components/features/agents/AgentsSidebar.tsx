@@ -4,13 +4,8 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
 import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
-import {
-  archiveAgentJob,
-  pinAgentJob,
-  unpinAgentJob,
-  getAgentJob,
-  getAgentJobThread,
-} from '@/lib/api/agents';
+import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import { useAgentReads } from './AgentReadProvider';
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -52,6 +47,7 @@ export function AgentsSidebar({
   const t = useT();
   const { state } = useAuth();
   const userId = state.user?.id;
+  const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
   const { isUnread, markRead } = useConversationReadState(userId);
   const knownRows = useMemo(
@@ -191,8 +187,8 @@ export function AgentsSidebar({
     const generation = sessionGeneration.current;
     setSelected(null);
     const id = /^\/([^/]+)$/.exec(pathname)?.[1];
-    if (!id || ['archived', 'integrations', 'admin', 'login'].includes(id)) return;
-    Promise.all([getAgentJob(id), getAgentJobThread(id)])
+    if (!id || ['archived', 'integrations', 'approvals', 'admin', 'login'].includes(id)) return;
+    Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
       .then(([job, thread]) => {
         if (cancelled || generation !== sessionGeneration.current) return;
         const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
@@ -216,7 +212,7 @@ export function AgentsSidebar({
     return () => {
       cancelled = true;
     };
-  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh]);
+  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh, reads]);
   const mountPath = useRef(pathname);
   useEffect(() => {
     if (mountPath.current === pathname) return;
@@ -261,6 +257,15 @@ export function AgentsSidebar({
     const keydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !collapsed) {
         event.preventDefault();
+        // Search must not pull focus out of a modal, including dialogs that
+        // render through a portal outside the sidebar.
+        if (
+          [...document.querySelectorAll('[aria-modal="true"], dialog[open]')].some(
+            (dialog) => !dialog.closest('[hidden], [aria-hidden="true"]'),
+          )
+        ) {
+          return;
+        }
         setSearchOpen(true);
         requestAnimationFrame(() => searchInput.current?.focus());
       }

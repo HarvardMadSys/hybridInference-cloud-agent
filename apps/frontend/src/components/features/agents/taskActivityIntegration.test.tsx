@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentJobApi, AgentThreadEventApi } from '@/lib/api/agents';
+import { buildActivityOverview } from './activityOverview';
 import { toDisplayJob } from './adapt';
 import { EventRow } from './ChatMessages';
 import { eventBlockKey } from './conversationTurnNavigation';
+import { ToolActivityDetails } from './ToolActivityDetails';
 import { ToolStepDetails } from './ToolStepDetails';
 import { buildTrajectorySteps } from './trajectorySteps';
 
@@ -54,6 +56,144 @@ function event(
 }
 
 describe('task and delegation activity in the conversation', () => {
+  it.each(['flat text', 'serialized text block', 'structured output'] as const)(
+    'renders three Claude tasks by joining %s create results to later status updates',
+    (resultFormat) => {
+      function createResult(id: string, subject: string): Record<string, unknown> {
+        if (resultFormat === 'structured output') {
+          return {
+            content: 'Task created.',
+            structured_output: { task: { id, subject } },
+          };
+        }
+        const acknowledgement = `Task #${id} created successfully: ${subject}`;
+        return {
+          content:
+            resultFormat === 'serialized text block'
+              ? JSON.stringify([{ type: 'text', text: acknowledgement }])
+              : acknowledgement,
+        };
+      }
+
+      const tasks = [
+        {
+          subject: 'Create notification helper script',
+          description: 'Write the notification helper script.',
+          status: 'completed',
+          label: 'Completed',
+        },
+        {
+          subject: 'Configure global hooks for Stop and Elicitation',
+          description: 'Configure the two hooks in the global settings.',
+          status: 'in_progress',
+          label: 'In progress',
+        },
+        {
+          subject: 'Validate settings JSON and test',
+          description: 'Validate the settings file and test notifications.',
+          status: 'completed',
+          label: 'Completed',
+        },
+      ];
+      const creates = tasks.flatMap(({ subject, description }, index) => [
+        event(index * 2 + 1, 'tool_use', {
+          id: `create-${index + 1}`,
+          name: 'TaskCreate',
+          input: { subject, description },
+        }),
+        event(index * 2 + 2, 'tool_result', {
+          tool_use_id: `create-${index + 1}`,
+          ...createResult(String(index + 1), subject),
+        }),
+      ]);
+      const updates = tasks.flatMap(({ status }, index) => [
+        event(index * 2 + 7, 'tool_use', {
+          id: `update-${index + 1}`,
+          name: 'TaskUpdate',
+          input: { taskId: String(index + 1), status },
+        }),
+        event(index * 2 + 8, 'tool_result', {
+          tool_use_id: `update-${index + 1}`,
+          content: `Updated task #${index + 1} status`,
+        }),
+      ]);
+      const overview = buildActivityOverview(
+        toDisplayJob(job, { events: [...creates, ...updates] }).events,
+      );
+
+      expect(overview.taskActivity?.tasks).toHaveLength(3);
+      expect(overview.taskActivity?.tasks).toMatchObject(
+        tasks.map(({ subject, description, status }, index) => ({
+          id: String(index + 1),
+          subject,
+          description,
+          status,
+        })),
+      );
+      render(<ToolActivityDetails activity={overview.taskActivity!} />);
+      expect(screen.getByText('2 of 3 marked completed')).toBeInTheDocument();
+      const rows = screen.getAllByRole('listitem');
+      expect(rows).toHaveLength(3);
+      tasks.forEach(({ subject, description, label }, index) => {
+        const row = within(rows[index]);
+        expect(row.getByText(`#${index + 1}`)).toBeInTheDocument();
+        expect(row.getByText(subject)).toBeInTheDocument();
+        expect(row.getByText(label)).toBeInTheDocument();
+        expect(row.getByText(description).closest('details')).not.toHaveAttribute('open');
+      });
+      expect(screen.queryByText(/^Task #\d+$/)).not.toBeInTheDocument();
+      expect(screen.queryByText('Status not recorded')).not.toBeInTheDocument();
+    },
+  );
+
+  it('reconciles a waiting create when its text result backfills before a status update', () => {
+    const create = event(1, 'tool_use', {
+      id: 'create',
+      name: 'TaskCreate',
+      input: { subject: 'Review notifications', description: 'Check the hook behavior.' },
+    });
+    const initial = buildActivityOverview(toDisplayJob(job, { events: [create] }).events);
+    expect(initial.taskActivity?.tasks).toHaveLength(1);
+    expect(initial.taskActivity?.tasks[0]).toMatchObject({
+      subject: 'Review notifications',
+      description: 'Check the hook behavior.',
+    });
+    expect(initial.taskActivity?.tasks[0].id).toBeUndefined();
+    const { rerender } = render(<ToolActivityDetails activity={initial.taskActivity!} />);
+
+    const backfilled = buildActivityOverview(
+      toDisplayJob(job, {
+        events: [
+          create,
+          event(2, 'tool_result', {
+            tool_use_id: 'create',
+            content: 'Task #1 created successfully: Review notifications',
+          }),
+          event(3, 'tool_use', {
+            id: 'update',
+            name: 'TaskUpdate',
+            input: { taskId: '1', status: 'completed' },
+          }),
+          event(4, 'tool_result', {
+            tool_use_id: 'update',
+            content: 'Updated task #1 status',
+          }),
+        ],
+      }).events,
+    );
+    expect(backfilled.taskActivity?.tasks).toHaveLength(1);
+    expect(backfilled.taskActivity?.tasks[0]).toMatchObject({
+      id: '1',
+      subject: 'Review notifications',
+      description: 'Check the hook behavior.',
+      status: 'completed',
+    });
+    rerender(<ToolActivityDetails activity={backfilled.taskActivity!} />);
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.getByText('1 of 1 marked completed')).toBeInTheDocument();
+    expect(screen.queryByText('Task #1')).not.toBeInTheDocument();
+  });
+
   it('renders a recorded native plan as a checklist without waiting for a tool result', () => {
     const events = [
       event(1, 'raw', {

@@ -408,6 +408,38 @@ class WorkspaceBrokerClient:
         """Inspect one membership in its shared retained container."""
         return await self._shared_sandbox_request("GET", thread_id)
 
+    async def prepare_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Export the exact stopped container behind a durable host barrier."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/prepare", json=payload, timeout=1800
+        )
+
+    async def upload_sandbox_deletion_archive(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Send a prepared archive using only a checksum-bound S3 upload URL."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/upload", json=payload, timeout=1800
+        )
+
+    async def commit_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Remove a stopped container after its verified receipt is durable."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/commit", json=payload, timeout=120
+        )
+
+    async def abort_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Release an uncommitted host archive barrier after a failed upload."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/abort", json=payload, timeout=120
+        )
+
     async def register_shared_sandbox(self, sandbox: dict[str, Any]) -> dict[str, Any]:
         """Rehydrate durable member aliases after a broker process restart.
 
@@ -451,6 +483,7 @@ class WorkspaceBrokerClient:
                 "resident_slot_capacity": sandbox["resident_slot_capacity"],
                 "memory_limit": sandbox["memory_limit"],
                 "cpu_limit": sandbox["cpu_limit"],
+                "disk_limit_mib": sandbox.get("disk_limit_mib", 0),
                 "stop_timeout_s": sandbox["stop_timeout_seconds"],
                 "members": members,
             },
@@ -528,6 +561,7 @@ class WorkspaceBrokerClient:
         resident_slot_capacity: int,
         memory_limit: str,
         cpu_limit: str,
+        disk_limit_mib: int,
         stop_timeout_s: int,
         members: list[dict[str, Any]],
         operation_id: str,
@@ -554,6 +588,7 @@ class WorkspaceBrokerClient:
                 "resident_slot_capacity": resident_slot_capacity,
                 "memory_limit": memory_limit,
                 "cpu_limit": cpu_limit,
+                "disk_limit_mib": disk_limit_mib,
                 "stop_timeout_s": stop_timeout_s,
                 "members": members,
                 "operation_id": operation_id,
@@ -581,6 +616,7 @@ class WorkspaceBrokerClient:
             "resident_slot_capacity": snapshot["resident_slot_capacity"],
             "memory_limit": snapshot["memory_limit"],
             "cpu_limit": snapshot["cpu_limit"],
+            "disk_limit_mib": snapshot.get("disk_limit_mib", 0),
             "stop_timeout_s": snapshot["stop_timeout_seconds"],
             "members": snapshot["members"],
         }

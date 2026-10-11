@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 #: hands a claimed turn to the process that runs it; the workspace broker is a
 #: separate container and is told its values by the runner.
 SettingScope = Literal["runner", "broker", "both"]
-SettingUnit = Literal["seconds", "MiB", "KiB", "count"]
+SettingUnit = Literal["seconds", "MiB", "KiB", "count", "millicores"]
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,50 @@ class HostSetting:
 #: In the order the admin pages list them: the session's own limits, then the
 #: sandbox's, then the terminals'.
 HOST_SETTINGS: tuple[HostSetting, ...] = (
+    HostSetting(
+        key="sandbox_cpu_millicores",
+        env="AGENT_SANDBOX_CPU_MILLICORES",
+        label="Container CPU",
+        description=(
+            "CPU limit shared by all sessions in one new sandbox. Existing sandboxes "
+            "and their forks keep the limit they were created with."
+        ),
+        unit="millicores",
+        default=2000,
+        minimum=100,
+        maximum=256000,
+        scope="runner",
+    ),
+    HostSetting(
+        key="sandbox_memory_mib",
+        env="AGENT_SANDBOX_MEMORY_MIB",
+        label="Container memory",
+        description=(
+            "Memory limit shared by all sessions in one new sandbox. Existing sandboxes "
+            "and their forks keep the limit they were created with."
+        ),
+        unit="MiB",
+        default=4096,
+        minimum=128,
+        maximum=1048576,
+        scope="runner",
+    ),
+    HostSetting(
+        key="sandbox_disk_mib",
+        env="AGENT_SANDBOX_DISK_MIB",
+        label="Container disk",
+        description=(
+            "Writable disk limit for one new sandbox, including its workspace and installed "
+            "files. Set 0 for no disk quota. Requires Docker overlay2 on XFS with project "
+            "quotas enabled; an unsupported server cannot create a sandbox with a quota. "
+            "Existing sandboxes and their forks keep their original limit."
+        ),
+        unit="MiB",
+        default=0,
+        minimum=0,
+        maximum=16777216,
+        scope="runner",
+    ),
     HostSetting(
         key="agent_timeout_s",
         env="AGENT_TIMEOUT_S",

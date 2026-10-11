@@ -35,17 +35,18 @@ export function LiveAgentStatus({ job }: { job: AgentJob }) {
   if (job.state !== 'running' || !job.liveNote) return null;
 
   return (
-    <div className="mb-2 flex items-center gap-2.5 px-2 text-[13px] text-gray-500 dark:text-gray-400">
+    <div className="mb-2 flex items-start gap-2.5 px-2 text-[13px] leading-5 text-gray-600 dark:text-gray-300">
       <span
         aria-hidden="true"
-        className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500 motion-reduce:animate-none"
+        className="mt-1.5 h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500 motion-reduce:animate-none"
       />
       <span
         role="status"
         aria-label="Agent status"
         aria-live="polite"
         aria-atomic="true"
-        className="min-w-0 truncate"
+        title={job.liveNote}
+        className="min-w-0 flex-1 [overflow-wrap:anywhere]"
       >
         {job.liveNote}
       </span>

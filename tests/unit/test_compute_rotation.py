@@ -15,6 +15,7 @@ from cloud_agent.application.compute_rotation import (
     classify_candidate_failure,
     next_node_type,
 )
+from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
 
 NOW = datetime.now(UTC)
@@ -264,3 +265,32 @@ async def test_replacement_profile_keeps_the_source_release_and_bundle():
         )
         is compatible
     )
+
+
+async def test_replacement_profile_preserves_the_hosts_explicit_storage_path():
+    mover = rotation()
+    mover.repository.list_allocations = AsyncMock(return_value=[])
+    spare = DeploymentProfile(
+        id="spare",
+        label="Spare host setup",
+        source_bundle="/bundle.tar.gz",
+        source_sha256="a" * 64,
+        deployment_sha="b" * 40,
+        environment_ref="deployment:spare",
+        data_mount="/profile-disk",
+        sandbox_storage_path="/spare-data",
+    )
+    mover.commands = SimpleNamespace(deployment_profiles=AsyncMock(return_value={"spare": spare}))
+    selected = await mover._free_profile(
+        exclude={
+            "id": "source",
+            "source_sha256": spare.source_sha256,
+            "deployment_sha": spare.deployment_sha,
+            "sandbox_storage_path": "/host-data",
+        }
+    )
+    assert selected is not None
+    assert selected.id == "spare"
+    assert selected.sandbox_storage_path == "/host-data"
+    assert selected.data_mount == "/profile-disk"
+    assert spare.sandbox_storage_path == "/spare-data"

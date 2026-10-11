@@ -80,6 +80,35 @@ def test_newline_free_stdout_is_read_in_bounded_chunks():
     assert process.wait() == 0
 
 
+def test_command_reaper_refuses_a_stale_start_receipt(tmp_path):
+    """A PID reused by a different process is a cleanup failure, never a kill target."""
+    sibling = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(20)"], start_new_session=True
+    )
+    pidfile = tmp_path / "command-stale.pid"
+    pidfile.write_text(f"{sibling.pid} 0\n")
+    try:
+        result = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                ChatSandboxManager._member_reaper_script('"$2"'),
+                "sh",
+                str(os.getuid()),
+                str(pidfile),
+            ],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert result.returncode == 126
+        assert sibling.poll() is None
+        assert not pidfile.exists()
+    finally:
+        sibling.kill()
+        sibling.wait()
+
+
 def test_newline_free_stderr_retains_only_a_byte_bounded_tail():
     process = ProcessBackend(acknowledged_unsafe=True).spawn(
         SandboxSpec(

@@ -26,6 +26,7 @@ guides run from the repository root unless the guide says otherwise.
 | [Compute resources](operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |
 | [Deployment reliability](deployment-reliability.md) | Drain runners safely, check schema compatibility, and detect stalled queues |
 | [Backup and recovery](disaster-recovery.md) | Define retention and recovery targets, preserve keys and coherent host state, and recover a previous artifact release |
+| [Automatic PR archiving](automatic-pr-archiving.md) | Configure merge detection, understand session mapping, and verify or recover automatic archival |
 | [Runner lease troubleshooting](runner-lease-troubleshooting.md) | Diagnose expired attempts and repeated lease failures |
 | [Host runtime settings](runtime-settings.md) | Configure host defaults, server overrides, and the storage reserve |
 | [Host execution limits](host-execution-limits.md) | Understand command cleanup, output bounds, checkpoints, and storage admission |
@@ -40,7 +41,9 @@ guides run from the repository root unless the guide says otherwise.
 | [Minimal Agent identity](minimal-identity.md) | Configure the gateway issuer and safely bind an existing database to it |
 | [Native conversation recall](context-recall.md) | Understand retained sessions, runtime-specific behavior, and recall verification |
 | [Native agent questions](operations.md#native-agent-questions) | Answer a waiting agent request and understand reload, skip, and stale-answer handling |
+| [Tool approvals](mcp-approvals.md) | Review pending calls across conversations and browse older request history |
 | [Conversation navigation](conversation-navigation.md) | Understand the turn rail, previews, jumps, and reading position |
+| [Workspace files](workspace-files.md) | Open repository files by path, retry reads, and copy or download previews |
 | [Sidebar navigation](sidebar-navigation.md) | Understand project grouping and conversation actions |
 
 ## Designs and historical evidence

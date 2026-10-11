@@ -64,6 +64,18 @@ class FakeHostPoolStore(AllCapabilities):
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
         self.global_settings: dict[str, Any] = {}
+        self.archive_settings: dict[str, Any] = {
+            "enabled": False,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+            "region": "",
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+            "revision": 0,
+            "updated_at": datetime.now(UTC),
+        }
         self.establish_answer: dict[str, Any] | None = None
         self.linked: list[tuple[str, int, str]] = []
         self.link_ok = True
@@ -183,6 +195,8 @@ class FakeHostPoolStore(AllCapabilities):
         runtime_versions_available: dict[str, list[str]] | None = None,
         settings_applied: dict[str, Any] | None = None,
         settings_local: dict[str, Any] | None = None,
+        sandbox_archive_settings_applied_revision: int | None = None,
+        sandbox_archive_settings_revision_reported: bool = False,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
@@ -212,6 +226,10 @@ class FakeHostPoolStore(AllCapabilities):
             row["labels"]["physical_host"] = physical_host
         if capabilities is not None:
             row["capabilities"] = normalize_capabilities(capabilities)
+        if sandbox_archive_settings_revision_reported:
+            row["sandbox_archive_settings_applied_revision"] = (
+                sandbox_archive_settings_applied_revision
+            )
         if capacity is not None and capacity_sample_age_ms is not None:
             self._apply_capacity(
                 row,
@@ -281,6 +299,9 @@ class FakeHostPoolStore(AllCapabilities):
 
     async def host_settings(self) -> dict[str, Any]:
         return dict(self.global_settings)
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        return dict(self.archive_settings)
 
     async def host_capacity_history(
         self, *, host: str, range_seconds: int
@@ -917,6 +938,59 @@ async def test_a_heartbeat_stores_the_settings_report_reduced_to_known_numbers(c
     assert row["settings_local"] == {"agent_timeout_s": 3600, "chat_idle_timeout_s": 15.5}
 
 
+async def test_a_heartbeat_delivers_archive_policy_and_tracks_exact_broker_revision(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    auth = {"Authorization": f"Bearer {credential}"}
+    store.archive_settings.update(
+        enabled=True,
+        region="us-east-1",
+        kms_key_arn=("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"),
+        expected_bucket_owner="123456789012",
+        revision=4,
+    )
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"sandbox_archive_settings_applied_revision": 4},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["sandbox_archive_settings"]["revision"] == 4
+    assert response.json()["sandbox_archive_settings"]["enabled"] is True
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    assert listed["hosts"][0]["sandbox_archive_settings_applied_revision"] == 4
+
+
+async def test_explicit_null_archive_revision_clears_stale_state_but_omission_does_not(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    auth = {"Authorization": f"Bearer {credential}"}
+    store.rows["runner-a"]["sandbox_archive_settings_applied_revision"] = 9
+
+    assert (
+        await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)
+    ).status_code == 200
+    assert store.rows["runner-a"]["sandbox_archive_settings_applied_revision"] == 9
+
+    assert (
+        await async_client.post(
+            "/v1/agent/host/heartbeat",
+            json={"sandbox_archive_settings_applied_revision": None},
+            headers=auth,
+        )
+    ).status_code == 200
+    assert store.rows["runner-a"]["sandbox_archive_settings_applied_revision"] is None
+
+    invalid = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"sandbox_archive_settings_applied_revision": True},
+        headers=auth,
+    )
+    assert invalid.status_code == 422
+
+
 async def test_a_heartbeat_without_a_credential_is_refused(client):
     async_client, _ = client
 
@@ -1086,6 +1160,7 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
                 # helper) are attested separately from runtime binaries.
                 "helper_versions": {},
                 "runner_capabilities": [],
+                "sandbox_archive_settings_applied_revision": None,
                 "host_kernel": "host",
                 "guest_kernel": "guest",
             },

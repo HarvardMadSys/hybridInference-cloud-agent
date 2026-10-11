@@ -161,5 +161,7 @@ def test_quiet_turn_remains_interruptible(quiet_broker, monkeypatch, reason):
         code, _tail, _errors, result = _run_turn(quiet_broker.client, **kwargs)
         assert code == (124 if reason == "deadline" else 130)
         assert result["resources"]["process_observation_complete"] is True
-    assert quiet_broker.event_sent.is_set()
+    # The client can interrupt after consuming init before the server resumes
+    # past its flush and records the send. Synchronize with that server thread.
+    assert quiet_broker.event_sent.wait(1)
     assert quiet_broker.interrupted.is_set()

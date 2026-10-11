@@ -144,8 +144,24 @@ async def test_background_workers_pick_up_interval_changes_between_passes(monkey
 async def test_queue_age_is_bound_as_a_runtime_value_in_health_query(monkeypatch):
     duration = 600.0
     monkeypatch.setattr(host_pool, "number_setting", lambda key, fallback: duration)
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
     connection = SimpleNamespace(
-        fetchrow=AsyncMock(return_value={"queued": 2, "unavailable": 1, "running": 0})
+        fetchrow=AsyncMock(
+            side_effect=[
+                None,
+                {"queued": 2, "unavailable": 1, "running": 0},
+                None,
+                {"queued": 2, "unavailable": 1, "running": 0},
+            ]
+        ),
+        transaction=Transaction,
     )
 
     class Acquire:
@@ -161,8 +177,8 @@ async def test_queue_age_is_bound_as_a_runtime_value_in_health_query(monkeypatch
         "unavailable": 1,
         "running": 0,
     }
-    assert connection.fetchrow.call_args.args[-1] == 600.0
+    assert connection.fetchrow.call_args.args[3] == 600.0
     assert "$3 * INTERVAL '1 second'" in connection.fetchrow.call_args.args[0]
     duration = 1200.0
     await repository.queue_health(expected_deployment_sha="release")
-    assert connection.fetchrow.call_args.args[-1] == 1200.0
+    assert connection.fetchrow.call_args.args[3] == 1200.0

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import {
   createAgentTerminal,
@@ -79,6 +79,8 @@ export function TerminalWorkspace({
   const [visibleIds, setVisibleIds] = useState<string[]>([]);
   // The pane someone just opened or picked, which takes keyboard focus.
   const [focusId, setFocusId] = useState<string | null>(null);
+  const workspaceId = useId();
+  const focusTabRef = useRef<{ paneIndex: number; terminalId: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -115,6 +117,7 @@ export function TerminalWorkspace({
     setMaxInputBytes(undefined);
     setVisibleIds([]);
     setFocusId(null);
+    focusTabRef.current = null;
     setError(null);
     setLoadFailed(false);
     setLoading(false);
@@ -190,6 +193,17 @@ export function TerminalWorkspace({
     () => visibleIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean),
     [sessions, visibleIds],
   ) as AgentTerminalApi[];
+
+  useEffect(() => {
+    // Selecting another shell remounts its pane. Restore keyboard navigation
+    // to its tab after that commit, without moving focus into the shell.
+    const target = focusTabRef.current;
+    if (!target) return;
+    focusTabRef.current = null;
+    document
+      .getElementById(`${workspaceId}-pane-${target.paneIndex}-tab-${target.terminalId}`)
+      ?.focus();
+  }, [visibleIds, workspaceId]);
 
   // A shell that has ended keeps its tab for its output, but not its slot.
   const occupied = sessions.filter((session) => !hasExited(session, exitedIds)).length;
@@ -305,7 +319,8 @@ export function TerminalWorkspace({
     });
   }
 
-  function select(paneIndex: number, terminalId: string) {
+  function select(paneIndex: number, terminalId: string, focus: 'terminal' | 'tab') {
+    focusTabRef.current = focus === 'tab' ? { paneIndex, terminalId } : null;
     setVisibleIds((current) => {
       const next = [...current];
       const otherPane = paneIndex === 0 ? 1 : 0;
@@ -315,14 +330,14 @@ export function TerminalWorkspace({
       next[paneIndex] = terminalId;
       return next;
     });
-    setFocusId(terminalId);
+    setFocusId(focus === 'terminal' ? terminalId : null);
   }
 
   return (
     <section
       ref={sectionRef}
       aria-label="Workspace terminal"
-      className="flex h-full min-h-[28rem] flex-col"
+      className="flex h-full min-h-0 flex-col overflow-y-auto"
     >
       {error ? (
         <p
@@ -334,10 +349,10 @@ export function TerminalWorkspace({
       ) : null}
       {visible.length ? (
         <div
-          className={`grid min-h-0 flex-1 gap-2 ${
+          className={`grid min-h-0 flex-1 auto-rows-[minmax(16rem,1fr)] gap-2 overflow-y-auto ${
             visible.length === 2
-              ? 'grid-rows-2 lg:grid-cols-2 lg:grid-rows-1'
-              : 'grid-cols-1 grid-rows-1'
+              ? 'grid-cols-[repeat(auto-fit,minmax(min(100%,24rem),1fr))]'
+              : 'grid-cols-1'
           }`}
         >
           {visible.map((terminal, paneIndex) => (
@@ -348,13 +363,14 @@ export function TerminalWorkspace({
               sessions={sessions}
               exitedIds={exitedIds}
               paneIndex={paneIndex}
+              idPrefix={`${workspaceId}-pane-${paneIndex}`}
               ready={ready}
               autoFocus={terminal.id === focusId}
               canCreate={canCreate}
               canSplit={canCreate && visible.length < 2}
               busy={busy}
               maxInputBytes={maxInputBytes}
-              onSelect={(terminalId) => select(paneIndex, terminalId)}
+              onSelect={(terminalId, focus) => select(paneIndex, terminalId, focus)}
               onNew={() => void create('new', paneIndex)}
               onSplit={() => void create('split')}
               onKill={() => void kill(terminal.id)}

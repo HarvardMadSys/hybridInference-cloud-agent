@@ -262,3 +262,201 @@ describe('workspace refresh', () => {
     expect(paths).toEqual(['', 'a.txt', 'src']);
   });
 });
+
+describe('workspace request retries', () => {
+  it('retries only the failed folder and shares its pending request across rapid retries', async () => {
+    const failed = deferred();
+    const retry = deferred();
+    const responses = { src: failed };
+    const { result } = await mountFiles(responses);
+    act(() => result.current.toggleDirectory('src'));
+    await act(async () => failed.reject(new Error('Folder unavailable')));
+    expect(result.current.directories.src.error).toBe('Folder unavailable');
+    vi.mocked(getAgentJobFiles).mockClear();
+    responses.src = retry;
+
+    act(() => {
+      result.current.retryDirectory('src');
+      result.current.retryDirectory('src');
+      result.current.retryDirectory('src');
+    });
+
+    expect(vi.mocked(getAgentJobFiles).mock.calls.map(([, path]) => path)).toEqual(['src']);
+    expect(result.current.directories.src.loading).toBe(true);
+    expect(result.current.directories.src.error).toBeNull();
+    const loaded = directory('src', ['recovered.ts']);
+    await act(async () => retry.resolve(loaded));
+    expect(result.current.directories.src).toEqual({
+      entries: loaded.entries,
+      loading: false,
+      error: null,
+    });
+  });
+
+  it.each(['response', 'error'] as const)(
+    'ignores an old folder %s without releasing a newer pending retry',
+    async (outcome) => {
+      const old = deferred();
+      const retry = deferred();
+      const responses = { src: old };
+      const { result } = await mountFiles(responses);
+      act(() => result.current.toggleDirectory('src'));
+      act(() => result.current.toggleDirectory('src'));
+      act(() => result.current.reload());
+      responses.src = retry;
+      act(() => result.current.retryDirectory('src'));
+      vi.mocked(getAgentJobFiles).mockClear();
+
+      await act(async () => {
+        if (outcome === 'response') old.resolve(directory('src', ['stale.ts']));
+        else old.reject(new Error('Stale folder error'));
+      });
+
+      expect(result.current.directories.src).toEqual({
+        entries: null,
+        loading: true,
+        error: null,
+      });
+      act(() => result.current.retryDirectory('src'));
+      expect(getAgentJobFiles).not.toHaveBeenCalled();
+      const loaded = directory('src', ['fresh.ts']);
+      await act(async () => retry.resolve(loaded));
+      expect(result.current.directories.src).toEqual({
+        entries: loaded.entries,
+        loading: false,
+        error: null,
+      });
+    },
+  );
+
+  it.each(['response', 'error'] as const)(
+    'keeps recovered folder contents when a previous-generation %s arrives last',
+    async (outcome) => {
+      const old = deferred();
+      const retry = deferred();
+      const responses = { src: old };
+      const { result } = await mountFiles(responses);
+      act(() => result.current.toggleDirectory('src'));
+      act(() => result.current.toggleDirectory('src'));
+      act(() => result.current.reload());
+      responses.src = retry;
+      act(() => result.current.retryDirectory('src'));
+      const loaded = directory('src', ['fresh.ts']);
+      await act(async () => retry.resolve(loaded));
+
+      await act(async () => {
+        if (outcome === 'response') old.resolve(directory('src', ['stale.ts']));
+        else old.reject(new Error('Stale folder error'));
+      });
+
+      expect(result.current.directories.src).toEqual({
+        entries: loaded.entries,
+        loading: false,
+        error: null,
+      });
+    },
+  );
+
+  it.each(['response', 'error'] as const)(
+    'keeps the newly selected file after an earlier preview retry returns a %s',
+    async (outcome) => {
+      const failed = deferred();
+      const retry = deferred();
+      const selected = deferred();
+      const responses = { 'a.ts': failed, 'b.ts': selected };
+      const { result } = await mountFiles(responses);
+      act(() => result.current.openFile('a.ts'));
+      await act(async () => failed.reject(new Error('File unavailable')));
+      expect(result.current.fileError).toBe('File unavailable');
+      responses['a.ts'] = retry;
+      act(() => result.current.retryFile());
+      expect(result.current.fileError).toBeNull();
+      expect(result.current.fileLoading).toBe(true);
+      act(() => result.current.openFile('b.ts'));
+      const chosen = file('b.ts', 'Selected content');
+      await act(async () => selected.resolve(chosen));
+
+      await act(async () => {
+        if (outcome === 'response') retry.resolve(file('a.ts', 'Old retried content'));
+        else retry.reject(new Error('Old retry error'));
+      });
+
+      expect(result.current.selected).toBe('b.ts');
+      expect(result.current.file).toEqual(chosen);
+      expect(result.current.fileError).toBeNull();
+      expect(result.current.fileLoading).toBe(false);
+    },
+  );
+});
+
+describe('direct workspace folder navigation', () => {
+  it('keeps a loaded preview when root navigation cancels its pending refresh', async () => {
+    const folder = deferred();
+    const first = deferred();
+    const refreshed = deferred();
+    const responses = { src: folder, 'a.ts': first };
+    const { result } = await mountFiles(responses);
+    act(() => result.current.openFile('src'));
+    await act(async () => folder.resolve(directory('src', ['a.ts'])));
+    act(() => result.current.openFile('a.ts'));
+    const preview = file('a.ts', 'Loaded preview');
+    await act(async () => first.resolve(preview));
+    responses['a.ts'] = refreshed;
+    act(() => result.current.reload());
+    expect(result.current.fileLoading).toBe(true);
+
+    act(() => result.current.showRootDirectory());
+
+    expect(result.current.selected).toBe('a.ts');
+    expect(result.current.file).toEqual(preview);
+    expect(result.current.fileLoading).toBe(false);
+    await act(async () => refreshed.resolve(directory('a.ts', ['late.txt'])));
+    expect(result.current.directoryPath).toBeNull();
+    expect(result.current.selected).toBe('a.ts');
+    expect(result.current.file).toEqual(preview);
+  });
+
+  it('reveals a nested folder and loads the parent needed to reach its contents', async () => {
+    const parent = deferred();
+    const nested = deferred();
+    const root: AgentJobDirectoryApi = {
+      path: '',
+      kind: 'directory',
+      entries: [{ path: 'src', name: 'src', kind: 'directory' }],
+    };
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (path === '') return root;
+      if (path === 'src') return parent.promise;
+      if (path === 'src/nested') return nested.promise;
+      throw new Error(`Unexpected file request: ${path}`);
+    });
+    const { result } = renderHook(() => useWorkspaceFiles('ajob_test', true));
+    await waitFor(() => expect(result.current.directories['']?.entries).toEqual(root.entries));
+    vi.mocked(getAgentJobFiles).mockClear();
+
+    act(() => result.current.openFile('src/nested'));
+    const contents = directory('src/nested', ['file.ts']);
+    await act(async () => nested.resolve(contents));
+
+    expect(result.current.selected).toBeNull();
+    expect(result.current.file).toBeNull();
+    expect(result.current.fileLoading).toBe(false);
+    expect(result.current.expanded).toMatchObject({ src: true, 'src/nested': true });
+    expect(result.current.directories['src/nested'].entries).toEqual(contents.entries);
+    expect(result.current.directories.src.loading).toBe(true);
+    expect(vi.mocked(getAgentJobFiles).mock.calls.map(([, path]) => path)).toEqual([
+      'src/nested',
+      'src',
+    ]);
+
+    const ancestor: AgentJobDirectoryApi = {
+      path: 'src',
+      kind: 'directory',
+      entries: [{ path: 'src/nested', name: 'nested', kind: 'directory' }],
+    };
+    await act(async () => parent.resolve(ancestor));
+    expect(result.current.directories[''].entries).toEqual(root.entries);
+    expect(result.current.directories.src.entries).toEqual(ancestor.entries);
+    expect(result.current.directories['src/nested'].entries).toEqual(contents.entries);
+  });
+});

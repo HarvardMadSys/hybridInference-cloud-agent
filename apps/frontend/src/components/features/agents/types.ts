@@ -36,7 +36,14 @@ export interface AgentAttempt {
  */
 export type AgentEvent =
   | { kind: 'lifecycle'; text: string; attemptNo?: number; sourceEventId?: number }
-  | { kind: 'thinking'; text: string; attemptNo?: number; sourceEventId?: number }
+  | {
+      kind: 'thinking';
+      text: string;
+      /** Native reasoning can record both a summary and detailed text. */
+      reasoningBlocks?: { text: string; channel?: string }[];
+      attemptNo?: number;
+      sourceEventId?: number;
+    }
   | {
       kind: 'message';
       text: string;
@@ -71,6 +78,8 @@ export type AgentEvent =
       durationMs?: number;
       /** Collapsed tool output preview (mono block), e.g. pytest tail. */
       output?: string[];
+      /** Native structured result, retained alongside the readable output. */
+      structuredOutput?: unknown;
       outputIsError?: boolean;
       /** e.g. "+12 −3" for Edit rows. */
       diffStat?: string;
@@ -80,6 +89,7 @@ export type AgentEvent =
   | {
       kind: 'tool_result';
       text: string;
+      structuredOutput?: unknown;
       toolUseId?: string;
       parentToolUseId?: string;
       cancelled?: boolean;

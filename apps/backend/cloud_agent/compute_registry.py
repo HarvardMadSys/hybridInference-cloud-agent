@@ -10,6 +10,9 @@ from cryptography.hazmat.primitives import serialization
 
 from cloud_agent.compute_config import current_cloudlab_api_url
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+)
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
 from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 
@@ -55,7 +58,20 @@ class ComputeProviderRegistration:
             if ssh_connection_id:
                 private, known = self.ssh_credential_fields
                 result[private] = ssh_connection_id
-                result[known] = f"{ssh_connection_id}:known_hosts"
+                host_key_source = supplied.get(
+                    "host_key_source", "none" if self.id == "cloudlab" else "known_hosts"
+                )
+                if self.id == "cloudlab":
+                    # Keep persisted configurations readable by the previous
+                    # release. Its resolver rejects this marker and therefore
+                    # fails closed instead of interpreting unchecked SSH.
+                    result["host_key_source"] = (
+                        "known_hosts" if host_key_source == "none" else host_key_source
+                    )
+                if self.id == "cloudlab" and host_key_source == "none":
+                    result[known] = UNCHECKED_CLOUDLAB_HOST_KEY_REF
+                elif host_key_source == "known_hosts":
+                    result[known] = f"{ssh_connection_id}:known_hosts"
         elif self.credential_kind == "ssh_key":
             result["known_hosts_ref"] = f"{connection_id}:known_hosts"
         return result
@@ -115,6 +131,11 @@ class ComputeProviderRegistration:
                 if len(parts) < 3:
                     raise ValueError("missing key")
                 serialization.load_ssh_public_key(f"{parts[1]} {parts[2]}".encode())
+        except (ValueError, TypeError, UnsupportedAlgorithm):
+            raise ComputeRefusal(
+                "invalid_host_keys", "Provide valid verified SSH host keys.", status=422
+            ) from None
+        try:
             try:
                 serialization.load_ssh_private_key(secret.encode(), password=None)
             except ValueError:
@@ -122,7 +143,7 @@ class ComputeProviderRegistration:
         except (ValueError, TypeError, UnsupportedAlgorithm):
             raise ComputeRefusal(
                 "invalid_ssh_key",
-                "Provide a supported private key without a passphrase and valid verified host keys.",
+                "Provide a supported private key without a passphrase.",
                 status=422,
             ) from None
         return {"known_hosts": known}
@@ -303,21 +324,21 @@ def build_registry(
                     },
                     {
                         "key": "host_key_source",
-                        "label": "Node host keys",
+                        "label": "SSH host-key checking",
                         "section": "access",
                         "type": "select",
-                        "default": "known_hosts",
+                        "default": "none",
                         "options": [
                             {
-                                "value": "known_hosts",
-                                "label": "Verified list on the SSH connection",
+                                "value": "none",
+                                "label": "Do not verify the CloudLab host",
                             },
                             {
                                 "value": "registration",
                                 "label": "Registered by the node at first boot",
                             },
                         ],
-                        "description": "Registration needs the Cloud Agent profile (deploy/cloudlab/cloud-agent-node.py) and lets new nodes join without anyone verifying their keys by hand.",
+                        "description": "Skipping verification permits automatic SSH but cannot detect an impersonated host. Registration needs the Cloud Agent profile (deploy/cloudlab/cloud-agent-node.py) and pins each new node's key.",
                         "advanced": True,
                         "deployment_only": True,
                         "modes": ["provision"],

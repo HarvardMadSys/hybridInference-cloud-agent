@@ -108,6 +108,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function inventoryTitles(): (string | null)[] {
+  return within(screen.getByRole('table'))
+    .getAllByRole('link')
+    .filter((link) => link.getAttribute('href')?.startsWith('/admin/sessions/'))
+    .map((link) => link.textContent);
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   auth.id = 'admin-one';
@@ -569,10 +576,30 @@ describe('running sandbox inventory', () => {
     expect(statValue('Terminals', stats)).toHaveTextContent('0');
     expect(statValue('Active operations', stats)).toHaveTextContent('0');
     expect(statValue('Snapshot', stats)).toHaveTextContent('ready');
+    expect(statValue('Configured limits', stats)).toHaveTextContent(
+      '2 CPU · 4g memory · No disk quota',
+    );
     fireEvent.click(button);
     expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
     expect(button).toHaveAttribute('aria-expanded', 'false');
   });
+
+  it.each([
+    [20480, '20 GiB disk'],
+    [1500, '1500 MiB disk'],
+    [0, 'No disk quota'],
+  ] as const)(
+    'shows a retained disk limit of %s MiB in configured limits',
+    async (quota, label) => {
+      vi.mocked(getAdminSandboxes).mockResolvedValue(page([sandbox({ disk_limit_mib: quota })]));
+      render(<AdminSandboxesPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
+      const stats = screen.getByLabelText('Stats for Fix login');
+      expect(statValue('Configured limits', stats)).toHaveTextContent(
+        `2 CPU · 4g memory · ${label}`,
+      );
+    },
+  );
 
   it('shows fleet resource totals only for fresh measurements and states their coverage', async () => {
     vi.mocked(getAdminSandboxes).mockResolvedValue(
@@ -697,5 +724,367 @@ describe('running sandbox inventory', () => {
     const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('Stale sample');
     expect(row).toHaveTextContent('0.25 cores');
+  });
+});
+
+describe('sandbox inventory controls', () => {
+  it('starts in sandbox ID order and toggles accessible session-name sorting', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({ id: 'sandbox-z', title: 'Alpha session' }),
+        sandbox({ id: 'sandbox-a', title: 'Zulu session' }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-a');
+    expect(inventoryTitles()).toEqual(['Zulu session', 'Alpha session']);
+
+    const sort = screen.getByRole('button', { name: 'Sort by Sandbox / session' });
+    fireEvent.click(sort);
+    expect(inventoryTitles()).toEqual(['Alpha session', 'Zulu session']);
+    expect(sort.closest('th')).toHaveAttribute('aria-sort', 'ascending');
+    fireEvent.click(sort);
+    expect(inventoryTitles()).toEqual(['Zulu session', 'Alpha session']);
+    expect(sort.closest('th')).toHaveAttribute('aria-sort', 'descending');
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<{
+    column: string;
+    low: Partial<AdminSandbox>;
+    high: Partial<AdminSandbox>;
+    unknown?: Partial<AdminSandbox>;
+  }>([
+    {
+      column: 'Activity / agent',
+      low: { active_attempt_count: 2 },
+      high: { active_attempt_count: 10 },
+    },
+    {
+      column: 'CPU',
+      low: { resource_usage: usage({ cpu_cores: 2 }) },
+      high: { resource_usage: usage({ cpu_cores: 10 }) },
+      unknown: { resource_usage: usage({ cpu_cores: null }) },
+    },
+    {
+      column: 'Memory',
+      low: { resource_usage: usage({ memory_bytes: 1024 }) },
+      high: { resource_usage: usage({ memory_bytes: 1024 ** 2 }) },
+      unknown: { resource_usage: usage({ memory_bytes: null }) },
+    },
+    {
+      column: 'Sessions',
+      low: { member_count: 2 },
+      high: { member_count: 10 },
+    },
+    {
+      column: 'Last activity',
+      low: { last_activity_at: '2026-10-10T09:00:00Z' },
+      high: { last_activity_at: '2026-10-10T09:59:00Z' },
+      unknown: { last_activity_at: 'invalid-date' },
+    },
+    {
+      column: 'Host heartbeat',
+      low: { host_last_heartbeat_at: '2026-10-10T09:00:00Z' },
+      high: { host_last_heartbeat_at: observedAt },
+      unknown: { host_last_heartbeat_at: null },
+    },
+  ])(
+    'sorts $column numerically and leaves unknown values last in either direction',
+    async (test) => {
+      const rows = [
+        sandbox({ id: 'sandbox-low', title: 'Lower value', ...test.low }),
+        sandbox({ id: 'sandbox-high', title: 'Higher value', ...test.high }),
+        ...(test.unknown
+          ? [sandbox({ id: 'sandbox-unknown', title: 'Unknown value', ...test.unknown })]
+          : []),
+      ];
+      vi.mocked(getAdminSandboxes).mockResolvedValue(page(rows));
+      render(<AdminSandboxesPage />);
+      await screen.findByText('sandbox-low');
+      const sort = screen.getByRole('button', { name: `Sort by ${test.column}` });
+      const tail = test.unknown ? ['Unknown value'] : [];
+      fireEvent.click(sort);
+      expect(inventoryTitles()).toEqual(['Higher value', 'Lower value', ...tail]);
+      expect(sort.closest('th')).toHaveAttribute('aria-sort', 'descending');
+      fireEvent.click(sort);
+      expect(inventoryTitles()).toEqual(['Lower value', 'Higher value', ...tail]);
+      expect(sort.closest('th')).toHaveAttribute('aria-sort', 'ascending');
+      expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('sorts owners by their IDs with sandbox IDs breaking ties', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({ id: 'sandbox-z', title: 'Second owner', user_id: 'owner-z' }),
+        sandbox({ id: 'sandbox-b', title: 'Second sandbox', user_id: 'owner-a' }),
+        sandbox({ id: 'sandbox-a', title: 'First sandbox', user_id: 'owner-a' }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-a');
+    const sort = screen.getByRole('button', { name: 'Sort by Owner / host' });
+    fireEvent.click(sort);
+    expect(inventoryTitles()).toEqual(['First sandbox', 'Second sandbox', 'Second owner']);
+    expect(sort.closest('th')).toHaveAttribute('aria-sort', 'ascending');
+    fireEvent.click(sort);
+    expect(inventoryTitles()).toEqual(['Second owner', 'First sandbox', 'Second sandbox']);
+    expect(sort.closest('th')).toHaveAttribute('aria-sort', 'descending');
+  });
+
+  it.each([
+    '  FIX LOGIN  ',
+    'sandbox-one',
+    'org/repo-one',
+    'owner-one',
+    'host-one',
+    'container-one-id',
+    'container-one',
+    'codex',
+  ])('searches sandbox metadata locally for %j', async (query) => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox(),
+        sandbox({
+          id: 'sandbox-two',
+          title: 'Another session',
+          repo: 'org/repo-two',
+          user_id: 'owner-two',
+          host: 'host-two',
+          container_id: 'container-two-id',
+          container_name: 'container-two',
+          runtime_id: 'claude',
+        }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search sandboxes' }), {
+      target: { value: query },
+    });
+    expect(inventoryTitles()).toEqual(['Fix login']);
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+  });
+
+  it('combines host, activity, and search filters and clears them without rereading the fleet', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({ id: 'sandbox-a', title: 'Alpha', host: 'host-one' }),
+        sandbox({
+          id: 'sandbox-b',
+          title: 'Bravo',
+          host: 'host-one',
+          active_attempt_count: 0,
+        }),
+        sandbox({
+          id: 'sandbox-c',
+          title: 'Charlie',
+          host: 'host-two',
+          active_attempt_count: 0,
+        }),
+        sandbox({ id: 'sandbox-d', title: 'Delta', host: 'host-two' }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-a');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox host' }), {
+      target: { value: 'host-one' },
+    });
+    expect(inventoryTitles()).toEqual(['Alpha', 'Bravo']);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox activity' }), {
+      target: { value: 'idle' },
+    });
+    expect(inventoryTitles()).toEqual(['Bravo']);
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search sandboxes' }), {
+      target: { value: ' BRAVO ' },
+    });
+    expect(inventoryTitles()).toEqual(['Bravo']);
+    expect(statValue('Running sandboxes')).toHaveTextContent('4');
+    expect(statValue('Active turns')).toHaveTextContent('2');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByRole('searchbox', { name: 'Search sandboxes' })).toHaveValue('');
+    expect(
+      (screen.getByRole('combobox', { name: 'Sandbox host' }) as HTMLSelectElement).selectedIndex,
+    ).toBe(0);
+    expect(
+      (screen.getByRole('combobox', { name: 'Sandbox activity' }) as HTMLSelectElement)
+        .selectedIndex,
+    ).toBe(0);
+    expect(inventoryTitles()).toEqual(['Alpha', 'Bravo', 'Charlie', 'Delta']);
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<AdminSandbox['state']>([
+    'provisioning',
+    'starting',
+    'stopping',
+    'stopped',
+    'stopped_dirty',
+    'lost',
+  ])('loads the selected %s lifecycle state from the server', async (state) => {
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    vi.mocked(getAdminSandboxes).mockResolvedValueOnce(
+      page([sandbox({ id: 'filtered-sandbox', state })]),
+    );
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox state' }), {
+      target: { value: state },
+    });
+    await screen.findByText('filtered-sandbox');
+    expect(getAdminSandboxes).toHaveBeenLastCalledWith(
+      { limit: 200, state },
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveValue(state);
+  });
+
+  it('requests removed sandboxes in the current state and ignores a superseded refresh', async () => {
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    const stopped = sandbox({ state: 'stopped', active_attempt_count: 0 });
+    const oldRead = deferred<InventoryPage>();
+    const includeRemovedRead = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes)
+      .mockResolvedValueOnce(page([stopped]))
+      .mockReturnValueOnce(oldRead.promise)
+      .mockReturnValueOnce(includeRemovedRead.promise)
+      .mockResolvedValue(page([stopped]));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox state' }), {
+      target: { value: 'all' },
+    });
+    await screen.findByText('sandbox-one');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(3));
+    const oldSignal = vi.mocked(getAdminSandboxes).mock.calls[2][1];
+
+    const includeRemoved = screen.getByRole('checkbox', { name: 'Include removed sandboxes' });
+    fireEvent.click(includeRemoved);
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(getAdminSandboxes).toHaveBeenLastCalledWith(
+        { limit: 200, state: 'all', include_archived: true },
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () =>
+      includeRemovedRead.resolve(
+        page([
+          sandbox({
+            id: 'removed-sandbox',
+            title: 'Removed session',
+            state: 'stopped',
+            archived_at: observedAt,
+            active_attempt_count: 0,
+          }),
+        ]),
+      ),
+    );
+    expect(screen.getByText('removed-sandbox')).toBeInTheDocument();
+    await act(async () => oldRead.resolve(page([sandbox({ id: 'late-sandbox' })])));
+    expect(screen.queryByText('late-sandbox')).not.toBeInTheDocument();
+    expect(screen.getByText('removed-sandbox')).toBeInTheDocument();
+
+    fireEvent.click(includeRemoved);
+    await screen.findByText('sandbox-one');
+    expect(getAdminSandboxes).toHaveBeenLastCalledWith(
+      { limit: 200, state: 'all' },
+      expect.any(AbortSignal),
+    );
+    expect(screen.queryByText('removed-sandbox')).not.toBeInTheDocument();
+    expect(includeRemoved).not.toBeChecked();
+  });
+
+  it('retains search, host, activity, and chosen sort when manually refreshing measurements', async () => {
+    const first = sandbox({
+      id: 'sandbox-a',
+      title: 'Target Alpha',
+      active_attempt_count: 0,
+      resource_usage: usage({ cpu_cores: 2 }),
+    });
+    const second = sandbox({
+      id: 'sandbox-b',
+      title: 'Target Bravo',
+      active_attempt_count: 0,
+      resource_usage: usage({ cpu_cores: 10 }),
+    });
+    const excluded = sandbox({ id: 'sandbox-c', title: 'Another session', host: 'host-two' });
+    vi.mocked(getAdminSandboxes).mockResolvedValue(page([first, second, excluded]));
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-a');
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search sandboxes' }), {
+      target: { value: 'target' },
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox host' }), {
+      target: { value: 'host-one' },
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox activity' }), {
+      target: { value: 'idle' },
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sort sandboxes' }), {
+      target: { value: 'cpu' },
+    });
+    expect(inventoryTitles()).toEqual(['Target Bravo', 'Target Alpha']);
+
+    vi.mocked(getAdminSandboxes).mockResolvedValueOnce(
+      page([
+        { ...first, resource_usage: usage({ cpu_cores: 11 }) },
+        { ...second, resource_usage: usage({ cpu_cores: 1 }) },
+        excluded,
+      ]),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(inventoryTitles()).toEqual(['Target Alpha', 'Target Bravo']));
+    expect(screen.getByRole('searchbox', { name: 'Search sandboxes' })).toHaveValue('target');
+    expect(screen.getByRole('combobox', { name: 'Sandbox host' })).toHaveValue('host-one');
+    expect(screen.getByRole('combobox', { name: 'Sandbox activity' })).toHaveValue('idle');
+    expect(screen.getByRole('combobox', { name: 'Sort sandboxes' })).toHaveValue('cpu');
+    expect(screen.getByRole('button', { name: 'Sort by CPU' }).closest('th')).toHaveAttribute(
+      'aria-sort',
+      'descending',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Sort ascending' }));
+    expect(inventoryTitles()).toEqual(['Target Bravo', 'Target Alpha']);
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+  });
+
+  it('pauses automatic polling while retaining manual refresh and resumes thirty-second polling', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    const autoRefresh = screen.getByRole('checkbox', { name: 'Auto-refresh' });
+    expect(autoRefresh).toBeChecked();
+    fireEvent.click(autoRefresh);
+    expect(autoRefresh).not.toBeChecked();
+    await act(async () => vi.advanceTimersByTimeAsync(90_000));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await act(async () => {});
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    expect(autoRefresh).not.toBeChecked();
+    fireEvent.click(autoRefresh);
+    await act(async () => vi.advanceTimersByTimeAsync(29_999));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a pending inventory read valid when automatic polling is paused', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const pending = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes).mockReturnValueOnce(pending.promise);
+    render(<AdminSandboxesPage />);
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+    const signal = vi.mocked(getAdminSandboxes).mock.calls[0][1];
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Auto-refresh' }));
+    expect(signal?.aborted).toBe(false);
+    await act(async () => pending.resolve(page()));
+    expect(screen.getByText('sandbox-one')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
   });
 });

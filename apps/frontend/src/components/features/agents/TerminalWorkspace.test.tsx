@@ -243,6 +243,92 @@ describe('TerminalWorkspace', () => {
     expect(screen.getAllByRole('application')).toHaveLength(1);
   });
 
+  it('navigates terminal tabs with the keyboard without moving focus into a shell', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([
+      terminal('term-1'),
+      terminal('term-2', 'bash'),
+      terminal('term-3'),
+    ]);
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+
+    const tablist = screen.getByRole('tablist', { name: 'Terminals in pane 1' });
+    const first = within(tablist).getByRole('tab', { name: 'Terminal 1 · zsh' });
+    const tabs = within(tablist).getAllByRole('tab');
+    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1]);
+    for (const tab of tabs) {
+      const panel = document.getElementById(tab.getAttribute('aria-controls')!);
+      expect(panel).toHaveAttribute('role', 'tabpanel');
+      expect(panel).toHaveAttribute('aria-labelledby', tab.id);
+      expect(panel?.hidden).toBe(tab !== first);
+    }
+    first.focus();
+    xtermHarness.instances[0].focus.mockClear();
+
+    let mountedTerminals = 1;
+    for (const [key, label] of [
+      ['ArrowRight', 'Terminal 2 · bash'],
+      ['End', 'Terminal 3 · zsh'],
+      ['ArrowRight', 'Terminal 1 · zsh'],
+      ['ArrowLeft', 'Terminal 3 · zsh'],
+      ['Home', 'Terminal 1 · zsh'],
+    ]) {
+      fireEvent.keyDown(document.activeElement!, { key });
+      const selected = screen.getByRole('tab', { name: label });
+      expect(selected).toHaveFocus();
+      expect(selected).toHaveAttribute('aria-selected', 'true');
+      expect(selected).toHaveAttribute('tabindex', '0');
+      const panel = document.getElementById(selected.getAttribute('aria-controls')!);
+      expect(panel).toBeVisible();
+      mountedTerminals += 1;
+      await waitFor(() => expect(xtermHarness.instances).toHaveLength(mountedTerminals));
+    }
+    expect(xtermHarness.instances.every((xterm) => xterm.focus.mock.calls.length === 0)).toBe(true);
+    expect(writeAgentTerminalInput).not.toHaveBeenCalled();
+  });
+
+  it('keeps keyboard focus in its pane when selecting a shell visible in the other pane', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([terminal('term-1')]);
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-2', 'bash'));
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    fireEvent.click(screen.getByRole('button', { name: 'Split terminal' }));
+    await waitFor(() => expect(screen.getAllByRole('application')).toHaveLength(2));
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(2));
+    for (const xterm of xtermHarness.instances) xterm.focus.mockClear();
+
+    const firstPaneTabs = screen.getByRole('tablist', { name: 'Terminals in pane 1' });
+    const selected = within(firstPaneTabs).getByRole('tab', { name: 'Terminal 1 · zsh' });
+    selected.focus();
+    fireEvent.keyDown(selected, { key: 'ArrowRight' });
+
+    const firstPane = screen.getByRole('tablist', { name: 'Terminals in pane 1' });
+    const secondPane = screen.getByRole('tablist', { name: 'Terminals in pane 2' });
+    expect(within(firstPane).getByRole('tab', { name: 'Terminal 2 · bash' })).toHaveFocus();
+    expect(within(secondPane).getByRole('tab', { name: 'Terminal 1 · zsh' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    const panelIds = screen.getAllByRole('tab').map((tab) => tab.getAttribute('aria-controls'));
+    expect(new Set(panelIds).size).toBe(panelIds.length);
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(4));
+    expect(xtermHarness.instances.every((xterm) => xterm.focus.mock.calls.length === 0)).toBe(true);
+  });
+
+  it('focuses the shell when selecting a terminal with the pointer', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([
+      terminal('term-1'),
+      terminal('term-2', 'bash'),
+    ]);
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+    const second = screen.getByRole('tab', { name: 'Terminal 2 · bash' });
+    second.focus();
+    fireEvent.click(second, { detail: 1 });
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(2));
+    expect(xtermHarness.instances[1].focus).toHaveBeenCalled();
+  });
+
   it('removes the last terminal when cleanup finishes after delete reports an error', async () => {
     const only = terminal('term-only');
     vi.mocked(listAgentTerminals).mockResolvedValueOnce([only]).mockResolvedValueOnce([]);

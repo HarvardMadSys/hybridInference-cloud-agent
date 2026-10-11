@@ -79,6 +79,7 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
 
 
@@ -95,6 +96,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
 
     ready_file.write_text("different-sha\n")
@@ -104,6 +106,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
 
     ready_file.write_text("target-sha\n")
@@ -113,6 +116,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
         "shared-sandbox-deployment:target-sha",
     ]
 
@@ -368,6 +372,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
     assert dispatched[0]["job"] is _JOB
     assert dispatched[0]["gateway_base_url"] == "http://gateway"

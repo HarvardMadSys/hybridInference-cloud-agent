@@ -88,7 +88,7 @@ const invocation: McpInvocationApi = {
   arguments_digest: 'digest',
   arguments: { query: 'release notes' },
   created_at: null,
-  expires_at: '2026-09-11T12:00:00Z',
+  expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
   decided_at: null,
   result_summary: null,
   guidance: '',
@@ -364,7 +364,7 @@ describe('McpSessionPanel', () => {
 
     expect(await screen.findByText('Team wiki wants to call search')).toBeInTheDocument();
     expect(screen.getByText(/"query": "release notes"/)).toBeInTheDocument();
-    expect(screen.getByText('Expired')).toHaveAttribute('dateTime', '2026-09-11T12:00:00Z');
+    expect(screen.getByText(/Expires in/)).toHaveAttribute('dateTime', invocation.expires_at);
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
 
@@ -537,6 +537,103 @@ describe('McpSessionPanel', () => {
 
     await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(2));
     expect(stored.tools).toEqual({ other: 'allow', search: 'allow' });
+  });
+
+  it('keeps two simultaneous decisions busy independently', async () => {
+    const other = { ...invocation, id: 12, capability_name: 'other' };
+    mockedInvocations.mockResolvedValue({ invocations: [invocation, other] });
+    let finishFirst!: (value: McpInvocationApi) => void;
+    let finishSecond!: (value: McpInvocationApi) => void;
+    mockedDecide.mockImplementation(
+      (id: number) =>
+        new Promise((resolve) => {
+          if (id === 11) finishFirst = resolve;
+          else finishSecond = resolve;
+        }),
+    );
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
+    const a = (await screen.findByText('Team wiki wants to call search')).parentElement!;
+    const b = screen.getByText('Team wiki wants to call other').parentElement!;
+    fireEvent.click(within(a).getByRole('button', { name: 'Approve' }));
+    fireEvent.click(within(b).getByRole('button', { name: 'Deny' }));
+    expect(within(a).getByRole('button', { name: 'Approve' })).toBeDisabled();
+    expect(within(b).getByRole('button', { name: 'Deny' })).toBeDisabled();
+    await act(async () => finishFirst({ ...invocation, status: 'approved' }));
+    expect(within(b).getByRole('button', { name: 'Deny' })).toBeDisabled();
+    await act(async () => finishSecond({ ...other, status: 'denied' }));
+    expect(mockedDecide).toHaveBeenCalledTimes(2);
+  });
+
+  it('loads approval requests beyond the first pending page', async () => {
+    mockedInvocations.mockImplementation(async ({ pendingOnly, beforeId }) => {
+      if (!pendingOnly) return { invocations: [] };
+      if (beforeId === 11) {
+        return {
+          invocations: [{ ...invocation, id: 10, capability_name: 'older_call' }],
+          has_more: false,
+          next_before_id: null,
+        };
+      }
+      return { invocations: [invocation], has_more: true, next_before_id: 11 };
+    });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
+    expect(await screen.findByText('Team wiki wants to call older_call')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(2);
+    expect(mockedInvocations).toHaveBeenCalledWith({
+      jobId: 'job-1',
+      pendingOnly: true,
+      beforeId: 11,
+    });
+  });
+
+  it('loads older history and preserves its depth on refresh', async () => {
+    const history = Array.from({ length: 50 }, (_, index) => ({
+      ...invocation,
+      id: 100 - index,
+      capability_name: `recent_${index}`,
+      status: 'completed',
+    }));
+    mockedInvocations.mockImplementation(async ({ pendingOnly, beforeId }) => {
+      if (pendingOnly) return { invocations: [] };
+      if (beforeId === 51) {
+        return {
+          invocations: [{ ...invocation, id: 50, capability_name: 'older_call', status: 'denied' }],
+          has_more: false,
+          next_before_id: null,
+        };
+      }
+      return { invocations: history, has_more: true, next_before_id: 51 };
+    });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load older requests' }));
+    expect(await screen.findByText('older_call · denied')).toBeInTheDocument();
+    expect(mockedInvocations).toHaveBeenCalledWith({ jobId: 'job-1', beforeId: 51 });
+    expect(screen.queryByRole('button', { name: 'Load older requests' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() =>
+      expect(mockedInvocations.mock.calls.filter(([query]) => query.beforeId === 51)).toHaveLength(
+        2,
+      ),
+    );
+    expect(screen.getByText('older_call · denied')).toBeInTheDocument();
+  });
+
+  it('keeps a newer pending snapshot when the initial history read finishes late', async () => {
+    let finishHistory!: (value: { invocations: McpInvocationApi[] }) => void;
+    let reads = 0;
+    mockedInvocations.mockImplementation(({ pendingOnly }) => {
+      reads += 1;
+      if (reads === 1)
+        return new Promise((resolve) => {
+          finishHistory = resolve;
+        });
+      return Promise.resolve({ invocations: pendingOnly && reads > 2 ? [invocation] : [] });
+    });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
+    receiveHint('mcp', 'job-1');
+    expect(await screen.findByText('Team wiki wants to call search')).toBeInTheDocument();
+    await act(async () => finishHistory({ invocations: [] }));
+    expect(screen.getByText('Team wiki wants to call search')).toBeInTheDocument();
   });
 
   it('waits to be opened before reading anything', () => {

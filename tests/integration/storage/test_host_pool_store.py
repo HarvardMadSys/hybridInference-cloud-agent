@@ -38,6 +38,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_S3_URI
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -124,6 +125,22 @@ async def _settled(db, store: Storage, job_id: str) -> None:
             "WHERE id = $1 AND native_turn_no IS NULL",
             job_id,
         )
+
+
+def _archive_settings(**changes) -> dict:
+    values = {
+        "enabled": True,
+        "region": "us-east-1",
+        "kms_key_arn": (
+            "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+        ),
+        "expected_bucket_owner": "123456789012",
+        "max_archive_bytes": 2 * 1024**3,
+        "multipart_threshold_bytes": 8 * 1024**2,
+        "multipart_part_bytes": 8 * 1024**2,
+    }
+    values.update(changes)
+    return values
 
 
 async def _enrol(store: Storage, host: str, hosts: PostgresHostPoolRepository, **overrides) -> dict:
@@ -968,6 +985,138 @@ async def test_global_host_settings_survive_a_missing_policy_row(
     await hosts.set_host_settings(changes={"chat_idle_timeout_s": 600})
 
     assert await hosts.host_settings() == {"chat_idle_timeout_s": 600}
+
+
+async def test_archive_policy_cas_is_noop_and_lost_response_idempotent(
+    hosts: PostgresHostPoolRepository,
+):
+    initial = await hosts.sandbox_archive_settings()
+    assert initial["revision"] == 0
+    assert initial["s3_uri"] == SANDBOX_ARCHIVE_S3_URI
+
+    changed = await hosts.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings=_archive_settings(),
+    )
+    assert changed is not None and changed["revision"] == 1 and changed["_changed"] is True
+
+    no_op = await hosts.set_sandbox_archive_settings(
+        expected_revision=1,
+        settings=_archive_settings(),
+    )
+    retry = await hosts.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings=_archive_settings(),
+    )
+    assert no_op is not None and retry is not None
+    assert no_op["revision"] == retry["revision"] == 1
+    assert no_op["updated_at"] == retry["updated_at"] == changed["updated_at"]
+    assert no_op["_changed"] is retry["_changed"] is False
+
+    conflict = await hosts.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings=_archive_settings(max_archive_bytes=1024**3),
+    )
+    assert conflict is None
+    future = await hosts.set_sandbox_archive_settings(
+        expected_revision=2,
+        settings=_archive_settings(),
+    )
+    assert future is None
+
+
+async def test_concurrent_identical_archive_policy_writes_increment_once(
+    hosts: PostgresHostPoolRepository,
+):
+    results = await asyncio.gather(
+        *(
+            hosts.set_sandbox_archive_settings(
+                expected_revision=0,
+                settings=_archive_settings(),
+            )
+            for _ in range(8)
+        )
+    )
+
+    assert all(result is not None and result["revision"] == 1 for result in results)
+    assert sum(result["_changed"] is True for result in results if result is not None) == 1
+
+
+async def test_archive_policy_missing_singleton_reads_and_recreates_cleanly(
+    db,
+    hosts: PostgresHostPoolRepository,
+):
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM agent_runner_policy WHERE id")
+
+    missing = await hosts.sandbox_archive_settings()
+    assert missing["revision"] == 0
+    assert missing["updated_at"] is None
+
+    restored = await hosts.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings=_archive_settings(),
+    )
+    assert restored is not None and restored["revision"] == 1
+    assert restored["updated_at"] is not None
+
+
+async def test_archive_revision_heartbeat_is_tristate_and_credential_fenced(
+    hosts: PostgresHostPoolRepository,
+):
+    old_hash = hash_secret("old")
+    new_hash = hash_secret("new")
+    await hosts.register_host(host="runner-a", credential_hash=old_hash)
+    reported = await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=old_hash,
+        sandbox_archive_settings_applied_revision=5,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    assert reported is not None
+    assert reported["sandbox_archive_settings_applied_revision"] == 5
+
+    omitted = await hosts.record_host_heartbeat(host="runner-a", credential_hash=old_hash)
+    assert omitted is not None
+    assert omitted["sandbox_archive_settings_applied_revision"] == 5
+    cleared = await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=old_hash,
+        sandbox_archive_settings_applied_revision=None,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    assert cleared is not None
+    assert cleared["sandbox_archive_settings_applied_revision"] is None
+
+    await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=old_hash,
+        sandbox_archive_settings_applied_revision=6,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    reenrolled = await hosts.register_host(host="runner-a", credential_hash=new_hash)
+    assert reenrolled["sandbox_archive_settings_applied_revision"] is None
+
+    stale = await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=old_hash,
+        sandbox_archive_settings_applied_revision=7,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    assert stale is not None
+    assert stale["last_heartbeat_at"] is not None
+    assert stale["sandbox_archive_settings_applied_revision"] is None
+    assert (await hosts.get_host(host="runner-a"))[
+        "sandbox_archive_settings_applied_revision"
+    ] is None
+    current = await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=new_hash,
+        sandbox_archive_settings_applied_revision=7,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    assert current is not None
+    assert current["sandbox_archive_settings_applied_revision"] == 7
 
 
 async def test_server_settings_are_kept_apart_from_what_the_host_reports(

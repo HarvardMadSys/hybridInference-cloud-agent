@@ -10,6 +10,9 @@ from cloud_agent.compute_secrets import (
     ComputeSecretStore,
     StoredDeploymentResolver,
 )
+from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+)
 
 
 class Connections:
@@ -59,6 +62,8 @@ async def test_resolution_separates_private_credentials_from_verified_host_keys(
     with pytest.raises(ComputeSecretError, match="unsupported"):
         await secrets.resolve("ssh:configuration")
     connections.rows["ssh"]["configuration"] = {}
+    with pytest.raises(ComputeSecretError, match="unsupported"):
+        await secrets.resolve(UNCHECKED_CLOUDLAB_HOST_KEY_REF)
     with pytest.raises(ComputeSecretError, match="verified SSH"):
         await secrets.resolve("ssh:known_hosts")
     with pytest.raises(ComputeSecretError, match="no longer exists"):

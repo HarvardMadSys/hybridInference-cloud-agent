@@ -19,6 +19,10 @@ function count(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function flag(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function record(value: unknown): Details {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Details)
@@ -63,6 +67,7 @@ const FIXED: Record<string, string> = {
   'agent.compute.connection.create': 'Added a server connection',
   'agent.compute.connection.update': 'Updated a server connection',
   'agent.compute.connection.validate': 'Checked a server connection',
+  'agent.compute.profile.automatic_create': 'Prepared server setups automatically',
   'agent.compute.cloudlab_defaults.set': 'Changed CloudLab defaults',
   'agent.compute.allocation.policy': "Changed a server's lease policy",
   'agent.compute.server.add': 'Requested a new server',
@@ -127,6 +132,14 @@ const SENTENCES: Record<string, Sentence> = {
   'agent.database.query': (details) => {
     const table = text(details.table);
     return table ? `Queried database table ${table}` : 'Queried the database';
+  },
+  'agent.sandbox_archive_settings.set': (details) => {
+    const previous = flag(record(details.old_settings).enabled) ?? flag(details.old_enabled);
+    const next = flag(record(details.new_settings).enabled) ?? flag(details.new_enabled);
+    if (previous !== null && next !== null && previous !== next) {
+      return next ? 'Enabled sandbox archives' : 'Disabled sandbox archives';
+    }
+    return 'Changed sandbox archive settings';
   },
   'agent.host_settings.set': (details, _host, definitions) => {
     const lines = settingChanges(details, definitions, {
