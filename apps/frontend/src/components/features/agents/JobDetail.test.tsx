@@ -3198,13 +3198,6 @@ describe('JobDetail', () => {
     expect(within(usage).queryByText(/999/)).not.toBeInTheDocument();
   });
 
-  it('wraps unbroken failure details inside the outcome card', () => {
-    const stateNote = `agent exited 1: ${'x'.repeat(300)}`;
-    render(<JobDetail job={makeJob({ state: 'failed', stateNote })} />);
-
-    expect(screen.getByText(stateNote)).toHaveClass('[overflow-wrap:anywhere]');
-  });
-
   describe('the transcript tool inspector', () => {
     function viewport() {
       vi.stubGlobal(

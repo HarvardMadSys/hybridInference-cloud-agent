@@ -1680,14 +1680,6 @@ describe('TaskComposer reasoning effort', () => {
     expect(offered).toEqual(['low', 'medium', 'high']);
   });
 
-  it('starts at the deepest level on offer', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
-
-    render(<TaskComposer />);
-
-    expect(await screen.findByLabelText('Reasoning')).toHaveValue('max');
-  });
-
   it('shows no control when the model takes no effort', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
@@ -1729,10 +1721,17 @@ describe('TaskComposer reasoning effort', () => {
     return vi.mocked(createAgentJob).mock.calls[0][0];
   }
 
-  it('sends whatever the control shows, untouched', async () => {
+  it('selects the deepest level on offer and sends it untouched', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(thinking);
 
-    expect(await submit()).toMatchObject({ reasoning_effort: 'max' });
+    render(<TaskComposer />);
+    expect(await screen.findByLabelText('Reasoning')).toHaveValue('max');
+    await chooseRepository();
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'do it' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ reasoning_effort: 'max' });
   });
 
   it('sends the chosen level', async () => {

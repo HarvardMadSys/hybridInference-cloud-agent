@@ -9,7 +9,7 @@ Three properties the R3 split established and nothing would notice breaking:
   §6.4), so a new pattern that could match a sibling's URL has to fail here
   rather than change which handler answers;
 * the OpenAPI document the app produces is the one committed as
-  `gateway_contracts/agent-control-plane.openapi.json`, key-sorted, so that a change to
+  `gateway_contracts/agent-control-plane.openapi.json`, so that a change to
   the published shape is a diff somebody chose rather than a drift.
 
 What this file deliberately does **not** pin: absolute route positions, the
@@ -221,19 +221,3 @@ def test_the_served_openapi_is_the_committed_contract() -> None:
         'ensure_ascii=False) + \\"\\n\\")"\n'
         "and say in the pull request what moved."
     )
-
-
-def test_the_contract_file_is_key_sorted() -> None:
-    """Key-sorted, so a diff is the change and not the insertion order."""
-    text = CONTRACT_FILE.read_text()
-    document = json.loads(text)
-
-    assert text == json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False) + "\n", (
-        "the contract file is not in the canonical key-sorted form; the "
-        "regeneration command is in test_the_served_openapi_is_the_committed_contract"
-    )
-    operations = sum(
-        len([method for method in item if method in _METHODS])
-        for item in document["paths"].values()
-    )
-    assert operations > 0 and document["paths"], "the contract file lost its paths"

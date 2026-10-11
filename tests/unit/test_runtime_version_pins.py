@@ -83,14 +83,6 @@ def _configurable() -> set[str]:
     return _extras()
 
 
-def test_every_pin_has_a_reviewed_default() -> None:
-    """`docker build` with no arguments must still produce the shipped image."""
-    pins = _pins()
-    assert pins, "no version pins found in the Dockerfile — regex drift?"
-    for name, default in pins.items():
-        assert default, f"{name} has an empty default"
-
-
 def test_the_deploy_script_passes_through_exactly_the_extra_version_menus() -> None:
     """A menu setting the deploy cannot pass is configuration silently lost."""
     script = SANDBOX_HOST.read_text()

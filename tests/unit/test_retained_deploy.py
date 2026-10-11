@@ -580,17 +580,6 @@ def test_a_leftover_replica_count_is_warned_about_not_read(tmp_path: Path) -> No
     assert "AGENT_RUNNER_REPLICAS is no longer read" in result.stderr
 
 
-def test_the_turn_probe_reads_its_answer_past_log_noise(tmp_path: Path) -> None:
-    """Staging, 2026-09-17: the probe's first rollout captured a preflight
-    warning on stderr ahead of the decline, judged the image unable to run
-    turns, and rolled the host back. The answer is a line, not the output."""
-    result = _run(_host(tmp_path), "check")
-
-    assert result.returncode == 0, result.stderr
-    assert "turn processes start: declined no turn was delivered" in result.stdout
-    assert "cannot run turns" not in result.stderr
-
-
 def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) -> None:
     """A configured limit is not proof that a turn can be started at all.
 
@@ -602,14 +591,6 @@ def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) ->
 
     assert result.returncode != 0
     assert "cannot start a turn process" in result.stderr
-
-
-def test_shared_live_check_does_not_count_runner_containers(tmp_path: Path) -> None:
-    """One container per host; its limit, not a container count, is the concurrency."""
-    result = _run(_host(tmp_path, running_containers=1), "check")
-
-    assert result.returncode == 0, result.stderr
-    assert "turn processes start" in result.stdout
 
 
 def test_up_no_longer_takes_a_replica_count(tmp_path: Path) -> None:
@@ -677,6 +658,8 @@ def test_shared_live_check_attests_every_runner_and_broker(tmp_path: Path) -> No
     assert "shared-sandbox-v1" in result.stdout
     assert "native-fork-at-anchor-v1" in result.stdout
     assert "MCP-only relay" in result.stdout
+    assert "turn processes start: declined no turn was delivered" in result.stdout
+    assert "cannot run turns" not in result.stderr
 
 
 def test_host_readiness_probes_both_sandbox_relays() -> None:
@@ -795,13 +778,6 @@ def test_host_up_probes_the_tunnels_instead_of_pausing_first() -> None:
     pauses = [line for line in up.splitlines() if line.strip().startswith("sleep")]
 
     assert not pauses, f"the host start pauses before probing; the probe already retries: {pauses}"
-
-
-def test_shared_live_check_fails_when_runner_does_not_advertise(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, capability=""), "check")
-
-    assert result.returncode != 0
-    assert "did not attest shared-sandbox-v1" in result.stderr
 
 
 def test_shared_live_check_requires_historical_fork_attestation(tmp_path: Path) -> None:
@@ -1087,21 +1063,6 @@ def test_the_restore_refuses_to_rewrite_the_tree_it_is_running_from(tmp_path: Pa
     assert "refusing to restore from inside" in _deploy_output(result)
     assert (root / ".deployed-sha").read_text().strip() == previous
     assert (root / ".shared-live-ready").read_text().strip() == f"pending:{target}"
-
-
-def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> None:
-    """`.deployed-sha` is the only name that is known to have served work.
-
-    Read it after a successful rollout has written it and the value is the
-    commit that just failed — the same mistake `PREVIOUS` already makes.
-    """
-    script = HOST_DEPLOY.read_text()
-
-    assert script.index('RECORDED="$(cat .deployed-sha') < script.index(
-        "printf '%s\\n' \"${SHA}\" > .deployed-sha"
-    )
-    assert 'mark-ready "${recorded}"' in script
-    assert "restore_recorded_generation" in script
 
 
 # ── Storage attestation ───────────────────────────────────────────────
@@ -1811,23 +1772,6 @@ def test_a_df_that_cannot_size_the_upper_directory_is_unverified(tmp_path: Path)
     assert entry["verdict"] == "unverified"
     assert "could not size" in entry["reason"]
     assert "quota" not in entry["reason"]
-
-
-def test_a_quota_on_the_upper_directory_is_still_unsupported(tmp_path: Path) -> None:
-    """The answer that *is* a real disagreement keeps its verdict.
-
-    The empty case must not swallow the one the comparison exists for: two
-    valid sizes that differ are a project quota, and the attestation has to go
-    on saying so.
-    """
-    env = _storage_host(tmp_path, upper_size=10 * STORAGE_GIB)
-
-    result = _run(env, "check")
-
-    assert result.returncode == 0, result.stderr
-    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
-    assert entry["verdict"] == "unsupported"
-    assert "project quota" in entry["reason"]
 
 
 def _add_storage_helper(

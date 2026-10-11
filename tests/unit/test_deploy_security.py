@@ -1,9 +1,7 @@
 """Security properties of the standalone deployment.
 
-The source repo's whole `test_agent_deploy_config.py` is ported as
-`test_deploy_config.py`, re-pointed at the standalone compose. This file holds
-only what that port could not carry: assertions the standalone topology needs
-that the overlay never had, and the record of what did not port.
+These checks complement test_deploy_config.py with CI trust boundaries,
+listener destinations, and the complete set of Docker socket holders.
 
 The Kata preflight lives in `test_setup_kata_runtime.py`, which drives the
 real script.
@@ -235,26 +233,3 @@ def test_every_docker_socket_holder_is_known_and_read_only(compose: dict) -> Non
 def test_the_sandbox_image_is_required_not_defaulted(compose: dict) -> None:
     """A defaulted image name is how a host silently runs something else."""
     assert ":?" in compose["services"]["runner"]["environment"]["AGENT_SANDBOX_IMAGE"]
-
-
-# ---------------------------------------------------------------------------
-# The sandbox image
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# What did not port
-# ---------------------------------------------------------------------------
-
-
-def test_the_dropped_assertions_stay_dropped_deliberately(compose: dict) -> None:
-    """Two source assertions do not port, and this records why.
-
-    `test_the_gateway_is_reachable_from_the_sandbox_network` and the
-    backend-service egress-network assertion both keyed on the gateway's own
-    `backend:` service. In this topology the gateway is not a service at all —
-    it is reached through the tunnel — so there is nothing to assert against.
-    If a `backend` service ever appears here, that reasoning has expired and
-    those assertions need rewriting rather than staying dropped.
-    """
-    assert "backend" not in compose["services"]

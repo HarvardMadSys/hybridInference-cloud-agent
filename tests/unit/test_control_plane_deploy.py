@@ -235,32 +235,6 @@ def test_control_plane_has_no_shared_claim_credential(control_plane_env: dict) -
     assert "AGENT_DISPATCHER_TOKEN" not in control_plane_env
 
 
-def test_shared_live_readiness_is_proved_before_any_running_service_is_replaced() -> None:
-    """The target host generation must be usable before the API rolls.
-
-    The readiness command is an unconditional compatibility fence for the
-    only supported topology. It is not a switch between legacy and retained
-    execution.
-    """
-    script = DEPLOY_SCRIPT_PATH.read_text()
-    build = script.index("compose build")
-    database = script.index('compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres')
-    migration = script.index("compose run --rm --no-deps migrate")
-    identity = script.index("python -m cloud_agent.identity_namespace --check")
-    running_probe = script.index("compose ps --status running -q control-plane")
-    readiness = script.index("python -m cloud_agent.deploy_readiness")
-    bring_up = script.index("compose up -d --remove-orphans")
-
-    assert build < database < migration < identity < running_probe < readiness < bring_up
-    assert "compose run --rm --no-deps control-plane" in script
-    assert "BOOTSTRAP_SERVICES+=(control-plane)" in script
-    assert "BOOTSTRAP_SERVICES+=(mcp-relay)" in script
-    assert 'compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"' in script
-    assert '--timeout-seconds "${SHARED_READY_TIMEOUT}"' in script
-    assert '--expected-deployment-sha "${SHA}"' in script
-    assert "AGENT_SHARED_LIVE_SANDBOX" not in script
-
-
 def _run_control_deploy(
     tmp_path: Path,
     *,
@@ -338,10 +312,17 @@ def _run_control_deploy(
     )
     curl.chmod(0o755)
 
+    # Failed health probes exercise the real deadline loop without spending
+    # three wall-clock seconds on each retry. Bash's SECONDS is the clock the
+    # script reads, so advancing it preserves the timeout condition.
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text("sleep() { SECONDS=$((SECONDS + $1)); }\n")
+
     result = subprocess.run(
         ["bash", str(DEPLOY_SCRIPT_PATH), sha],
         env={
             **os.environ,
+            "BASH_ENV": str(bash_env),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "SOURCE_REPO": str(source),
             "DEPLOY_ROOT": str(deploy_root),
@@ -388,10 +369,13 @@ def test_a_failed_readiness_probe_never_replaces_the_running_stack(
     result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=17)
 
     assert result.returncode == 17
-    assert " build" in docker_calls
-    assert " up -d --wait --wait-timeout 1 postgres" in docker_calls
-    assert " run --rm --no-deps migrate" in docker_calls
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert (
+        docker_calls.index(" build")
+        < docker_calls.index(" up -d --wait --wait-timeout 1 postgres")
+        < docker_calls.index(" run --rm --no-deps migrate")
+        < docker_calls.index("cloud_agent.identity_namespace --check")
+        < docker_calls.index("cloud_agent.deploy_readiness")
+    )
     assert " up -d --remove-orphans" not in docker_calls
 
 

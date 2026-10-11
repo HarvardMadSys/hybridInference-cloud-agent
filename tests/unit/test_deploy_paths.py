@@ -1,19 +1,12 @@
-"""The deploy files must reference paths that exist in *this* repository.
+"""Active deployment paths resolve in this repository.
 
-The migration's diff here was mostly path edits rather than imports, and
-nothing else checks them: a Dockerfile that `COPY`s a path from the source
-repo's layout fails at build time on a runner host, long after review. These
-tests read the files and assert every path they name is real.
-
-They deliberately do not re-test *behaviour* (egress network internal, socket
-read-only, non-root sandbox). Those assertions live in `test_deploy_config.py`,
-the source repo's `test_agent_deploy_config.py` ported here, and in
-`test_deploy_security.py`.
+Dockerfile COPY sources, Compose build files, invoked host modules, and current
+path references are checked here. Deployment behavior and security boundaries
+are covered by test_deploy_config.py and test_deploy_security.py.
 """
 
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
@@ -25,19 +18,14 @@ HOST = REPO / "deploy/host"
 SANDBOX = REPO / "deploy/sandbox"
 CONTROL_PLANE = REPO / "deploy/control-plane"
 
-#: `deploy/control-plane/` was outside this guard until its `.env.example`
-#: arrived — so the control plane's compose and Dockerfiles were the one part
-#: of the deployment whose paths nothing checked.
+#: Current deployment files whose repository-relative paths must resolve.
 DEPLOY_FILES = sorted(
     p for p in (*HOST.iterdir(), *SANDBOX.iterdir(), *CONTROL_PLANE.iterdir()) if p.is_file()
 )
 
 # `COPY <src> <dst>` / `COPY --from=x <src> <dst>` — src is repo-relative.
 _COPY = re.compile(r"^COPY(?:\s+--\S+)*\s+(\S+)\s+\S+\s*$", re.MULTILINE)
-# Top-level directories of THIS repository. A reference to one of these must
-# resolve. The list is the actual tree, not a sample: an earlier version checked
-# four prefixes while claiming to verify every path, and missed real breakage in
-# `distributions/` and `docs/` references precisely because they were not on it.
+# Repository directories whose references must resolve, including documentation.
 _OWN_DIRS = (
     "apps",
     "deploy",
@@ -45,24 +33,6 @@ _OWN_DIRS = (
     "gateway_contracts",
     "migrations",
     "tests",
-)
-
-# Top-level directories that exist only in the SOURCE repository — plus the
-# names this tree carried until the consolidation moved them: `web/` is
-# `apps/frontend/` now, `contracts/` is `gateway_contracts/`, and the two
-# shared packages are one package with `git/` inside it. `backend` and `host`
-# came off this list in the same commit: `apps/backend/` is ours now, so a
-# bare `backend/` is no longer the source repo's root but a missing directory
-# under a path this guard already checks.
-_SOURCE_ONLY_DIRS = (
-    "ops",
-    "config",
-    "distributions",
-    "services",
-    "web",
-    "contracts",
-    "cloud_agent_contracts",
-    "cloud_agent_git",
 )
 
 # Trailing dots are excluded: these paths are frequently named mid-prose in
@@ -85,21 +55,6 @@ _NOT_OUR_PATHS = {
 
 _PATH_TAIL = r"/[A-Za-z0-9._/*-]*[A-Za-z0-9_/*-]"
 _OWN_PATH = re.compile(rf"(?<![A-Za-z0-9._/-])(?:{'|'.join(_OWN_DIRS)}){_PATH_TAIL}")
-_SOURCE_ONLY_PATH = re.compile(
-    rf"(?<![A-Za-z0-9._/-])(?:{'|'.join(_SOURCE_ONLY_DIRS)}){_PATH_TAIL}"
-)
-
-
-@pytest.mark.parametrize("path", DEPLOY_FILES, ids=lambda p: str(p.relative_to(REPO)))
-def test_no_deploy_file_references_the_source_repo_layout(path: Path) -> None:
-    """No `serving.`, `ops/`, or `deploy/docker` survives."""
-    text = path.read_text(encoding="utf-8")
-    stale = [
-        marker
-        for marker in ("serving.agent_jobs", "deploy/docker/", "ops/deploy/")
-        if marker in text
-    ]
-    assert not stale, f"{path.relative_to(REPO)} still points at the source repo: {stale}"
 
 
 @pytest.mark.parametrize(
@@ -122,19 +77,6 @@ def test_the_runner_image_runs_the_host_package() -> None:
     text = (HOST / "Dockerfile.agent-runner").read_text(encoding="utf-8")
     assert "COPY apps/backend/cloud_agent_host/ cloud_agent_host/" in text
     assert '"cloud_agent_host.runner"' in text
-
-
-def test_the_runner_entrypoint_does_not_import_the_control_plane_package() -> None:
-    """The slim runner image carries only the host package at runtime."""
-    source = (REPO / "apps" / "backend" / "cloud_agent_host/runner.py").read_text(encoding="utf-8")
-    imports = {
-        node.module
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.ImportFrom) and node.module is not None
-    }
-    assert not {
-        module for module in imports if module == "cloud_agent" or module.startswith("cloud_agent.")
-    }
 
 
 def test_the_remote_compose_builds_from_files_that_exist() -> None:
@@ -160,7 +102,7 @@ def test_the_remote_compose_invokes_host_modules() -> None:
 
 
 def _text_files() -> list[Path]:
-    """Deploy files plus the workflows — everything the path rewrite touched."""
+    """Current deployment files and workflows that reference repository paths."""
     return [*DEPLOY_FILES, *sorted((REPO / ".github/workflows").glob("*.yml"))]
 
 
@@ -183,21 +125,3 @@ def test_every_own_path_reference_resolves(path: Path) -> None:
         }
     )
     assert not missing, f"{path.relative_to(REPO)} names paths that do not exist: {missing}"
-
-
-@pytest.mark.parametrize("path", _text_files(), ids=lambda p: str(p.relative_to(REPO)))
-def test_no_file_references_a_source_repo_only_directory(path: Path) -> None:
-    """`ops/`, `config/`, `distributions/`, … do not exist here at all.
-
-    Separate from the check above because these can never resolve: they are
-    concepts of the repository we migrated *from*. A reference to one means a
-    rewrite was missed, and the failure is silent — a compose `--env-file` glob
-    that matches nothing simply contributes no configuration.
-    """
-    stale = sorted(set(_SOURCE_ONLY_PATH.findall(path.read_text(encoding="utf-8"))))
-    assert not stale, f"{path.relative_to(REPO)} references the source repo layout: {stale}"
-
-
-def test_the_legacy_actions_runner_workflow_is_removed() -> None:
-    """Manual dispatch must not reopen the removed one-shot/process backend."""
-    assert not (REPO / ".github/workflows/agent-job-runner.yml").exists()

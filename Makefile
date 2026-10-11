@@ -6,6 +6,8 @@
 #   make lint UV_RUN="uv run --active"
 UV_RUN ?= uv run
 PYTHON_VERSION ?= 3.12
+# Match CI's execution mode; use PYTEST_WORKERS=0 for a serial debugging run.
+PYTEST_WORKERS ?= 4
 
 RESET := \033[0m
 BOLD := \033[1m
@@ -42,7 +44,7 @@ typecheck:  ## Type-check all three packages (mypy; config in pyproject.toml)
 
 test:  ## Run tests (exclude external and db-dependent)
 	@echo "$(YELLOW)Running tests (not external, not dbtest)...$(RESET)"
-	$(UV_RUN) pytest -q -m "not external and not dbtest"
+	$(UV_RUN) pytest -n $(PYTEST_WORKERS) --dist loadfile -q -m "not external and not dbtest"
 	@echo "$(GREEN)OK Tests passed$(RESET)"
 
 test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.md)

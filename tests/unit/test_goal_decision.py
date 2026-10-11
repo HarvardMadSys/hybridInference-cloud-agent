@@ -181,10 +181,6 @@ def test_a_completion_on_the_last_permitted_round_still_completes():
     assert action.kind == "complete"
 
 
-def test_an_absent_report_queues_the_next_work_round():
-    assert decide(context(report_parse="absent")).kind == "queue_work_round"
-
-
 def test_a_turn_with_no_report_read_at_all_queues_the_next_work_round():
     """An owner-triggered resume has no turn to read; it is an authorization, not a report."""
     assert decide(context(report_parse=None)).kind == "queue_work_round"

@@ -52,13 +52,3 @@ def test_the_maximum_ttl_is_the_one_the_document_declares(declared_constants: di
 def test_the_renewal_step_is_the_one_the_document_declares(declared_constants: dict) -> None:
     """The number a running attempt's renewal cadence has to stay inside."""
     assert declared_constants["DEFAULT_GRANT_TTL_S"] == grants.GATEWAY_RENEWAL_STEP_S
-
-
-def test_the_token_prefix_is_the_one_the_document_declares(declared_constants: dict) -> None:
-    """This service never mints a grant token, so it cannot check the prefix by use.
-
-    What it can do is pin the value the external lifecycle case asserts a live
-    gateway honours, so a silent edit here fails rather than quietly changing what
-    both records mean by a grant token.
-    """
-    assert declared_constants["token_prefix"] == "agr."

@@ -4,6 +4,9 @@ import { resolve } from 'node:path';
 export default defineConfig({
   test: {
     setupFiles: ['./vitest.setup.ts'],
+    // Use every available CPU for the isolated workers. Vitest otherwise
+    // reserves one, slowing the jsdom-heavy suite on small CI runners.
+    maxWorkers: '100%',
     // Node 25+ exposes its own experimental Web Storage globals. Vitest sees
     // those names before jsdom is installed and therefore skips jsdom's
     // localStorage/sessionStorage implementations, leaving localStorage

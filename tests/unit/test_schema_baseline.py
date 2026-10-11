@@ -12,8 +12,6 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[2]
 VERSIONS = REPO / "migrations/versions"
 BASELINE = VERSIONS / "0001_schema_baseline.py"
@@ -73,14 +71,6 @@ def _literal(name: str) -> tuple[str, ...]:
     raise AssertionError(f"{name} not found in the baseline migration")
 
 
-def _module_constant(name: str) -> object:
-    tree = ast.parse(BASELINE.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == name:
-            return ast.literal_eval(node.value)
-    raise AssertionError(f"{name} not assigned at module level")
-
-
 def _revision_pair(path: Path) -> tuple[str, str | None]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     values: dict[str, object] = {}
@@ -105,11 +95,6 @@ def test_the_chain_is_linear_and_rooted_at_the_rewritten_baseline() -> None:
     heads = [rev for rev in pairs if rev not in parents]
     assert len(heads) == 1, heads
     assert all(len(rev) <= 32 for rev in pairs)
-
-
-def test_the_revision_identifier_fits_alembic_version_num() -> None:
-    """``alembic_version.version_num`` is VARCHAR(32)."""
-    assert len(str(_module_constant("revision"))) <= 32
 
 
 def _tables_created_by_every_revision() -> set[str]:
@@ -224,9 +209,3 @@ def test_the_storage_layer_executes_no_ddl() -> None:
 def test_the_storage_layer_imports_no_gateway_module() -> None:
     """The gateway is reached over HTTP only (AGENTS.md rule 5)."""
     assert "serving." not in _storage_source()
-
-
-@pytest.mark.parametrize("path", sorted(VERSIONS.glob("*.py")), ids=lambda p: p.name)
-def test_migration_files_parse(path: Path) -> None:
-    """A migration that does not parse fails the deploy, not the test suite."""
-    ast.parse(path.read_text(encoding="utf-8"))

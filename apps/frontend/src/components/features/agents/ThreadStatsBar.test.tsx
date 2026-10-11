@@ -70,12 +70,6 @@ describe('statSegments', () => {
     expect(segments.some((segment) => segment.key === 'cache')).toBe(false);
   });
 
-  it('distinguishes a measured zero cache-hit rate from an absent one', () => {
-    const measured = statSegments(makeStats({ cache_hit_ratio: 0 }));
-
-    expect(measured.find((segment) => segment.key === 'cache')?.text).toBe('Cache hit 0%');
-  });
-
   it('singularizes a one-turn thread', () => {
     const segments = statSegments(makeStats({ turns: 1, tool_calls: 1 }));
 

@@ -43,9 +43,12 @@ EXPECTED_CASES = (
 
 
 @pytest.fixture(scope="module")
-def mypy_run(tmp_path_factory: pytest.TempPathFactory) -> subprocess.CompletedProcess[str]:
+def mypy_run(pytestconfig: pytest.Config, worker_id: str) -> subprocess.CompletedProcess[str]:
     """Run mypy once over the fixture, with the project's own configuration."""
-    cache = tmp_path_factory.mktemp("mypy-negative")
+    # Mypy invalidates changed source/configuration itself. Reuse its import
+    # cache across runs without sharing the production gate's cache, and keep
+    # concurrent pytest workers from writing the same cache files.
+    cache = pytestconfig.cache.mkdir("mypy-negative") / worker_id
     return subprocess.run(
         [
             sys.executable,

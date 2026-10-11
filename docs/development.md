@@ -123,7 +123,7 @@ make check
 | `make format` | Ruff formatting and automatic lint fixes; changes files. |
 | `make lint` | Ruff format check, Ruff lint without fixes, and pydocstyle. |
 | `make typecheck` | Mypy over all three backend packages. |
-| `make test` | Pytest excluding `external` and `dbtest`. |
+| `make test` | Pytest excluding `external` and `dbtest`, with four workers and each file kept on one worker. |
 | `make check` | `format`, `lint`, `typecheck`, then `test`. Review any automatic fixes before committing. |
 | `make test-db` | The PostgreSQL-backed `dbtest` tier. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
@@ -154,11 +154,12 @@ allowing a test run must never grant access to publication's hosts or credential
 These are GitHub administrator settings; repository tests cannot configure or
 verify them.
 
-CI runs the default test tier with four workers and keeps each test file on one
-worker. To use the same execution mode for the local backend gate:
+The default backend test tier uses four workers in both CI and `make test`,
+keeping each test file on one worker. Override the worker count when needed;
+zero disables parallel execution for debugging:
 
 ```bash
-PYTEST_ADDOPTS='-n 4 --dist loadfile' make check
+make check PYTEST_WORKERS=0
 ```
 
 Markers select the test tier. For example, `tests/servers/` contains HTTP-level

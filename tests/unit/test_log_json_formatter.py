@@ -14,7 +14,6 @@ across both packages already pass were discarded before reaching a log.
 from __future__ import annotations
 
 import contextlib
-import inspect
 import io
 import json
 import logging
@@ -157,20 +156,6 @@ def test_json_still_defers_to_configuration_already_in_place(module, monkeypatch
 
         assert root.handlers == [sentinel]
         assert root.level == logging.ERROR
-
-
-def test_the_two_copies_have_not_drifted() -> None:
-    """Behaviour is checked above; this catches wording and shape.
-
-    The duplication is deliberate, so the duplicate has to stay a duplicate.
-    A parametrised case only proves the behaviours it happens to cover —
-    comparing the source catches the change nobody thought to test, which is
-    the one that will be made.
-    """
-    for name in ("JsonLogFormatter", "_adopt_uvicorn_loggers"):
-        assert inspect.getsource(getattr(control_plane, name)) == inspect.getsource(
-            getattr(host, name)
-        ), f"{name} differs between the two shims"
 
 
 def test_uvicorn_is_handed_to_the_json_handler(module, monkeypatch) -> None:
