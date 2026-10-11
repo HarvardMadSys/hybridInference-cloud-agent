@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as client from './client';
 import {
   extendComputeAllocation,
+  createAutomaticComputeSetup,
+  getComputeAutomaticSetup,
   getComputeOperations,
   importComputeResource,
   rotateComputeAllocation,
@@ -37,6 +39,46 @@ function stub(status = 200, body: unknown = {}) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('compute API contracts', () => {
+  it('checks automatic setup availability without caching deployment readiness', async () => {
+    const readiness = { available: true, deployment_sha: 'c'.repeat(40), blocked_reasons: [] };
+    const fetch = stub(200, readiness);
+    const controller = new AbortController();
+    await expect(getComputeAutomaticSetup(controller.signal)).resolves.toEqual(readiness);
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/compute-automatic-setup');
+    expect(fetch.mock.calls[0][2]).toMatchObject({
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  });
+
+  it('creates automatic setup using connection references and a stable intent', async () => {
+    const fetch = stub();
+    const request = {
+      request_id: 'setup-once',
+      gateway: {
+        connection_id: 'gateway-key',
+        address: 'gateway.example.org',
+        port: 22,
+        username: 'operator',
+      },
+      control: {
+        connection_id: 'control-key',
+        address: 'control.example.org',
+        port: 22,
+        username: 'operator',
+      },
+      gateway_port: 8080,
+      chat_network_pool: '172.29.0.0/16',
+      dns_server: '1.1.1.1',
+      protected_cidrs: ['203.0.113.0/24'],
+      slots: 2,
+    };
+    await createAutomaticComputeSetup(request);
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/compute-deployment-profiles/automatic');
+    expect(fetch.mock.calls[0][2]?.method).toBe('POST');
+    expect(JSON.parse(String(fetch.mock.calls[0][2]?.body))).toEqual(request);
+  });
+
   it('requests replacement with a revision and stable intent ID', async () => {
     const fetch = stub();
     const intent = { request_id: 'move-once', expected_revision: 4 };
