@@ -1,14 +1,33 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useSyncExternalStore } from 'react';
 
 import type { AgentRunnerHost, AgentRunnerHostPool, HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
 const auth = vi.hoisted(() => ({ id: 'admin-a', access: undefined as AgentAccessApi | undefined }));
+const search = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  return {
+    value: '',
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    read: () => search.value,
+    set(next: string) {
+      search.value = next;
+      for (const listener of listeners) listener();
+    },
+  };
+});
+vi.mock('next/navigation', () => ({
+  useSearchParams: () => new URLSearchParams(useSyncExternalStore(search.subscribe, search.read)),
+}));
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: auth.id, role: 'free', agent_access: auth.access } } }),
 }));
@@ -28,15 +47,27 @@ vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
   setAgentAdminSettings: vi.fn(),
 }));
+vi.mock('@/lib/api/compute', () => ({
+  getCloudLabDefaults: vi.fn(),
+  saveCloudLabDefaults: vi.fn(),
+}));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
+import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
 import AdminSettingsPage from './page';
 
 const list = vi.mocked(getAgentRunnerHosts);
 const setLimit = vi.mocked(setAgentHostSettings);
 const setVersion = vi.mocked(setAgentRuntimeVersion);
+const cloudLabDefaults = {
+  project: 'mad-cloudlab',
+  duration: 4,
+  profile_project: 'cloud-agent',
+  profile_name: 'kata-node',
+  ssh_username: 'researcher',
+};
 
 const definitions: HostSettingDefinition[] = [
   {
@@ -153,7 +184,7 @@ function submit(control: HTMLElement) {
   fireEvent.submit(control.closest('form')!);
 }
 
-type SettingsTab = 'Application' | 'Agent versions' | 'Sandbox';
+type SettingsTab = 'Application' | 'Agent versions' | 'Sandbox' | 'CloudLab';
 
 function selectSettingsTab(name: SettingsTab) {
   fireEvent.click(screen.getByRole('tab', { name }));
@@ -169,9 +200,18 @@ beforeEach(() => {
   auth.id = 'admin-a';
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   vi.clearAllMocks();
+  window.history.replaceState(null, '', '/admin/settings');
+  search.value = '';
+  const replace = window.history.replaceState.bind(window.history);
+  vi.spyOn(window.history, 'replaceState').mockImplementation((data, unused, url) => {
+    replace(data, unused, url);
+    search.set(window.location.search);
+  });
   list.mockReset().mockResolvedValue(pool());
   setLimit.mockReset();
   setVersion.mockReset();
+  vi.mocked(getCloudLabDefaults).mockReset().mockResolvedValue({ defaults: cloudLabDefaults });
+  vi.mocked(saveCloudLabDefaults).mockReset();
   vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
     revision: 1,
     definitions: [],
@@ -195,6 +235,7 @@ describe('admin Settings', () => {
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(list).not.toHaveBeenCalled();
     expect(getAgentAdminSettings).not.toHaveBeenCalled();
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
   });
 
   it('admits a free account with admin permission and opens Application settings', async () => {
@@ -221,9 +262,9 @@ describe('admin Settings', () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
-    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox'];
-    expect(within(tablist).getAllByRole('tab')).toHaveLength(3);
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(3);
+    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox', 'CloudLab'];
+    expect(within(tablist).getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(4);
 
     for (const name of names) {
       selectSettingsTab(name);
@@ -256,10 +297,76 @@ describe('admin Settings', () => {
       expect(screen.getByRole('tabpanel', { name })).toBeVisible();
     };
     move('ArrowRight', 'Agent versions');
-    move('End', 'Sandbox');
+    move('End', 'CloudLab');
     move('ArrowRight', 'Application');
-    move('ArrowLeft', 'Sandbox');
+    move('ArrowLeft', 'CloudLab');
     move('Home', 'Application');
+  });
+
+  it('opens CloudLab from a deep link and keeps it out of the main Admin navigation', async () => {
+    window.history.replaceState(null, '', '/admin/settings?tab=cloudlab');
+    renderSettings();
+    expect(screen.getByRole('tab', { name: 'CloudLab' })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByLabelText('CloudLab project')).toHaveValue('mad-cloudlab');
+    expect(screen.getByRole('tabpanel', { name: 'CloudLab' })).toBeVisible();
+    const admin = screen.getByRole('navigation', { name: 'Admin sections' });
+    expect(within(admin).queryByRole('link', { name: 'CloudLab' })).not.toBeInTheDocument();
+    expect(within(admin).getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+
+  it('loads CloudLab on first selection and keeps its draft when switching tabs', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
+    selectSettingsTab('CloudLab');
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'draft-project' } });
+    selectSettingsTab('Application');
+    selectSettingsTab('CloudLab');
+    expect(screen.getByLabelText('CloudLab project')).toHaveValue('draft-project');
+    expect(getCloudLabDefaults).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps tab selection in the URL and follows external navigation without losing drafts', async () => {
+    window.history.replaceState(null, '', '/admin/settings?context=keep#details');
+    renderSettings();
+    selectSettingsTab('CloudLab');
+    expect(window.location.search).toBe('?context=keep&tab=cloudlab');
+    expect(window.location.hash).toBe('#details');
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'draft-project' } });
+    act(() => window.history.replaceState(null, '', '/admin/settings?tab=versions'));
+    expect(screen.getByRole('tab', { name: 'Agent versions' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    act(() => window.history.replaceState(null, '', '/admin/settings?tab=cloudlab'));
+    expect(screen.getByRole('tabpanel', { name: 'CloudLab' })).toBeVisible();
+    expect(screen.getByLabelText('CloudLab project')).toHaveValue('draft-project');
+    selectSettingsTab('Application');
+    expect(window.location.search).toBe('');
+  });
+
+  it('uses Application for an unknown tab', async () => {
+    window.history.replaceState(null, '', '/admin/settings?tab=unknown');
+    renderSettings();
+    expect(screen.getByRole('tab', { name: 'Application' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await screen.findByText('No application settings are available.');
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
+  });
+
+  it('hides all Settings content when CloudLab administration is revoked', async () => {
+    vi.mocked(getCloudLabDefaults).mockRejectedValue(new APIError('FORBIDDEN', 'Forbidden', 403));
+    renderSettings('CloudLab');
+    await screen.findByRole('heading', { name: 'Admin access required' });
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('CloudLab project')).not.toBeInTheDocument();
   });
 
   it('preserves unsaved application, version, and sandbox drafts when switching tabs', async () => {
