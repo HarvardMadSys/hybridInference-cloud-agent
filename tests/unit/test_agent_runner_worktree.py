@@ -180,6 +180,20 @@ def test_a_credential_left_on_disk_stops_the_job(tmp_path: Path):
     _assert_no_credential_on_disk(str(tmp_path), "ghs_leaked")
 
 
+def test_the_header_git_is_given_is_what_the_disk_check_looks_for(tmp_path: Path):
+    """Git only ever sees the Basic header, so that is what it could persist."""
+    (tmp_path / ".git").mkdir()
+    header = _auth_env("ghs_leaked")["GIT_CONFIG_VALUE_0"]
+    (tmp_path / ".git" / "config").write_text(f'[http]\n\textraHeader = "{header}"\n')
+    with pytest.raises(WorktreeError, match="credential was written"):
+        _assert_no_credential_on_disk(str(tmp_path), "ghs_leaked")
+
+    encoded = base64.b64encode(b"ghs_leaked").decode()
+    (tmp_path / ".git" / "config").write_text(f"token={encoded}")
+    with pytest.raises(WorktreeError, match="credential was written"):
+        _assert_no_credential_on_disk(str(tmp_path), "ghs_leaked")
+
+
 def test_a_missing_pinned_commit_stops_initialization(tmp_path: Path, remote):
     base, repo, _first, _head = remote
     workdir = tmp_path / "job"

@@ -957,12 +957,16 @@ def _auth_env(clone_token: str | None) -> dict[str, str]:
     """
     if not clone_token:
         return {}
-    basic = base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
     return {
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {_basic_credential(clone_token)}",
     }
+
+
+def _basic_credential(clone_token: str) -> str:
+    """Return the HTTP Basic value git is given for the clone credential."""
+    return base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
 
 
 def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
@@ -975,6 +979,15 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
     """
     if not clone_token:
         return
+    # Git is only ever handed the Basic header value, so that -- not the raw
+    # token -- is what it would persist. The 15-byte ``x-access-token:`` prefix
+    # is a whole number of base64 groups, so the token's own encoding appears
+    # verbatim inside the header value; it is searched for on its own as well.
+    forms = (
+        clone_token,
+        _basic_credential(clone_token),
+        base64.b64encode(clone_token.encode()).decode().rstrip("="),
+    )
     git_dir = pathlib.Path(workdir) / ".git"
     for path in git_dir.rglob("*"):
         # Object and pack files hold repository content, not our configuration,
@@ -987,7 +1000,7 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if clone_token in text:
+        if any(form in text for form in forms):
             raise WorktreeError(
                 f"refusing to run: the clone credential was written to .git/{path.name}, "
                 "which the sandbox would be able to read"
