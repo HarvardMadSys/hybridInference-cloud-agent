@@ -186,7 +186,8 @@ async def test_retry_without_enrollment_uses_persisted_host_credential(tmp_path)
         fileobj=io.BytesIO(transport.run.call_args.kwargs["stdin"]), mode="r:gz"
     ) as archive:
         assert b"AGENT_ENROLL_TOKEN" not in archive.extractfile(".env").read()
-    assert "credential" not in _DEPLOY.split("unlink")[0] or "unlink" not in _DEPLOY
+    params = json.loads(shlex.split(transport.run.call_args.args[1])[-1])
+    assert params["reenroll"] is False
 
 
 @pytest.mark.asyncio

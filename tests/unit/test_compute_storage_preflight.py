@@ -31,9 +31,14 @@ def disk(tmp_path, monkeypatch):
         bind_sources={},
         inventories={},
         sudo_inspected=False,
+        daemon_active=True,
+        socket_active=True,
+        daemon_root="/var/lib/docker",
+        readonly=set(),
     )
     original_path = pathlib.Path
     original_samefile = os.path.samefile
+    original_statvfs = os.statvfs
 
     def logical(value):
         return str(value).replace(str(root), "")
@@ -48,6 +53,11 @@ def disk(tmp_path, monkeypatch):
         if machine.bind_sources.get(logical(target)) == logical(source):
             return True
         return original_samefile(source, target)
+
+    def statvfs(path):
+        if logical(path) in machine.readonly:
+            return SimpleNamespace(f_flag=os.ST_RDONLY)
+        return original_statvfs(path)
 
     def run(args, **kwargs):
         command = [logical(arg) for arg in args]
@@ -70,12 +80,15 @@ def disk(tmp_path, monkeypatch):
             ["docker", "image", "ls", "-aq"],
             ["docker", "volume", "ls", "-q"],
         ):
+            if not machine.daemon_active and machine.socket_active:
+                machine.daemon_active = True
             code, output = machine.inventories.get(tuple(command), (0, ""))
             return subprocess.CompletedProcess(command, code, output, "")
         raise AssertionError(f"Preflight must only issue read-only commands: {command}")
 
     monkeypatch.setattr("pathlib.Path", isolated_path)
     monkeypatch.setattr("os.path.samefile", samefile)
+    monkeypatch.setattr("os.statvfs", statvfs)
     monkeypatch.setattr("os.geteuid", lambda: 0)
     monkeypatch.setattr("platform.machine", lambda: "x86_64")
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
@@ -158,15 +171,18 @@ def test_store_path_conflicts_are_reported_without_mutation(
 
 
 @pytest.mark.parametrize("source", ["missing", "wrong", "correct"])
-def test_existing_store_mount_must_match_the_selected_disk(disk, monkeypatch, capsys, source):
-    target = disk.root / "var/lib/containerd"
+@pytest.mark.parametrize("store", ["docker", "containerd"])
+def test_existing_store_mount_must_match_the_selected_disk(
+    disk, monkeypatch, capsys, source, store
+):
+    target = disk.root / f"var/lib/{store}"
     target.mkdir()
     (target / "retained-state").write_text("keep")
-    disk.mounted.add("/var/lib/containerd")
+    disk.mounted.add(f"/var/lib/{store}")
     if source != "missing":
-        (disk.root / "mydata/containerd").mkdir()
-    disk.bind_sources["/var/lib/containerd"] = (
-        "/mydata/containerd" if source == "correct" else "/other-disk/containerd"
+        (disk.root / f"mydata/{store}").mkdir()
+    disk.bind_sources[f"/var/lib/{store}"] = (
+        f"/mydata/{store}" if source == "correct" else f"/other-disk/{store}"
     )
     checks = inspect(disk, monkeypatch, capsys)
     assert checks["data_mount_available"]
@@ -185,29 +201,52 @@ def test_unmounted_containerd_state_blocks_even_when_docker_inventory_is_empty(
 
 
 @pytest.mark.parametrize(
-    "command",
-    [["docker", "ps", "-aq"], ["docker", "image", "ls", "-aq"], ["docker", "volume", "ls", "-q"]],
+    ("daemon_active", "daemon_root"),
+    [(True, "/var/lib/docker"), (False, "/var/lib/docker"), (True, "/other-disk/docker")],
 )
-@pytest.mark.parametrize("inventory", [(0, "retained-object"), (1, "")])
-def test_nonempty_docker_store_requires_complete_empty_inventories(
-    disk, monkeypatch, capsys, command, inventory
+def test_nonempty_unmounted_docker_store_is_preserved_without_contacting_any_daemon(
+    disk, monkeypatch, capsys, daemon_active, daemon_root
 ):
     target = disk.root / "var/lib/docker"
     target.mkdir()
-    (target / "engine-metadata").write_text("initial daemon metadata")
-    disk.inventories[tuple(command)] = inventory
+    (target / "retained-state").write_text("user state outside the active daemon")
+    disk.daemon_active = daemon_active
+    disk.daemon_root = daemon_root
     checks = inspect(disk, monkeypatch, capsys)
     assert checks["data_mount_available"]
     assert not checks["data_mount_conflict_free"]
+    assert disk.daemon_active is daemon_active
+    assert not any(command[0] == "docker" for command in disk.calls)
 
 
-def test_initial_docker_metadata_with_empty_inventories_can_use_the_disk(disk, monkeypatch, capsys):
+def test_initial_docker_metadata_also_requires_explicit_operator_cleanup(disk, monkeypatch, capsys):
     target = disk.root / "var/lib/docker"
     target.mkdir()
     (target / "engine-metadata").write_text("initial daemon metadata")
     checks = inspect(disk, monkeypatch, capsys)
-    assert checks["data_mount_available"] and checks["data_mount_conflict_free"]
-    assert ["docker", "volume", "ls", "-q"] in disk.calls
+    assert checks["data_mount_available"]
+    assert not checks["data_mount_conflict_free"]
+    assert not any(command[0] == "docker" for command in disk.calls)
+
+
+@pytest.mark.parametrize(
+    "readonly_path",
+    ["/mydata", "/mydata/docker", "/mydata/containerd", "/var/lib/docker", "/var/lib/containerd"],
+)
+def test_readonly_disk_or_store_is_unavailable_without_mutation(
+    disk, monkeypatch, capsys, readonly_path
+):
+    path = disk.root / readonly_path.lstrip("/")
+    path.mkdir(parents=True, exist_ok=True)
+    if readonly_path == "/var/lib/docker":
+        (disk.root / "mydata/docker").mkdir()
+        disk.mounted.add(readonly_path)
+        disk.bind_sources[readonly_path] = "/mydata/docker"
+    disk.readonly.add(readonly_path)
+    checks = inspect(disk, monkeypatch, capsys)
+    assert not checks["data_mount_available"]
+    assert not checks["data_mount_conflict_free"]
+    assert not any(command[0] in {"docker", "systemctl", "mount"} for command in disk.calls)
 
 
 def test_management_user_inspects_root_owned_storage_through_sudo(disk, monkeypatch, capsys):

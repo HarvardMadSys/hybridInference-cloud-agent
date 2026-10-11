@@ -66,17 +66,21 @@ checks = {
 }
 if params.get('data_mount'):
     # Root-owned daemon stores need privileged inspection. This helper only
-    # reads paths and inventories; preflight never mounts or changes state.
+    # reads paths and mount state; preflight never mounts or changes state.
     storage_script = r'''
-import json, os, shutil, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 def inspect_storage(data_mount):
     result = {'data_mount_available': False, 'data_mount_conflict_free': False}
     quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
     try:
         base = Path(data_mount)
-        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode:
+        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode or os.statvfs(base).f_flag & os.ST_RDONLY:
             return result
+        for name in ('docker', 'containerd'):
+            for path in (base / name, Path('/var/lib') / name):
+                if path.is_dir() and os.statvfs(path).f_flag & os.ST_RDONLY:
+                    return result
         result['data_mount_available'] = True
         for name in ('docker', 'containerd'):
             source, target = base / name, Path('/var/lib') / name
@@ -89,14 +93,9 @@ def inspect_storage(data_mount):
                 if not source.is_dir() or not os.path.samefile(source, target):
                     return result
             elif target.is_dir() and any(target.iterdir()):
-                # Docker's inventory cannot prove that a separate containerd
-                # store has no retained objects. Never hide that store.
-                if name == 'containerd' or not shutil.which('docker'):
-                    return result
-                for command in (['docker', 'ps', '-aq'], ['docker', 'image', 'ls', '-aq'], ['docker', 'volume', 'ls', '-q']):
-                    listed = subprocess.run(command, capture_output=True, text=True)
-                    if listed.returncode or listed.stdout.strip():
-                        return result
+                # An unrelated daemon's inventories cannot attest these files.
+                # Do not query Docker: that could socket-activate user workloads.
+                return result
         result['data_mount_conflict_free'] = True
     except OSError:
         pass
@@ -128,9 +127,22 @@ print(json.dumps({'machine_identity': hashlib.sha256(machine.encode()).hexdigest
 # Existing installations require our persisted identity marker. A retry uses
 # the same identity and flock; it cannot overwrite or enroll a different Host.
 _DEPLOY = r"""
-import fcntl, io, json, os, shutil, subprocess, sys, tarfile
+import fcntl, io, json, os, subprocess, sys, tarfile
 from pathlib import Path
 params = json.loads(sys.argv[1])
+def storage_available(base):
+    try:
+        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            return False
+        paths = [base] + [path for name in ('docker', 'containerd') for path in (base / name, Path('/var/lib') / name) if path.is_dir()]
+        return not any(os.statvfs(path).f_flag & os.ST_RDONLY for path in paths)
+    except OSError:
+        return False
+# Reject an unavailable or read-only disk before even changing the deployment
+# checkout. The later check still guards changes between inspection and use.
+if params.get('data_mount') and not storage_available(Path(params['data_mount'])):
+    print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_unavailable']}))
+    raise SystemExit(0)
 root = Path(params['root'])
 identity = params['identity']
 root.parent.mkdir(parents=True, exist_ok=True)
@@ -168,16 +180,11 @@ with open(lock_path, 'a') as lock:
     def run(step, args):
         if subprocess.run(args, cwd=root, env=environment, **quiet).returncode:
             blocked(step)
-    def listed(args):
-        result = subprocess.run(args, capture_output=True, text=True)
-        if result.returncode:
-            blocked('data_mount_conflict')
-        return result.stdout.strip()
     if params.get('data_mount'):
         # Keep Docker's and containerd's default paths, but on the provider's
         # large local disk: a Host's whole state is what moves between nodes.
         base = Path(params['data_mount'])
-        if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], **quiet).returncode:
+        if not storage_available(base):
             blocked('data_mount_unavailable')
         fstab = Path('/etc/fstab')
         stores = []
@@ -194,36 +201,21 @@ with open(lock_path, 'a') as lock:
                 # An already mounted daemon must use this Host's selected disk.
                 # Never accept or replace a different store on a retry.
                 blocked('data_mount_conflict')
-            if name == 'containerd' and not mounted and any(target.iterdir()):
-                # Docker cannot attest other containerd namespaces (for
-                # example Kubernetes). Never discard a nonempty shared store.
+            if not mounted and any(target.iterdir()):
+                # Neither store may be hidden or reclaimed from an unrelated
+                # daemon's inventory. Retained files are never discarded here.
                 blocked('data_mount_conflict')
             stores.append((name, source, target, mounted))
         unmounted = [target for _, _, target, mounted in stores if not mounted]
-        cleanup = any(any(target.iterdir()) for target in unmounted)
-        if cleanup:
-            # Verify Docker's store once, while its daemon is still running. Never
-            # hide containers, images or volumes beneath a new bind mount.
-            if not shutil.which('docker') or listed(['docker', 'ps', '-aq']) or listed(['docker', 'image', 'ls', '-aq']) or listed(['docker', 'volume', 'ls', '-q']):
-                blocked('data_mount_conflict')
         active_daemons = [name for name in ('docker.socket', 'docker', 'containerd') if subprocess.run(['systemctl', 'is-active', '--quiet', name], **quiet).returncode == 0] if unmounted else []
-        if unmounted and (cleanup or active_daemons):
+        if unmounted and active_daemons:
             run('data_mount_failed', ['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'])
         # Recheck after stopping: a daemon may have populated an initially
-        # empty containerd store while its disk was being inspected.
-        if any(target.name == 'containerd' and any(target.iterdir()) for target in unmounted):
+        # empty store while its disk was being inspected.
+        if any(any(target.iterdir()) for target in unmounted):
             if active_daemons:
                 run('data_mount_failed', ['systemctl', 'start', *active_daemons])
             blocked('data_mount_conflict')
-        if cleanup:
-            for target in unmounted:
-                if target.name == 'containerd':
-                    continue
-                for child in target.iterdir():
-                    if child.is_dir() and not child.is_symlink():
-                        shutil.rmtree(child)
-                    else:
-                        child.unlink()
         for name, source, target, mounted in stores:
             if not mounted:
                 run('data_mount_failed', ['mount', '--bind', str(source), str(target)])

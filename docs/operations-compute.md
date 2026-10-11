@@ -61,7 +61,8 @@ resource visible and does not destroy it.
 ### Sandbox storage path
 
 When adding or creating a server, enter **Sandbox storage path**, for example
-`/mydata`. This must be an existing mounted data disk on the remote server.
+`/mydata`. This must be an existing writable mounted data disk on the remote
+server.
 Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
 and `<path>/containerd`, binding these directories to the daemons' standard
 `/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
@@ -70,10 +71,10 @@ Attachment preflight checks the selected disk without changing the host;
 deployment checks it again before preparing storage.
 
 The path is saved with the allocation and reused on retries and replacement
-nodes, where the same mount must exist. A missing mount, symlink or conflicting
-existing store blocks setup. A nonempty containerd store outside the selected
-mount also blocks setup, since it may hold workloads that Docker cannot list.
-Bootstrap never moves existing sandbox data to a
+nodes, where the same mount must exist. A missing or read-only mount, symlink or
+conflicting existing store blocks setup. Any nonempty Docker or containerd store
+outside the selected mount also blocks setup. Preflight does not query or start
+these daemons, and bootstrap never deletes or moves existing sandbox data to a
 different disk. Daemon startup requires the configured disk and bind mount after
 a reboot. Older API clients that omit `sandbox_storage_path` continue to
 use the operator profile's `data_mount` configuration.
