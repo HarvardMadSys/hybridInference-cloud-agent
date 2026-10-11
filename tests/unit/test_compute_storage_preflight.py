@@ -121,11 +121,14 @@ def snapshot(root):
     }
 
 
-def inspect(disk, monkeypatch, capsys, *, selected="/mydata", install=True):
+def inspect(disk, monkeypatch, capsys, *, selected="/mydata", install=True, deployment=None):
     before = snapshot(disk.root)
+    parameters = {"data_mount": selected, "install_prerequisites": install}
+    if deployment is not None:
+        parameters["deployment"] = deployment
     monkeypatch.setattr(
         "sys.argv",
-        ["preflight", json.dumps({"data_mount": selected, "install_prerequisites": install})],
+        ["preflight", json.dumps(parameters)],
     )
     exec(_PREFLIGHT, {})
     assert snapshot(disk.root) == before
@@ -198,7 +201,18 @@ def test_existing_store_mount_must_match_the_selected_disk(
     disk.bind_sources[f"/var/lib/{store}"] = (
         f"/mydata/{store}" if source == "correct" else f"/other-disk/{store}"
     )
-    checks = inspect(disk, monkeypatch, capsys)
+    other = "containerd" if store == "docker" else "docker"
+    for directory in (disk.root / f"mydata/{other}", disk.root / f"var/lib/{other}"):
+        directory.mkdir()
+    disk.mounted.add(f"/var/lib/{other}")
+    disk.bind_sources[f"/var/lib/{other}"] = f"/mydata/{other}"
+    root = disk.root / "managed"
+    root.mkdir()
+    identity = {"host": "managed"}
+    (root / ".compute-identity.json").write_text(json.dumps(identity))
+    checks = inspect(
+        disk, monkeypatch, capsys, deployment={"root": str(root), "identity": identity}
+    )
     assert checks["data_mount_available"]
     assert checks["data_mount_conflict_free"] is (source == "correct")
 

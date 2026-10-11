@@ -399,9 +399,12 @@ def test_correctly_bound_existing_stores_are_retained_without_inventory(
             retained.append(state)
         machine.mounted.add(f"/var/lib/{store}")
         machine.bind_sources[f"/var/lib/{store}"] = f"/mydata/{store}"
+    root = tmp_path / "deploy"
+    root.mkdir()
+    (root / ".compute-identity.json").write_text(json.dumps(IDENTITY))
     result = run_remote(
         _DEPLOY,
-        deploy_params(tmp_path / "deploy", activate=False, install=False),
+        deploy_params(root, activate=False, install=False),
         monkeypatch,
         capsys,
         stdin=payload(),

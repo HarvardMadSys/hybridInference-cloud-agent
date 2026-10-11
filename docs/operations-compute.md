@@ -73,9 +73,14 @@ deployment checks it again before preparing storage.
 The path is saved with the allocation and reused on retries and replacement
 nodes, where the same mount must exist. A missing or read-only mount, symlink or
 conflicting existing store blocks setup. Any nonempty Docker or containerd store
-outside the selected mount also blocks setup. Preflight does not query or start
-these daemons, and bootstrap never deletes or moves existing sandbox data to a
-different disk. Docker and containerd must use their default `/var/lib/docker`
+outside the selected mount also blocks setup. New hosts require empty `docker`
+and `containerd` directories on the selected disk. Deployment retries can reuse
+nonempty directories only when the existing deployment identity matches and
+both daemon directories are already bound to those same storage directories.
+Retained data with missing binds requires operator repair before retrying.
+Preflight does not query or start these daemons, and bootstrap never deletes or
+moves existing sandbox data to a different disk. Docker and containerd must use
+their default `/var/lib/docker`
 and `/var/lib/containerd` data directories. Setup rejects custom daemon storage
 configuration before restarting services.
 Daemon startup requires the configured disk and bind mount after

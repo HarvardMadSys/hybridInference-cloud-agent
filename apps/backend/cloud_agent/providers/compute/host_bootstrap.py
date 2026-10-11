@@ -48,8 +48,35 @@ if TYPE_CHECKING:
 # The two remote entrypoints use the same read-only daemon configuration guard.
 # Never ask a daemon for this evidence: a socket request can start workloads.
 _DAEMON_STORAGE_GUARD = r"""
-import json, re, shlex, subprocess
+import json, os, re, shlex, subprocess
 from pathlib import Path
+def deployment_storage_owned(deployment):
+    if not isinstance(deployment, dict) or not isinstance(deployment.get('identity'), dict):
+        return False
+    try:
+        root = Path(deployment['root'])
+        marker = root / '.compute-identity.json'
+        return root.is_dir() and root.resolve() == root and not root.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.resolve() == marker and json.loads(marker.read_text()) == deployment['identity']
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+def storage_state_compatible(base, owned):
+    try:
+        nonempty = False
+        bound = True
+        for name in ('docker', 'containerd'):
+            source, target = base / name, Path('/var/lib') / name
+            if any(path.is_symlink() or path.resolve() != path or path.exists() and not path.is_dir() for path in (source, target)):
+                return False
+            mounted = target.is_dir() and subprocess.run(['mountpoint', '-q', str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            if mounted and (not source.is_dir() or not os.path.samefile(source, target)):
+                return False
+            nonempty = nonempty or any(path.is_dir() and any(path.iterdir()) for path in (source, target))
+            bound = bound and mounted
+        # A marker alone cannot authorize a newly substituted disk. Both daemon
+        # stores must already be bound to this exact managed deployment.
+        return not nonempty or owned and bound
+    except OSError:
+        return False
 def _default_path(value, expected):
     return isinstance(value, str) and value.rstrip('/') == expected
 def _toml_key_path(value):
@@ -224,7 +251,7 @@ if params.get('data_mount'):
     storage_script = r'''
 import json, os, subprocess, sys
 from pathlib import Path
-def inspect_storage(data_mount, allow_missing=True):
+def inspect_storage(data_mount, allow_missing=True, deployment=None):
     result = {'data_mount_available': False, 'data_mount_conflict_free': False}
     quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
     try:
@@ -238,20 +265,8 @@ def inspect_storage(data_mount, allow_missing=True):
         result['data_mount_available'] = True
         if not daemon_storage_default(allow_missing):
             return result
-        for name in ('docker', 'containerd'):
-            source, target = base / name, Path('/var/lib') / name
-            if source.is_symlink() or source.resolve() != source or target.is_symlink() or target.resolve() != target:
-                return result
-            if (source.exists() and not source.is_dir()) or (target.exists() and not target.is_dir()):
-                return result
-            mounted = target.is_dir() and subprocess.run(['mountpoint', '-q', str(target)], **quiet).returncode == 0
-            if mounted:
-                if not source.is_dir() or not os.path.samefile(source, target):
-                    return result
-            elif target.is_dir() and any(target.iterdir()):
-                # An unrelated daemon's inventories cannot attest these files.
-                # Do not query Docker: that could socket-activate user workloads.
-                return result
+        if not storage_state_compatible(base, deployment_storage_owned(deployment)):
+            return result
         result['data_mount_conflict_free'] = True
     except OSError:
         pass
@@ -260,10 +275,10 @@ def inspect_storage(data_mount, allow_missing=True):
     if os.geteuid() == 0:
         storage = {}
         exec(storage_script, storage)
-        checks.update(storage['inspect_storage'](params['data_mount'], params.get('install_prerequisites', True)))
+        checks.update(storage['inspect_storage'](params['data_mount'], params.get('install_prerequisites', True), params.get('deployment')))
     elif root:
         inspected = subprocess.run(
-            ['sudo', '-n', 'python3', '-c', storage_script + "\nparams = json.loads(sys.argv[1]); print(json.dumps(inspect_storage(params['data_mount'], params.get('install_prerequisites', True))))", json.dumps(params)],
+            ['sudo', '-n', 'python3', '-c', storage_script + "\nparams = json.loads(sys.argv[1]); print(json.dumps(inspect_storage(params['data_mount'], params.get('install_prerequisites', True), params.get('deployment'))))", json.dumps(params)],
             capture_output=True, text=True,
         )
         try:
@@ -278,8 +293,9 @@ print(json.dumps({'machine_identity': hashlib.sha256(machine.encode()).hexdigest
     'operating_system': osinfo.get('ID', '') + ':' + osinfo.get('VERSION_ID', ''),
     'architecture': platform.machine(), 'checks': checks}))
 """.replace(
-    "def inspect_storage(data_mount, allow_missing=True):",
-    _DAEMON_STORAGE_GUARD + "\ndef inspect_storage(data_mount, allow_missing=True):",
+    "def inspect_storage(data_mount, allow_missing=True, deployment=None):",
+    _DAEMON_STORAGE_GUARD
+    + "\ndef inspect_storage(data_mount, allow_missing=True, deployment=None):",
 )
 
 # Executed with sudo and a tar stream on stdin, never a secret command argument.
@@ -291,6 +307,9 @@ _DEPLOY = (
 import fcntl, io, json, os, subprocess, sys, tarfile
 from pathlib import Path
 params = json.loads(sys.argv[1])
+root = Path(params['root'])
+identity = params['identity']
+owned_storage = deployment_storage_owned({'root': str(root), 'identity': identity})
 def storage_available(base):
     try:
         if base.is_symlink() or base.resolve() != base or not base.is_dir() or subprocess.run(['mountpoint', '-q', str(base)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
@@ -307,8 +326,9 @@ if params.get('data_mount') and not storage_available(Path(params['data_mount'])
 if params.get('data_mount') and not daemon_storage_default(params['install']):
     print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
     raise SystemExit(0)
-root = Path(params['root'])
-identity = params['identity']
+if params.get('data_mount') and not storage_state_compatible(Path(params['data_mount']), owned_storage):
+    print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
+    raise SystemExit(0)
 root.parent.mkdir(parents=True, exist_ok=True)
 if root.is_symlink() or root.resolve() != root:
     raise SystemExit('unsafe deployment root')
@@ -318,6 +338,11 @@ if lock_path.is_symlink():
 with open(lock_path, 'a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     marker = root / '.compute-identity.json'
+    # Capture ownership before this invocation can create its own marker.
+    owned_storage = deployment_storage_owned({'root': str(root), 'identity': identity})
+    if params.get('data_mount') and not storage_state_compatible(Path(params['data_mount']), owned_storage):
+        print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
+        raise SystemExit(0)
     if root.exists() and any(root.iterdir()):
         if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != identity:
             raise SystemExit('existing deployment identity conflict')
@@ -354,6 +379,8 @@ with open(lock_path, 'a') as lock:
             blocked('data_mount_unavailable')
         if not daemon_storage_default(params['install']):
             blocked('data_mount_conflict')
+        if not storage_state_compatible(base, owned_storage):
+            blocked('data_mount_conflict')
         fstab = Path('/etc/fstab')
         stores = []
         for name in ('docker', 'containerd'):
@@ -380,7 +407,7 @@ with open(lock_path, 'a') as lock:
             run('data_mount_failed', ['systemctl', 'stop', 'docker.socket', 'docker', 'containerd'])
         # Recheck after stopping: a daemon may have populated an initially
         # empty store while its disk was being inspected.
-        if any(any(target.iterdir()) for target in unmounted):
+        if not storage_state_compatible(base, owned_storage):
             if active_daemons:
                 run('data_mount_failed', ['systemctl', 'start', *active_daemons])
             blocked('data_mount_conflict')
@@ -514,20 +541,26 @@ class SshHostBootstrap:
 
     async def preflight(self, node: NodeObservation, profile: DeploymentProfile) -> PreflightResult:
         """Verify identity, prerequisites and selected storage without changing state."""
+        return await self._preflight(node, profile)
+
+    async def _preflight(
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        *,
+        deployment: dict[str, Any] | None = None,
+    ) -> PreflightResult:
+        """Only an existing allocation may attest ownership of retained storage."""
         data_mount = profile.sandbox_storage_path or profile.data_mount
+        parameters: dict[str, Any] = {
+            "data_mount": data_mount,
+            "install_prerequisites": profile.install_prerequisites,
+        }
+        if deployment is not None:
+            parameters["deployment"] = deployment
         text = await self._transport.run(
             self._connection(node),
-            "python3 -c "
-            + shlex.quote(_PREFLIGHT)
-            + " "
-            + shlex.quote(
-                json.dumps(
-                    {
-                        "data_mount": data_mount,
-                        "install_prerequisites": profile.install_prerequisites,
-                    }
-                )
-            ),
+            "python3 -c " + shlex.quote(_PREFLIGHT) + " " + shlex.quote(json.dumps(parameters)),
         )
         result = self._json(text)
         checks = result.get("checks", {})
@@ -794,7 +827,9 @@ class SshHostBootstrap:
         intent: BootstrapIntent,
         enrollment_token: SecretStr | None,
     ) -> BootstrapResult:
-        preflight = await self.preflight(node, profile)
+        preflight = await self._preflight(
+            node, profile, deployment={"root": params["root"], "identity": params["identity"]}
+        )
         if not preflight.ready:
             return BootstrapResult(
                 ready=False,

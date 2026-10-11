@@ -161,6 +161,11 @@ async def test_selected_storage_path_is_used_by_bootstrap_and_daemon_attestation
     params = json.loads(shlex.split(transport.run.call_args.args[1])[-1])
     assert params["data_mount"] == "/sandbox-disk"
     assert params["identity"]["sandbox_storage_path"] == "/sandbox-disk"
+    preflight_params = json.loads(shlex.split(transport.run.await_args_list[0].args[1])[-1])
+    assert preflight_params["deployment"] == {
+        "root": params["root"],
+        "identity": params["identity"],
+    }
     with tarfile.open(
         fileobj=io.BytesIO(transport.run.call_args.kwargs["stdin"]), mode="r:gz"
     ) as archive:
