@@ -134,6 +134,433 @@ describe('grouped tool calls', () => {
     <EventRow event={event} blockKey={blockKey} />
   );
 
+  it('merges alternating reasoning and tool batches into one inspectable activity', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the project.', attemptNo: 1, sourceEventId: 1 },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'pwd',
+        input: { command: 'pwd' },
+        output: ['/workspace'],
+        attemptNo: 1,
+        sourceEventId: 2,
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Read',
+        detail: 'README.md',
+        input: { file_path: 'README.md' },
+        output: ['Project overview'],
+        attemptNo: 1,
+        sourceEventId: 3,
+      },
+      { kind: 'thinking', text: 'Find the relevant files.', attemptNo: 1, sourceEventId: 4 },
+      {
+        kind: 'tool_use',
+        tool: 'Glob',
+        detail: 'src/**/*.ts',
+        input: { pattern: 'src/**/*.ts' },
+        output: ['src/router.ts'],
+        attemptNo: 1,
+        sourceEventId: 5,
+      },
+      { kind: 'thinking', text: 'Check the implementation.', attemptNo: 1, sourceEventId: 6 },
+      {
+        kind: 'tool_use',
+        tool: 'Read',
+        detail: 'src/router.ts',
+        input: { file_path: 'src/router.ts', offset: 20 },
+        output: ['Router implementation'],
+        attemptNo: 1,
+        sourceEventId: 7,
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'npm test',
+        input: { command: 'npm test', timeout: 0 },
+        output: ['All tests passed'],
+        attemptNo: 1,
+        sourceEventId: 8,
+      },
+      { kind: 'thinking', text: 'Prepare the response.', attemptNo: 1, sourceEventId: 9 },
+    ];
+    render(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
+
+    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const calls = screen.getByRole('list', { name: 'Tool calls' });
+    const chips = within(calls).getAllByRole('listitem');
+    expect(chips.map((chip) => within(chip).getByText(/^(Bash|Read|Glob):/).textContent)).toEqual([
+      'Bash: pwd',
+      'Read: README.md',
+      'Glob: src/**/*.ts',
+      'Read: src/router.ts',
+      'Bash: npm test',
+    ]);
+    for (const chip of chips) {
+      expect(within(chip).getByText('Result received')).toBeVisible();
+    }
+    expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
+      'ajob_1:e2',
+      'ajob_1:e3',
+      'ajob_1:e5',
+      'ajob_1:e7',
+      'ajob_1:e8',
+    ]);
+    for (const event of events) {
+      expect(
+        document.querySelectorAll(`[data-block-key="ajob_1:e${event.sourceEventId}"]`),
+      ).toHaveLength(1);
+      if (event.kind === 'thinking') expect(screen.queryByText(event.text)).not.toBeInTheDocument();
+      if (event.kind === 'tool_use') expect(screen.getByText(event.output![0])).not.toBeVisible();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Show tool calls' }));
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    const details = document.getElementById(hide.getAttribute('aria-controls')!)!;
+    expect(
+      within(details)
+        .getAllByText(/· Call \d$/)
+        .map((heading) => heading.textContent),
+    ).toEqual([
+      'Bash · Call 1',
+      'Read · Call 2',
+      'Glob · Call 3',
+      'Read · Call 4',
+      'Bash · Call 5',
+    ]);
+    expect(details).toHaveTextContent('"command": "pwd"');
+    expect(details).toHaveTextContent('"file_path": "README.md"');
+    expect(details).toHaveTextContent('"pattern": "src/**/*.ts"');
+    expect(details).toHaveTextContent('"offset": 20');
+    expect(details).toHaveTextContent('"command": "npm test"');
+    expect(details).toHaveTextContent('"timeout": 0');
+    for (const event of events) {
+      if (event.kind === 'tool_use') expect(screen.getByText(event.output![0])).toBeVisible();
+    }
+    expect(details.querySelectorAll('[data-block-key]')).toHaveLength(0);
+  });
+
+  it('folds all merged completed events in Compact and expands their calls in Detailed', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the files.', attemptNo: 1, sourceEventId: 1 },
+      {
+        kind: 'tool_use',
+        tool: 'Read',
+        detail: 'README.md',
+        input: { file_path: 'README.md' },
+        output: ['Project documentation'],
+        resultState: 'received',
+        attemptNo: 1,
+        sourceEventId: 2,
+      },
+      { kind: 'thinking', text: 'Verify the change.', attemptNo: 1, sourceEventId: 3 },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'npm test',
+        input: { command: 'npm test' },
+        output: ['Tests passed'],
+        resultState: 'received',
+        attemptNo: 1,
+        sourceEventId: 4,
+      },
+      { kind: 'thinking', text: 'Prepare the answer.', attemptNo: 1, sourceEventId: 5 },
+      { kind: 'message', text: 'The change is ready.', attemptNo: 1, sourceEventId: 6 },
+    ];
+    const inspect = vi.fn();
+    const props = { events, jobId, renderEvent, completed: true, onInspectEvent: inspect };
+    const { rerender } = render(<EventList {...props} presentation="compact" />);
+    const anchors = events.map((event) => {
+      const matches = document.querySelectorAll(
+        `[data-block-key="ajob_1:e${event.sourceEventId}"]`,
+      );
+      expect(matches).toHaveLength(1);
+      return matches[0];
+    });
+    expect(anchors[0]).not.toBeVisible();
+    expect(anchors[1]).not.toBeVisible();
+    expect(anchors[5]).toBeVisible();
+    expect(screen.getByText('The change is ready.')).toBeVisible();
+    expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show process (5)' }));
+    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const calls = screen.getByRole('list', { name: 'Tool calls' });
+    const chips = within(calls).getAllByRole('listitem');
+    expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
+      'ajob_1:e2',
+      'ajob_1:e4',
+    ]);
+    const disclosure = screen.getByRole('button', { name: 'Show tool calls' });
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByText('Project documentation')).not.toBeVisible();
+    expect(screen.getByText('Tests passed')).not.toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide process (5)' }));
+
+    rerender(<EventList {...props} presentation="detailed" />);
+    for (const [index, event] of events.entries()) {
+      expect(document.querySelector(`[data-block-key="ajob_1:e${event.sourceEventId}"]`)).toBe(
+        anchors[index],
+      );
+    }
+    expect(screen.getByRole('list', { name: 'Tool calls' })).toBe(calls);
+    expect(within(calls).getAllByRole('listitem')[0]).toBe(chips[0]);
+    expect(screen.getByRole('button', { name: 'Hide tool calls' })).toBe(disclosure);
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Project documentation')).toBeVisible();
+    expect(screen.getByText('Tests passed')).toBeVisible();
+    expect(screen.getByText('The change is ready.')).toBeVisible();
+    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(
+      screen.queryByRole('button', { name: /Show process|Hide process/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect Bash: npm test' }));
+    expect(inspect).toHaveBeenCalledWith(events[3], jobId);
+  });
+
+  it('extends a reasoning activity during streaming without replacing its expanded tools', () => {
+    const thought: AgentEvent = {
+      kind: 'thinking',
+      text: 'Start inspecting.',
+      attemptNo: 1,
+      sourceEventId: 1,
+    };
+    const first: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'Read',
+      detail: 'README.md',
+      input: { file_path: 'README.md' },
+      attemptNo: 1,
+      sourceEventId: 2,
+    };
+    const middle: AgentEvent = {
+      kind: 'thinking',
+      text: 'Run the tests next.',
+      attemptNo: 1,
+      sourceEventId: 3,
+    };
+    const next: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'Bash',
+      detail: 'npm test',
+      input: { command: 'npm test' },
+      attemptNo: 1,
+      sourceEventId: 4,
+    };
+    const { rerender } = render(
+      <EventList events={[thought]} jobId={jobId} renderEvent={renderEvent} />,
+    );
+    const reasoning = screen.getByText('Agent is reasoning');
+    expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Show tool calls?/ })).not.toBeInTheDocument();
+
+    rerender(
+      <EventList events={[thought, first, middle]} jobId={jobId} renderEvent={renderEvent} />,
+    );
+    expect(screen.getByText('Agent is reasoning')).toBe(reasoning);
+    const calls = screen.getByRole('list', { name: 'Tool calls' });
+    const firstChip = screen.getByRole('listitem');
+    const show = screen.getByRole('button', { name: 'Show tool call' });
+    const detailsId = show.getAttribute('aria-controls');
+    fireEvent.click(show);
+
+    const growing: AgentEvent[] = [
+      thought,
+      { ...first, output: ['Project documentation'] },
+      middle,
+      next,
+      { kind: 'thinking', text: 'Review the results.', attemptNo: 1, sourceEventId: 5 },
+    ];
+    rerender(<EventList events={growing} jobId={jobId} renderEvent={renderEvent} />);
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    expect(hide).toBe(show);
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    expect(hide).toHaveAttribute('aria-controls', detailsId);
+    expect(screen.getByRole('list', { name: 'Tool calls' })).toBe(calls);
+    expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
+    expect(screen.getByText('Agent is reasoning')).toBe(reasoning);
+    expect(screen.getByText('Project documentation')).toBeVisible();
+    expect(screen.getByText('Waiting for the tool result…')).toBeVisible();
+
+    rerender(
+      <EventList
+        events={growing.map((event) =>
+          event.sourceEventId === 4 ? { ...next, output: ['Tests passed'] } : event,
+        )}
+        jobId={jobId}
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Hide tool calls' })).toBe(hide);
+    expect(screen.getByText('Tests passed')).toBeVisible();
+    expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
+    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-block-key]')).toHaveLength(5);
+  });
+
+  it('keeps reasoning activities separate at delegation, attempt and message boundaries', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the main task.', attemptNo: 1, sourceEventId: 1 },
+      { kind: 'tool_use', tool: 'Read', detail: 'main.ts', attemptNo: 1, sourceEventId: 2 },
+      { kind: 'thinking', text: 'Wait for the child.', attemptNo: 1, sourceEventId: 3 },
+      {
+        kind: 'tool_use',
+        tool: 'Read',
+        detail: 'child.ts',
+        attemptNo: 1,
+        sourceEventId: 4,
+        parentToolUseId: 'child',
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'child tests',
+        attemptNo: 1,
+        sourceEventId: 5,
+        parentToolUseId: 'child',
+      },
+      { kind: 'thinking', text: 'Continue the main task.', attemptNo: 1, sourceEventId: 6 },
+      { kind: 'tool_use', tool: 'Bash', detail: 'main tests', attemptNo: 1, sourceEventId: 7 },
+      { kind: 'tool_use', tool: 'Read', detail: 'retry.ts', attemptNo: 2, sourceEventId: 8 },
+      { kind: 'thinking', text: 'Review the retry.', attemptNo: 2, sourceEventId: 9 },
+      { kind: 'message', text: 'The retry is ready.', attemptNo: 2, sourceEventId: 10 },
+      { kind: 'thinking', text: 'Inspect the docs.', attemptNo: 2, sourceEventId: 11 },
+      { kind: 'tool_use', tool: 'Read', detail: 'docs.md', attemptNo: 2, sourceEventId: 12 },
+      { kind: 'user_message', text: 'Check the examples too.', attemptNo: 2, sourceEventId: 13 },
+      { kind: 'thinking', text: 'Inspect the examples.', attemptNo: 2, sourceEventId: 14 },
+      { kind: 'tool_use', tool: 'Read', detail: 'examples.ts', attemptNo: 2, sourceEventId: 15 },
+    ];
+    const renderStructured = vi.fn(renderEvent);
+    render(<EventList events={events} jobId={jobId} renderEvent={renderStructured} />);
+
+    const groups = screen.getAllByRole('list', { name: 'Tool calls' });
+    expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual([
+      1, 2, 1, 1, 1, 1,
+    ]);
+    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(5);
+    expect(within(groups[1]).getAllByText('Subagent tool')).toHaveLength(2);
+    for (const group of [groups[0], ...groups.slice(2)]) {
+      expect(within(group).queryByText('Subagent tool')).not.toBeInTheDocument();
+    }
+    expect(renderStructured).toHaveBeenCalledWith(events[9], 9, 'ajob_1:e10');
+    expect(renderStructured).toHaveBeenCalledWith(events[12], 12, 'ajob_1:e13');
+    const assistantMessage = screen.getByText('The retry is ready.');
+    const userMessage = screen.getByText('Check the examples too.');
+    expect(
+      groups[3].compareDocumentPosition(assistantMessage) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      assistantMessage.compareDocumentPosition(groups[4]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      groups[4].compareDocumentPosition(userMessage) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      userMessage.compareDocumentPosition(groups[5]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(document.querySelectorAll('[data-block-key]')).toHaveLength(events.length);
+  });
+
+  it('keeps an expanded tool-only activity stable when reasoning is appended', () => {
+    const first: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'Read',
+      detail: 'README.md',
+      input: { file_path: 'README.md' },
+      output: ['Project documentation'],
+      attemptNo: 1,
+      sourceEventId: 1,
+    };
+    const { rerender } = render(
+      <EventList events={[first]} jobId={jobId} renderEvent={renderEvent} />,
+    );
+    const chip = screen.getByRole('listitem');
+    const show = screen.getByRole('button', { name: 'Show tool call' });
+    const detailsId = show.getAttribute('aria-controls');
+    fireEvent.click(show);
+
+    rerender(
+      <EventList
+        events={[
+          first,
+          { kind: 'thinking', text: 'Run verification.', attemptNo: 1, sourceEventId: 2 },
+          {
+            kind: 'tool_use',
+            tool: 'Bash',
+            detail: 'npm test',
+            input: { command: 'npm test' },
+            output: ['Tests passed'],
+            attemptNo: 1,
+            sourceEventId: 3,
+          },
+        ]}
+        jobId={jobId}
+        renderEvent={renderEvent}
+      />,
+    );
+
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    expect(hide).toBe(show);
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    expect(hide).toHaveAttribute('aria-controls', detailsId);
+    expect(screen.getAllByRole('listitem')[0]).toBe(chip);
+    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(screen.getByText('Project documentation')).toBeVisible();
+    expect(screen.getByText('Tests passed')).toBeVisible();
+    expect(document.querySelectorAll('[data-block-key]')).toHaveLength(3);
+  });
+
+  it.each([true, false])(
+    'respects activity card boundaries while grouping reasoning when details are %s',
+    (showActivityDetails) => {
+      render(
+        <EventList
+          jobId={jobId}
+          renderEvent={renderEvent}
+          showActivityDetails={showActivityDetails}
+          events={[
+            { kind: 'thinking', text: 'Inspect first.', attemptNo: 1, sourceEventId: 1 },
+            { kind: 'tool_use', tool: 'Read', detail: 'README.md', attemptNo: 1, sourceEventId: 2 },
+            { kind: 'thinking', text: 'Delegate the review.', attemptNo: 1, sourceEventId: 3 },
+            {
+              kind: 'tool_use',
+              tool: 'Task',
+              detail: 'Review tests',
+              input: { description: 'Review tests', prompt: 'Check test coverage.' },
+              attemptNo: 1,
+              sourceEventId: 4,
+            },
+            { kind: 'thinking', text: 'Run the tests.', attemptNo: 1, sourceEventId: 5 },
+            { kind: 'tool_use', tool: 'Bash', detail: 'npm test', attemptNo: 1, sourceEventId: 6 },
+          ]}
+        />,
+      );
+
+      const groups = screen.getAllByRole('list', { name: 'Tool calls' });
+      expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual(
+        showActivityDetails ? [1, 1] : [3],
+      );
+      expect(screen.getAllByText('Agent is reasoning')).toHaveLength(showActivityDetails ? 2 : 1);
+      expect(document.querySelectorAll('[data-block-key]')).toHaveLength(6);
+      if (showActivityDetails) {
+        const card = screen.getByRole('region', { name: 'Subagent activity' });
+        expect(card).toHaveAttribute('data-block-key', 'ajob_1:e4');
+        expect(
+          groups[0].compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+        expect(
+          card.compareDocumentPosition(groups[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+      } else {
+        expect(screen.queryByRole('region', { name: 'Subagent activity' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Show tool calls' }));
+        expect(screen.getByText(/"prompt": "Check test coverage\."/)).toBeVisible();
+      }
+    },
+  );
+
   it('keeps activity calls compact with inspectable arguments and results when their overview is elsewhere', () => {
     const events: AgentEvent[] = [
       {

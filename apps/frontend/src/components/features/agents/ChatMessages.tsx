@@ -372,7 +372,7 @@ function ToolActivity({
   );
 }
 
-/** Consecutive calls share one line; other events keep their original position. */
+/** Consecutive reasoning and calls share one activity group. */
 export function EventList({
   events,
   jobId,
@@ -402,10 +402,14 @@ export function EventList({
   }[] = [];
   const richActivity =
     presentation === 'detailed' || (presentation !== 'compact' && showActivityDetails);
+  const isCompactActivity = (event: AgentEvent): boolean =>
+    event.kind === 'thinking' ||
+    (event.kind === 'tool_use' && (!richActivity || !parseToolActivity(event.tool, event.input)));
+
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     const blockKey = eventBlockKey(jobId, event, index);
-    if (event.kind !== 'tool_use' || (richActivity && parseToolActivity(event.tool, event.input))) {
+    if (!isCompactActivity(event)) {
       rows.push({
         key: blockKey,
         node:
@@ -425,25 +429,58 @@ export function EventList({
       });
       continue;
     }
-    const tools: ToolActivityItem[] = [{ event, blockKey }];
-    while (index + 1 < events.length) {
-      const next = events[index + 1];
+    const parentToolUseId = event.kind === 'tool_use' ? event.parentToolUseId : undefined;
+    const tools: ToolActivityItem[] = [];
+    const reasoning: {
+      event: Extract<AgentEvent, { kind: 'thinking' }>;
+      index: number;
+      blockKey: string;
+    }[] = [];
+    let nextIndex = index;
+    while (nextIndex < events.length) {
+      const next = events[nextIndex];
       if (
-        next.kind !== 'tool_use' ||
+        !isCompactActivity(next) ||
         next.attemptNo !== event.attemptNo ||
-        next.parentToolUseId !== event.parentToolUseId ||
-        (richActivity && parseToolActivity(next.tool, next.input))
+        (next.kind === 'tool_use' ? next.parentToolUseId : undefined) !== parentToolUseId
       )
         break;
-      index += 1;
-      tools.push({ event: next, blockKey: eventBlockKey(jobId, next, index) });
+      const nextBlockKey = eventBlockKey(jobId, next, nextIndex);
+      if (next.kind === 'thinking') {
+        reasoning.push({ event: next, index: nextIndex, blockKey: nextBlockKey });
+      } else if (next.kind === 'tool_use') {
+        tools.push({ event: next, blockKey: nextBlockKey });
+      }
+      nextIndex += 1;
     }
+    index = nextIndex - 1;
+    const firstReasoning = reasoning[0];
     rows.push({
       key: blockKey,
-      node: <ToolActivity tools={tools} {...{ presentation, jobId, onInspectEvent }} />,
+      node: (
+        <Fragment>
+          {firstReasoning ? (
+            <div key="reasoning" className="relative">
+              {renderEvent(firstReasoning.event, firstReasoning.index, firstReasoning.blockKey)}
+              {/* Merged statuses retain their reading anchors at the shared label. */}
+              {reasoning.slice(1).map((item) => (
+                <span
+                  key={item.blockKey}
+                  data-block-key={item.blockKey}
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0"
+                />
+              ))}
+            </div>
+          ) : null}
+          {tools.length > 0 ? (
+            <ToolActivity key="tools" tools={tools} {...{ presentation, jobId, onInspectEvent }} />
+          ) : null}
+        </Fragment>
+      ),
       foldable: tools.every(({ event: tool }) => processMayFold(tool)),
       process: true,
-      count: tools.length,
+      count: tools.length + reasoning.length,
       attemptNo: event.attemptNo,
     });
   }
