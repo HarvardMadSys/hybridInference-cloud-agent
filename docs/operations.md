@@ -301,6 +301,13 @@ option or enter a custom answer when offered, then submit to continue the
 same native tool call. **Answer later** dismisses the dialog without answering;
 **Review question** reopens it. **Skip** explicitly declines the request.
 
+Claude Code `ExitPlanMode` uses the same dialog to present its plan for
+approval. Select **Approve plan** and submit to let Claude exit plan mode and
+continue implementation. **Skip** declines the plan approval and asks the
+agent to keep planning; **Answer later** leaves the native approval request
+waiting until the owner answers it. Claude handles entering plan mode and
+reading or updating its plan file within the native session.
+
 The page reads pending questions from the resident agent, so reloading the
 conversation rediscovers unanswered requests. An answer names the job,
 attempt, and request it was read from. The owner API and host both fence that

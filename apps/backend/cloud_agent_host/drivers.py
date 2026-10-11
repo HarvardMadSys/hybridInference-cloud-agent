@@ -2145,7 +2145,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         self._session.interrupt_turn()
 
     def _track_questions(self, record: dict[str, Any]) -> None:
-        """Route Claude's stdio interaction requests to their platform policy."""
+        """Hold native questions and plan approval until the turn's owner answers."""
         kind = record.get("type")
         native_id = record.get("request_id")
         if kind == "control_cancel_request" and isinstance(native_id, str):
@@ -2165,20 +2165,8 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             return
         original = request.get("input")
         tool_name = request.get("tool_name")
-        if tool_name == "ExitPlanMode" and isinstance(original, dict):
-            # The resident session deliberately starts in bypassPermissions.
-            # EnterPlanMode temporarily narrows that mode, but registering the
-            # stdio prompt handler for AskUserQuestion also routes its exit
-            # approval here. Preserve the autonomous permission contract and
-            # return Claude's exact plan input so it can continue execution;
-            # the CLI restores the previous permission mode on the transition.
-            self._reply_permission(
-                native_id,
-                {
-                    "behavior": "allow",
-                    "updatedInput": copy.deepcopy(original),
-                },
-            )
+        if tool_name == "ExitPlanMode":
+            self._track_plan_approval(native_id, original)
             return
         if tool_name != "AskUserQuestion":
             self._reply_permission(
@@ -2221,6 +2209,50 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
                         },
                     },
                 }
+            self._reply_permission(native_id, response)
+
+        self._remember_question(native_id, questions, respond)
+
+    def _track_plan_approval(self, native_id: str, original: Any) -> None:
+        """Approve the native mode transition through the existing question channel."""
+        if not isinstance(original, dict) or (
+            "plan" in original and not isinstance(original["plan"], str)
+        ):
+            self._reply_permission(
+                native_id,
+                {
+                    "behavior": "deny",
+                    "message": "The plan approval request is invalid. Ask the user in chat instead.",
+                },
+            )
+            return
+        original_input = copy.deepcopy(original)
+        text = "Approve this plan and continue implementation?"
+        plan = original_input.get("plan")
+        if isinstance(plan, str) and plan.strip():
+            text += "\n\n" + plan
+        if len(text) > 10_000:
+            suffix = "\n\n[Plan preview truncated.]"
+            text = text[: 10_000 - len(suffix)] + suffix
+        questions = [
+            {
+                "id": "0",
+                "header": "Plan approval",
+                "question": text,
+                "multiple": False,
+                "options": [
+                    {"label": "Approve plan", "description": "Continue with implementation."}
+                ],
+                "allow_custom": False,
+            }
+        ]
+
+        def respond(_answers: dict[str, list[str]], reject: bool) -> None:
+            response = (
+                {"behavior": "deny", "message": "The user declined this plan. Keep planning."}
+                if reject
+                else {"behavior": "allow", "updatedInput": original_input}
+            )
             self._reply_permission(native_id, response)
 
         self._remember_question(native_id, questions, respond)
