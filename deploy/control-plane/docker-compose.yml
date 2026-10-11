@@ -127,6 +127,16 @@ services:
       AGENT_ONCALL_DISPATCH_TOKEN: ${AGENT_ONCALL_DISPATCH_TOKEN:-}
       AGENT_ONCALL_USER_ID: ${AGENT_ONCALL_USER_ID:-}
 
+      # --- Sandbox deletion archives ---------------------------------------
+      # Imported once; subsequent bucket/endpoint changes use Admin Settings.
+      AGENT_SANDBOX_ARCHIVE_S3_BUCKET: ${AGENT_SANDBOX_ARCHIVE_S3_BUCKET:-}
+      AGENT_SANDBOX_ARCHIVE_S3_REGION: ${AGENT_SANDBOX_ARCHIVE_S3_REGION:-}
+      AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT: ${AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT:-}
+      AGENT_SANDBOX_ARCHIVE_S3_PREFIX: ${AGENT_SANDBOX_ARCHIVE_S3_PREFIX:-sandbox-archives}
+      # The standard SDK credential chain prefers an IAM workload role.
+      # Configure environment or shared-profile credentials in a private
+      # main-service override; never add them to hosts, sandboxes or MCP relay.
+
       # --- Behaviour switches ----------------------------------------------
       # Both default to the safe answer, so an operator who sets neither gets a
       # Secure cookie and an audit trail that records the peer rather than a

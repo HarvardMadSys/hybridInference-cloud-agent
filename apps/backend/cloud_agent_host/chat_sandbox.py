@@ -30,6 +30,7 @@ import shlex
 import signal
 import struct
 import subprocess
+import tempfile
 import termios
 import threading
 import time
@@ -1810,6 +1811,156 @@ class ChatSandboxManager:
                 "retained chat container id does not match its durable sandbox record"
             )
         return current
+
+    def require_stopped_archive(
+        self, spec: ChatSandboxSpec, *, container_id: str
+    ) -> ChatSandboxInspection:
+        """Fence archival and removal to an exact, stopped, owned container."""
+        current = self.require_existing(spec, container_id=container_id)
+        if not self._belongs_to_namespace(current):
+            raise SandboxError("sandbox archive requires this deployment's ownership label")
+        if current.running or current.status is not ChatSandboxStatus.STOPPED:
+            raise SandboxError("sandbox archive requires a stopped container")
+        return current
+
+    def export_stopped_archive(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        container_id: str,
+        output: BinaryIO,
+        max_bytes: int,
+        timeout_s: float = 600,
+    ) -> dict[str, Any]:
+        """Export the Docker-owned filesystem without starting user processes.
+
+        The normal mount fence rejects bind/volume state. Docker export
+        includes workspace and all providers' native state in the writable
+        layer, while stopped credential tmpfs mounts contain no retained data.
+        Inspect configuration accompanies the export for offline recovery.
+        """
+        self.require_stopped_archive(spec, container_id=container_id)
+        metadata_result = self._run(
+            [self.backend.docker_binary, "container", "inspect", container_id], timeout=30
+        )
+        if metadata_result.returncode != 0:
+            raise SandboxError("sandbox archive metadata inspection failed")
+        try:
+            metadata = json.loads(metadata_result.stdout)[0]
+            if not isinstance(metadata, dict) or metadata.get("Id") != container_id:
+                raise ValueError("container identity changed")
+        except (IndexError, TypeError, ValueError) as exc:
+            raise SandboxError("sandbox archive metadata is invalid") from exc
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            with tempfile.TemporaryFile() as errors:
+                process = subprocess.Popen(
+                    [self.backend.docker_binary, "container", "export", container_id],
+                    stdout=output,
+                    stderr=errors,
+                )
+                deadline = time.monotonic() + timeout_s
+                while process.poll() is None:
+                    if os.fstat(output.fileno()).st_size > max_bytes:
+                        raise SandboxError("sandbox archive exceeds the S3 upload size limit")
+                    if time.monotonic() >= deadline:
+                        raise SandboxError("sandbox archive export timed out")
+                    time.sleep(0.1)
+                if process.returncode != 0:
+                    raise SandboxError("sandbox archive filesystem export failed")
+                output.flush()
+                if os.fstat(output.fileno()).st_size > max_bytes:
+                    raise SandboxError("sandbox archive exceeds the S3 upload size limit")
+        except OSError as exc:
+            raise SandboxError("sandbox archive filesystem export failed") from exc
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+        self.require_stopped_archive(spec, container_id=container_id)
+        config = metadata.get("Config") or {}
+        host_config = metadata.get("HostConfig") or {}
+        owned_label_keys = {
+            CHAT_SANDBOX_LABEL,
+            CHAT_NAMESPACE_LABEL,
+            CHAT_THREAD_LABEL,
+            CHAT_SANDBOX_ID_LABEL,
+            CHAT_GENERATION_LABEL,
+            CHAT_RUNTIME_LABEL,
+            CHAT_RUNTIME_VERSION_LABEL,
+            CHAT_IMAGE_DIGEST_LABEL,
+            CHAT_MEMORY_LIMIT_LABEL,
+            CHAT_CPU_LIMIT_LABEL,
+            CHAT_STOP_TIMEOUT_LABEL,
+            CHAT_SHARED_LABEL,
+            CHAT_RESIDENT_CAPACITY_LABEL,
+        }
+        # Docker inspect also includes environment values, host paths, mounts,
+        # and arbitrary labels. Offline recovery needs image identity and
+        # container policy, not those potential secret-bearing values.
+        return {
+            **{key: metadata[key] for key in ("Id", "Name", "Image", "Created") if key in metadata},
+            "Config": {
+                **{
+                    key: config[key]
+                    for key in ("Image", "User", "WorkingDir", "Entrypoint", "Cmd")
+                    if key in config
+                },
+                "Labels": {
+                    key: value
+                    for key, value in (config.get("Labels") or {}).items()
+                    if key in owned_label_keys
+                },
+            },
+            "HostConfig": {
+                key: host_config[key]
+                for key in (
+                    "Runtime",
+                    "Memory",
+                    "MemorySwap",
+                    "NanoCpus",
+                    "CpuQuota",
+                    "CpuPeriod",
+                    "CpuShares",
+                    "PidsLimit",
+                    "ReadonlyRootfs",
+                    "CapDrop",
+                    "CapAdd",
+                    "SecurityOpt",
+                )
+                if key in host_config
+            },
+        }
+
+    def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
+        """Remove only a verified archive's exact stopped container, without force."""
+        current = self.require_stopped_archive(spec, container_id=container_id)
+        self.require_stopped_archive(spec, container_id=container_id)
+        result = self._run(
+            [self.backend.docker_binary, "container", "rm", container_id], timeout=60
+        )
+        if result.returncode != 0:
+            raise SandboxError("archived sandbox removal failed")
+        if self.inspect(container_id) is not None:
+            raise SandboxError("archived sandbox still exists after removal")
+        # Remove first, without force: a start after the stopped fence makes
+        # Docker refuse removal. Generic stop/network release before rm could
+        # stop a newly running original and discard post-backup writes.
+        network_ids = dict(current.network_ids)
+        for network_name in current.networks:
+            if network_name in {CHAT_NULL_NETWORK, CHAT_BOOTSTRAP_NETWORK}:
+                continue
+            try:
+                self._release_owned_network(
+                    network_name,
+                    spec,
+                    only_if_sandbox_unattached=True,
+                    expected_network_id=network_ids.get(network_name),
+                )
+            except SandboxError:
+                # The container is already absent. Normal orphan-network
+                # pruning can retry cleanup, fenced to that network's labels.
+                logger.warning("archived sandbox network cleanup needs reconciliation")
 
     def inspect(
         self, container: str, *, verify_mounts: bool = True

@@ -1,12 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { conversationHref } from '@/lib/api/adminConversations';
-import { getAdminSandboxes } from '@/lib/api/adminSandboxes';
+import { getAdminSandboxes, type AdminSandboxState } from '@/lib/api/adminSandboxes';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
@@ -22,9 +22,27 @@ import {
   type SandboxObservation,
 } from './present';
 import { SandboxManagement } from './SandboxManagement';
+import {
+  defaultSortDirection,
+  selectSandboxes,
+  SORT_OPTIONS,
+  type SandboxActivityFilter,
+  type SandboxSort,
+  type SandboxSortKey,
+} from './inventory';
 
 const REFRESH_MS = 30_000;
 const STALE_HEARTBEAT_MS = 90_000;
+const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
+  { value: 'running', label: 'Running' },
+  { value: 'all', label: 'All states' },
+  { value: 'provisioning', label: 'Provisioning' },
+  { value: 'starting', label: 'Starting' },
+  { value: 'stopping', label: 'Stopping' },
+  { value: 'stopped', label: 'Stopped' },
+  { value: 'stopped_dirty', label: 'Stopped dirty' },
+  { value: 'lost', label: 'Lost' },
+];
 
 function AdminRequired() {
   return (
@@ -57,7 +75,14 @@ function SandboxesView() {
   const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [stateFilter, setStateFilter] = useState<'running' | 'all'>('running');
+  const [stateFilter, setStateFilter] = useState<AdminSandboxState | 'all'>('running');
+  const [search, setSearch] = useState('');
+  const [hostFilter, setHostFilter] = useState('');
+  const [activityFilter, setActivityFilter] = useState<SandboxActivityFilter>('all');
+  const [sort, setSort] = useState<SandboxSort>({ key: 'id', direction: 'asc' });
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const autoRefreshRef = useRef(true);
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [nowMs, setNowMs] = useState(() => performance.now());
   const denyAccess = useCallback(() => {
     setSnapshot(null);
@@ -99,7 +124,8 @@ function SandboxesView() {
           const page = await getAdminSandboxes(
             {
               limit: 200,
-              ...(stateFilter === 'all' ? { state: 'all' } : {}),
+              ...(stateFilter !== 'running' ? { state: stateFilter } : {}),
+              ...(includeArchived ? { include_archived: true } : {}),
               ...(cursor ? { cursor } : {}),
             },
             controller.signal,
@@ -138,13 +164,43 @@ function SandboxesView() {
     }
 
     void load();
-    const timer = setInterval(() => void load(), REFRESH_MS);
+    const timer = setInterval(() => {
+      if (autoRefreshRef.current) void load();
+    }, REFRESH_MS);
     return () => {
       disposed = true;
       clearInterval(timer);
       request?.abort();
     };
-  }, [revision, stateFilter, denied]);
+  }, [revision, stateFilter, includeArchived, denied]);
+
+  const hosts = useMemo(
+    () => [...new Set(snapshot?.sandboxes.map(({ sandbox }) => sandbox.host) ?? [])].sort(),
+    [snapshot],
+  );
+  const visibleSandboxes = useMemo(
+    () =>
+      selectSandboxes(
+        snapshot?.sandboxes ?? [],
+        { search, host: hostFilter, activity: activityFilter },
+        sort,
+      ),
+    [snapshot, search, hostFilter, activityFilter, sort],
+  );
+  const hasFilters = search !== '' || hostFilter !== '' || activityFilter !== 'all';
+  const stateLabel = STATE_OPTIONS.find(({ value }) => value === stateFilter)?.label ?? stateFilter;
+
+  function sortBy(key: SandboxSortKey) {
+    setSort((current) => ({
+      key,
+      direction:
+        current.key === key
+          ? current.direction === 'asc'
+            ? 'desc'
+            : 'asc'
+          : defaultSortDirection(key),
+    }));
+  }
 
   if (denied) return <AdminRequired />;
   return (
@@ -156,14 +212,14 @@ function SandboxesView() {
         <AdminNavigation current="sandboxes" />
         <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">
-            {stateFilter === 'running' ? 'Running sandboxes' : 'All sandboxes'}{' '}
+            {stateFilter === 'all' ? 'All sandboxes' : `${stateLabel} sandboxes`}{' '}
             {snapshot && (
               <span className="ml-2 text-sm font-normal tabular-nums text-gray-500 dark:text-gray-400">
                 ({snapshot.sandboxes.length})
               </span>
             )}
           </h2>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <label className="text-sm text-gray-500 dark:text-gray-400">
               State
               <select
@@ -173,12 +229,26 @@ function SandboxesView() {
                 onChange={(event) => {
                   setSnapshot(null);
                   setLoading(true);
-                  setStateFilter(event.target.value as 'running' | 'all');
+                  setStateFilter(event.target.value as AdminSandboxState | 'all');
                 }}
               >
-                <option value="running">Running</option>
-                <option value="all">All states</option>
+                {STATE_OPTIONS.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </select>
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(event) => {
+                  autoRefreshRef.current = event.target.checked;
+                  setAutoRefresh(event.target.checked);
+                }}
+              />
+              Auto-refresh
             </label>
             <button type="button" className={BUTTON} disabled={loading} onClick={refresh}>
               Refresh
@@ -187,11 +257,112 @@ function SandboxesView() {
         </div>
         <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
           Includes idle containers retained between turns. Choose All states to inspect stopped or
-          lost sandboxes. Refreshes every 30 seconds.
+          lost sandboxes.{' '}
+          {autoRefresh ? 'Refreshes every 30 seconds.' : 'Automatic refresh paused.'}
         </p>
+        <div className="mt-5 flex flex-wrap items-end gap-3">
+          <label className="min-w-52 flex-1 text-xs text-gray-500 dark:text-gray-400">
+            Search sandboxes
+            <input
+              type="search"
+              value={search}
+              placeholder="Session, repository, owner, host or container…"
+              onChange={(event) => setSearch(event.target.value)}
+              className="mt-1 block w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+            />
+          </label>
+          <label className="text-xs text-gray-500 dark:text-gray-400">
+            Host
+            <select
+              aria-label="Sandbox host"
+              value={hostFilter}
+              onChange={(event) => setHostFilter(event.target.value)}
+              className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+            >
+              <option value="">All hosts</option>
+              {hostFilter && !hosts.includes(hostFilter) && (
+                <option value={hostFilter}>{hostFilter}</option>
+              )}
+              {hosts.map((host) => (
+                <option key={host} value={host}>
+                  {host}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-gray-500 dark:text-gray-400">
+            Activity
+            <select
+              aria-label="Sandbox activity"
+              value={activityFilter}
+              onChange={(event) => setActivityFilter(event.target.value as SandboxActivityFilter)}
+              className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+            >
+              <option value="all">All activity</option>
+              <option value="executing">Executing</option>
+              <option value="idle">Idle</option>
+            </select>
+          </label>
+          <label className="text-xs text-gray-500 dark:text-gray-400">
+            Sort by
+            <select
+              aria-label="Sort sandboxes"
+              value={sort.key}
+              onChange={(event) => {
+                const key = event.target.value as SandboxSortKey;
+                setSort({ key, direction: defaultSortDirection(key) });
+              }}
+              className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+            >
+              {SORT_OPTIONS.map(({ key, label }) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className={BUTTON}
+            aria-label={`Sort ${sort.direction === 'asc' ? 'descending' : 'ascending'}`}
+            onClick={() => sortBy(sort.key)}
+          >
+            {sort.direction === 'asc' ? '↑ Ascending' : '↓ Descending'}
+          </button>
+          {hasFilters && (
+            <button
+              type="button"
+              className={BUTTON}
+              onClick={() => {
+                setSearch('');
+                setHostFilter('');
+                setActivityFilter('all');
+              }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+        <label className="mt-3 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+          <input
+            type="checkbox"
+            checked={includeArchived}
+            onChange={(event) => {
+              setSnapshot(null);
+              setLoading(true);
+              setIncludeArchived(event.target.checked);
+            }}
+          />
+          Include removed sandboxes
+        </label>
         {snapshot && (
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
             Last refreshed: {dateTime(snapshot.observedAt)}
+          </p>
+        )}
+        {snapshot && (
+          <p role="status" className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+            Showing {visibleSandboxes.length} of {snapshot.sandboxes.length} sandboxes.
           </p>
         )}
         {error && (
@@ -217,9 +388,16 @@ function SandboxesView() {
             <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
               {stateFilter === 'running' ? 'No running sandboxes.' : 'No sandboxes.'}
             </p>
+          ) : visibleSandboxes.length === 0 ? (
+            <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
+              No sandboxes match your filters.
+            </p>
           ) : (
             <SandboxesTable
-              sandboxes={snapshot.sandboxes}
+              sandboxes={visibleSandboxes}
+              sort={sort}
+              onSort={sortBy}
+              autoRefresh={autoRefresh}
               now={Date.parse(snapshot.observedAt) + Math.max(0, nowMs - snapshot.appliedAtMs)}
               nowMs={nowMs}
               onDenied={denyAccess}
@@ -276,36 +454,68 @@ function FleetSummary({ sandboxes, nowMs }: { sandboxes: SandboxObservation[]; n
 
 function SandboxesTable({
   sandboxes,
+  sort,
+  onSort,
+  autoRefresh,
   now,
   nowMs,
   onDenied,
   onChanged,
 }: {
   sandboxes: SandboxObservation[];
+  sort: SandboxSort;
+  onSort: (key: SandboxSortKey) => void;
+  autoRefresh: boolean;
   now: number;
   nowMs: number;
   onDenied: () => void;
   onChanged: () => void;
 }) {
+  const columns: { label: string; key?: SandboxSortKey }[] = [
+    { label: 'Sandbox / session', key: 'name' },
+    { label: 'Owner / host', key: 'owner' },
+    { label: 'Activity / agent', key: 'activity' },
+    { label: 'CPU', key: 'cpu' },
+    { label: 'Memory', key: 'memory' },
+    { label: 'Sessions', key: 'sessions' },
+    { label: 'Last activity', key: 'last_activity' },
+    { label: 'Host heartbeat', key: 'heartbeat' },
+    { label: 'Stats' },
+  ];
   return (
     <div className="mt-4 overflow-x-auto">
       <table className="w-full min-w-[950px] text-left text-sm">
         <caption className="sr-only">Sandboxes across users and hosts</caption>
         <thead className="text-xs text-gray-500 dark:text-gray-400">
           <tr className="border-b border-gray-100 dark:border-white/5">
-            {[
-              'Sandbox / session',
-              'Owner / host',
-              'Activity / agent',
-              'CPU',
-              'Memory',
-              'Sessions',
-              'Last activity',
-              'Host heartbeat',
-              'Stats',
-            ].map((label) => (
-              <th key={label} scope="col" className="px-3 py-2 font-normal">
-                {label}
+            {columns.map(({ label, key }) => (
+              <th
+                key={label}
+                scope="col"
+                aria-sort={
+                  key && sort.key === key
+                    ? sort.direction === 'asc'
+                      ? 'ascending'
+                      : 'descending'
+                    : undefined
+                }
+                className="px-3 py-2 font-normal"
+              >
+                {key ? (
+                  <button
+                    type="button"
+                    aria-label={`Sort by ${label}`}
+                    onClick={() => onSort(key)}
+                    className="flex items-center gap-1 rounded py-1 text-left hover:text-gray-900 focus-visible:outline focus-visible:outline-2 dark:hover:text-gray-100"
+                  >
+                    {label}
+                    <span aria-hidden="true" className="text-gray-400">
+                      {sort.key === key ? (sort.direction === 'asc' ? '↑' : '↓') : '↕'}
+                    </span>
+                  </button>
+                ) : (
+                  label
+                )}
               </th>
             ))}
           </tr>
@@ -315,6 +525,7 @@ function SandboxesTable({
             <SandboxRow
               key={observation.sandbox.id}
               observation={observation}
+              autoRefresh={autoRefresh}
               now={now}
               nowMs={nowMs}
               onDenied={onDenied}
@@ -329,12 +540,14 @@ function SandboxesTable({
 
 function SandboxRow({
   observation,
+  autoRefresh,
   now,
   nowMs,
   onDenied,
   onChanged,
 }: {
   observation: SandboxObservation;
+  autoRefresh: boolean;
   now: number;
   nowMs: number;
   onDenied: () => void;
@@ -379,6 +592,11 @@ function SandboxRow({
           >
             {sandbox.container_name}
           </span>
+          {sandbox.archived_at && (
+            <span className="mt-1 block text-xs text-amber-700 dark:text-amber-400">
+              Removed from inventory
+            </span>
+          )}
         </th>
         <td className="max-w-40 px-3 py-3 text-xs text-gray-500 dark:text-gray-400">
           <span className="block truncate font-mono" title={sandbox.user_id}>
@@ -487,6 +705,7 @@ function SandboxRow({
               />
               <SandboxManagement
                 sandboxId={sandbox.id}
+                autoRefresh={autoRefresh}
                 nowMs={nowMs}
                 onDenied={onDenied}
                 onChanged={onChanged}

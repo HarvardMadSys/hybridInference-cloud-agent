@@ -44,6 +44,39 @@ def _shared_snapshot() -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "suffix", "timeout"),
+    [
+        ("prepare_sandbox_deletion", "prepare", 1800),
+        ("upload_sandbox_deletion_archive", "upload", 1800),
+        ("commit_sandbox_deletion", "commit", 120),
+        ("abort_sandbox_deletion", "abort", 120),
+    ],
+)
+async def test_archive_delete_calls_stay_on_the_authenticated_shared_broker(
+    monkeypatch, method_name, suffix, timeout
+):
+    broker = WorkspaceBrokerClient("http://broker", "secret")
+    calls = []
+    payload = {
+        "request_id": "delete-one",
+        "generation": 4,
+        "expected_container_id": "container-one",
+        "archive_key": "sandbox-archives/group/delete-one/archive.tar",
+    }
+
+    async def request(method, thread_id, action, *, json, timeout):
+        calls.append((method, thread_id, action, json, timeout))
+        return {"request_id": "delete-one"}
+
+    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
+    assert await getattr(broker, method_name)("origin/thread", payload) == {
+        "request_id": "delete-one"
+    }
+    assert calls == [("POST", "origin/thread", f"admin-delete/{suffix}", payload, timeout)]
+
+
+@pytest.mark.asyncio
 async def test_native_question_client_keeps_read_and_response_scoped_to_the_owner(monkeypatch):
     broker = WorkspaceBrokerClient("http://broker", "secret")
     calls: list[tuple] = []

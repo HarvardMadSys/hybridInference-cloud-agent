@@ -198,6 +198,9 @@ services:
       # not mounted into this container. Production points Docker itself at a
       # durable block volume and sets this to that exact data-root.
       AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
+      # Broker-only archival receipts and temporary exports survive service
+      # replacement. No sandbox or runner mounts this directory.
+      AGENT_SANDBOX_ARCHIVE_STATE_DIR: /var/lib/hybridinference/broker-archives
       # Product inactivity timeout: after the latest settled turn (and after
       # all terminals close), docker stop retains the chat writable layer.
       # This is distinct from the per-turn AGENT_TIMEOUT_S watchdog.
@@ -227,6 +230,7 @@ services:
       - cloud_agent_host.workspace_broker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives:/var/lib/hybridinference/broker-archives
     networks:
       - internal
 

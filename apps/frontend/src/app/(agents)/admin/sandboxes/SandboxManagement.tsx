@@ -5,7 +5,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
 import {
+  archiveAdminSandbox,
+  deleteAdminSandbox,
   getAdminSandbox,
+  restoreAdminSandbox,
   stopAdminSandbox,
   type AdminSandboxDetail,
 } from '@/lib/api/adminSandboxes';
@@ -15,28 +18,51 @@ import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
 
 const REFRESH_MS = 30_000;
 const TERMINAL_FRESHNESS_MS = 90_000;
+const REVIEW_FRESHNESS_MS = 90_000;
+type SandboxAction = 'stop' | 'archive' | 'restore' | 'delete';
 
 export function SandboxManagement({
   sandboxId,
   nowMs,
+  autoRefresh = true,
   onDenied,
   onChanged,
 }: {
   sandboxId: string;
   nowMs: number;
+  autoRefresh?: boolean;
   onDenied: () => void;
   onChanged: () => void;
 }) {
   const [detail, setDetail] = useState<AdminSandboxDetail | null>(null);
   const [observedAtMs, setObservedAtMs] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<SandboxAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const action = useRef<AbortController | null>(null);
+  const accessRevoked = useRef(false);
+  const autoRefreshEnabled = useRef(autoRefresh);
+
+  useEffect(() => {
+    autoRefreshEnabled.current = autoRefresh;
+  }, [autoRefresh]);
+
+  const clearAccess = useCallback(() => {
+    accessRevoked.current = true;
+    request.current?.abort();
+    action.current?.abort();
+    request.current = null;
+    action.current = null;
+    setDetail(null);
+    setError(null);
+    setLoading(false);
+    setPendingAction(null);
+    onDenied();
+  }, [onDenied]);
 
   const load = useCallback(async () => {
-    if (request.current || action.current) return;
+    if (accessRevoked.current || request.current || action.current) return;
     const controller = new AbortController();
     request.current = controller;
     setLoading(true);
@@ -47,17 +73,19 @@ export function SandboxManagement({
       setObservedAtMs(performance.now());
     } catch (cause) {
       if (controller.signal.aborted) return;
-      if (accessDenied(cause)) onDenied();
+      if (accessDenied(cause)) clearAccess();
       else setError(getErrorMessage(cause));
     } finally {
       if (!controller.signal.aborted) setLoading(false);
       if (request.current === controller) request.current = null;
     }
-  }, [sandboxId, onDenied]);
+  }, [sandboxId, clearAccess]);
 
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), REFRESH_MS);
+    const timer = setInterval(() => {
+      if (autoRefreshEnabled.current) void load();
+    }, REFRESH_MS);
     return () => {
       clearInterval(timer);
       request.current?.abort();
@@ -68,34 +96,69 @@ export function SandboxManagement({
   }, [load]);
 
   const sandbox = detail?.sandbox;
+  const busy = pendingAction !== null;
   const serverNow = detail
     ? Date.parse(detail.observed_at) + Math.max(0, nowMs - observedAtMs)
     : NaN;
   const terminalObserved = Date.parse(sandbox?.terminal_count_observed_at ?? '');
-  const blocked = !sandbox
-    ? 'Load the current sandbox details before stopping it.'
-    : sandbox.state !== 'running'
-      ? 'Only a running idle sandbox can be stopped.'
-      : sandbox.active_attempt_count > 0
-        ? 'Wait for all active turns to finish.'
-        : (sandbox.active_operation_count ?? 0) > 0
-          ? 'Wait for active workspace operations to finish.'
-          : ['pending', 'snapshotting', 'importing'].includes(sandbox.snapshot_state ?? '')
-            ? 'Wait for the workspace snapshot to finish.'
-            : sandbox.terminal_count == null || !Number.isFinite(terminalObserved)
-              ? 'Wait for the host to report its open terminals.'
-              : sandbox.terminal_count > 0
-                ? 'Close all open terminals before stopping the sandbox.'
-                : !Number.isFinite(serverNow) ||
-                    serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
-                  ? 'Wait for a fresh terminal report from the host.'
-                  : sandbox.generation == null || !sandbox.container_id
-                    ? 'The current container identity is unavailable.'
-                    : null;
+  const deletionPending = ['pending', 'archived'].includes(sandbox?.deletion_state ?? 'none');
+  const deletionComplete = sandbox?.deletion_state === 'deleted';
+  const deletionBusyReason = deletionPending
+    ? 'Wait for the S3 archive and container deletion to finish.'
+    : null;
+  const reviewBlocked = !sandbox
+    ? 'Load the current sandbox details before changing it.'
+    : nowMs - observedAtMs > REVIEW_FRESHNESS_MS
+      ? 'Refresh details before changing this sandbox.'
+      : sandbox.generation == null
+        ? 'The current container identity is unavailable.'
+        : null;
+  const idleBlocked = sandbox
+    ? sandbox.active_attempt_count > 0
+      ? 'Wait for all active turns to finish.'
+      : (sandbox.active_operation_count ?? 0) > 0
+        ? 'Wait for active workspace operations to finish.'
+        : ['pending', 'snapshotting', 'importing'].includes(sandbox.snapshot_state ?? '')
+          ? 'Wait for the workspace snapshot to finish.'
+          : null
+    : null;
+  const stopBlocked =
+    reviewBlocked ??
+    deletionBusyReason ??
+    (sandbox?.state !== 'running' ? 'Only a running idle sandbox can be stopped.' : null) ??
+    idleBlocked ??
+    (sandbox?.terminal_count == null || !Number.isFinite(terminalObserved)
+      ? 'Wait for the host to report its open terminals.'
+      : sandbox.terminal_count > 0
+        ? 'Close all open terminals before stopping the sandbox.'
+        : !Number.isFinite(serverNow) || serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
+          ? 'Wait for a fresh terminal report from the host.'
+          : !sandbox.container_id
+            ? 'The current container identity is unavailable.'
+            : null);
+  const removalBlocked =
+    sandbox?.state !== 'stopped' && !deletionComplete
+      ? 'Wait for the host to confirm a clean stop before removing this sandbox.'
+      : idleBlocked;
+  const inventoryBlocked =
+    reviewBlocked ?? deletionBusyReason ?? (sandbox?.archived_at ? null : removalBlocked);
+  const deleteBlocked =
+    reviewBlocked ??
+    deletionBusyReason ??
+    (deletionComplete ? 'This sandbox has already been deleted.' : null) ??
+    (sandbox?.state !== 'stopped'
+      ? 'Wait for the host to confirm a clean stop before deleting this sandbox.'
+      : null) ??
+    idleBlocked ??
+    (!sandbox?.container_id ? 'The retained container identity is unavailable.' : null);
+  const controlsBlocked = reviewBlocked ?? deletionBusyReason;
 
-  async function stop() {
-    if (!sandbox || blocked || action.current) return;
+  async function applyAction(kind: SandboxAction) {
+    const blocked =
+      kind === 'stop' ? stopBlocked : kind === 'delete' ? deleteBlocked : inventoryBlocked;
+    if (!sandbox || blocked || request.current || action.current || accessRevoked.current) return;
     if (
+      kind === 'stop' &&
       !window.confirm(
         `Stop the idle sandbox shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'}? ` +
           'This stops the container for every member and retains its workspace files. ' +
@@ -103,31 +166,62 @@ export function SandboxManagement({
       )
     )
       return;
+    if (
+      kind === 'delete' &&
+      !window.confirm(
+        `Archive to S3 and permanently delete the stopped sandbox shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'}? ` +
+          'Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted for every member. ' +
+          'Live native resume will no longer be available. Chat history remains.',
+      )
+    )
+      return;
+    if (
+      kind === 'archive' &&
+      !window.confirm(
+        deletionComplete
+          ? 'Remove this deleted sandbox from the admin inventory? Its S3 archive and chat history remain available. ' +
+              'You can restore its inventory entry using Include removed.'
+          : `Remove the stopped sandbox shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} from the admin inventory? ` +
+              'Workspace files, native sessions, and chat history are retained. ' +
+              'Resuming a session returns the sandbox to the inventory. You can also restore it using Include removed.',
+      )
+    )
+      return;
+    if (performance.now() - observedAtMs > REVIEW_FRESHNESS_MS) {
+      setError('Refresh details before changing this sandbox.');
+      void load();
+      return;
+    }
     const controller = new AbortController();
     action.current = controller;
-    // A read begun before this action must not restore an earlier running state.
-    request.current?.abort();
-    request.current = null;
     setLoading(false);
-    setBusy(true);
+    setPendingAction(kind);
     setError(null);
     try {
-      const next = await stopAdminSandbox(
-        sandbox.id,
-        {
-          generation: sandbox.generation!,
-          container_id: sandbox.container_id!,
-          last_activity_at: sandbox.last_activity_at,
-        },
-        controller.signal,
-      );
+      const reviewed = {
+        generation: sandbox.generation!,
+        container_id: sandbox.container_id,
+        last_activity_at: sandbox.last_activity_at,
+      };
+      let next: AdminSandboxDetail;
+      if (kind === 'stop' || kind === 'delete') {
+        const updateContainer = kind === 'stop' ? stopAdminSandbox : deleteAdminSandbox;
+        next = await updateContainer(
+          sandbox.id,
+          { ...reviewed, container_id: sandbox.container_id! },
+          controller.signal,
+        );
+      } else {
+        const updateInventory = kind === 'archive' ? archiveAdminSandbox : restoreAdminSandbox;
+        next = await updateInventory(sandbox.id, reviewed, controller.signal);
+      }
       if (controller.signal.aborted) return;
       setDetail(next);
       setObservedAtMs(performance.now());
       onChanged();
     } catch (cause) {
       if (controller.signal.aborted) return;
-      if (accessDenied(cause)) onDenied();
+      if (accessDenied(cause)) clearAccess();
       else {
         setError(getErrorMessage(cause));
         // The server may have refused newer activity than the reviewed snapshot.
@@ -136,7 +230,7 @@ export function SandboxManagement({
         void load();
       }
     } finally {
-      if (!controller.signal.aborted) setBusy(false);
+      if (!controller.signal.aborted) setPendingAction(null);
       if (action.current === controller) action.current = null;
     }
   }
@@ -153,7 +247,7 @@ export function SandboxManagement({
         <button
           type="button"
           className={BUTTON}
-          disabled={loading || busy}
+          disabled={loading || busy || accessRevoked.current}
           onClick={() => {
             setError(null);
             void load();
@@ -188,6 +282,55 @@ export function SandboxManagement({
               The host reports this sandbox as {sandbox.state.replaceAll('_', ' ')}.
             </p>
           )}
+          {sandbox.archived_at && (
+            <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+              Removed from the admin inventory.{' '}
+              {deletionComplete
+                ? 'Its S3 archive and chat history remain available.'
+                : 'Workspace files, native sessions, and chat history are retained.'}
+            </p>
+          )}
+          {sandbox.deletion_state === 'pending' && (
+            <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
+              Archiving to S3. Waiting for the archive to be uploaded and verified before deletion.
+            </p>
+          )}
+          {sandbox.deletion_state === 'archived' && (
+            <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
+              Archive verified in S3. Waiting for the host to delete the retained container.
+            </p>
+          )}
+          {deletionComplete && (
+            <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+              Sandbox deleted. Its files and native session history are archived in S3; live native
+              resume is no longer available.
+              {sandbox.deleted_at && <> Deleted {dateTime(sandbox.deleted_at)}.</>}
+            </p>
+          )}
+          {sandbox.deletion_state === 'failed' && (
+            <ErrorNotice>
+              Deletion failed:{' '}
+              {sandbox.deletion_error ?? 'The host could not complete the archive and deletion.'}
+            </ErrorNotice>
+          )}
+          {sandbox.deletion_state !== 'failed' && sandbox.deletion_error && (
+            <ErrorNotice>Deletion is waiting to retry: {sandbox.deletion_error}</ErrorNotice>
+          )}
+          {sandbox.deletion_archive_key && (
+            <div className="mt-2 break-all text-xs text-gray-500 dark:text-gray-400">
+              <p>
+                S3 archive: <code>{sandbox.deletion_archive_key}</code>
+              </p>
+              {sandbox.deletion_sha256 && (
+                <p>
+                  SHA-256: <code>{sandbox.deletion_sha256}</code>
+                </p>
+              )}
+              {sandbox.deletion_size_bytes != null && (
+                <p>Archive size: {sandbox.deletion_size_bytes.toLocaleString()} bytes</p>
+              )}
+            </div>
+          )}
           <ul
             aria-label="Sandbox sessions"
             className="mt-3 divide-y divide-gray-200 dark:divide-white/10"
@@ -214,19 +357,66 @@ export function SandboxManagement({
               No member sessions are recorded.
             </p>
           )}
+          {controlsBlocked && (
+            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{controlsBlocked}</p>
+          )}
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <button
               type="button"
               className={BUTTON}
-              disabled={busy || loading || blocked !== null}
-              onClick={() => void stop()}
+              disabled={busy || loading || stopBlocked !== null}
+              onClick={() => void applyAction('stop')}
             >
-              {busy ? 'Requesting stop…' : 'Stop idle sandbox'}
+              {pendingAction === 'stop' ? 'Requesting stop…' : 'Stop idle sandbox'}
             </button>
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              {blocked ??
-                `Affects all ${sandbox.member_count} member sessions. The server checks that the sandbox is still idle.`}
-            </p>
+            {!controlsBlocked && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {stopBlocked ??
+                  `Affects all ${sandbox.member_count} member sessions. The server checks that the sandbox is still idle.`}
+              </p>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={BUTTON}
+              disabled={busy || loading || inventoryBlocked !== null}
+              onClick={() => void applyAction(sandbox.archived_at ? 'restore' : 'archive')}
+            >
+              {pendingAction === 'archive'
+                ? 'Removing…'
+                : pendingAction === 'restore'
+                  ? 'Restoring…'
+                  : sandbox.archived_at
+                    ? 'Restore to inventory'
+                    : 'Remove from inventory'}
+            </button>
+            {!controlsBlocked && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {inventoryBlocked ??
+                  (sandbox.archived_at
+                    ? 'Makes this sandbox visible in the admin inventory again.'
+                    : deletionComplete
+                      ? 'Hides this deleted sandbox. Its S3 archive and chat history remain available.'
+                      : 'Hides this stopped sandbox. Workspace files, native sessions, and chat history are retained.')}
+              </p>
+            )}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-gray-200 pt-4 dark:border-white/10">
+            <button
+              type="button"
+              className={`${BUTTON} text-red-700 dark:text-red-400`}
+              disabled={busy || loading || deleteBlocked !== null}
+              onClick={() => void applyAction('delete')}
+            >
+              {pendingAction === 'delete' ? 'Requesting deletion…' : 'Archive to S3 and delete'}
+            </button>
+            {!controlsBlocked && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {deleteBlocked ??
+                  'Uploads and verifies files and native session history in S3 before deleting the retained container. Live native resume will no longer be available.'}
+              </p>
+            )}
           </div>
         </>
       )}

@@ -107,6 +107,62 @@ build routing, mounted files, and trusted compute
 deployment profiles remain deployment configuration. These bootstrap names
 appear on the page with hidden values. See [the environment inventory](../ENVIRONMENT.md#settings-and-bootstrap-configuration).
 
+## Sandbox archive storage
+
+Configure **Admin → Settings → Application → Sandbox archives** before enabling stopped
+sandbox deletion. Set the S3 bucket and, optionally, its region, HTTPS
+S3-compatible endpoint and object prefix. The matching
+`AGENT_SANDBOX_ARCHIVE_S3_*` environment variables import once when these fields
+are first introduced; later environment changes do not override saved settings.
+An empty bucket leaves deletion unavailable.
+
+Provision the main control plane's AWS SDK credential chain, preferably with an
+IAM workload role. Its archive role needs `s3:PutObject` and `s3:GetObject` on the
+configured archive prefix; `HeadObject` uses `s3:GetObject`. If SSE-KMS is applied
+by the bucket, also grant the required KMS permissions, including
+`kms:GenerateDataKey` and `kms:Decrypt` so checksum-enabled HEAD can verify the
+object. The application does not need `s3:DeleteObject` for archive storage.
+Keep credentials off execution hosts and sandbox containers. The base Compose
+does not forward AWS credential variables. For environment credentials, create
+a private override restricted to the main service, for example:
+
+```yaml
+services:
+  control-plane:
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set the archive access key}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set the archive secret key}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+```
+
+Load this override with the normal Compose deployment and keep it private.
+For shared profiles, mount the credentials and configuration files read-only
+in this service and set `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE` and
+`AWS_PROFILE` to their container paths and selected profile. Use the saved
+archive region setting or provision `AWS_DEFAULT_REGION` in the same override.
+Never apply these mounts or variables to a runner host, sandbox, web application
+or MCP relay.
+
+The host receives a 15-minute presigned PUT for exactly one request object, with
+a fixed byte length, full-object SHA-256 checksum and `If-None-Match: *`. The
+single PUT archive limit is **5 GiB**; an oversized archive keeps its container.
+A retry may encounter HTTP 412 if the upload already succeeded. The control
+plane independently reads `HeadObject` with `ChecksumMode=ENABLED` and requires
+the exact service-verified SHA-256 and byte length before deletion can proceed.
+ETags, supplied metadata, missing checksums and composite checksums cannot
+substitute for that verification. S3-compatible storage must implement these
+conditional PUT and checksum semantics.
+
+Use a private bucket, block public access, and configure encryption, retention
+and recovery access for these archives. Conditional PUT prevents the issued
+capability from overwriting an existing request object; the archive role and
+other principals must preserve this immutability. Bucket policies can require
+conditional writes, and versioning/Object Lock provide stronger protection
+against later administrative changes. Do not expire an archive while deletion
+or recovery may still depend on it. Persisted receipts include its original
+S3 URI, SHA-256, byte length and object version when available, so changing
+settings does not redirect verification of an existing deletion request.
+
 ## Database browser
 
 Open **Admin → Database** to inspect the Agent database directly in the dashboard.
@@ -370,6 +426,14 @@ container row. The inventory refreshes every 30 seconds and follows every page
 of `GET /admin/agent/sandboxes`, which requires admin access. The default API
 filter remains `state=running`; `state=all` includes every lifecycle state.
 
+Search matches session titles, repositories, owners, hosts, agent versions, and
+container identifiers across the complete loaded inventory. Combine it with
+host and activity filters. Column headings toggle sorting; **Sort by** also
+offers host, state, agent, and creation time. CPU, memory, session counts, and
+timestamps sort by their raw values, with unavailable values last. Uncheck
+**Auto-refresh** to pause both inventory and expanded-detail polling; manual
+refresh and measurement-age indicators remain active.
+
 Open a sandbox's details to inspect its member sessions, host, runtime,
 container identity, and lifecycle. Member details include session links and
 activity states, without exposing native session identifiers, credentials,
@@ -385,6 +449,31 @@ check before stopping the container.
 The page shows the pending request until a host observation confirms the stop;
 an offline host cannot complete it. New turns wait while the stop is pending.
 This action does not delete the container or reclaim its retained disk space.
+
+**Archive to S3 and delete** removes a cleanly stopped container after its
+complete retained filesystem has been uploaded and verified in S3. Configure
+the bucket, region, optional S3 endpoint, and object prefix under **Admin →
+Settings → Application → Sandbox archives**. [S3 storage setup](#sandbox-archive-storage)
+describes permissions, credential provisioning and compatible storage requirements.
+
+Deletion blocks new turns, Fork, and workspace operations while the owning
+broker prepares the archive. The archive contains `manifest.json` and
+`container-rootfs.tar`, including workspace files and retained native session
+files. Archives larger than 5 GiB are refused before deletion. An immutable S3
+object must match both SHA-256 and byte length, and its receipt must commit to
+the database before the host may remove the exact reviewed stopped container.
+Upload failures retain the container. Once an archive is verified, uncertain
+deletion acknowledgements keep admission blocked and retry the same request.
+The broker stores its deletion receipts on its own persistent volume so an
+acknowledgement can survive a broker restart.
+
+The details show progress, archive location, checksum, size, and any failure.
+Chat history, memberships, execution records, and audit receipts remain in the
+database. Deleted native sessions cannot resume; this operation does not add
+automatic recovery from S3. **Remove from inventory** is a separate reversible
+visibility control for stopped sandboxes. Use **Include removed sandboxes**
+with **All states**, then **Restore to inventory**, to inspect retained entries.
+Resuming a sandbox removed only from inventory makes it visible again.
 
 CPU is measured in occupied cores over the interval between Docker samples;
 memory is current usage with inactive file cache removed. Network and block
@@ -403,7 +492,10 @@ measurements.
 
 Sandbox controls require migration `0037_admin_sandbox_stop` and matching
 control-plane and host releases. Apply `alembic upgrade head` before starting
-the updated API. Resource persistence requires migration
+the updated API. Inventory removal additionally requires
+`0040_admin_sandbox_archive`, and S3-backed container deletion requires
+`0041_admin_sandbox_deletion` plus the matching workspace broker release.
+Resource persistence requires migration
 `0034_sandbox_resource_usage` and a host running the updated workspace broker.
 Older hosts still appear in the inventory with resource usage unavailable.
 Only the latest observation is stored; this view does not provide resource

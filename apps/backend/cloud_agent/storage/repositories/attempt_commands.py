@@ -245,6 +245,11 @@ class PostgresAttemptCommands:
                         OR (
                             s.host = $2
                             AND $6::boolean
+                            AND NOT EXISTS (
+                                SELECT 1 FROM agent_sandboxes deleting
+                                WHERE deleting.id = s.sandbox_id
+                                  AND deleting.deletion_state IN ('pending', 'archived', 'deleted')
+                            )
                             AND s.fork_operation_id IS NULL
                             AND s.context_status <> 'lost'
                             AND s.native_state <> 'lost'
@@ -275,7 +280,9 @@ class PostgresAttemptCommands:
                 # a stop committed first leaves this job queued.
                 claimable = await conn.fetchval(
                     "SELECT state IN ('provisioning', 'starting', 'running', 'stopped') "
-                    "AND stop_requested_at IS NULL FROM agent_sandboxes "
+                    "AND stop_requested_at IS NULL "
+                    "AND deletion_state NOT IN ('pending', 'archived', 'deleted') "
+                    "FROM agent_sandboxes "
                     "WHERE id = $1 FOR SHARE",
                     thread_sandbox["sandbox_id"],
                 )

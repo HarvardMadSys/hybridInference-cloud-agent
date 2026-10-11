@@ -75,6 +75,7 @@ class PostgresSnapshotRepository:
                   AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND g.state IN ('running', 'stopped')
                   AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND g.snapshot_state = 'pending'
                   AND g.active_operation_count = 0
                   AND NOT EXISTS (
@@ -720,6 +721,7 @@ class PostgresSnapshotRepository:
                 JOIN agent_threads t ON t.id = j.thread_id
                 WHERE g.snapshot_state = 'importing'
                   AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND (latest.retry_at IS NULL OR latest.retry_at <= NOW())
                 ORDER BY g.updated_at
                 LIMIT 1

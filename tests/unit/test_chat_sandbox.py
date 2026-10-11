@@ -63,6 +63,174 @@ def _spec() -> ChatSandboxSpec:
     )
 
 
+def test_archive_export_is_stopped_exact_id_and_metadata_excludes_secrets(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {
+        **spec.docker_labels(),
+        CHAT_NAMESPACE_LABEL: "deployment-a",
+        "custom-secret": "hidden",
+    }
+    raw = json.loads(_inspect_payload(spec, status="exited", labels=labels))[0]
+    raw["Config"].update(
+        {"Env": ["AWS_SECRET_ACCESS_KEY=hidden"], "User": "10001:10001", "WorkingDir": "/workspace"}
+    )
+    raw["HostConfig"].update({"Binds": ["/host/secret:/secret"], "Memory": 1024, "Runtime": "kata"})
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv[1:3] == ["container", "inspect"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps([raw]), stderr="")
+
+    class ExportProcess:
+        returncode = 0
+
+        def __init__(self, argv, *, stdout, stderr):
+            calls.append(argv)
+            stdout.write(b"complete Docker filesystem tar")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
+    with (tmp_path / "rootfs.tar").open("wb") as output:
+        metadata = manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1024
+        )
+    assert [manager.backend.docker_binary, "container", "export", "sha256:container-one"] in calls
+    assert metadata["Config"]["Image"] == spec.sandbox_image_digest
+    assert metadata["HostConfig"] == {"Memory": 1024, "Runtime": "kata"}
+    assert "Env" not in metadata["Config"]
+    assert "custom-secret" not in metadata["Config"]["Labels"]
+    assert "hidden" not in json.dumps(metadata)
+    assert "Mounts" not in metadata and "NetworkSettings" not in metadata
+    assert not any("exec" in command or "start" in command for command in calls)
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["running", "paused", "created", "wrong-id", "wrong-generation", "foreign", "volume"],
+)
+def test_archive_fences_reject_nonstopped_unowned_or_changed_containers(monkeypatch, change):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    if change == "wrong-generation":
+        labels[chat_sandbox_mod.CHAT_GENERATION_LABEL] = "100"
+    if change == "foreign":
+        labels[CHAT_NAMESPACE_LABEL] = "foreign"
+    payload = _inspect_payload(
+        spec,
+        labels=labels,
+        status="created" if change == "created" else "exited",
+        running=change == "running",
+        paused=change == "paused",
+        mounts=[{"Type": "volume", "Destination": "/agent-state"}] if change == "volume" else [],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
+    )
+    with pytest.raises(SandboxError):
+        manager.require_stopped_archive(
+            spec, container_id="replacement" if change == "wrong-id" else "sha256:container-one"
+        )
+
+
+def test_archived_removal_never_stops_an_external_start_before_removal(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        if argv[1:3] == ["container", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_inspect_payload(spec, status="exited", labels=labels),
+                stderr="",
+            )
+        assert argv == [manager.backend.docker_binary, "container", "rm", "sha256:container-one"]
+        # Docker refuses because an administrator started the exact original
+        # after the stopped inspection. No generic stop may make it removable.
+        return SimpleNamespace(returncode=1, stdout="", stderr="container is running")
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(
+        manager, "stop", lambda *_args: pytest.fail("archive must never stop a new start")
+    )
+    with pytest.raises(SandboxError, match="removal failed"):
+        manager.remove_stopped_archived(spec, container_id="sha256:container-one")
+    assert not any("stop" in argv or "--force" in argv for argv in calls)
+
+
+def test_archived_removal_rejects_start_at_second_identity_fence(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv[1:3] == ["container", "inspect"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_inspect_payload(spec, status="exited", labels=labels, running=len(calls) > 1),
+            stderr="",
+        )
+
+    monkeypatch.setattr(manager, "_run", run)
+    with pytest.raises(SandboxError, match="stopped container"):
+        manager.remove_stopped_archived(spec, container_id="sha256:container-one")
+    assert len(calls) == 2
+
+
+def test_archive_export_rejects_oversize_and_changed_identity_after_export(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    inspections = 0
+
+    def run(argv, *, timeout):
+        nonlocal inspections
+        inspections += 1
+        payload = json.loads(_inspect_payload(spec, status="exited", labels=labels))
+        if inspections > 2:
+            payload[0]["Id"] = "replacement"
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    class ExportProcess:
+        returncode = 0
+
+        def __init__(self, argv, *, stdout, stderr):
+            stdout.write(b"export data")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
+    with (
+        (tmp_path / "rootfs.tar").open("wb") as output,
+        pytest.raises(SandboxError, match="size limit"),
+    ):
+        manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1
+        )
+    inspections = 0
+    with (
+        (tmp_path / "rootfs.tar").open("wb") as output,
+        pytest.raises(SandboxError, match="durable sandbox record"),
+    ):
+        manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1024
+        )
+
+
 @pytest.fixture(autouse=True)
 def _plain_group_network(monkeypatch):
     """Keep these tests on one fixed bridge; the group network is tested elsewhere.

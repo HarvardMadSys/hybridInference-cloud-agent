@@ -1595,6 +1595,18 @@
             "title": "Active Operation Count",
             "type": "integer"
           },
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
           "container_id": {
             "anyOf": [
               {
@@ -1617,6 +1629,109 @@
           "created_at": {
             "format": "date-time",
             "title": "Created At",
+            "type": "string"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "deletion_archive_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Archive Key"
+          },
+          "deletion_archive_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Archive Version Id"
+          },
+          "deletion_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Error"
+          },
+          "deletion_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Request Id"
+          },
+          "deletion_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Requested At"
+          },
+          "deletion_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Sha256"
+          },
+          "deletion_size_bytes": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Size Bytes"
+          },
+          "deletion_state": {
+            "default": "none",
+            "enum": [
+              "none",
+              "pending",
+              "archived",
+              "deleted",
+              "failed"
+            ],
+            "title": "Deletion State",
             "type": "string"
           },
           "execution_profile": {
@@ -1808,6 +1923,42 @@
           "updated_at"
         ],
         "title": "AdminSandbox",
+        "type": "object"
+      },
+      "AdminSandboxArchiveRequest": {
+        "additionalProperties": false,
+        "description": "The exact sandbox reviewed for reversible inventory removal or restore.",
+        "properties": {
+          "container_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Container Id"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "container_id",
+          "last_activity_at"
+        ],
+        "title": "AdminSandboxArchiveRequest",
         "type": "object"
       },
       "AdminSandboxDetail": {
@@ -20060,6 +20211,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "include_archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Archived",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -20155,6 +20316,204 @@
           }
         },
         "summary": "Get Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/archive": {
+      "post": {
+        "description": "Remove a stopped sandbox from inventory while retaining native state.",
+        "operationId": "archive_admin_sandbox_admin_agent_sandboxes__sandbox_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxArchiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/delete": {
+      "post": {
+        "description": "Queue archive-before-delete under the exact reviewed stopped-container fence.",
+        "operationId": "delete_admin_sandbox_admin_agent_sandboxes__sandbox_id__delete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxStopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Admin Sandbox"
+      }
+    },
+    "/admin/agent/sandboxes/{sandbox_id}/restore": {
+      "post": {
+        "description": "Return a removed sandbox to inventory without changing its lifecycle.",
+        "operationId": "restore_admin_sandbox_admin_agent_sandboxes__sandbox_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sandbox_id",
+            "required": true,
+            "schema": {
+              "title": "Sandbox Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSandboxArchiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Admin Sandbox"
       }
     },
     "/admin/agent/sandboxes/{sandbox_id}/stop": {

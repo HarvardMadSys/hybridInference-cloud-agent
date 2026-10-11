@@ -16,7 +16,7 @@ from tests.unit.test_ledger_snapshots import END, START
 from tests.unit.test_sandbox_resource_protocol import sample
 
 from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_sandboxes import SANDBOX_CURSOR_SCOPE, SandboxCursor
+from cloud_agent.admin_sandboxes import SANDBOX_CURSOR_SCOPE, SandboxCursor, sandbox_cursor_scope
 from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -100,6 +100,169 @@ async def stop_request(db, store, sandbox_id, **overrides):
             | overrides
         )
     )
+
+
+async def archive_request(store, sandbox_id, *, archived=True, **overrides):
+    """Change visibility for exactly the sandbox an administrator reviewed."""
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None
+    return await store.sandbox.set_admin_archived(
+        **(
+            {
+                "sandbox_id": sandbox_id,
+                "generation": detail.sandbox.generation,
+                "container_id": detail.sandbox.container_id,
+                "last_activity_at": detail.sandbox.last_activity_at,
+                "archived": archived,
+                "actor_id": "admin:operator",
+                "admin_ip": "127.0.0.1",
+            }
+            | overrides
+        )
+    )
+
+
+async def test_inventory_removal_is_reversible_audited_and_preserves_native_state(db, store):
+    origin = await seed(db, store, "asbx_remove", state="stopped")
+    await member(db, "asbx_remove", origin, 0)
+    before = await store.sandbox.thread_sandbox(thread_id=origin["thread_id"])
+    assert before is not None
+    assert await archive_request(store, "asbx_remove") == "accepted"
+    assert await archive_request(store, "asbx_remove") == "accepted"
+    hidden = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=100, state="all")
+    assert hidden.sandboxes == [] and hidden.total_count == 0
+    visible = await store.admin_sandboxes.list_sandboxes(
+        cursor=None, limit=100, state="all", include_archived=True
+    )
+    assert visible.total_count == 1 and visible.sandboxes[0].archived_at is not None
+    removed = await store.sandbox.thread_sandbox(thread_id=origin["thread_id"])
+    assert removed is not None
+    for field in ("container_id", "native_session_id", "state", "generation", "resident_slot_id"):
+        assert removed[field] == before[field]
+    assert await archive_request(store, "asbx_remove", archived=False) == "accepted"
+    assert await archive_request(store, "asbx_remove", archived=False) == "accepted"
+    restored = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=100, state="stopped")
+    assert restored.total_count == 1 and restored.sandboxes[0].archived_at is None
+    async with db.acquire() as conn:
+        logs = await conn.fetch("SELECT * FROM agent_admin_audit_log ORDER BY id")
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_jobs WHERE id=$1", origin["id"]) == 1
+    assert [row["action"] for row in logs] == ["agent.sandbox.archive", "agent.sandbox.restore"]
+    assert all(row["actor_id"] == "admin:operator" for row in logs)
+    assert all(row["target_user_id"] == origin["user_id"] for row in logs)
+
+
+async def test_removed_inventory_pagination_and_counts_use_same_visibility(db, store):
+    for sandbox_id in ("asbx_a", "asbx_b", "asbx_c"):
+        await seed(db, store, sandbox_id, state="stopped")
+    assert await archive_request(store, "asbx_a") == "accepted"
+    default = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=1, state="all")
+    assert default.total_count == 2 and default.sandboxes[0].id == "asbx_b"
+    included = await store.admin_sandboxes.list_sandboxes(
+        cursor=None, limit=1, state="all", include_archived=True
+    )
+    assert included.total_count == 3 and included.sandboxes[0].id == "asbx_a"
+    cursor = decode_cursor(included.next_cursor, SandboxCursor, sandbox_cursor_scope("all", True))
+    continuation = await store.admin_sandboxes.list_sandboxes(
+        cursor=cursor, limit=100, state="all", include_archived=True
+    )
+    assert [row.id for row in continuation.sandboxes] == ["asbx_b", "asbx_c"]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("state = 'running'", "not_stopped"),
+        ("state = 'starting'", "not_stopped"),
+        ("state = 'stopping'", "not_stopped"),
+        ("state = 'stopped_dirty'", "not_stopped"),
+        ("state = 'lost'", "not_stopped"),
+        ("active_operation_count = 1", "busy"),
+        ("snapshot_state = 'pending'", "busy"),
+        ("snapshot_state = 'snapshotting'", "busy"),
+        ("snapshot_state = 'importing'", "busy"),
+    ],
+)
+async def test_inventory_removal_refuses_live_or_busy_groups(db, store, change, reason):
+    await seed(db, store, "asbx_refuse", state="stopped")
+    async with db.acquire() as conn:
+        await conn.execute(f"UPDATE agent_sandboxes SET {change} WHERE id='asbx_refuse'")
+    assert await archive_request(store, "asbx_refuse") == reason
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
+
+
+async def test_inventory_removal_refuses_claimed_work_before_member_reservation(db, store):
+    origin = await seed(db, store, "asbx_claimed", state="stopped")
+    await member(db, "asbx_claimed", origin, 0)
+    await _seed_attempt(db, store, job=origin, grant_id=None)
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state='running' WHERE id=$1", origin["id"])
+    assert await archive_request(store, "asbx_claimed") == "busy"
+
+
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize(
+    "fence", [{"generation": 2}, {"container_id": None}, {"last_activity_at": START}]
+)
+async def test_inventory_controls_reject_stale_review(db, store, archived, fence):
+    await seed(db, store, "asbx_stale", state="stopped")
+    assert await archive_request(store, "asbx_stale", archived=archived, **fence) == "stale"
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived):
+    await seed(db, store, "asbx_audit", state="stopped")
+    if not archived:
+        assert await archive_request(store, "asbx_audit") == "accepted"
+    action = "agent.sandbox.archive" if archived else "agent.sandbox.restore"
+    async with db.acquire() as conn:
+        await conn.execute(
+            f"ALTER TABLE agent_admin_audit_log ADD CONSTRAINT reject_archive_test "
+            f"CHECK (action <> '{action}')"
+        )
+    try:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await archive_request(store, "asbx_audit", archived=archived)
+        detail = await store.admin_sandboxes.detail("asbx_audit")
+        assert detail is not None and (detail.sandbox.archived_at is None) == archived
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_archive_test"
+            )
+
+
+async def test_only_fenced_running_observation_restores_removed_group(db, store):
+    origin = await seed(db, store, "asbx_resumed", state="stopped")
+    await member(db, "asbx_resumed", origin, 0)
+    assert await archive_request(store, "asbx_resumed") == "accepted"
+    observation = {
+        "thread_id": origin["thread_id"],
+        "host": "runner-one",
+        "sandbox_id": "asbx_resumed",
+        "container_id": "container-asbx_resumed",
+        "sandbox_generation": 1,
+    }
+    for changed in ({"host": "other-host"}, {"sandbox_generation": 2}, {"container_id": "other"}):
+        assert (
+            await store.sandbox.reconcile_thread_sandbox_observation(
+                **(observation | changed), running=True
+            )
+            is None
+        )
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(**observation, running=False)
+        is None
+    )
+    detail = await store.admin_sandboxes.detail("asbx_resumed")
+    assert detail is not None and detail.sandbox.archived_at is not None
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(**observation, running=True)
+        == "running"
+    )
+    detail = await store.admin_sandboxes.detail("asbx_resumed")
+    assert detail is not None and detail.sandbox.archived_at is None
+    assert [row.id for row in (await listing(db)).sandboxes] == ["asbx_resumed"]
 
 
 async def test_all_states_and_detail_include_safe_current_members(db, store):
@@ -218,7 +381,8 @@ async def test_stop_audit_failure_rolls_back_intent(db, store):
             await conn.execute("ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_stop_test")
 
 
-async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(db, store):
+@pytest.mark.parametrize("archived", [False, True])
+async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(db, store, archived):
     job, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
         "thread_id": job["thread_id"],
@@ -285,6 +449,8 @@ async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(d
         )
         == "stopped"
     )
+    if archived:
+        assert await archive_request(store, sandbox["sandbox_id"]) == "accepted"
     resumed = await _claim(store, **claim_options)
     assert resumed is not None and resumed["id"] == follow_up["id"]
     # Claim has committed before reservation: the membership still has no
@@ -316,6 +482,9 @@ async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(d
         reserved is not None
         and reserved["activation_generation"] > sandbox["activation_generation"]
     )
+    detail = await store.admin_sandboxes.detail(sandbox["sandbox_id"])
+    assert detail is not None and detail.sandbox.archived_at is None
+    assert reserved["native_session_id"] == "native-control"
 
 
 async def test_running_idle_groups_include_all_owners_and_missing_hosts(db, store):

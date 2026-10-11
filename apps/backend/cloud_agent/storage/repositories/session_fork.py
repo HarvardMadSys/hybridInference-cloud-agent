@@ -127,7 +127,7 @@ class PostgresSessionForkRepository:
                 SELECT m.*, g.generation AS sandbox_generation, g.host,
                        g.container_id, g.container_name, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
-                       g.execution_profile, g.state AS sandbox_state,
+                       g.execution_profile, g.state AS sandbox_state, g.deletion_state,
                        g.resident_slot_capacity, g.memory_limit, g.cpu_limit,
                        g.stop_timeout_seconds,
                        {NATIVE_FORK_CAPABLE} AS native_fork_capable
@@ -140,6 +140,8 @@ class PostgresSessionForkRepository:
             )
             if row is None:
                 return {"error": "not_shared_live"}
+            if row["deletion_state"] in {"pending", "archived", "deleted"}:
+                return {"error": "sandbox_not_ready"}
             resource_new, _ = await host_compute_admission(conn, str(row["host"]))
             if not resource_new:
                 return {"error": "resource_admission_blocked"}
@@ -325,7 +327,8 @@ class PostgresSessionForkRepository:
                 """
                 UPDATE agent_sandboxes
                 SET active_operation_count = active_operation_count + 1,
-                    idle_deadline = NULL, last_activity_at = NOW(), updated_at = NOW()
+                    idle_deadline = NULL, archived_at = NULL,
+                    last_activity_at = NOW(), updated_at = NOW()
                 WHERE id = $1
                 """,
                 row["sandbox_id"],
@@ -629,7 +632,8 @@ class PostgresSessionForkRepository:
             await conn.execute(
                 """
                 UPDATE agent_sandboxes
-                SET state = 'running', last_activity_at = NOW(), updated_at = NOW()
+                SET state = 'running', archived_at = NULL,
+                    last_activity_at = NOW(), updated_at = NOW()
                 WHERE id = $1 AND generation = $2 AND container_id = $3
                 """,
                 operation["sandbox_id"],
