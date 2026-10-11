@@ -53,29 +53,29 @@ describe('TurnRail', () => {
     expect(onNavigate).toHaveBeenCalledWith('t3');
   });
 
-  it('previews a turn on focus without moving the transcript', () => {
+  it('associates a focused turn with its preview without moving the transcript', () => {
     const onNavigate = vi.fn();
     render(<TurnRail entries={ENTRIES} activeKey="t1" onNavigate={onNavigate} />);
-    fireEvent.focus(screen.getByRole('button', { name: 'Go to turn 3' }));
+    const mark = screen.getByRole('button', { name: 'Go to turn 3' });
+    fireEvent.focus(mark);
     const preview = screen.getByRole('tooltip');
+    expect(mark).toHaveAttribute('aria-describedby', preview.id);
     expect(preview).toHaveTextContent('Question 3');
     expect(preview).toHaveTextContent('Answer 3');
     expect(preview).toHaveTextContent('Running');
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
-  it('associates the preview with the mark it describes', () => {
-    render(<TurnRail entries={ENTRIES} activeKey="t1" onNavigate={vi.fn()} />);
-    const mark = screen.getByRole('button', { name: 'Go to turn 2' });
-    fireEvent.focus(mark);
-    expect(mark).toHaveAttribute('aria-describedby', screen.getByRole('tooltip').id);
-  });
-
-  it('walks the rail with the arrow keys and keeps navigation for a commit', () => {
+  it('walks a single tab stop with the arrow keys and keeps navigation for a commit', () => {
     const onNavigate = vi.fn();
     render(<TurnRail entries={ENTRIES} activeKey="t1" onNavigate={onNavigate} />);
     const marks = screen.getAllByRole('button');
-    marks[0].focus();
+    fireEvent.focus(marks[2]);
+    const tabbable = marks.filter((mark) => mark.getAttribute('tabindex') === '0');
+    expect(tabbable).toHaveLength(1);
+    expect(tabbable[0]).toHaveAccessibleName('Go to turn 3');
+
+    act(() => marks[0].focus());
     fireEvent.keyDown(marks[0], { key: 'ArrowDown' });
     expect(marks[1]).toHaveFocus();
     expect(onNavigate).not.toHaveBeenCalled();
@@ -85,15 +85,6 @@ describe('TurnRail', () => {
     expect(marks[0]).toHaveFocus();
     fireEvent.keyDown(marks[0], { key: 'ArrowUp' });
     expect(marks[0]).toHaveFocus();
-  });
-
-  it('keeps a single tab stop on the rail', () => {
-    render(<TurnRail entries={ENTRIES} activeKey="t1" onNavigate={vi.fn()} />);
-    const marks = screen.getAllByRole('button');
-    fireEvent.focus(marks[2]);
-    const tabbable = marks.filter((mark) => mark.getAttribute('tabindex') === '0');
-    expect(tabbable).toHaveLength(1);
-    expect(tabbable[0]).toHaveAccessibleName('Go to turn 3');
   });
 
   it('leaves the tab stop alone while the rail itself holds focus', () => {

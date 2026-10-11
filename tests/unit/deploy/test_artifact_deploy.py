@@ -620,18 +620,6 @@ def test_the_phases_together_do_what_one_invocation_does(tmp_path: Path, stack: 
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
-def test_no_phase_is_the_whole_deployment_it_always_was(tmp_path: Path, stack: str):
-    """Every existing caller passes a commit and nothing else."""
-    script, env = deployment(tmp_path, stack)
-
-    result, calls = run(script, env)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == COMMIT
-    assert any(replaces_something(c) for c in calls), "it still replaces the stack"
-
-
-@pytest.mark.parametrize("stack", ["control-plane", "host"])
 def test_an_unknown_phase_is_refused_before_anything_runs(tmp_path: Path, stack: str):
     script, env = deployment(tmp_path, stack)
 

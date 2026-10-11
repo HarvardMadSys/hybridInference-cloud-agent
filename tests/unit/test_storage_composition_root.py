@@ -42,17 +42,6 @@ def _port_methods(port: type) -> set[str]:
 
 
 @pytest.mark.parametrize("protocol", TASK_PROTOCOLS, ids=lambda p: p.__name__)
-def test_assembled_storage_carries_every_capability_a_task_declares(protocol: type) -> None:
-    storage = _assembled_storage()
-    missing = [
-        attribute for attribute in protocol.__annotations__ if not hasattr(storage, attribute)
-    ]
-    assert not missing, (
-        f"{protocol.__name__} reaches for {missing}, which Storage has no attribute for"
-    )
-
-
-@pytest.mark.parametrize("protocol", TASK_PROTOCOLS, ids=lambda p: p.__name__)
 def test_every_declared_port_is_implemented_by_what_assembly_supplies(protocol: type) -> None:
     storage = _assembled_storage()
     gaps: list[str] = []

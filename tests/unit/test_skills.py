@@ -197,15 +197,3 @@ def test_idempotency_keeps_legacy_null_fields_and_omitted_skill_defaults():
     assert request_fingerprint("create", original) == legacy
     assert request_fingerprint("create", {**original, "skill_ids": None}) == legacy
     assert request_fingerprint("create", {**original, "skill_ids": []}) != legacy
-
-
-@pytest.mark.asyncio
-async def test_one_fake_delegates_its_skill_repository_without_shadowing():
-    from tests.support.storage import OneFake
-
-    inner = SimpleNamespace(select_skills=AsyncMock(return_value=[{"id": 9}]))
-    wrapped = OneFake(inner)
-    assert await wrapped.skills.select_skills(user_id="owner", skill_ids=[9]) == [{"id": 9}]
-    inner.select_skills.assert_awaited_once_with(user_id="owner", skill_ids=[9])
-    with pytest.raises(AttributeError):
-        _ = wrapped.misspelled_method

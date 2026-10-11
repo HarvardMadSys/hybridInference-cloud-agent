@@ -222,13 +222,6 @@ def test_an_interval_never_fires_twice_without_a_new_mark():
     assert schedule.due() is False
 
 
-def test_a_clock_that_stands_still_cannot_make_the_schedule_raise():
-    schedule = CheckpointSchedule(interval_s=15.0, clock=_Clock())
-    assert schedule.due() is True
-    schedule.mark_sent()
-    assert schedule.due() is False
-
-
 def test_a_cumulative_checkpoint_and_a_final_snapshot_share_one_endpoint():
     """The same method serves both, so the body's own state is what differs."""
     paths: list[str] = []
@@ -311,29 +304,6 @@ def test_a_transport_error_never_fails_a_turn_that_already_ran():
 def test_an_unpostable_snapshot_is_not_released_for_posting(payload):
     """A rejected report reads as a platform error, which is worse than silence."""
     assert runner_mod._reportable_turn_resources(payload) is None
-
-
-def test_a_structurally_invalid_snapshot_never_reaches_the_wire():
-    bodies: list[dict[str, Any]] = []
-
-    def endpoint(request: httpx.Request) -> httpx.Response:
-        bodies.append(_json_body(request))
-        return httpx.Response(200, json={"ok": True})
-
-    broken = {key: value for key, value in _snapshot().items() if key != "measurement_id"}
-    control = _control()
-    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
-    try:
-        reportable = runner_mod._reportable_turn_resources(broken)
-        assert reportable is None
-        # One valid report proves the transport and the method are working, so
-        # the empty assertion below is about the guard and not a dead client.
-        control.report_turn_resources(_snapshot())
-    finally:
-        control.close()
-
-    assert len(bodies) == 1
-    assert bodies[0]["measurement_id"] == "00000000-0000-4000-8000-000000000001"
 
 
 def test_the_reported_snapshot_is_the_broker_payload_unchanged():

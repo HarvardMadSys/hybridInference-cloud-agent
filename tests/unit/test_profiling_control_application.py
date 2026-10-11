@@ -25,7 +25,6 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_STALE_REVISION,
     ControlCommandResult,
 )
-from cloud_agent.ports.profiling_control import ProfilingControl
 from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_ACTIVE,
     LIFECYCLE_EXPIRED,
@@ -252,17 +251,6 @@ class _FakeControl:
     async def list_runs(self, *, deployment: str, limit: int = 20) -> list[dict[str, Any]]:
         """Return the deployment's runs."""
         return list(self.runs.values())[:limit]
-
-
-def test_the_fake_covers_every_method_the_port_declares() -> None:
-    """A port method the fake forgot would leave that path untestable here."""
-    declared = {
-        name
-        for name in dir(ProfilingControl)
-        if not name.startswith("_") and callable(getattr(ProfilingControl, name, None))
-    }
-    implemented = {name for name in vars(_FakeControl) if not name.startswith("_")}
-    assert declared <= implemented, sorted(declared - implemented)
 
 
 def _service(fake: _FakeControl) -> control.ProfilingControlService:

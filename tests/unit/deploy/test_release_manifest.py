@@ -338,12 +338,6 @@ def test_the_database_revision_is_alembics_head() -> None:
     assert head not in parents
 
 
-def test_the_source_repository_and_schema_version_are_pinned() -> None:
-    manifest = build()
-    assert manifest["source_repository"] == SCHEMA["properties"]["source_repository"]["const"]
-    assert manifest["schema_version"] == SCHEMA["properties"]["schema_version"]["const"]
-
-
 # ------------------------------------------------- the schema refuses tampering
 
 

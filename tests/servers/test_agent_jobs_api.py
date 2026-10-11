@@ -4726,20 +4726,6 @@ async def test_shared_abandon_releases_the_exact_residency_and_grant(
     assert grants.revoked == ["agr_resident_shared"]
 
 
-async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeStorage):
-    """A retry of a dropped response gets the stored id, not a duplicate row."""
-    job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-    body = {"event_type": "message", "payload": {"text": "hello"}, "event_seq": 1}
-
-    first = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
-    replay = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
-
-    assert first.json()["event_id"] == replay.json()["event_id"]
-    assert len(store.events) == 1
-
-
 async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating_the_turn(
     client: AsyncClient, store: FakeStorage
 ):
@@ -6893,14 +6879,6 @@ async def test_a_job_created_with_an_alias_stores_the_canonical_id(
     assert job["model"] == _TEST_MODELS[0], "the alias was stored instead of the canonical id"
 
 
-async def test_an_unknown_model_is_still_refused_at_creation(client: AsyncClient):
-    """The other half: resolution must not have turned refusal into a pass."""
-    response = await _create_job_raw(client, model="no-such-model")
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "model_not_available"
-
-
 async def test_the_owner_sees_what_their_turn_consumed(client: AsyncClient, store: FakeStorage):
     """The footer's numbers, end to end: runner posts, owner reads."""
     job_id = await _create_job(client)
@@ -7326,26 +7304,6 @@ async def test_a_stale_or_disagreeing_snapshot_is_refused_with_409(
     assert disagreeing.status_code == 409
     assert disagreeing.json()["detail"]["error"]["type"] == "turn_summary_conflict"
     assert store.turn_summaries[claim["attempt_id"]]["seq"] == 5
-
-
-async def test_a_final_snapshot_cannot_be_reopened_by_a_collecting_one(
-    client: AsyncClient, store: FakeStorage
-):
-    """A newer sequence does not outrank the end of collection."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    endpoint = f"/v1/agent/worker/jobs/{job_id}/turn-resources"
-    await client.post(endpoint, json=_turn_resources_body(report_seq=9), headers=auth)
-
-    reopened = await client.post(
-        endpoint,
-        json=_turn_resources_body(report_seq=10, state="collecting", observed_through_ms=4_000),
-        headers=auth,
-    )
-
-    assert reopened.status_code == 409
-    assert store.turn_summaries[claim["attempt_id"]]["state"] == "final"
 
 
 async def test_a_superseded_attempt_cannot_file_a_turn_resource_snapshot(

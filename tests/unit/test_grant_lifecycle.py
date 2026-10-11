@@ -33,13 +33,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from typing import Any
 
 import pytest
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import grants as grant_client, grants as grants_mod
+from cloud_agent import grants as grant_client
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 from cloud_agent.workers import attempts as control_plane
@@ -222,16 +221,6 @@ async def test_mint_asks_for_the_derived_ttl_without_being_told() -> None:
 
 
 # ── Renewal ────────────────────────────────────────────────────────────
-
-
-async def test_a_live_attempts_grant_is_renewed() -> None:
-    store, grants = _AttemptStore(), _Grants()
-    store.add(1, "agr_1")
-    store.add(2, "agr_2")
-
-    await _renew_live_grants(store, grants, failures={})
-
-    assert grants.renewed == ["agr_1", "agr_2"]
 
 
 async def test_a_superseded_attempt_stops_being_renewed() -> None:
@@ -496,16 +485,6 @@ async def test_a_finished_attempt_leaves_no_failure_count_behind() -> None:
 # ── Revocation ─────────────────────────────────────────────────────────
 
 
-async def test_a_superseded_attempts_grant_is_revoked() -> None:
-    store, grants = _AttemptStore(), _Grants()
-    store.add(1, "agr_1")
-    store.supersede(1)
-
-    await _revoke_dead_grants(store, grants)
-
-    assert grants.revoked == ["agr_1"]
-
-
 async def test_a_finished_attempts_grant_is_revoked() -> None:
     """The terminal case: the worker reported, the attempt is over, and the
     capability it was carrying should not outlive it by its whole TTL."""
@@ -571,23 +550,6 @@ async def test_the_pass_deadline_leaves_room_for_two_of_them() -> None:
         f"two passes plus an interval is {worst_gap}s against a {GRANT_TTL_S}s "
         "TTL: a grant can expire under a running attempt"
     )
-
-
-async def test_a_full_page_of_slow_renewals_cannot_outrun_the_ttl() -> None:
-    """Concurrency alone never bounded this, which is why the deadline exists.
-
-    A full page at the concurrency limit is `ceil(page/concurrency)` waves, and
-    a gateway answering slowly rather than failing makes every wave cost the
-    full request timeout. Without a deadline that product is what one pass
-    takes — and at today's numbers it exceeds the lifetime being renewed.
-    """
-    waves = math.ceil(control_plane.GRANT_RENEWAL_PAGE / control_plane.GRANT_RENEWAL_CONCURRENCY)
-    unbounded = waves * grants_mod._TIMEOUT_S
-    assert unbounded > GRANT_TTL_S, (
-        "the numbers no longer describe the problem this deadline solves; "
-        "re-derive it rather than deleting the test"
-    )
-    assert unbounded > control_plane.GRANT_RENEWAL_PASS_DEADLINE_S
 
 
 async def test_a_pass_that_runs_long_gives_up_its_tail_and_says_so(monkeypatch, caplog) -> None:

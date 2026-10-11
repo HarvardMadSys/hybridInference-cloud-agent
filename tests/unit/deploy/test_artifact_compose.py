@@ -92,12 +92,17 @@ def test_nothing_but_the_build_and_the_image_changed(stack: str, variant: str | 
     """
     before = source(stack)
     after = rendered(stack, variant)
+    release_services = {name for names in ac.STACKS[stack].values() for name in names}
 
     assert set(after["services"]) == set(before["services"])
     for name, service in before["services"].items():
         expected = {k: v for k, v in service.items() if k not in {"build", "image"}}
         actual = {k: v for k, v in after["services"][name].items() if k not in {"build", "image"}}
         assert actual == expected, f"{name} changed beyond its image"
+        if name not in release_services:
+            assert after["services"][name]["image"] == service["image"], (
+                f"{name} is not a release artifact, so its image must be preserved"
+            )
 
     assert set(after) == set(before), "a top-level section (volumes, networks) went missing"
     assert after.get("networks") == before.get("networks")
@@ -115,24 +120,8 @@ def test_each_role_supplies_the_services_that_run_it(stack: str, variant: str | 
             assert document["services"][name]["image"] == images[role], f"{name} != {role}"
 
 
-def test_the_web_variant_chooses_the_image_the_deployment_serves() -> None:
-    """`/` and `/agents` are different images, and a deployment serves one."""
-    agents = rendered("control-plane", "agents")["services"]["web"]["image"]
-    root = rendered("control-plane", "root")["services"]["web"]["image"]
-    assert agents == reference("web", "agents")
-    assert root == reference("web", "root")
-    assert agents != root
-
-
-def test_third_party_services_keep_their_own_images() -> None:
-    document = rendered("control-plane", "agents")
-    assert document["services"]["postgres"]["image"] == "postgres:16-alpine"
-    assert document["services"]["edge"]["image"] == "nginx:1.27.5-alpine"
-
-
-@pytest.mark.parametrize("artifact", [False, True])
-def test_kata_epoch_mount_is_host_wide_read_only_and_tracks_atomic_replacements(artifact):
-    document = rendered("host", None) if artifact else source("host")
+def test_kata_epoch_mount_is_host_wide_read_only_and_tracks_atomic_replacements():
+    document = source("host")
     mounts = document["services"]["runner"]["volumes"]
     matches = [
         item

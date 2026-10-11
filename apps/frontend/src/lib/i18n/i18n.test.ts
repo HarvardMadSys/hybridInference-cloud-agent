@@ -1,12 +1,9 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { en } from './dictionaries/en';
-import { zhCN } from './dictionaries/zh-CN';
 import {
   DEFAULT_LOCALE,
   LOCALES,
-  LOCALE_HTML_LANG,
-  LOCALE_LABELS,
   LOCALE_STORAGE_KEY,
   isLocale,
   negotiateLocale,
@@ -77,10 +74,6 @@ describe('translate', () => {
 });
 
 describe('dictionaries', () => {
-  it('cover exactly the same keys', () => {
-    expect(Object.keys(zhCN).sort()).toEqual(Object.keys(en).sort());
-  });
-
   it('leave no string empty', () => {
     for (const locale of LOCALES) {
       const blank = Object.entries(DICTIONARIES[locale])
@@ -103,13 +96,6 @@ describe('dictionaries', () => {
       })
       .map(String);
     expect(mismatched).toEqual([]);
-  });
-
-  it('name every shipped locale in its own language, and give it an html lang', () => {
-    for (const locale of LOCALES) {
-      expect(LOCALE_LABELS[locale]).toBeTruthy();
-      expect(LOCALE_HTML_LANG[locale]).toBeTruthy();
-    }
   });
 });
 

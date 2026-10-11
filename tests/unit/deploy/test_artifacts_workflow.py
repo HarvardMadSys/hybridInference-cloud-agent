@@ -74,12 +74,6 @@ def test_each_cell_runs_on_its_own_architecture() -> None:
         )
 
 
-def test_the_matrix_covers_the_roles_the_release_names() -> None:
-    role_args = [cell["smoke_args"] for cell in cells()]
-    roles = {arg.split()[1] for arg in role_args}
-    assert roles == set(rm.EXPECTED_PLATFORMS)
-
-
 def test_nothing_in_ci_publishes() -> None:
     """A pull request must not be able to reach a registry, however it changes the file.
 

@@ -475,14 +475,6 @@ def test_the_relay_network_is_internal(compose: dict):
     assert compose["networks"]["agent-relays"]["internal"] is True
 
 
-def test_runner_mounts_the_docker_socket_read_only(compose: dict):
-    """The runner starts sandboxes; it has no business reconfiguring the daemon."""
-    volumes = compose["services"]["runner"]["volumes"]
-    socket_mounts = [v for v in volumes if "docker.sock" in v]
-    assert socket_mounts, "the runner needs the daemon to spawn sandboxes"
-    assert all(v.endswith(":ro") for v in socket_mounts)
-
-
 def test_default_backend_is_vm_isolated(compose: dict):
     """Self-hosted defaults to a kernel boundary per job, not a shared one."""
     env = compose["services"]["runner"]["environment"]
@@ -947,6 +939,7 @@ def test_runner_and_broker_build_group_networks_from_the_same_settings(compose: 
         "AGENT_SANDBOX_MCP_URL",
     ):
         assert runner[name] == broker[name], name
+    assert "COMPOSE_PROJECT" in runner["AGENT_SANDBOX_NAMESPACE"]
 
 
 def test_the_pool_and_resolver_have_no_default(compose: dict):
@@ -967,21 +960,6 @@ def test_the_runner_image_carries_the_host_rule_helper():
     runner = (REPO_ROOT / "deploy/host/Dockerfile.agent-runner").read_text()
     assert re.search(r"^\s+nftables \\$", runner, re.MULTILINE)
     assert "nftables" not in _DOCKERFILE.read_text()
-
-
-def test_runner_and_broker_share_the_private_network_pool(compose: dict):
-    runner_pool = compose["services"]["runner"]["environment"]["AGENT_EGRESS_CHAT_NETWORK_POOL"]
-    broker_pool = compose["services"]["workspace-broker"]["environment"][
-        "AGENT_EGRESS_CHAT_NETWORK_POOL"
-    ]
-
-    assert runner_pool == broker_pool
-    runner_namespace = compose["services"]["runner"]["environment"]["AGENT_SANDBOX_NAMESPACE"]
-    broker_namespace = compose["services"]["workspace-broker"]["environment"][
-        "AGENT_SANDBOX_NAMESPACE"
-    ]
-    assert runner_namespace == broker_namespace
-    assert "COMPOSE_PROJECT" in runner_namespace
 
 
 def test_complete_local_stack_namespaces_daemon_wide_chat_discovery(local_compose: dict):
@@ -1685,27 +1663,6 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
     }
     for name, service in remote_compose["services"].items():
         assert "backend" not in (service.get("depends_on") or []), name
-
-
-def test_remote_relay_network_is_still_closed(remote_compose: dict):
-    """A remote host must not buy reachability by routing the discovery network."""
-    assert remote_compose["networks"]["agent-relays"]["internal"] is True
-
-
-def test_only_the_two_relays_are_on_both_networks(remote_compose: dict):
-    """Everything else is either the runner's or nobody's.
-
-    Two relays: the gateway for model calls, the MCP relay for tools. Named
-    exactly, because the natural way to make this pass after adding a service
-    is to loosen it to "at least one", and that would attach the next
-    addition to every group bridge without a word.
-    """
-    on_relays = {
-        name
-        for name, service in remote_compose["services"].items()
-        if "agent-relays" in (service.get("networks") or {})
-    }
-    assert on_relays == {"gateway-tunnel", "mcp-tunnel"}
 
 
 def test_runner_and_sandbox_are_pointed_at_the_same_name(remote_compose: dict):

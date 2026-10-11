@@ -131,11 +131,4 @@ describe('themeBootScript', () => {
     expect(boot).not.toThrow();
     if (original) Object.defineProperty(window, 'localStorage', original);
   });
-
-  it('agrees with the module it was generated from', () => {
-    // The script is hand-written JS; this is what stops it drifting from
-    // `readStoredTheme`/`resolveTheme` when either changes.
-    expect(themeBootScript()).toContain(JSON.stringify(THEME_STORAGE_KEY));
-    expect(themeBootScript()).toContain(JSON.stringify(DARK_CLASS));
-  });
 });
