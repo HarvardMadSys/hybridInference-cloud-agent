@@ -1,13 +1,13 @@
 """Fence host drain ownership across token reuse and old-writer updates.
 
-Revision ID: 0051_host_drain_fence_epoch
-Revises: 0050_user_memory_edits
+Revision ID: 0052_host_drain_fence_epoch
+Revises: 0051_web_search_admission
 """
 
 from alembic import op
 
-revision = "0051_host_drain_fence_epoch"
-down_revision = "0050_user_memory_edits"
+revision = "0052_host_drain_fence_epoch"
+down_revision = "0051_web_search_admission"
 branch_labels = None
 depends_on = None
 

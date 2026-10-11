@@ -140,6 +140,7 @@ function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
     runtime_versions_available: null,
     capacity_epoch: 'epoch-1',
     capacity: capacity(),
+    drain_fence_epoch: '00000000-0000-4000-8000-000000000001',
     ...over,
   };
 }

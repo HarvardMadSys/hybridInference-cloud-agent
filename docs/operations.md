@@ -63,7 +63,7 @@ field is missing or an optional integration is only partly configured, the
 attention.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0051_host_drain_fence_epoch`. Existing hosts begin without a deployment drain
+`0052_host_drain_fence_epoch`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. Rebuild the sandbox image for explicit plugin loading. Then start the
 main control-plane listener with its existing complete environment. It
@@ -1820,7 +1820,7 @@ there before relying on a new rollback fence, and do not dispatch an older
 default-branch workflow against an environment during that rollout window.
 
 Migration `0049_host_drain_fence` introduced durable drain ownership and its V1
-recipe marker. Additive migration `0051_host_drain_fence_epoch` establishes the
+recipe marker. Additive migration `0052_host_drain_fence_epoch` establishes the
 current permanent compatibility floor. Before activating the V2 control plane,
 the deployment orchestrator must reject every candidate whose control-plane
 recipe lacks `AGENT_DEPLOY_DRAIN_FENCE_V2`; after activation, do not downgrade
