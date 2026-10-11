@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
@@ -136,6 +137,19 @@ class AutomaticComputeSetup:
         saved = await self.repository.provider_defaults("automatic_setup")
         request = saved.get("request")
         if not isinstance(request, dict):
+            try:
+                gateway_address = urlsplit(text_setting("gateway_base_url")).hostname or ""
+            except ValueError:
+                gateway_address = ""
+            status["machine_defaults"] = {
+                "gateway": {
+                    "address": os.environ.get("AGENT_GATEWAY_SSH_HOST", "").strip()
+                    or gateway_address,
+                },
+                "control": {
+                    "address": os.environ.get("AGENT_CONTROL_PLANE_SSH_HOST", "").strip(),
+                },
+            }
             return status
         defaults = {key: value for key, value in request.items() if key != "request_id"}
         status["defaults"] = defaults

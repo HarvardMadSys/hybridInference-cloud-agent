@@ -219,6 +219,10 @@ function AutomaticComputeSetup({
             intent.current = { signature: setupSignature(parameters), requestId };
             setPending(true);
           }
+        } else if (result.machine_defaults) {
+          const machines = result.machine_defaults;
+          setGateway((current) => ({ ...current, address: machines.gateway.address }));
+          setControl((current) => ({ ...current, address: machines.control.address }));
         }
         setStatus(result);
       })

@@ -219,6 +219,12 @@ from_env() {
 AGENT_DEPLOYMENT_SHA="${SHA}"
 export AGENT_DEPLOYMENT_SHA
 
+# Server setup needs the physical node's address, not the API container's
+# hostname or the public reverse proxy. Respect a deployment-specific SSH alias.
+AGENT_CONTROL_PLANE_SSH_HOST="${AGENT_CONTROL_PLANE_SSH_HOST:-$(from_env AGENT_CONTROL_PLANE_SSH_HOST)}"
+AGENT_CONTROL_PLANE_SSH_HOST="${AGENT_CONTROL_PLANE_SSH_HOST:-$(hostname -f 2>/dev/null || hostname)}"
+export AGENT_CONTROL_PLANE_SSH_HOST
+
 compose() {
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in

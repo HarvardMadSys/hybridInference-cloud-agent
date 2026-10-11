@@ -105,6 +105,11 @@ services:
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
+      # Editable first-time Server setup defaults. The deployer supplies the
+      # physical node's SSH hostname; a container hostname is not an SSH target.
+      AGENT_CONTROL_PLANE_SSH_HOST: ${AGENT_CONTROL_PLANE_SSH_HOST:-}
+      # Omit when the gateway API hostname is also its SSH address.
+      AGENT_GATEWAY_SSH_HOST: ${AGENT_GATEWAY_SSH_HOST:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       # Imported once into admin Settings; subsequent changes are made there.
       AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}

@@ -173,6 +173,10 @@ export interface AutomaticComputeSetupStatus {
   available: boolean;
   deployment_sha: string | null;
   blocked_reasons: BlockedReason[];
+  machine_defaults?: {
+    gateway: { address: string };
+    control: { address: string };
+  };
   defaults?: Omit<AutomaticComputeSetupRequest, 'request_id'>;
   pending_request_id?: string | null;
 }

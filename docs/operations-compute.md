@@ -105,7 +105,13 @@ Supply the infrastructure inputs once:
 
 1. Add and validate management SSH connections for the stable gateway machine
    and control-plane machine, including independently verified host keys.
-2. Select those connections and enter the machines' SSH addresses and users.
+2. Select those connections and confirm the machines' SSH addresses and users.
+   The gateway address defaults to the saved Gateway API URL's hostname
+   (for FreeInference, `freeinference.org`). The supported control-plane deployer
+   supplies the service node's FQDN as the control-plane address. Override these
+   with `AGENT_GATEWAY_SSH_HOST` and `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses
+   different addresses; other deployers must supply the control-plane value.
+   Saved and pending setup inputs take precedence over these first-time defaults.
    Both machines need Python 3 and passwordless `sudo`. The control machine
    must run the supported Docker Compose deployment, and the gateway must
    already listen on the selected inference port.

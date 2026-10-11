@@ -90,6 +90,7 @@ with log.open("a") as f:
                        "pgadmin_servers": os.getenv("AGENT_PGADMIN_SERVERS_FILE"),
                        "pgadmin_entrypoint": os.getenv("AGENT_PGADMIN_ENTRYPOINT_FILE"),
                        "physical_host": os.getenv("AGENT_PHYSICAL_HOST"),
+                       "control_ssh_host": os.getenv("AGENT_CONTROL_PLANE_SSH_HOST"),
                        "runner_host": os.getenv("AGENT_RUNNER_HOST")}) + "\n")
 if "config" in a and "--environment" in a:
     if os.getenv("TEST_REAL_COMPOSE"):
@@ -324,6 +325,10 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         deployed_at = (state / ".deployed-at").read_text().strip()
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", deployed_at)
         activation = next(c for c in calls if "--remove-orphans" in c["args"])
+        assert (
+            activation["control_ssh_host"]
+            == subprocess.check_output(["hostname", "-f"], text=True).strip()
+        )
         assert activation["deployed_at"] == deployed_at
         preserved = "2026-08-07T12:00:00Z"
         (state / ".deployed-at").write_text(preserved + "\n")
@@ -356,6 +361,37 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert COMMIT in calls[readiness]["args"]
         assert "--draining-host" not in calls[readiness]["args"]
         assert "/agents" in Path(env["TEST_CURL_LOG"]).read_text()
+
+
+@pytest.mark.parametrize("source", ["environment", "dotenv"])
+def test_control_plane_preserves_an_explicit_ssh_address(tmp_path: Path, source: str):
+    script, env = deployment(tmp_path, "control-plane")
+    address = "control-ssh.example.org"
+    if source == "environment":
+        env["AGENT_CONTROL_PLANE_SSH_HOST"] = address
+    else:
+        with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
+            config.write(f"AGENT_CONTROL_PLANE_SSH_HOST={address}\n")
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    activation = next(call for call in calls if "--remove-orphans" in call["args"])
+    assert activation["control_ssh_host"] == address
+
+
+def test_control_plane_defaults_to_node_hostname_when_fqdn_is_unavailable(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    executable(
+        tmp_path / "bin/hostname",
+        '#!/bin/sh\nif [ "$1" = "-f" ]; then exit 1; fi\nprintf "service-node\\n"\n',
+    )
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    activation = next(call for call in calls if "--remove-orphans" in call["args"])
+    assert activation["control_ssh_host"] == "service-node"
 
 
 def test_control_readiness_accepts_the_exact_draining_host(tmp_path: Path):
