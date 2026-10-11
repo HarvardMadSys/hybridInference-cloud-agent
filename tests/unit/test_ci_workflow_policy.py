@@ -24,7 +24,9 @@ def _document() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())
 
 
-def _expression(value: str, event: str, cell: dict) -> Any:
+def _expression(
+    value: str, event: str, cell: dict, *, runner_environment: str = "github-hosted"
+) -> Any:
     """Evaluate the small Actions expression subset used for runner routing.
 
     An explicit AST allowlist avoids executing workflow text as Python and fails
@@ -33,6 +35,8 @@ def _expression(value: str, event: str, cell: dict) -> Any:
     source = value.removeprefix("${{").removesuffix("}}").strip()
     for name, replacement in {
         "github.event_name": event,
+        "runner.environment": runner_environment,
+        "matrix.artifact.name": cell.get("name"),
         "matrix.artifact.arch": cell.get("arch"),
         "matrix.artifact.runner": cell.get("runner"),
     }.items():
@@ -168,6 +172,91 @@ def test_builder_configuration_is_disposable_for_prs_and_persistent_for_pushes(
             runner_workspace.parent / "buildx" / "trusted-runner"
         )
         assert outputs["BUILDER"] == "ci-trusted-runner"
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push", "workflow_dispatch"])
+@pytest.mark.parametrize("runner_environment", ["github-hosted", "self-hosted"])
+def test_sandbox_disk_cleanup_runs_only_for_hosted_pull_request_cells(
+    event: str, runner_environment: str
+) -> None:
+    """Persistent runners and other artifact cells must retain their SDKs and caches."""
+    artifacts = _document()["jobs"]["artifacts"]
+    cleanup = [step for step in artifacts["steps"] if step.get("name", "").startswith("Free ")]
+    assert len(cleanup) == 2
+    for cell in _cells(artifacts):
+        expected = (
+            event == "pull_request"
+            and runner_environment == "github-hosted"
+            and cell["name"] == "sandbox"
+        )
+        for step in cleanup:
+            assert (
+                _expression(step["if"], event, cell, runner_environment=runner_environment)
+                is expected
+            )
+
+
+def test_sandbox_disk_cleanup_keeps_loaded_images_and_other_builder_caches(tmp_path: Path) -> None:
+    """Execute cleanup with command recorders instead of SDK files or a Docker daemon."""
+    steps = _document()["jobs"]["artifacts"]["steps"]
+    sdks = next(
+        step
+        for step in steps
+        if step.get("name") == "Free unused SDKs on the hosted sandbox runner"
+    )
+    cache = next(
+        step
+        for step in steps
+        if step.get("name") == "Free the hosted sandbox builder's unused cache"
+    )
+    builder = next(
+        step for step in steps if step.get("name") == "Reuse this runner's builder, or make one"
+    )
+    retry = next(
+        step for step in steps if step.get("name") == "Build ${{ matrix.artifact.name }} (retry)"
+    )
+    uv = next(step for step in steps if step.get("name") == "Install uv")
+    assert steps.index(sdks) < steps.index(builder)
+    assert steps.index(retry) < steps.index(cache) < steps.index(uv)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    commands = tmp_path / "commands"
+    for tool in ("sudo", "docker"):
+        executable = bin_dir / tool
+        executable.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "${0##*/}" "$@" >> "$CLEANUP_COMMAND_LOG"\n'
+        )
+        executable.chmod(0o755)
+    df = bin_dir / "df"
+    df.write_text("#!/bin/sh\nexit 0\n")
+    df.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CLEANUP_COMMAND_LOG": str(commands),
+        "BUILDER": "ci-pr-123-2-sandbox",
+        "IMAGE_TAG": "sandbox:ci-123-2-sandbox",
+    }
+    for step in (sdks, cache):
+        subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+        subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, env=env, check=True)
+    assert commands.read_text().splitlines() == [
+        "sudo",
+        "rm",
+        "-rf",
+        "/usr/local/lib/android",
+        "/usr/share/dotnet",
+        "/opt/ghc",
+        "/opt/hostedtoolcache/CodeQL",
+        "docker",
+        "buildx",
+        "prune",
+        "--builder",
+        env["BUILDER"],
+        "--all",
+        "--force",
+    ]
 
 
 def test_real_kata_probe_is_unreachable_from_pull_requests_and_reported_as_skipped() -> None:
