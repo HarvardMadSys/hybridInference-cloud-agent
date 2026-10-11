@@ -798,6 +798,76 @@ async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_fail
     assert store.rounds() == []
 
 
+@pytest.mark.parametrize(
+    ("current_goal", "trigger_ref", "detail"),
+    [
+        (
+            goal_row(goal_id="goal-2", revision=2, objective="ship something else"),
+            "set:2",
+            "superseded goal",
+        ),
+        (goal_row(revision=3), "resume:3", "superseded revision"),
+    ],
+    ids=["objective-replaced", "paused-and-resumed"],
+)
+async def test_an_exhausted_scheduling_failure_preserves_a_new_goal_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    current_goal: dict[str, Any],
+    trigger_ref: str,
+    detail: str,
+):
+    """A failure belongs to the goal revision that was being scheduled.
+
+    The owner's replacement or pause/resume can commit while a scheduling
+    attempt fails. Its new round and wakeup must survive the old attempt's
+    exhausted retry handler.
+    """
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
+    failed_wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    failed_wakeup["attempts"] = MAX_WAKEUP_ATTEMPTS - 1
+
+    async def fail_after_owner_write(**kwargs: Any) -> None:
+        assert (kwargs["goal_id"], kwargs["revision"]) == (GOAL_ID, 1)
+        store.goal = dict(current_goal)
+        current_round = turn(
+            id="current-round",
+            state="queued",
+            turn_source="goal",
+            goal_id=current_goal["goal_id"],
+            round_kind="work",
+            input_seq_at_create=1,
+            turn_no=2,
+        )
+        current_round["round_goal_revision"] = current_goal["revision"]
+        store.turns.append(current_round)
+        store.goal_wakeups.arm(
+            trigger="owner",
+            trigger_ref=trigger_ref,
+            goal_id=current_goal["goal_id"],
+            revision=current_goal["revision"],
+        )
+        raise RuntimeError("the old scheduling attempt failed")
+
+    monkeypatch.setattr(store.conversation_commands, "create_goal_round", fail_after_owner_write)
+
+    assert await run_goal_wakeups(store=store) == 1
+
+    assert store.goal == current_goal
+    assert [row["id"] for row in store.queued_rounds()] == ["current-round"]
+    failed = store.wakeup(failed_wakeup["id"])
+    assert (failed["state"], failed["detail"], failed["lease_expires_at"]) == (
+        "processed",
+        detail,
+        None,
+    )
+    current_wakeup = store.goal_wakeups.rows[-1]
+    assert (current_wakeup["state"], current_wakeup["attempts"], current_wakeup["detail"]) == (
+        "pending",
+        0,
+        None,
+    )
+
+
 async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads():
     """Issue #47: a deployment fault must not spend the goal's attempts.
 

@@ -586,7 +586,8 @@ const filesError = (cause: unknown): string =>
  *
  * Each directory is one request, cached under its path, so expanding a folder
  * never discards the rest of the tree. A refresh (job state change, or a save)
- * refetches the root, every open folder and the open file — nothing else.
+ * refetches the root, every open folder and the open file. Closed folders are
+ * marked stale and refetched when they are next opened.
  */
 export function useWorkspaceFiles(
   jobId: string,
@@ -606,6 +607,8 @@ export function useWorkspaceFiles(
   // A refresh invalidates every in-flight request: results from an older
   // generation belong to a workspace state the user is no longer looking at.
   const generation = useRef(0);
+  const directoryGenerations = useRef(new Map<string, number>());
+  const directoryRequests = useRef(new Map<string, number>());
   const fileRequest = useRef(0);
   const alive = useRef(true);
   const expandedRef = useRef(expanded);
@@ -626,6 +629,7 @@ export function useWorkspaceFiles(
   const loadDirectory = useCallback(
     async (path: string) => {
       const mine = generation.current;
+      directoryRequests.current.set(path, mine);
       setDirectories((current) => ({
         ...current,
         [path]: { entries: current[path]?.entries ?? null, loading: true, error: null },
@@ -633,6 +637,7 @@ export function useWorkspaceFiles(
       try {
         const node = await getAgentJobFiles(jobId, path);
         if (!alive.current || mine !== generation.current) return;
+        directoryGenerations.current.set(path, mine);
         setDirectories((current) => ({
           ...current,
           [path]: {
@@ -648,6 +653,8 @@ export function useWorkspaceFiles(
           ...current,
           [path]: { entries: null, loading: false, error: filesError(cause) },
         }));
+      } finally {
+        if (directoryRequests.current.get(path) === mine) directoryRequests.current.delete(path);
       }
     },
     [jobId],
@@ -666,6 +673,7 @@ export function useWorkspaceFiles(
         if (!isCurrent()) return;
         if (node.kind === 'directory') {
           // The entry turned out to be a directory — show it in the tree.
+          directoryGenerations.current.set(path, mine);
           setDirectories((current) => ({
             ...current,
             [path]: { entries: node.entries ?? [], loading: false, error: null },
@@ -706,7 +714,14 @@ export function useWorkspaceFiles(
     (path: string) => {
       const open = Boolean(expanded[path]);
       setExpanded((current) => ({ ...current, [path]: !open }));
-      if (!open && !directories[path]?.entries) void loadDirectory(path);
+      if (
+        !open &&
+        (!directories[path]?.entries ||
+          directoryGenerations.current.get(path) !== generation.current) &&
+        directoryRequests.current.get(path) !== generation.current
+      ) {
+        void loadDirectory(path);
+      }
     },
     [directories, expanded, loadDirectory],
   );

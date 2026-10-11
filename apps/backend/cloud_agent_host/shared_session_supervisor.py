@@ -2160,6 +2160,7 @@ class SharedChatSessionSupervisor:
         generation: int,
         reason: Literal["idle", "orphaned_attempt", "lost", "unguarded"] = "idle",
         member_activation_generations: dict[str, int] | None = None,
+        require_expired_deadline: bool = False,
     ) -> SharedSessionDescriptor:
         """Close all member transports, then stop the group exactly once.
 
@@ -2167,6 +2168,10 @@ class SharedChatSessionSupervisor:
         Docker calls. Without it, a new activation can start the container in
         the gap after transports are detached but before the stale idle sweep
         issues ``docker stop``.
+
+        Sweep callers also require an expired deadline under this barrier:
+        activity can finish and refresh it after the sweep selects candidates.
+        Direct stop requests retain their quiescence-only admission behavior.
         """
         with self._lock:
             group, requested = self._member(thread_id)
@@ -2183,6 +2188,12 @@ class SharedChatSessionSupervisor:
                 raise SessionBusy("shared sandbox group stop is already in progress")
             if reason == "idle" and not self._is_quiescent(group):
                 raise SessionBusy("shared sandbox group still has active members")
+            if (
+                reason == "idle"
+                and require_expired_deadline
+                and (group.idle_deadline is None or group.idle_deadline > self._clock())
+            ):
+                raise SessionBusy("shared sandbox group inactivity deadline has not elapsed")
             group.stopping = True
             group.lifecycle_generation += 1
             group.idle_deadline = None
@@ -2281,6 +2292,7 @@ class SharedChatSessionSupervisor:
                     self.stop_if_idle(
                         thread_id,
                         generation=generation,
+                        require_expired_deadline=True,
                     )
                 )
         return stopped

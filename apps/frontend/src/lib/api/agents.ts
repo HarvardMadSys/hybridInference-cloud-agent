@@ -1782,7 +1782,9 @@ export async function streamAgentTerminal(
         { headers: { Accept: 'text/event-stream' }, signal: options.signal },
       );
       if (!resp.ok) {
-        reconnectable = false;
+        // A temporarily unavailable host or rate limit must not disable a
+        // retained terminal. Resume from the same cursor after the backoff.
+        reconnectable = resp.status === 429 || (resp.status >= 500 && resp.status < 600);
         await jsonOrThrow(resp);
         return;
       }
@@ -1897,6 +1899,26 @@ export function parseFrame(raw: string): ParsedFrame | null {
 export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions): Promise<void> {
   let cursor = opts.lastEventId ?? 0;
   let finished = false;
+  let reconnectAttempts = 0;
+
+  // Empty or repeatedly failing streams must not create a reconnect storm.
+  // New event progress restores the short delay for the next dropped stream.
+  const waitToReconnect = () =>
+    new Promise<void>((resolve) => {
+      if (opts.signal?.aborted) {
+        resolve();
+        return;
+      }
+      const delayMs = Math.min(100 * 2 ** reconnectAttempts, 5_000);
+      reconnectAttempts = Math.min(reconnectAttempts + 1, 6);
+      const finish = () => {
+        clearTimeout(timer);
+        opts.signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      opts.signal?.addEventListener('abort', finish, { once: true });
+    });
 
   while (!finished) {
     if (opts.signal?.aborted) return;
@@ -1951,7 +1973,9 @@ export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions)
             const parsed = JSON.parse(frame.data) as AgentJobEventApi;
             // Track the cursor from the frame id so a reconnect resumes
             // exactly here, with no gap and no duplicate.
-            cursor = frame.id ?? parsed.id ?? cursor;
+            const nextCursor = frame.id ?? parsed.id ?? cursor;
+            if (nextCursor > cursor) reconnectAttempts = 0;
+            cursor = nextCursor;
             opts.onEvent(parsed);
           } catch {
             // A frame we cannot parse is dropped rather than aborting the
@@ -1965,7 +1989,14 @@ export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions)
       // fires. Reconnect from the cursor instead of surfacing an error.
       opts.onError?.(err);
     } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        // Abort and network failures may already have errored the body.
+      }
       reader.releaseLock();
     }
+
+    if (!finished) await waitToReconnect();
   }
 }

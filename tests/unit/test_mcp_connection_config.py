@@ -10,6 +10,7 @@ tested directly rather than through a server.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from cloud_agent.mcp import config_import, launch, net_policy
@@ -18,6 +19,135 @@ from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec, Mount, Transpo
 
 class TestNetPolicy:
     """What may be dialled, and what may not."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected_url", "expected_origin", "expected_port"),
+        [
+            (
+                "https://[2606:4700:4700::1111]",
+                "https://[2606:4700:4700::1111]/",
+                "https://[2606:4700:4700::1111]",
+                443,
+            ),
+            (
+                "https://[2606:4700:4700::1111]/mcp?mode=read#tools",
+                "https://[2606:4700:4700::1111]/mcp?mode=read",
+                "https://[2606:4700:4700::1111]",
+                443,
+            ),
+            (
+                "https://[2606:4700:4700::1111]:443/mcp",
+                "https://[2606:4700:4700::1111]:443/mcp",
+                "https://[2606:4700:4700::1111]:443",
+                443,
+            ),
+            (
+                "https://[2606:4700:4700::1111]:8443/mcp?mode=read#tools",
+                "https://[2606:4700:4700::1111]:8443/mcp?mode=read",
+                "https://[2606:4700:4700::1111]:8443",
+                8443,
+            ),
+            (
+                "http://[2606:4700:4700::1111]:80/mcp",
+                "http://[2606:4700:4700::1111]:80/mcp",
+                "http://[2606:4700:4700::1111]:80",
+                80,
+            ),
+        ],
+    )
+    def test_ipv6_authorities_remain_valid_for_the_http_client(
+        self, raw: str, expected_url: str, expected_origin: str, expected_port: int
+    ) -> None:
+        """Normalization preserves literal brackets without adding them to dial hosts."""
+        endpoint = net_policy.normalize_url(raw)
+        assert endpoint.url == expected_url
+        assert endpoint.origin == expected_origin
+        assert endpoint.host == "2606:4700:4700::1111"
+        assert endpoint.port == expected_port
+        assert httpx.URL(endpoint.url).host == endpoint.host
+        assert httpx.URL(endpoint.origin).host == endpoint.host
+        assert net_policy.dial_host(endpoint.host) == endpoint.host
+
+    @pytest.mark.parametrize(
+        ("base", "other", "expected"),
+        [
+            (
+                "https://[2606:4700:4700::1111]/mcp",
+                "https://[2606:4700:4700::1111]:443/messages?session=1#tools",
+                True,
+            ),
+            (
+                "https://[2606:4700:4700::1111]:443/mcp",
+                "https://[2606:4700:4700::1111]/messages",
+                True,
+            ),
+            (
+                "https://[2606:4700:4700::1111]:8443/mcp",
+                "https://[2606:4700:4700::1111]:8443/messages",
+                True,
+            ),
+            (
+                "https://[2606:4700:4700::1111]/mcp",
+                "https://[2606:4700:4700::1111]:8443/messages",
+                False,
+            ),
+            (
+                "https://[2606:4700:4700::1111]/mcp",
+                "https://[2606:4700:4700::1001]/messages",
+                False,
+            ),
+            (
+                "https://[2606:4700:4700::1111]/mcp",
+                "http://[2606:4700:4700::1111]/messages",
+                False,
+            ),
+        ],
+    )
+    def test_ipv6_same_origin_uses_scheme_host_and_effective_port(
+        self, base: str, other: str, expected: bool
+    ) -> None:
+        """Default ports match, while a different host, scheme or port does not."""
+        assert net_policy.normalize_url(base).same_origin(other) is expected
+
+    @pytest.mark.parametrize("port", ["", ":443", ":8443"])
+    def test_ipv6_redirects_and_resources_accept_the_same_authority(self, port: str) -> None:
+        """Credential origin and resource checks use valid bracketed authorities."""
+        endpoint = net_policy.normalize_url(f"https://[2606:4700:4700::1111]{port}/mcp")
+        target = f"{endpoint.origin}/mcp/messages?session=1"
+        redirect = net_policy.validate_redirect(
+            endpoint,
+            target,
+            net_policy.EgressPolicy(),
+            hops=1,
+            credential_origin=endpoint.origin,
+        )
+        assert httpx.URL(redirect.url).host == endpoint.host
+        assert net_policy.resource_covers(endpoint.url, target)
+
+    @pytest.mark.parametrize(
+        ("address", "policy", "allowed"),
+        [
+            ("2606:4700:4700::1111", net_policy.EgressPolicy(), True),
+            ("fd00:ec2::1", net_policy.EgressPolicy(), False),
+            ("fd00:ec2::1", net_policy.EgressPolicy(allow_private=True), True),
+            ("fd00:ec2::254", net_policy.EgressPolicy(allow_private=True), False),
+            (
+                "fd00:ec2::254",
+                net_policy.EgressPolicy(allowed_hosts=frozenset({"fd00:ec2::254"})),
+                False,
+            ),
+        ],
+    )
+    def test_ipv6_url_hosts_still_apply_address_policy(
+        self, address: str, policy: net_policy.EgressPolicy, allowed: bool
+    ) -> None:
+        """Fixing URL syntax leaves private and metadata restrictions in force."""
+        endpoint = net_policy.validate_endpoint(f"https://[{address}]/mcp", policy)
+        if allowed:
+            assert net_policy.check_addresses(endpoint.host, [endpoint.host], policy) == (address,)
+        else:
+            with pytest.raises(net_policy.EndpointRejected):
+                net_policy.check_addresses(endpoint.host, [endpoint.host], policy)
 
     def test_rejects_a_url_carrying_a_credential(self) -> None:
         """A password in a URL would be replayed into logs and errors."""
@@ -49,6 +179,42 @@ class TestNetPolicy:
             net_policy.check_addresses(
                 "example.com", ["::ffff:127.0.0.1"], net_policy.EgressPolicy()
             )
+
+    @pytest.mark.parametrize(
+        "address", ["169.254.169.254", "fd00:ec2::254", "::ffff:169.254.169.254"]
+    )
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            net_policy.EgressPolicy(),
+            net_policy.EgressPolicy(allow_private=True, allow_plain_http=True),
+            net_policy.EgressPolicy(allowed_hosts=frozenset({"bridge.internal"})),
+            net_policy.EgressPolicy(
+                allow_private=True,
+                allow_plain_http=True,
+                allowed_hosts=frozenset({"bridge.internal"}),
+            ),
+        ],
+    )
+    def test_metadata_is_refused_even_when_the_policy_is_widened(
+        self, address: str, policy: net_policy.EgressPolicy
+    ) -> None:
+        """Private connectors and trusted hosts cannot reach cloud metadata."""
+        with pytest.raises(net_policy.EndpointRejected, match="never dials"):
+            net_policy.check_addresses("bridge.internal", ["93.184.216.34", address], policy)
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            net_policy.EgressPolicy(allow_private=True, allow_plain_http=True),
+            net_policy.EgressPolicy(allowed_hosts=frozenset({"bridge.internal"})),
+        ],
+    )
+    def test_private_ipv6_connectors_remain_allowed(self, policy: net_policy.EgressPolicy) -> None:
+        """Blocking the metadata endpoint does not block trusted private connectors."""
+        assert net_policy.check_addresses("bridge.internal", ["fd00:ec2::1"], policy) == (
+            "fd00:ec2::1",
+        )
 
     def test_refuses_when_one_of_several_addresses_is_private(self) -> None:
         """A name answering with both is a rebinding attempt, not a lucky one."""

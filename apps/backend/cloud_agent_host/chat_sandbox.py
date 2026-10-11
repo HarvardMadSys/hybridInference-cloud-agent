@@ -2472,6 +2472,36 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
+    @staticmethod
+    def _shared_writer_task_state_script() -> str:
+        """Classify a complete thread group, failing closed on census races.
+
+        A zombie group leader may still have live worker threads. Check every
+        task and match both surrounding thread counts. Exited nonleaders make
+        the census ambiguous: another task may replace them without changing
+        the count. Only a sole dead leader proves the group has exited.
+        """
+        return (
+            "writer_state() { proc=$1; seen=0; live=0; stopped=1; "
+            'threads=$(sed -n "s/^Threads:[[:space:]]*//p" "$proc/status" 2>/dev/null || :); '
+            'case "$threads" in ""|0|*[!0-9]*) printf "%s" unknown; return;; esac; '
+            'for task in "$proc"/task/[0-9]*; do '
+            'raw=$(cat "$task/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'state=$(set -- $fields; printf "%s" "${1:-}"); '
+            'case "$state" in Z|X|x) '
+            'if [ "${task##*/}" != "${proc##*/}" ]; then '
+            'printf "%s" unknown; return; fi;; T|t) live=1;; '
+            '"") printf "%s" unknown; return;; *) live=1; stopped=0;; esac; '
+            "seen=$((seen + 1)); done; "
+            'current_threads=$(sed -n "s/^Threads:[[:space:]]*//p" '
+            '"$proc/status" 2>/dev/null || :); '
+            'if [ "$threads" != "$seen" ] || [ "$current_threads" != "$seen" ]; then '
+            'printf "%s" unknown; elif [ "$live" = 0 ]; then '
+            'if [ "$seen" = 1 ]; then printf "%s" exited; else printf "%s" unknown; fi; '
+            'elif [ "$stopped" = 1 ]; then printf "%s" stopped; '
+            'else printf "%s" running; fi; }; '
+        )
+
     def freeze_shared_writers(
         self,
         spec: ChatSandboxSpec,
@@ -2499,7 +2529,9 @@ class ChatSandboxManager:
         # added back.  Run one census as each identity instead.  Repeating the
         # census until every observed process is stopped closes the race where
         # an idle CLI background process forks while /proc is being scanned.
-        script = (
+        # Exclude only fully exited thread groups: a zombie leader can retain
+        # live workers, and the leader stays Z even when SIGSTOP stops them.
+        script = self._shared_writer_task_state_script() + (
             'set -eu; expected_uid="$1"; committed=0; receipt=""; '
             "resume_receipt() { "
             '[ "$committed" = 0 ] || return 0; '
@@ -2516,11 +2548,11 @@ class ChatSandboxManager:
             'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
             '[ "$uid" = "$expected_uid" ] || continue; '
             'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'state=$(set -- $fields; printf "%s" "${1:-}"); '
+            'state=$(writer_state "$proc"); [ "$state" != exited ] || continue; '
             'started=$(set -- $fields; printf "%s" "${20:-}"); '
             'case "$started" in ""|*[!0-9]*) continue;; esac; item="$pid:$started"; '
             'case " $receipt " in *" $item "*) '
-            'case "$state" in T|t) ;; *) kill -STOP "$pid" 2>/dev/null || continue; '
+            'case "$state" in stopped) ;; *) kill -STOP "$pid" 2>/dev/null || continue; '
             'stable=0;; esac;; *) kill -STOP "$pid" 2>/dev/null || continue; '
             'receipt="$receipt $item"; stable=0;; esac; done; '
             '[ "$stable" = 1 ] && break; [ "$round" -lt 64 ] || exit 45; done; '
@@ -2682,13 +2714,14 @@ class ChatSandboxManager:
             uid: [(pid, started) for pid, owner, started in frozen if owner == uid]
             for uid in target_uids
         }
-        script = (
+        script = self._shared_writer_task_state_script() + (
             'set -u; exact="$1"; expected_uid="$2"; shift 2; unknown=0; '
             'if [ "$exact" = 1 ]; then for proc in /proc/[0-9]*; do '
             'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
             'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
             '[ "$uid" = "$expected_uid" ] || continue; '
             'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'state=$(writer_state "$proc"); [ "$state" != exited ] || continue; '
             'started=$(set -- $fields; printf "%s" "${20:-}"); found=0; '
             'for item in "$@"; do [ "$item" = "$pid:$started" ] && found=1; done; '
             '[ "$found" = 1 ] || unknown=1; done; fi; '

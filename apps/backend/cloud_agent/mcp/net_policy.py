@@ -71,10 +71,11 @@ FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
 FORBIDDEN_HEADER_PREFIXES: tuple[str, ...] = ("x-forwarded-", "x-real-ip", "forwarded")
 
 #: Addresses that are always refused, whatever the deployment policy says.
-#: Link-local covers the cloud metadata services (``169.254.169.254`` and
-#: ``fd00:ec2::254``); the rest is the platform's own plumbing.
+#: Link-local covers IPv4 cloud metadata services; AWS's IPv6 metadata address
+#: (``fd00:ec2::254``) is blocked explicitly. The rest is the platform's own plumbing.
 ALWAYS_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("::/128"),
     ipaddress.ip_network("ff00::/8"),
@@ -138,9 +139,9 @@ class EgressPolicy:
 
     allow_private: bool = False
     allow_plain_http: bool = False
-    #: Extra hosts, exact matches only, that bypass the address checks. For a
-    #: deployment whose connector gateway resolves to a private address the
-    #: operator has decided to trust.
+    #: Extra hosts, exact matches only, that may resolve to private addresses.
+    #: For a deployment whose connector gateway the operator has decided to
+    #: trust. These remain bounded by ALWAYS_BLOCKED_NETWORKS.
     allowed_hosts: frozenset[str] = frozenset()
     max_redirects: int = MAX_REDIRECTS
     #: Hosts a redirect may land on, on top of the request's own origin. Empty
@@ -212,7 +213,10 @@ def normalize_url(raw: str) -> NormalizedEndpoint:
     scheme = parts.scheme.lower()
     host = (parts.hostname or "").lower()
     resolved_port = port or _default_port(scheme)
-    netloc = host if port is None else f"{host}:{port}"
+    # ``hostname`` omits an IPv6 literal's brackets. Keep the bare address for
+    # policy and dial checks, but restore its brackets in URL authorities.
+    authority_host = f"[{host}]" if ":" in host else host
+    netloc = authority_host if port is None else f"{authority_host}:{port}"
     path = parts.path or "/"
     return NormalizedEndpoint(
         url=urlunsplit((scheme, netloc, path, parts.query, "")),
@@ -225,13 +229,13 @@ def normalize_url(raw: str) -> NormalizedEndpoint:
 
 
 def _blocked_reason(
-    address: ipaddress.IPv4Address | ipaddress.IPv6Address, policy: EgressPolicy
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool
 ) -> str | None:
     """Why one address is refused, or ``None`` when it may be dialled."""
     for network in ALWAYS_BLOCKED_NETWORKS:
         if address.version == network.version and address in network:
             return f"{address} is in a range this platform never dials ({network})"
-    if policy.allow_private:
+    if allow_private:
         return None
     for network in PRIVATE_NETWORKS:
         if address.version == network.version and address in network:
@@ -261,10 +265,6 @@ def check_addresses(
     requests may reach one hostname through different connections, and one
     request's answer must not become another's destination.
     """
-    if host.lower() in policy.allowed_hosts:
-        resolved = tuple(addresses)
-        _pin(host, resolved)
-        return resolved
     resolved = tuple(addresses)
     if not resolved:
         raise EndpointRejected(f"{host} did not resolve to any address", kind="unreachable")
@@ -277,7 +277,9 @@ def check_addresses(
         # to slip a loopback past an IPv4-only check, so it is unwrapped first.
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
             address = address.ipv4_mapped
-        reason = _blocked_reason(address, policy)
+        reason = _blocked_reason(
+            address, allow_private=policy.allow_private or host.lower() in policy.allowed_hosts
+        )
         if reason is not None:
             raise EndpointRejected(reason)
     _pin(host, resolved)

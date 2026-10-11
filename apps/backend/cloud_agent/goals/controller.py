@@ -272,7 +272,6 @@ async def consume_wakeup(
             store,
             wakeup=wakeup,
             thread_id=thread_id,
-            goal=goal,
             action=blocked,
             context=context,
         )
@@ -543,7 +542,6 @@ async def _apply(
         store,
         wakeup=wakeup,
         thread_id=thread_id,
-        goal=goal,
         action=action,
         context=context,
     )
@@ -554,7 +552,6 @@ async def _stop(
     *,
     wakeup: dict[str, Any],
     thread_id: str,
-    goal: dict[str, Any],
     action: GoalAction,
     context: GoalContext,
 ) -> str:
@@ -570,7 +567,11 @@ async def _stop(
     detail = (action.message or "")[:MAX_REASON_CHARS] or None
     decision = store.goal_wakeups.transaction()
     async with decision as conn:
-        stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=goal)
+        # The obligation's identity and revision authorize this stop. In
+        # particular, the retry handler may have read a replacement or resumed
+        # goal after the scheduling attempt failed; that newer read must not
+        # authorize pausing it for the old wakeup's failure.
+        stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=wakeup)
         if stale is None and action.kind == "complete":
             stale = await _completion_superseded(
                 store, conn=conn, thread_id=thread_id, context=context
@@ -584,7 +585,7 @@ async def _stop(
             return "none"
         written = await store.goals.apply_action(
             thread_id=thread_id,
-            revision=int(goal["revision"]),
+            revision=int(wakeup["revision"]),
             action=action,
             pause_reason=action.reason,
             pause_detail=detail,
@@ -781,7 +782,6 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
         store,
         wakeup=wakeup,
         thread_id=str(wakeup["thread_id"]),
-        goal=goal,
         action=GoalAction(
             kind="pause",
             reason="scheduling_failed",

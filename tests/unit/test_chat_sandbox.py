@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import sys
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1032,6 +1037,278 @@ def test_shared_writer_thaw_reads_manifest_and_resumes_as_each_owner(monkeypatch
     assert calls[2][0][-1] == "41:400"
     assert "kill -CONT" in calls[1][0][2]
     assert calls[-1][0][2] == 'rm -f -- "$1"'
+
+
+@pytest.mark.parametrize("dead_state", ["Z", "X", "x"])
+@pytest.mark.parametrize("has_stopped_worker", [False, True])
+def test_shared_writer_census_rejects_exiting_nonleaders_even_with_matching_counts(
+    tmp_path, dead_state, has_stopped_worker
+):
+    # An exiting nonleader can be replaced while /proc is read, preserving
+    # both thread counts but hiding a live writer from the observed task list.
+    proc = tmp_path / "100"
+    states = {100: "Z", 101: dead_state}
+    if has_stopped_worker:
+        states[102] = "T"
+    for tid, state in states.items():
+        task = proc / "task" / str(tid)
+        task.mkdir(parents=True)
+        (task / "stat").write_text(f"{tid} (writer) {state}\n")
+    (proc / "status").write_text(f"Threads:\t{len(states)}\n")
+
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            ChatSandboxManager._shared_writer_task_state_script() + 'writer_state "$1"',
+            "sh",
+            str(proc),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=5,
+    )
+
+    assert result.stdout == b"unknown"
+
+
+def _local_shared_writer_manager(monkeypatch, tmp_path, owned_processes):
+    """Run the generated scripts with census traversal confined to owned PIDs."""
+    manager = ChatSandboxManager(ContainerBackend(image="img", uid=os.getuid(), gid=os.getgid()))
+
+    def local_exec(_spec, argv, **kwargs):
+        assert kwargs["user_uid"] == os.getuid()
+        command = list(argv)
+        targets = " ".join(f"/proc/{process.pid}" for process in owned_processes)
+        assert targets
+        command[2] = command[2].replace("/proc/[0-9]*", targets)
+        assert "/proc/[0-9]*" not in command[2]
+        command = [argument.replace(ACTIVATION_TMPFS, str(tmp_path)) for argument in command]
+        return subprocess.run(
+            command,
+            input=kwargs.get("input_bytes"),
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
+    monkeypatch.setattr(manager, "exec_capture", local_exec)
+    return manager
+
+
+@pytest.fixture
+def owned_shared_writer_processes():
+    processes = []
+    yield processes
+    for process in processes:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _shared_writer_process_state(pid):
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+
+
+@pytest.fixture
+def zombie_leader_writer_binary(tmp_path):
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("pthread writer fixture requires a C compiler")
+    source = tmp_path / "zombie-leader-writer.c"
+    source.write_text(
+        """
+#include <pthread.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static void *writer(void *path) {
+    FILE *stream = fopen(path, "w");
+    if (!stream) return NULL;
+    for (;;) {
+        fputs("x", stream);
+        fflush(stream);
+        usleep(10000);
+    }
+}
+
+int main(int argc, char **argv) {
+    pthread_t thread;
+    if (argc != 2 || pthread_create(&thread, NULL, writer, argv[1])) return 1;
+    pthread_exit(NULL);
+}
+"""
+    )
+    executable = tmp_path / "zombie-leader-writer"
+    subprocess.run(
+        [compiler, "-pthread", str(source), "-o", str(executable)],
+        capture_output=True,
+        check=True,
+        timeout=5,
+    )
+    return executable
+
+
+def _spawn_zombie_leader_writer(executable, writes_path, owned_processes):
+    process = subprocess.Popen([str(executable), str(writes_path)])
+    owned_processes.append(process)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if (
+            _shared_writer_process_state(process.pid) == "Z"
+            and writes_path.exists()
+            and writes_path.stat().st_size > 0
+        ):
+            return process
+        time.sleep(0.01)
+    pytest.fail("pthread fixture did not reach a zombie leader with a live writer")
+
+
+def _wait_for_shared_writer_growth(writes_path, previous_size):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if writes_path.stat().st_size > previous_size:
+            return
+        time.sleep(0.01)
+    pytest.fail("the live writer did not resume")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_freeze_and_exact_thaw_ignore_an_owned_zombie(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+    owned_shared_writer_processes.append(zombie)
+    os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+    assert _shared_writer_process_state(zombie.pid) == "Z"
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="c" * 32)
+
+    assert (tmp_path / Path(manifest).name).read_bytes() == b""
+    manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+    assert _shared_writer_process_state(zombie.pid) == "Z"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_freeze_and_thaw_keep_live_writers_fenced_beside_zombies(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.extend([zombie, writer])
+    os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="d" * 32)
+
+    receipt = manager._parse_frozen_processes(
+        (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
+    )
+    assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
+    assert _shared_writer_process_state(writer.pid) == "T"
+    manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert _shared_writer_process_state(zombie.pid) == "Z"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_exact_thaw_still_rejects_a_new_live_writer(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="e" * 32)
+    new_writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(new_writer)
+
+    with pytest.raises(SandboxError, match="writer census changed"):
+        manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert not (tmp_path / Path(manifest).name).exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_freeze_and_thaw_fence_live_threads_behind_a_zombie_leader(
+    monkeypatch, tmp_path, owned_shared_writer_processes, zombie_leader_writer_binary
+):
+    writes_path = tmp_path / "thread-writes"
+    writer = _spawn_zombie_leader_writer(
+        zombie_leader_writer_binary, writes_path, owned_shared_writer_processes
+    )
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="f" * 32)
+
+    receipt = manager._parse_frozen_processes(
+        (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
+    )
+    assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
+    task_states = {
+        task_stat.read_text().rsplit(") ", 1)[1].split()[0]
+        for task_stat in Path(f"/proc/{writer.pid}/task").glob("*/stat")
+    }
+    assert task_states == {"Z", "T"}
+    frozen_size = writes_path.stat().st_size
+    time.sleep(0.05)
+    assert writes_path.stat().st_size == frozen_size
+
+    manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+
+    _wait_for_shared_writer_growth(writes_path, frozen_size)
+    assert _shared_writer_process_state(writer.pid) == "Z"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_exact_thaw_rejects_a_new_zombie_leader_with_live_threads(
+    monkeypatch, tmp_path, owned_shared_writer_processes, zombie_leader_writer_binary
+):
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="1" * 32)
+    _spawn_zombie_leader_writer(
+        zombie_leader_writer_binary, tmp_path / "new-thread-writes", owned_shared_writer_processes
+    )
+
+    with pytest.raises(SandboxError, match="writer census changed"):
+        manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert not (tmp_path / Path(manifest).name).exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize("failure_phase", ["freeze", "manifest"])
+def test_shared_writer_freeze_failure_resumes_live_threads_behind_a_zombie_leader(
+    monkeypatch,
+    tmp_path,
+    owned_shared_writer_processes,
+    zombie_leader_writer_binary,
+    failure_phase,
+):
+    writes_path = tmp_path / "thread-writes"
+    _spawn_zombie_leader_writer(
+        zombie_leader_writer_binary, writes_path, owned_shared_writer_processes
+    )
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+
+    def failing_exec(spec, argv, **kwargs):
+        if failure_phase == "freeze" and "resume_receipt()" in argv[2]:
+            argv = list(argv)
+            argv[2] = argv[2].replace("committed=1", "exit 45")
+        if failure_phase == "manifest" and kwargs.get("input_bytes") is not None:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"injected manifest failure")
+        return local_exec(spec, argv, **kwargs)
+
+    monkeypatch.setattr(manager, "exec_capture", failing_exec)
+
+    with pytest.raises(SandboxError, match=f"writer {failure_phase} failed"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="2" * 32)
+
+    _wait_for_shared_writer_growth(writes_path, writes_path.stat().st_size)
 
 
 @pytest.mark.parametrize(

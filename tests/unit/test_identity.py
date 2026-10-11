@@ -162,6 +162,24 @@ def test_an_unfetchable_key_refuses_rather_than_passing(monkeypatch, keypair) ->
         verify_identity_token(_token(key))
 
 
+def test_a_jwks_fetch_has_a_bounded_network_timeout(monkeypatch, keypair) -> None:
+    """The real JWKS client must bound a slow fetch and fail closed on timeout."""
+    key, _ = keypair
+    monkeypatch.setenv(ENV_JWKS_URL, "https://gateway.example/v1/identity/jwks")
+    requested_timeouts: list[float] = []
+
+    def _unreachable(request, *, timeout, context):
+        requested_timeouts.append(timeout)
+        raise TimeoutError("JWKS request timed out")
+
+    monkeypatch.setattr("jwt.jwks_client.urllib.request.urlopen", _unreachable)
+
+    with pytest.raises(IdentityError, match="cannot resolve the signing key"):
+        verify_identity_token(_token(key))
+
+    assert requested_timeouts == [10.0]
+
+
 def test_a_withdrawn_jwks_key_stops_verifying_after_the_set_refreshes(monkeypatch) -> None:
     """The bounded JWKS-set cache must refresh without an immortal key cache."""
     first = rsa.generate_private_key(public_exponent=65537, key_size=2048)

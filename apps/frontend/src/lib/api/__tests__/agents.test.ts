@@ -585,6 +585,98 @@ describe('agents api', () => {
     );
   });
 
+  it.each([429, 500, 503, 504])(
+    'recovers from a terminal attach HTTP %i with backoff and the last output cursor',
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        fetchWithAuth
+          .mockResolvedValueOnce(sseResponse(['event: output\ndata: {"seq":8,"data":"YQ=="}\n\n']))
+          .mockResolvedValueOnce(jsonResponse({ detail: 'temporarily unavailable' }, status))
+          .mockResolvedValueOnce(
+            sseResponse([
+              'event: output\ndata: {"seq":8,"data":"YQ=="}\n\n',
+              'event: output\ndata: {"seq":9,"data":"Yg=="}\n\n',
+              'event: exit\ndata: {"seq":10,"exit_code":0}\n\n',
+            ]),
+          );
+        const onOutput = vi.fn();
+        const onExit = vi.fn();
+        const stream = streamAgentTerminal('job-1', 'term-1', {
+          after: 7,
+          onOutput,
+          onReset: vi.fn(),
+          onExit,
+        });
+
+        await vi.advanceTimersByTimeAsync(99);
+        expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(199);
+        expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(stream).resolves.toBeUndefined();
+
+        expect(fetchWithAuth).toHaveBeenCalledTimes(3);
+        for (const request of fetchWithAuth.mock.calls.slice(1)) {
+          expect(request[1]).toBe('/v1/agent/jobs/job-1/terminals/term-1/stream?after=8');
+        }
+        expect(onOutput.mock.calls.map(([event]) => event.seq)).toEqual([8, 9]);
+        expect(onExit).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([400, 401, 403, 404, 409, 410, 422])(
+    'does not retry a permanent terminal attach HTTP %i',
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'terminal unavailable' }, status));
+
+        await expect(
+          streamAgentTerminal('job-1', 'term-1', {
+            onOutput: vi.fn(),
+            onReset: vi.fn(),
+            onExit: vi.fn(),
+          }),
+        ).rejects.toMatchObject({ statusCode: status });
+
+        expect(fetchWithAuth).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([429, 503])('cleans up a pending terminal HTTP %i retry on abort', async (status) => {
+    vi.useFakeTimers();
+    try {
+      fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'temporarily unavailable' }, status));
+      const controller = new AbortController();
+      const stream = streamAgentTerminal('job-1', 'term-1', {
+        signal: controller.signal,
+        onOutput: vi.fn(),
+        onReset: vi.fn(),
+        onExit: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      controller.abort();
+      await expect(stream).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(fetchWithAuth).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports where history ends without moving the resume cursor', async () => {
     fetchWithAuth
       .mockResolvedValueOnce(
@@ -779,6 +871,115 @@ describe('agents api', () => {
     expect(seen).toEqual([1, 2, 3]);
     const secondUrl = fetchWithAuth.mock.calls[1][1] as string;
     expect(secondUrl).toContain('after=2');
+  });
+
+  it.each(['EOF', 'read error'])(
+    'backs off repeatedly short job streams ending in %s',
+    async (end) => {
+      vi.useFakeTimers();
+      try {
+        const error = new Error('connection dropped');
+        const responses: Response[] = [];
+        fetchWithAuth.mockImplementation(async () => {
+          let response: Response;
+          if (end === 'EOF') {
+            response = sseResponse([]);
+          } else {
+            response = new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.error(error);
+                },
+              }),
+            );
+          }
+          responses.push(response);
+          return response;
+        });
+        const controller = new AbortController();
+        const onError = vi.fn();
+        const stream = streamAgentJob('ajob_1', {
+          lastEventId: 42,
+          signal: controller.signal,
+          onEvent: vi.fn(),
+          onError,
+        });
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchWithAuth).toHaveBeenCalledOnce();
+        const delays = [100, 200, 400, 800, 1_600, 3_200, 5_000, 5_000];
+        for (const [index, delay] of delays.entries()) {
+          await vi.advanceTimersByTimeAsync(delay - 1);
+          expect(fetchWithAuth).toHaveBeenCalledTimes(index + 1);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(fetchWithAuth).toHaveBeenCalledTimes(index + 2);
+        }
+
+        expect(vi.getTimerCount()).toBe(1);
+        controller.abort();
+        await expect(stream).resolves.toBeUndefined();
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(fetchWithAuth).toHaveBeenCalledTimes(delays.length + 1);
+        for (const request of fetchWithAuth.mock.calls) {
+          expect(request[1]).toBe('/v1/agent/jobs/ajob_1/stream?after=42');
+        }
+        expect(responses.every((response) => !response.body?.locked)).toBe(true);
+        if (end === 'read error') {
+          expect(onError).toHaveBeenCalledTimes(delays.length + 1);
+          expect(onError).toHaveBeenCalledWith(error);
+        } else {
+          expect(onError).not.toHaveBeenCalled();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('resets job-stream backoff on event progress and keeps the resume cursor', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchWithAuth
+        .mockResolvedValueOnce(sseResponse([]))
+        .mockResolvedValueOnce(
+          sseResponse([': keepalive\n\n', 'id: 11\nevent: message\ndata: {broken\n\n']),
+        )
+        .mockResolvedValueOnce(sseResponse([frame(11, 'message', {})]))
+        .mockResolvedValueOnce(sseResponse([]))
+        .mockResolvedValueOnce(sseResponse([FINISHED]));
+      const onEvent = vi.fn();
+      const onFinished = vi.fn();
+      const stream = streamAgentJob('ajob_1', { lastEventId: 10, onEvent, onFinished });
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(199);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(3);
+      expect(onEvent.mock.calls.map(([event]) => event.id)).toEqual([11]);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(199);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(stream).resolves.toBeUndefined();
+
+      expect(fetchWithAuth.mock.calls.map((request: unknown[]) => request[1])).toEqual([
+        '/v1/agent/jobs/ajob_1/stream?after=10',
+        '/v1/agent/jobs/ajob_1/stream?after=10',
+        '/v1/agent/jobs/ajob_1/stream?after=10',
+        '/v1/agent/jobs/ajob_1/stream?after=11',
+        '/v1/agent/jobs/ajob_1/stream?after=11',
+      ]);
+      expect(onFinished).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('starts from an explicit resume point', async () => {

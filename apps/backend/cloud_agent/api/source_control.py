@@ -54,6 +54,7 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.settings import setting_env
 from cloud_agent.source_control import (
+    GitLabOAuthClient,
     OAuthStateError,
     SourceControlError,
     consume_oauth_state,
@@ -290,7 +291,7 @@ async def _source_control_providers(
     user_id: str,
     store: _SourceControlStorage,
     app_credentials: Any | None,
-    gitlab_oauth: Any | None,
+    gitlab_oauth: GitLabOAuthClient | None,
     github_load_status: LoadStatus,
     gitlab_load_status: LoadStatus,
 ) -> list[SourceControlProviderResponse]:
@@ -387,10 +388,12 @@ async def _source_control_providers(
     gitlab_connect_url = None
     if gitlab_oauth is not None:
         try:
-            gitlab_connect_url = await gitlab_oauth.authorization_url(store, user_id=user_id)
+            gitlab_connect_url = await gitlab_oauth.authorization_url(
+                store.source_control, user_id=user_id
+            )
             if gitlab_connection:
                 gitlab_projects = await gitlab_oauth.projects_for_connection(
-                    store, gitlab_connection
+                    store.source_control, gitlab_connection
                 )
         except SourceControlError:
             if gitlab_connection:
@@ -462,7 +465,7 @@ async def list_source_control_integrations(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
     github: GitHubAppState = Depends(get_github_app_state),
-    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    gitlab_oauth: GitLabOAuthClient | None = Depends(get_agent_gitlab_oauth),
     gitlab_load_status: LoadStatus = Depends(get_gitlab_load_status),
 ) -> SourceControlIntegrationsResponse:
     """Return configured and connected state for source control and MCP.
@@ -518,7 +521,7 @@ async def connect_gitlab_integration(
     body: OAuthConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
-    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    gitlab_oauth: GitLabOAuthClient | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlProviderResponse:
     """Verify a GitLab user and persist only encrypted, refreshable tokens."""
     job_store = _require_store(store)
@@ -586,7 +589,7 @@ async def disconnect_gitlab_integration(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
     github: GitHubAppState = Depends(get_github_app_state),
-    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    gitlab_oauth: GitLabOAuthClient | None = Depends(get_agent_gitlab_oauth),
     gitlab_load_status: LoadStatus = Depends(get_gitlab_load_status),
 ) -> SourceControlIntegrationsResponse:
     """Revoke GitLab best-effort, then always remove the local credential."""
@@ -596,7 +599,9 @@ async def disconnect_gitlab_integration(
         raise HTTPException(status_code=404, detail="No such GitLab connection")
     if gitlab_oauth is not None:
         try:
-            access_token = await gitlab_oauth.access_token_for_connection(job_store, connection)
+            access_token = await gitlab_oauth.access_token_for_connection(
+                job_store.source_control, connection
+            )
             await gitlab_oauth.revoke(access_token)
         except Exception:
             logger.warning("agent_gitlab_revoke_failed", exc_info=True)
@@ -654,7 +659,7 @@ async def disconnect_github_account(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
     github: GitHubAppState = Depends(get_github_app_state),
-    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    gitlab_oauth: GitLabOAuthClient | None = Depends(get_agent_gitlab_oauth),
     gitlab_load_status: LoadStatus = Depends(get_gitlab_load_status),
 ) -> SourceControlIntegrationsResponse:
     """Forget this user's GitHub connection: the account, its token, every grant.

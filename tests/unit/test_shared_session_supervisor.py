@@ -1646,6 +1646,75 @@ def test_native_fork_keeps_source_transport_ownership_during_cli_restart(observa
         assert source_observation.residency_generation == 1
 
 
+def test_idle_sweep_stops_a_group_only_after_its_deadline():
+    manager = _Manager()
+    now = 100.0
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: now)
+    supervisor.register_manifest(_spec(), _members())
+    token, _ = supervisor.operation_opened("athr_source")
+    closed = supervisor.operation_closed("athr_source", token)
+    assert closed.idle_deadline_monotonic == 130.0
+
+    now = 129.0
+    assert supervisor.sweep() == []
+    assert manager.stop_count == 0
+
+    now = 130.0
+    stopped = supervisor.sweep()
+    assert len(stopped) == 1
+    assert stopped[0].running is False
+    assert manager.stop_count == 1
+    assert supervisor.sweep() == []
+    assert manager.stop_count == 1
+
+
+@pytest.mark.parametrize("activity", ["operation", "terminal"])
+def test_idle_sweep_preserves_a_group_used_after_candidate_selection(monkeypatch, activity):
+    manager = _Manager()
+    now = 100.0
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: now)
+    supervisor.register_manifest(_spec(), _members())
+    token, _ = supervisor.operation_opened("athr_source")
+    supervisor.operation_closed("athr_source", token)
+    original_stop = supervisor.stop_if_idle
+    stop_attempts = []
+
+    def activity_before_stop(thread_id, **kwargs):
+        # The sweep has selected an expired candidate and released its lock.
+        # Complete fresh activity before it admits the selected stop request.
+        token, _ = getattr(supervisor, f"{activity}_opened")("athr_peer")
+        refreshed = getattr(supervisor, f"{activity}_closed")("athr_peer", token)
+        assert refreshed.idle_deadline_monotonic == 160.0
+        stop_attempts.append(thread_id)
+        return original_stop(thread_id, **kwargs)
+
+    monkeypatch.setattr(supervisor, "stop_if_idle", activity_before_stop)
+    now = 130.0
+
+    assert supervisor.sweep() == []
+    assert stop_attempts == ["athr_source"]
+    assert manager.stop_count == 0
+    current = supervisor.status("athr_source")
+    assert current.running is True
+    assert current.operation_count == current.terminal_count == 0
+    assert current.idle_deadline_monotonic == 160.0
+
+
+@pytest.mark.parametrize("reason", ["idle", "orphaned_attempt", "lost", "unguarded"])
+def test_direct_stop_does_not_wait_for_the_inactivity_deadline(reason):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: 100.0)
+    supervisor.register_manifest(_spec(), _members())
+    token, _ = supervisor.operation_opened("athr_source")
+    closed = supervisor.operation_closed("athr_source", token)
+    assert closed.idle_deadline_monotonic == 130.0
+
+    stopped = supervisor.stop_if_idle("athr_source", generation=1, reason=reason)
+
+    assert stopped.running is False
+    assert manager.stop_count == 1
+
+
 def test_idle_stop_releases_networks_after_docker_already_stopped_the_container():
     manager = _Manager()
     spec = _spec()

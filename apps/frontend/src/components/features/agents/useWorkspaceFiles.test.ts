@@ -3,7 +3,11 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getAgentJobFiles, type AgentJobFilesApi } from '@/lib/api/agents';
+import {
+  getAgentJobFiles,
+  type AgentJobDirectoryApi,
+  type AgentJobFilesApi,
+} from '@/lib/api/agents';
 import { useWorkspaceFiles } from './useAgentJobs';
 
 vi.mock('@/lib/api/agents', () => ({ getAgentJobFiles: vi.fn() }));
@@ -20,6 +24,19 @@ function deferred() {
 
 function file(path: string, content = path): AgentJobFilesApi {
   return { path, kind: 'file', content, size: content.length, binary: false, truncated: false };
+}
+
+function directory(path: string, names: string[]): AgentJobDirectoryApi {
+  return {
+    path,
+    kind: 'directory',
+    entries: names.map((name) => ({
+      path: `${path}/${name}`,
+      name,
+      kind: 'file',
+      size: 1,
+    })),
+  };
 }
 
 async function mountFiles(responses: Record<string, ReturnType<typeof deferred>>) {
@@ -116,6 +133,82 @@ describe('workspace preview response ordering', () => {
 });
 
 describe('workspace refresh', () => {
+  it.each(['reload', 'refresh key'] as const)(
+    'refetches a collapsed directory when reopened after a %s',
+    async (refresh) => {
+      const cached = directory('src', ['old.ts']);
+      const fresh = directory('src', ['new.ts']);
+      const pending = deferred();
+      vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') =>
+        path === 'src' ? cached : { path, kind: 'directory', entries: [] },
+      );
+      const hook = renderHook(({ key }) => useWorkspaceFiles('ajob_test', true, key), {
+        initialProps: { key: 'running:0' },
+      });
+      await act(async () => hook.result.current.toggleDirectory('src'));
+      act(() => hook.result.current.toggleDirectory('src'));
+      vi.mocked(getAgentJobFiles).mockClear();
+      vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') =>
+        path === 'src' ? pending.promise : { path, kind: 'directory', entries: [] },
+      );
+
+      await act(async () => {
+        if (refresh === 'reload') hook.result.current.reload();
+        else hook.rerender({ key: 'running:1' });
+      });
+      expect(vi.mocked(getAgentJobFiles).mock.calls.map(([, path]) => path)).toEqual(['']);
+
+      act(() => hook.result.current.toggleDirectory('src'));
+      expect(hook.result.current.directories.src.entries).toEqual(cached.entries);
+      expect(hook.result.current.directories.src.loading).toBe(true);
+      await act(async () => pending.resolve(fresh));
+      expect(hook.result.current.directories.src.entries).toEqual(fresh.entries);
+      expect(hook.result.current.directories.src.loading).toBe(false);
+    },
+  );
+
+  it('reuses a cached directory when reopened without a refresh', async () => {
+    const cached = directory('src', ['a.ts']);
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') =>
+      path === 'src' ? cached : { path, kind: 'directory', entries: [] },
+    );
+    const { result } = renderHook(() => useWorkspaceFiles('ajob_test', true));
+    await act(async () => result.current.toggleDirectory('src'));
+    vi.mocked(getAgentJobFiles).mockClear();
+
+    act(() => result.current.toggleDirectory('src'));
+    act(() => result.current.toggleDirectory('src'));
+
+    expect(result.current.directories.src.entries).toEqual(cached.entries);
+    expect(vi.mocked(getAgentJobFiles)).not.toHaveBeenCalled();
+  });
+
+  it('ignores an older directory response and keeps the current request when reopened', async () => {
+    const old = deferred();
+    const fresh = deferred();
+    const responses = { src: old };
+    const { result } = await mountFiles(responses);
+    act(() => result.current.toggleDirectory('src'));
+    act(() => result.current.toggleDirectory('src'));
+    responses.src = fresh;
+    act(() => result.current.reload());
+    act(() => result.current.toggleDirectory('src'));
+    await act(async () => old.resolve(directory('src', ['old.ts'])));
+
+    expect(result.current.directories.src.entries).toBeNull();
+    expect(result.current.directories.src.loading).toBe(true);
+    act(() => result.current.toggleDirectory('src'));
+    act(() => result.current.toggleDirectory('src'));
+    expect(
+      vi.mocked(getAgentJobFiles).mock.calls.filter(([, path]) => path === 'src'),
+    ).toHaveLength(2);
+
+    const loaded = directory('src', ['new.ts']);
+    await act(async () => fresh.resolve(loaded));
+    expect(result.current.directories.src.entries).toEqual(loaded.entries);
+    expect(result.current.directories.src.loading).toBe(false);
+  });
+
   it('keeps the tree on screen while it reloads', async () => {
     // A refresh fires while the agent is writing — exactly when the user is
     // watching the panel. Clearing the directories first blanked and

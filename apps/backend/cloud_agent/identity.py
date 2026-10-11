@@ -60,6 +60,10 @@ USER_AGENT = "hybridinference-cloud-agent"
 #: turn the intended bounded revocation window into an unbounded one.
 JWKS_CACHE_LIFESPAN_S = 5 * 60
 
+#: Bound the JWKS client's synchronous network operations explicitly, matching
+#: the gateway contract client's default request timeout.
+JWKS_FETCH_TIMEOUT_S = 10.0
+
 #: Our own identity session, with a fixed thirty-day expiry.
 #:
 #: Every protected request resolves Agent permissions afresh at the Gateway.
@@ -134,6 +138,7 @@ def _jwks_client() -> PyJWKClient:
             cache_keys=False,
             cache_jwk_set=True,
             lifespan=JWKS_CACHE_LIFESPAN_S,
+            timeout=JWKS_FETCH_TIMEOUT_S,
             headers={"User-Agent": USER_AGENT},
         )
         _jwk_client_url = url

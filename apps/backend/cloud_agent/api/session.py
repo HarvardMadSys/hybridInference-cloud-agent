@@ -49,6 +49,7 @@ require operator action; temporary failures offer retry without signing in again
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -430,7 +431,9 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
             cannot verify identity or could not reach the gateway.
     """
     try:
-        claims = identity.verify_identity_token(identity_token)
+        # PyJWKClient performs a synchronous HTTP fetch on a cold cache or an
+        # unknown kid. Keep that fetch off the API worker's event loop.
+        claims = await asyncio.to_thread(identity.verify_identity_token, identity_token)
     except identity.IdentityNotConfigured:
         raise AgentConfigurationError() from None
     except identity.IdentityError:
