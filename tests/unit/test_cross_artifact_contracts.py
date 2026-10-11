@@ -31,6 +31,7 @@ import pytest
 
 from cloud_agent_host import member_resources, shared_protocol
 from cloud_agent_host.guest_observer import GUEST_OBSERVER_VERSION
+from cloud_agent_host.sandbox import SANDBOX_PATH
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SANDBOX_DOCKERFILE = REPO_ROOT / "deploy" / "sandbox" / "Dockerfile.agent-sandbox"
@@ -123,6 +124,13 @@ class TestTheGuestPaths:
 
     def test_the_image_installs_the_window_driver_at_that_path(self) -> None:
         assert member_resources.MEMBER_WINDOW_DRIVER in dockerfile()
+
+
+class TestTheSandboxPath:
+    """The image proves its tools under the PATH the runner launches them with."""
+
+    def test_the_toolchain_check_runs_under_the_runners_path(self) -> None:
+        assert f"PATH={SANDBOX_PATH};" in dockerfile()
 
 
 class TestTheMirroredCounterBits:
