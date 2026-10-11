@@ -335,8 +335,10 @@ Provider references:
 ## Day-to-day workflow
 
 Use **Admin → CloudLab** to set the project, initial duration, template project,
-template name and SSH user that new CloudLab server forms start with. These are
-non-secret defaults only; an administrator can change them for one allocation.
+template name, SSH user, and the SSH public key installed for that user. These
+are non-secret defaults only; an administrator can change them for one
+allocation. Leave the public key blank to use keys already on the CloudLab
+account.
 
 1. In **Admin → Servers**, choose **Add server** and select existing SSH or
    CloudLab.
@@ -346,7 +348,9 @@ non-secret defaults only; an administrator can change them for one allocation.
    first-boot host-key registration. Credential responses expose metadata only.
 3. Enter the resource details. Existing SSH needs an address, port and user.
    CloudLab needs an exact experiment UUID to attach, or a profile and explicitly
-   selected project to provision, plus its SSH user.
+   selected project to provision, plus its SSH user. A public key set with that
+   user is sent as the experiment's additional SSH key when the experiment is
+   created.
 4. Submit and follow the durable operation until ready. HTTP 202 confirms only
    that the operation was recorded; allocation, installation, enrollment and
    readiness are separate steps.

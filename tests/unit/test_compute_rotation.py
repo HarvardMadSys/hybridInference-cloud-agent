@@ -159,10 +159,12 @@ def test_replacement_request_keeps_scope_but_never_the_old_identity():
         "name": "ca-old",
         "profile_name": "cloud-agent-node",
         "host_key_source": "registration",
+        "ssh_public_key": "ssh-ed25519 AAAA researcher",
         "bindings": {"phystype": "c6420", "dataMount": "/mydata"},
     }
     derived = candidate_configuration(source, POLICY, "r6615")
     assert "external_id" not in derived and "name" not in derived
+    assert derived["ssh_public_key"] == "ssh-ed25519 AAAA researcher"
     assert derived["bindings"] == {"phystype": "r6615", "dataMount": "/mydata"}
     assert derived["host_key_source"] == "registration"
     assert source["bindings"]["phystype"] == "c6420"

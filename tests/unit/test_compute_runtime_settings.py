@@ -97,6 +97,16 @@ def test_cloudlab_ssh_defaults_to_no_host_key_check_without_weakening_existing_s
         "none",
         "registration",
     ]
+    public_key = next(
+        field
+        for field in cloudlab.catalog({"ssh_public_key": "ssh-ed25519 AAAA"})["fields"]
+        if field["key"] == "ssh_public_key"
+    )
+    assert public_key["section"] == "access"
+    assert public_key["label"] == "SSH public key"
+    assert public_key["modes"] == ["provision"]
+    assert public_key["deployment_only"] is True
+    assert public_key["default"] == "ssh-ed25519 AAAA"
 
 
 def test_key_only_connection_error_does_not_require_a_hidden_host_key_field():

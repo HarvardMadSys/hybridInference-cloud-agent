@@ -35,6 +35,7 @@ const defaults = {
   profile_project: 'cloud-agent',
   profile_name: 'kata-node',
   ssh_username: 'researcher',
+  ssh_public_key: '',
 };
 
 beforeEach(() => {
@@ -70,6 +71,8 @@ describe('admin CloudLab settings', () => {
     expect(advanced).toContainElement(screen.getByLabelText('Template project'));
     expect(advanced).toContainElement(screen.getByLabelText('Template name'));
     expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH user'));
+    expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH public key'));
+    expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeDisabled();
   });
 
@@ -96,6 +99,40 @@ describe('admin CloudLab settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
 
     await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
+  });
+
+  it('saves an SSH public key for the CloudLab SSH user', async () => {
+    const publicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTheFormOnly researcher';
+    const updated = { ...defaults, ssh_public_key: publicKey };
+    saveDefaults.mockResolvedValue({ defaults: updated });
+    render(<CloudLabSettings />);
+
+    await screen.findByLabelText('CloudLab project');
+    fireEvent.click(screen.getByText('Advanced').closest('details')!.querySelector('summary')!);
+    fireEvent.change(screen.getByLabelText('CloudLab SSH public key'), {
+      target: { value: publicKey },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
+  });
+
+  it('keeps an invalid SSH public key in the advanced section', async () => {
+    render(<CloudLabSettings />);
+
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'next-project' } });
+    fireEvent.change(screen.getByLabelText('CloudLab SSH public key'), {
+      target: { value: 'not-a-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'SSH public key must be one OpenSSH public key.',
+    );
+    expect(screen.getByText('Advanced').closest('details')).toHaveAttribute('open');
+    expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('not-a-key');
+    expect(saveDefaults).not.toHaveBeenCalled();
   });
 
   it('saves edited defaults and uses the returned values', async () => {

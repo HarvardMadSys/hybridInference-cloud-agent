@@ -12,6 +12,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -534,14 +536,45 @@ async def test_cloudlab_defaults_are_saved_audited_and_exposed_in_the_catalog(co
 
     saved = await client.put("/admin/agent/compute-defaults/cloudlab", headers=ADMIN, json=defaults)
     assert saved.status_code == 200
-    assert saved.json() == {"defaults": defaults}
-    assert repo.defaults == {"cloudlab": defaults}
+    assert saved.json() == {"defaults": {**defaults, "ssh_public_key": ""}}
+    assert repo.defaults == {"cloudlab": {**defaults, "ssh_public_key": ""}}
     assert repo.audit_rows[-1]["action"] == "agent.compute.cloudlab_defaults.set"
     assert repo.audit_rows[-1]["details"] == {}
 
     catalog = (await client.get("/admin/agent/compute-providers", headers=ADMIN)).json()
     fields = {field["key"]: field for field in catalog["providers"][0]["fields"]}
     assert {key: fields[key]["default"] for key in defaults} == defaults
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_defaults_accept_one_ssh_public_key_for_the_ssh_user(compute_api):
+    client, repo, _ = compute_api
+    public_key = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+    saved = await client.put(
+        "/admin/agent/compute-defaults/cloudlab",
+        headers=ADMIN,
+        json={"ssh_username": "researcher", "ssh_public_key": f"{public_key}  researcher@lab"},
+    )
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["defaults"]["ssh_public_key"] == f"{public_key} researcher@lab"
+    assert saved.json()["defaults"]["ssh_username"] == "researcher"
+    assert repo.audit_rows[-1]["details"] == {}
+    assert public_key not in str(repo.audit_rows)
+
+    rejected = await client.put(
+        "/admin/agent/compute-defaults/cloudlab",
+        headers=ADMIN,
+        json={"ssh_public_key": "ssh-ed25519 not-a-real-key"},
+    )
+    assert rejected.status_code == 422
+    assert "not-a-real-key" not in rejected.text
+    assert repo.defaults["cloudlab"]["ssh_public_key"] == f"{public_key} researcher@lab"
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from cloud_agent.ports.external.compute_provider import (
@@ -70,6 +72,15 @@ def resource(**updates: object) -> dict[str, object]:
         },
         **updates,
     }
+
+
+def openssh_user_key() -> str:
+    return (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
 
 
 def provider(handler: object) -> CloudLabProvider:
@@ -314,7 +325,54 @@ async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contr
     assert payload["profile_project"] == "PortalProfiles"
     assert payload["bindings"] == {"hardware": "c220g2"}
     assert "credential_ref" not in payload and "ssh_credential_ref" not in payload
+    assert "sshpubkey" not in payload
     assert requests[0].url.path == "/v1/experiments/"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_provision_installs_the_ssh_users_public_key():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    public_key = openssh_user_key()
+    adapter = provider(respond)
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "one-node",
+        "profile_project": "PortalProfiles",
+        "ssh_username": "researcher",
+        "ssh_credential_ref": "ssh-1",
+        "ssh_known_hosts_ref": "ssh-1:known_hosts",
+        "ssh_public_key": f"  {public_key}   researcher@lab  ",
+    }
+    receipt = await adapter.acquire(AcquireRequest(mode="provision", config=config), intent())
+    payload = json.loads(requests[0].content)
+    assert payload["sshpubkey"] == f"{public_key} researcher@lab"
+    assert receipt.resource.config["ssh_public_key"] == payload["sshpubkey"]
+    assert TOKEN not in requests[0].content.decode()
+
+
+def test_cloudlab_refuses_a_private_key_in_place_of_the_ssh_user_key():
+    private_key = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    )
+    with pytest.raises(ValidationError):
+        provider(lambda request: httpx.Response(201)).validate_config(
+            "provision",
+            {
+                "credential_ref": "account-1",
+                "project": "research",
+                "profile_name": "one-node",
+                "profile_project": "PortalProfiles",
+                "ssh_public_key": private_key.decode(),
+            },
+        )
 
 
 @pytest.mark.asyncio

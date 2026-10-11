@@ -13,6 +13,26 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { SettingsSection } from '../SettingsSection';
 
+const SSH_PUBLIC_KEY_ALGORITHM =
+  /^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa)$/;
+
+function sshPublicKeyError(value: string): string | null {
+  const key = value.trim();
+  if (!key) return null;
+  if (/[\r\n]/.test(value)) return 'SSH public key must be one OpenSSH public key.';
+  const parts = key.split(/\s+/);
+  const comment = parts.slice(2).join(' ');
+  if (
+    parts.length < 2 ||
+    !SSH_PUBLIC_KEY_ALGORITHM.test(parts[0]) ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(parts[1]) ||
+    comment.length > 128
+  ) {
+    return 'SSH public key must be one OpenSSH public key.';
+  }
+  return null;
+}
+
 function AccessDenied() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
@@ -97,6 +117,12 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
     if (!draft || busy) return;
     if (!Number.isInteger(draft.duration) || draft.duration < 1 || draft.duration > 168) {
       setError('Initial duration must be a whole number from 1 to 168 hours.');
+      return;
+    }
+    const keyError = sshPublicKeyError(draft.ssh_public_key ?? '');
+    if (keyError) {
+      setError(keyError);
+      setAdvancedOpen(true);
       return;
     }
     setBusy(true);
@@ -266,6 +292,25 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                     value={draft.ssh_username}
                     onChange={(event) => updateDraft({ ssh_username: event.target.value })}
                   />
+                </label>
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">SSH public key</span>
+                  <textarea
+                    aria-label="CloudLab SSH public key"
+                    className={`${inputClass} font-mono`}
+                    rows={3}
+                    maxLength={8192}
+                    spellCheck={false}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    placeholder="ssh-ed25519 AAAA..."
+                    value={draft.ssh_public_key ?? ''}
+                    onChange={(event) => updateDraft({ ssh_public_key: event.target.value })}
+                  />
+                  <span className="block text-xs text-gray-500 dark:text-gray-400">
+                    Installed for this user on new experiments. Leave blank to use keys already on
+                    the CloudLab account.
+                  </span>
                 </label>
               </section>
             </SettingsSection>

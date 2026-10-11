@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 import httpx
 from pydantic import Field, ValidationError, field_validator
 
+from cloud_agent.domain.compute import normalize_user_public_key
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     AcquisitionResolution,
@@ -52,6 +53,8 @@ class CloudLabConfig(ComputeValue):
     duration: int = Field(default=4, ge=1, le=168)
     bindings: dict[str, Any] = Field(default_factory=dict)
     ssh_username: str | None = Field(default=None, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+    # Extra public key CloudLab installs for this experiment's SSH user.
+    ssh_public_key: str | None = Field(default=None, max_length=8192)
     ssh_credential_ref: str | None = None
     ssh_known_hosts_ref: str | None = None
     # "known_hosts": every node key must already be in the administrator's
@@ -59,6 +62,14 @@ class CloudLabConfig(ComputeValue):
     # with a reserved reference for explicitly unchecked CloudLab SSH.
     # "registration" pins the key supplied by the node's first-boot script.
     host_key_source: Literal["known_hosts", "registration"] = "known_hosts"
+
+    @field_validator("ssh_public_key")
+    @classmethod
+    def validate_ssh_public_key(cls, value: str | None) -> str | None:
+        """Keep a blank key out of the persisted configuration."""
+        if value is None or not value.strip():
+            return None
+        return normalize_user_public_key(value.strip())
 
     @field_validator("external_id")
     @classmethod
@@ -289,6 +300,8 @@ class CloudLabProvider(ComputeProvider):
         }
         if config.group:
             payload["group"] = config.group
+        if config.ssh_public_key:
+            payload["sshpubkey"] = config.ssh_public_key
         try:
             response = await self._request(
                 "POST", "/experiments/", config.credential_ref, payload=payload

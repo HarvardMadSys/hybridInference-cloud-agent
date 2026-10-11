@@ -7960,6 +7960,12 @@
             "title": "Project",
             "type": "string"
           },
+          "ssh_public_key": {
+            "default": "",
+            "maxLength": 8192,
+            "title": "Ssh Public Key",
+            "type": "string"
+          },
           "ssh_username": {
             "default": "",
             "maxLength": 128,

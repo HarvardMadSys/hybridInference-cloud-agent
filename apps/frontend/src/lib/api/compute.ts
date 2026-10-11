@@ -51,6 +51,7 @@ export interface CloudLabDefaults {
   profile_project: string;
   profile_name: string;
   ssh_username: string;
+  ssh_public_key: string;
 }
 
 export interface ComputeConnection {

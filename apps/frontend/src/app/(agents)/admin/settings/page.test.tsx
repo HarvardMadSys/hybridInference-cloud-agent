@@ -79,6 +79,7 @@ const cloudLabDefaults = {
   profile_project: 'cloud-agent',
   profile_name: 'kata-node',
   ssh_username: 'researcher',
+  ssh_public_key: '',
 };
 
 const getArchiveSettings = vi.mocked(getSandboxArchiveSettings);

@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from cloud_agent.domain.compute import normalize_user_public_key
 from cloud_agent.ports.external.host_bootstrap import validate_sandbox_storage_path
 
 
@@ -39,6 +40,15 @@ class CloudLabDefaults(ComputeRequest):
     ssh_username: str = Field(
         default="", max_length=128, pattern=r"^(?:[a-zA-Z_][a-zA-Z0-9_.-]*)?$"
     )
+    ssh_public_key: str = Field(default="", max_length=8192)
+
+    @field_validator("ssh_public_key")
+    @classmethod
+    def validate_ssh_public_key(cls, value: str) -> str:
+        """Accept one OpenSSH public key, or blank when the account keys are enough."""
+        if not value:
+            return ""
+        return normalize_user_public_key(value)
 
 
 class RenewalPolicy(ComputeRequest):
