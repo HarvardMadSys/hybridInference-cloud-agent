@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0044_admin_sandbox_deletion"
-down_revision = "0043_admin_sandbox_archive"
+revision = "0045_admin_sandbox_deletion"
+down_revision = "0044_admin_sandbox_archive"
 branch_labels = None
 depends_on = None
 

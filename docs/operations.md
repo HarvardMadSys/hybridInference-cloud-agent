@@ -527,8 +527,8 @@ measurements.
 Sandbox controls require migration `0037_admin_sandbox_stop` and matching
 control-plane and host releases. Apply `alembic upgrade head` before starting
 the updated API. Inventory removal additionally requires
-`0043_admin_sandbox_archive`, and S3-backed container deletion requires
-`0044_admin_sandbox_deletion` plus the matching workspace broker release.
+`0044_admin_sandbox_archive`, and S3-backed container deletion requires
+`0045_admin_sandbox_deletion` plus the matching workspace broker release.
 Resource persistence requires migration
 `0034_sandbox_resource_usage` and a host running the updated workspace broker.
 Older hosts still appear in the inventory with resource usage unavailable.
