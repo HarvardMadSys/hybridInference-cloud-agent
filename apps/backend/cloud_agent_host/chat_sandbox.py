@@ -4464,18 +4464,14 @@ finally:
                 spec,
                 expected_container_id=expected_container_id,
             )
-        except SandboxError as exc:
-            detail = str(exc).lower()
-            if FINAL_ARCHIVE_MARKER_NAME in detail and any(
-                phrase in detail
-                for phrase in (
-                    "could not find the file",
-                    "no such file or directory",
-                    "no such file",
-                )
-            ):
-                return None
-            raise
+        except FileNotFoundError as exc:
+            marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+            # export_archive normalizes only Docker's exact missing source
+            # for the inspected container. Host-side missing files and other
+            # Docker failures must still prevent activation.
+            if exc.args != (marker_path,):
+                raise
+            return None
 
     def write_stopped_final_archive_marker(
         self,

@@ -29,6 +29,8 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     TURN_NETWORK_PROOF_S,
@@ -1076,6 +1078,72 @@ def test_export_archive_normalizes_the_exact_missing_source_path(monkeypatch):
             max_bytes=1024,
             expected_container_id="sha256:container-one",
         )
+
+
+@pytest.mark.parametrize("prefix", ["", "Error response from daemon: "])
+def test_optional_stopped_final_marker_accepts_exact_docker_path_absence(monkeypatch, prefix):
+    path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+    detail = f"{prefix}Could not find the file {path} in container sha256:container-one"
+    manager, spec = _archive_export_failure(monkeypatch, detail)
+
+    assert (
+        manager.read_stopped_final_archive_marker_optional(
+            spec,
+            expected_container_id="sha256:container-one",
+        )
+        is None
+    )
+    with pytest.raises(FileNotFoundError):
+        manager.read_final_archive_marker(spec, expected_container_id="sha256:container-one")
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Error response from daemon: No such container: sha256:container-one",
+        "Error response from daemon: permission denied",
+        (
+            "Error response from daemon: Could not find the file /workspace in container "
+            "sha256:container-one"
+        ),
+        (
+            "Error response from daemon: Could not find the file "
+            f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME} "
+            "in container sha256:another-container"
+        ),
+    ],
+)
+def test_optional_stopped_final_marker_keeps_near_miss_daemon_errors_fatal(monkeypatch, detail):
+    manager, spec = _archive_export_failure(monkeypatch, detail)
+
+    with pytest.raises(SandboxError, match="archive export failed"):
+        manager.read_stopped_final_archive_marker_optional(
+            spec,
+            expected_container_id="sha256:container-one",
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FileNotFoundError("docker"),
+        FileNotFoundError(2, "No such file or directory", "/tmp/archive-marker-copy"),
+    ],
+)
+def test_optional_stopped_final_marker_preserves_unrelated_missing_files(monkeypatch, failure):
+    manager, spec = _archive_export_failure(monkeypatch, "")
+
+    def export(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(manager, "export_archive", export)
+
+    with pytest.raises(FileNotFoundError) as caught:
+        manager.read_stopped_final_archive_marker_optional(
+            spec,
+            expected_container_id="sha256:container-one",
+        )
+    assert caught.value is failure
 
 
 @pytest.mark.parametrize(
