@@ -1,10 +1,12 @@
 """Writers that meet on the same rows, interleaved on real Postgres.
 
 The order every transaction takes shared rows in is written down once, in
-:mod:`cloud_agent.storage`. A test here holds one writer's locks open on a
-connection of its own, in the order that writer's code takes them, runs the
-real repository call into it, and then asks for the rows the held writer takes
-next: two orders over the same rows is a deadlock, and Postgres says so.
+:mod:`cloud_agent.storage`. A test here holds one writer part-way through -- on
+a connection of its own, taking the rows in the order that writer's code does,
+or by pausing the real call -- runs another real repository call into it, and
+then lets the held writer go on: two orders over the same rows is a deadlock,
+and Postgres says so. The capture and attempt reapers are here too, for what a
+writer that ran in between leaves them to find.
 """
 
 from __future__ import annotations
@@ -119,6 +121,7 @@ async def _settle(task: asyncio.Task | None) -> None:
 
 
 async def _snapshots(pool, sandbox_id: str) -> list[dict]:
+    """Every snapshot of a group, oldest first, with the turns it includes."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
