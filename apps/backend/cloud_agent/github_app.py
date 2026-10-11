@@ -55,6 +55,12 @@ _TOKEN_REFRESH_MARGIN_S = 300
 # bounding how long a revoked permission still reads as granted.
 _USER_REPOSITORIES_TTL_S = 60.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+# What the token endpoint answers when the refresh token itself is finished:
+# expired, already spent, or its authorization revoked. GitHub sends its own
+# code with HTTP 200; `invalid_grant` is the OAuth standard's, sent with 400.
+# A rate limit, abuse detection or the App's own client secret being refused
+# says nothing about the user's grant, and must not cost them their connection.
+_REVOKED_REFRESH_ERRORS = frozenset({"bad_refresh_token", "invalid_grant"})
 
 
 class GitHubAppError(Exception):
@@ -489,7 +495,13 @@ class GitHubAppCredentials:
         return _user_tokens(body)
 
     async def refresh_user_token(self, refresh_token: str) -> UserTokens:
-        """Spend a refresh token for a new pair. Each refresh token works once."""
+        """Spend a refresh token for a new pair. Each refresh token works once.
+
+        Only an answer about the refresh token itself is
+        :class:`UserAuthorizationRevoked`, on which the caller forgets the
+        stored tokens. Every other failure is a plain :class:`GitHubAppError`,
+        so the stored tokens stay and the next caller tries again.
+        """
         async with self._http() as client:
             response = await client.post(
                 "https://github.com/login/oauth/access_token",
@@ -501,18 +513,20 @@ class GitHubAppCredentials:
                     "refresh_token": refresh_token,
                 },
             )
-        if response.status_code >= 500:
-            raise GitHubAppError(
-                f"GitHub could not refresh the user token ({response.status_code})",
-                status=response.status_code,
-            )
-        body = response.json() if response.status_code < 400 else {}
-        if not body.get("access_token"):
-            # `bad_refresh_token` and the rest: expired, spent, or revoked.
-            raise UserAuthorizationRevoked(
-                f"GitHub refused the refresh token: {body.get('error', response.status_code)}"
-            )
-        return _user_tokens(body)
+        status = response.status_code
+        try:
+            body = response.json() if status < 500 else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        if status < 400 and body.get("access_token"):
+            return _user_tokens(body)
+        error = body.get("error")
+        if status in (200, 400) and isinstance(error, str) and error in _REVOKED_REFRESH_ERRORS:
+            raise UserAuthorizationRevoked(f"GitHub refused the refresh token: {error}")
+        detail = f"{status}: {error}" if isinstance(error, str) and error else str(status)
+        raise GitHubAppError(f"GitHub could not refresh the user token ({detail})", status=status)
 
     async def revoke_user_authorization(self, access_token: str) -> None:
         """Withdraw the user's authorization of the App, and every token it issued.

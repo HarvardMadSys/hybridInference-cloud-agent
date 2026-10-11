@@ -695,6 +695,47 @@ async def test_github_down_while_renewing_is_not_a_revoked_authorization(config)
     assert not isinstance(raised.value, UserAuthorizationRevoked)
 
 
+@pytest.mark.parametrize(
+    ("status", "headers", "body"),
+    [
+        (429, {"retry-after": "60"}, {"message": "rate limited"}),
+        (403, {"x-ratelimit-remaining": "0"}, {"message": "API rate limit exceeded"}),
+        (401, {}, {"error": "invalid_client"}),
+        (200, {}, {"error": "incorrect_client_credentials"}),
+        (400, {}, "<html>bad request</html>"),
+    ],
+)
+async def test_a_refusal_that_is_not_about_the_refresh_token_keeps_the_connection(
+    config, status, headers, body
+):
+    """A rate limit or the App's own refused secret must not make the user reconnect."""
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    def respond(request):
+        if isinstance(body, str):
+            return httpx.Response(status, headers=headers, text=body)
+        return httpx.Response(status, headers=headers, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(GitHubAppError) as raised:
+            await GitHubAppCredentials(_oauth(config), client=client).refresh_user_token("ghr_a")
+
+    assert not isinstance(raised.value, UserAuthorizationRevoked)
+    assert raised.value.status == status
+
+
+@pytest.mark.parametrize(("status", "error"), [(200, "bad_refresh_token"), (400, "invalid_grant")])
+async def test_a_finished_refresh_token_is_a_revoked_authorization(config, status, error):
+    """GitHub's own code and the OAuth standard's both settle it: connect again."""
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={"error": error}))
+    ) as client:
+        with pytest.raises(UserAuthorizationRevoked, match=error):
+            await GitHubAppCredentials(_oauth(config), client=client).refresh_user_token("ghr_a")
+
+
 async def test_only_repositories_the_user_can_push_to_are_theirs(config):
     """Asked as the user, every page, and push is the bar — not read."""
     requests = []
