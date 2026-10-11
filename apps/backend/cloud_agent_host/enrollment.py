@@ -33,11 +33,12 @@ import fcntl
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -177,14 +178,33 @@ def store_credential(credential: str) -> None:
     path = credential_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive create then replace, so a concurrent reader never sees a
-    # half-written file and no umask can widen the mode.
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # half-written file and no umask can widen the mode. ``mkstemp`` creates a
+    # new name with O_EXCL: reopening a fixed ``.tmp`` would keep the mode and
+    # owner of a file already there, or follow a symlink planted in its place.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        os.write(fd, credential.encode())
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        try:
+            os.fchmod(fd, 0o600)
+            data = credential.encode()
+            while data:
+                data = data[os.write(fd, data) :]
+            # Durable before it replaces anything: the enrollment token is
+            # already spent, and an empty file after a crash cannot be
+            # re-enrolled from.
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
+    with suppress(OSError):
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def _post(url: str, body: dict[str, Any], *, bearer: str = "") -> dict[str, Any]:
