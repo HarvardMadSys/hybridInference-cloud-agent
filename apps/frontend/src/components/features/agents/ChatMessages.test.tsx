@@ -1147,6 +1147,93 @@ describe('transcript work details', () => {
     expect(screen.getByText('The change is ready.')).toBeVisible();
   });
 
+  it.each<AgentEvent>([
+    { ...call, resultState: 'failed', outputIsError: true, sourceEventId: 3 },
+    { ...call, resultState: 'unknown', sourceEventId: 3 },
+    { ...call, resultState: 'waiting', output: undefined, sourceEventId: 3 },
+    {
+      kind: 'tool_use',
+      tool: 'update_plan',
+      detail: 'Review changes',
+      input: { plan: [{ step: 'Review changes', status: 'pending' }] },
+      resultState: 'received',
+      output: ['Plan recorded.'],
+      sourceEventId: 3,
+    },
+    { kind: 'terminal', text: 'Unclassified terminal output', sourceEventId: 3 },
+  ])('folds successful activity around an attention record ($kind, $resultState)', (attention) => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the change.', sourceEventId: 10 },
+      call,
+      attention,
+      {
+        ...call,
+        tool: 'Read',
+        input: { file_path: 'README.md' },
+        output: ['Project documentation'],
+        sourceEventId: 4,
+      },
+      answer,
+    ];
+    const props = {
+      events,
+      jobId: 'mixed',
+      completed: true,
+      showActivityDetails: false,
+      renderEvent,
+    };
+    const { rerender } = render(<EventList {...props} presentation="standard" />);
+    const anchors = events.map((event) =>
+      document.querySelector(`[data-block-key="mixed:e${event.sourceEventId}"]`),
+    );
+    for (const anchor of anchors) expect(anchor).toBeVisible();
+
+    rerender(<EventList {...props} presentation="compact" />);
+    expect(anchors[0]).not.toBeVisible();
+    expect(anchors[1]).not.toBeVisible();
+    expect(anchors[2]).toBeVisible();
+    expect(anchors[3]).not.toBeVisible();
+    expect(anchors[4]).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show process (2)' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Show process (1)' }));
+    expect(anchors[3]).toBeVisible();
+    for (const [index, event] of events.entries()) {
+      expect(document.querySelector(`[data-block-key="mixed:e${event.sourceEventId}"]`)).toBe(
+        anchors[index],
+      );
+    }
+
+    rerender(<EventList {...props} presentation="detailed" />);
+    expect(screen.getByText('Project documentation')).toBeVisible();
+    for (const output of screen.getAllByText('Checks passed')) expect(output).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: /Show process|Hide process/ }),
+    ).not.toBeInTheDocument();
+    rerender(<EventList {...props} presentation="compact" />);
+    expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
+    expect(anchors[3]).not.toBeVisible();
+    expect(screen.getByText('The change is ready.')).toBeVisible();
+  });
+
+  it('keeps mixed successful and pending activity visible while the turn is running', () => {
+    render(
+      <EventList
+        events={[
+          call,
+          { ...call, resultState: 'waiting', output: undefined, sourceEventId: 3 },
+          { ...call, tool: 'Read', input: { file_path: 'README.md' }, sourceEventId: 4 },
+        ]}
+        jobId="running"
+        presentation="compact"
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByRole('list', { name: 'Tool calls' })).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    expect(screen.getByText('Waiting for result')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
+  });
+
   it('opens the existing inspector from a descriptive summary with its original event and job', () => {
     const inspect = vi.fn();
     render(

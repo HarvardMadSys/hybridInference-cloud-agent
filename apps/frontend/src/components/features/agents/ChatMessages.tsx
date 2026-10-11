@@ -430,6 +430,7 @@ export function EventList({
       continue;
     }
     const parentToolUseId = event.kind === 'tool_use' ? event.parentToolUseId : undefined;
+    const foldable = processMayFold(event);
     const tools: ToolActivityItem[] = [];
     const reasoning: {
       event: Extract<AgentEvent, { kind: 'thinking' }>;
@@ -442,6 +443,9 @@ export function EventList({
       if (
         !isCompactActivity(next) ||
         next.attemptNo !== event.attemptNo ||
+        // Completed activity can fold around a call that still needs attention.
+        // Keep the same partitions in every mode so reading anchors stay put.
+        (completed && processMayFold(next) !== foldable) ||
         (next.kind === 'tool_use' ? next.parentToolUseId : undefined) !== parentToolUseId
       )
         break;
@@ -495,6 +499,7 @@ export function EventList({
     while (
       index + 1 < rows.length &&
       rows[index + 1].process &&
+      (!completed || rows[index + 1].foldable === row.foldable) &&
       rows[index + 1].attemptNo === row.attemptNo
     ) {
       process.push(rows[++index]);
@@ -566,6 +571,9 @@ function ProcessDisclosure({
 }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setExpanded(false);
+  }, [enabled]);
   const bodyId = useId();
   const collapsed = enabled && !expanded;
   return (
