@@ -1958,9 +1958,10 @@ export function JobDetail({
                 </div>
               )}
 
+              {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
               <div
                 ref={scroll.composerRef}
-                className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
+                className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gray-50 px-2 pb-2 pt-8 dark:bg-gray-950"
               >
                 <LiveAgentStatus job={job} />
                 {/* `/goal` on its own is not an objective. It is consumed
