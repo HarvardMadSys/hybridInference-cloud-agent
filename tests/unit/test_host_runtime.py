@@ -374,24 +374,43 @@ def test_a_real_child_answers_before_it_does_anything_else(tmp_path: Path) -> No
     script.write_text(
         textwrap.dedent(
             f"""
-            import os, sys, time
+            import os, sys
             fd = int(sys.argv[1])
+            release_fd = int(sys.argv[2])
             os.write(fd, b"{HANDOVER_ACCEPTED} ajob_1\\n")
             os.close(fd)
-            time.sleep(0.5)
+            os.read(release_fd, 1)
+            os.close(release_fd)
             open({str(marker)!r}, "w").write("ran")
             """
         )
     )
     read_fd, write_fd = os.pipe()
-    process = subprocess.Popen([sys.executable, str(script), str(write_fd)], pass_fds=(write_fd,))
+    release_read_fd, release_write_fd = os.pipe()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(script), str(write_fd), str(release_read_fd)],
+            pass_fds=(write_fd, release_read_fd),
+        )
+    except BaseException:
+        for fd in (read_fd, write_fd, release_read_fd, release_write_fd):
+            os.close(fd)
+        raise
     os.close(write_fd)
+    os.close(release_read_fd)
     try:
         answer = read_handover(read_fd, timeout_s=30)
         assert answer == f"{HANDOVER_ACCEPTED} ajob_1"
         assert not marker.exists(), "the answer must come before anything observable"
     finally:
-        process.wait(timeout=30)
+        # EOF releases the child even when an assertion fails.
+        os.close(release_write_fd)
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+            raise
     assert marker.exists()
 
 

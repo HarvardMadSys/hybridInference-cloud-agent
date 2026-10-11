@@ -312,10 +312,17 @@ def _run_control_deploy(
     )
     curl.chmod(0o755)
 
+    # Failed health probes exercise the real deadline loop without spending
+    # three wall-clock seconds on each retry. Bash's SECONDS is the clock the
+    # script reads, so advancing it preserves the timeout condition.
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text("sleep() { SECONDS=$((SECONDS + $1)); }\n")
+
     result = subprocess.run(
         ["bash", str(DEPLOY_SCRIPT_PATH), sha],
         env={
             **os.environ,
+            "BASH_ENV": str(bash_env),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "SOURCE_REPO": str(source),
             "DEPLOY_ROOT": str(deploy_root),

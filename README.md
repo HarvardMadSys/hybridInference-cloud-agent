@@ -58,7 +58,7 @@ uses Node.js 22 and npm, with separate checks described in the
 | `make format` | Apply Ruff formatting and automatic lint fixes |
 | `make lint` | Check formatting, Ruff rules, and Python docstrings |
 | `make typecheck` | Run mypy across all three backend packages |
-| `make test` | Run pytest excluding `external` and `dbtest` |
+| `make test` | Run pytest with four workers, excluding `external` and `dbtest` |
 | `make test-db` | Run database-backed tests against a dedicated test database |
 
 ### Complete local Docker run
