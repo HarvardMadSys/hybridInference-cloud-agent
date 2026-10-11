@@ -970,6 +970,8 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
     resolv = tmp_path / "resolv.conf"
     hosts.write_text("127.0.0.1 localhost\n")
     resolv.write_text("nameserver 127.0.0.11\n")
+    hosts.chmod(0o644)
+    resolv.chmod(0o644)
     paths = {"/etc/hosts": hosts, "/etc/resolv.conf": resolv}
     actual_open, actual_stat = os.open, os.fstat
     monkeypatch.setattr(os, "open", lambda path, flags: actual_open(paths.get(path, path), flags))

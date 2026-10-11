@@ -220,7 +220,7 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     kata_root = tmp_path / "kata-root"
-    kata_root.mkdir()
+    kata_root.mkdir(mode=0o755)
     executable(fake_bin / "docker", f"#!{sys.executable}\n{DOCKER}")
     executable(fake_bin / "git", '#!/bin/sh\necho "git was invoked" >&2\nexit 93\n')
     executable(fake_bin / "curl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_CURL_LOG"\n')
