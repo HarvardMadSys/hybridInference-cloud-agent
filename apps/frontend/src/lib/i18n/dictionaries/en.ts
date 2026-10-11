@@ -79,6 +79,8 @@ export const en = {
     'A follow-up would fail the same way. Ask an admin to raise the repository import limit, or use a smaller repository.',
   'runDetails.siteMisconfigured':
     'An admin needs to finish setting up the site before you try another turn.',
+  'runDetails.restart': 'Restart in a new session',
+  'runDetails.restarting': 'Restarting…',
   'turnResults.region': 'Recorded turn results',
   'turnResults.title': 'Recorded changes',
   'turnResults.files': '{count} changed files',

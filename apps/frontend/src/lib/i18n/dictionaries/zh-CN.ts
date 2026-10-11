@@ -75,6 +75,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'runDetails.repositoryLimit':
     '发送后续消息仍会失败。请管理员提高仓库导入限制，或使用更小的仓库。',
   'runDetails.siteMisconfigured': '请管理员完成站点配置后，再尝试新一轮。',
+  'runDetails.restart': '在新会话中重新开始',
+  'runDetails.restarting': '正在重新开始…',
   'turnResults.region': '本轮记录的结果',
   'turnResults.title': '记录的改动',
   'turnResults.files': '{count} 个改动文件',
