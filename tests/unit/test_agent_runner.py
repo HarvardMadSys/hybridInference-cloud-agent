@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -237,7 +239,7 @@ def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", Supervisor)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: Supervisor())
 
     rows = runner_mod._retained_sandbox_heartbeat_rows()
 
@@ -274,7 +276,7 @@ def test_retained_heartbeat_passes_group_resources_and_terminal_count(
         ],
         close=Mock(),
     )
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: supervisor)
     rows = runner_mod._retained_sandbox_heartbeat_rows()
     assert rows is not None
     assert rows[0]["container_id"] == "container-source"
@@ -288,6 +290,38 @@ def test_retained_heartbeat_passes_group_resources_and_terminal_count(
         assert rows[0]["resource_usage"]["memory_bytes"] == 1024
         assert rows[0]["resource_usage"]["scope"] == "container"
     supervisor.close.assert_called_once()
+
+
+def test_a_broker_that_never_answers_costs_the_host_beat_only_its_observation(monkeypatch):
+    """The observation runs on the host-heartbeat thread, ahead of the beat itself.
+
+    It used the broker client's 180-second ceiling, so a broker that accepted
+    the request and never answered held the beat for three minutes -- twice
+    the silence after which the control plane counts the host offline and
+    refuses its claims.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    # Connections complete in the backlog and are never read or answered.
+    listener.listen(8)
+    monkeypatch.setenv(
+        "AGENT_WORKSPACE_BROKER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}"
+    )
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+    monkeypatch.setattr(runner_mod, "_HOST_BEAT_BROKER_TIMEOUT_S", 0.2)
+    observed: list[Any] = []
+    beat = threading.Thread(
+        target=lambda: observed.append(runner_mod._retained_sandbox_heartbeat_rows()),
+        daemon=True,
+    )
+    try:
+        beat.start()
+        beat.join(timeout=10)
+        assert not beat.is_alive(), "the host beat waited on the broker"
+        # "Not observed this beat", never an authoritative empty list.
+        assert observed == [None]
+    finally:
+        listener.close()
 
 
 def test_resume_requires_the_exact_native_session():

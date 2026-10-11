@@ -1464,7 +1464,14 @@ def _claim_attestation(
     return stamp
 
 
-def _session_supervisor_from_env() -> SessionSupervisorClient:
+#: How long a host heartbeat waits for the broker's Docker observation. The
+#: beat is the host's liveness signal, and the control plane counts a host
+#: offline after three missed intervals: a broker that is restarting, or whose
+#: request workers are all busy, costs one beat its observation, never the beat.
+_HOST_BEAT_BROKER_TIMEOUT_S = 10.0
+
+
+def _session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorClient:
     url = (os.environ.get("AGENT_WORKSPACE_BROKER_URL") or "").strip()
     token = (os.environ.get("AGENT_WORKSPACE_BROKER_TOKEN") or "").strip()
     if not url or not token:
@@ -1472,7 +1479,7 @@ def _session_supervisor_from_env() -> SessionSupervisorClient:
             "restartable chat execution needs AGENT_WORKSPACE_BROKER_URL and "
             "AGENT_WORKSPACE_BROKER_TOKEN"
         )
-    return SessionSupervisorClient(url, token, timeout=180)
+    return SessionSupervisorClient(url, token, timeout=timeout)
 
 
 def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
@@ -1484,7 +1491,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     """
     client: SessionSupervisorClient | None = None
     try:
-        client = _session_supervisor_from_env()
+        client = _session_supervisor_from_env(timeout=_HOST_BEAT_BROKER_TIMEOUT_S)
         rows = client.list()
         observations: list[dict[str, Any]] = []
         now = time.monotonic()
