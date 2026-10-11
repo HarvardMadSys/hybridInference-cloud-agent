@@ -910,6 +910,53 @@ class GitHubAppCredentials:
             raise GitHubAppError(f"GitHub returned no commit for {ref!r} in {repo}")
         return sha
 
+    async def branch_contains(self, repo: str, branch: str, sha: str) -> bool:
+        """Whether ``branch`` is a branch of ``repo`` whose history holds ``sha``.
+
+        A job's draft PR targets the branch it names, and shows everything the
+        agent's branch adds to it. A tag or a ``refs/`` path is no PR base at
+        all, and a branch the pinned commit is not on would present other
+        commits as the agent's change.
+        """
+        endpoint = f"{self._config.api_base}{_repository_endpoint(repo)}"
+        if not is_ref_name(branch) or not _COMMIT_SHA.fullmatch(sha or ""):
+            return False
+        token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with self._http() as client:
+            found = await client.get(
+                f"{endpoint}/branches/{quote(branch, safe='/')}", headers=headers
+            )
+            # A renamed branch answers with a redirect: it is not this name.
+            if found.status_code == 404 or 300 <= found.status_code < 400:
+                return False
+            if found.status_code >= 400:
+                raise GitHubAppError(
+                    f"could not read branch {branch!r} in {repo}", status=found.status_code
+                )
+            body = found.json()
+            commit = body.get("commit") if isinstance(body, dict) else None
+            head = commit.get("sha") if isinstance(commit, dict) else None
+            if not isinstance(head, str) or not _COMMIT_SHA.fullmatch(head):
+                raise GitHubAppError(f"GitHub returned no commit for branch {branch!r} in {repo}")
+            compared = await client.get(
+                f"{endpoint}/compare/{sha}...{head}", params={"per_page": 1}, headers=headers
+            )
+        if compared.status_code == 404:
+            return False
+        if compared.status_code >= 400:
+            raise GitHubAppError(
+                f"could not compare {sha[:12]} with {branch!r} in {repo}",
+                status=compared.status_code,
+            )
+        body = compared.json()
+        # `ahead`: the branch descends from the commit; `identical`: it is it.
+        return isinstance(body, dict) and body.get("status") in {"ahead", "identical"}
+
     async def repository_contents(
         self,
         repo: str,

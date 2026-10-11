@@ -231,6 +231,11 @@ async def ensure_draft_pull_request(
     Look up the branch even on the first publication: a previous create may
     have reached GitHub before its URL could be recorded locally. Never infer
     that a saved URL still denotes an open PR.
+
+    Looked up by head alone, and refreshed without touching its base: a
+    reviewer who retargets the draft has decided where it merges, and filtering
+    by the job's base made the next snapshot open a second draft beside it.
+    ``base_branch`` is only for a draft this creates.
     """
     headers = _github_headers(credential)
     endpoint = f"{credential.api_base}/repos/{repo}/pulls"
@@ -238,11 +243,7 @@ async def ensure_draft_pull_request(
         response = await client.get(
             endpoint,
             headers=headers,
-            params={
-                "state": "open",
-                "head": f"{repo.split('/')[0]}:{head_branch}",
-                "base": base_branch,
-            },
+            params={"state": "open", "head": f"{repo.split('/')[0]}:{head_branch}"},
         )
         if response.status_code >= 400:
             raise PublishError(f"GitHub refused the PR lookup ({response.status_code})")

@@ -373,11 +373,7 @@ async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_sta
         requests.append(request)
         assert request.headers["Authorization"] == "Bearer t"
         if request.method == "GET":
-            assert dict(request.url.params) == {
-                "state": "open",
-                "head": "o:agent/athr_1",
-                "base": "dev",
-            }
+            assert dict(request.url.params) == {"state": "open", "head": "o:agent/athr_1"}
             return httpx.Response(
                 200,
                 json=[{"number": 7, "state": "open", "html_url": old_url}]
@@ -424,6 +420,49 @@ async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_sta
         "GET",
         "PATCH" if prior_state == "open" else "POST",
     ]
+
+
+async def test_a_draft_retargeted_by_a_reviewer_is_refreshed_not_duplicated(monkeypatch):
+    """GitHub allows open PRs from one branch to several bases; there must stay one."""
+    requests: list[httpx.Request] = []
+    open_prs = [
+        {
+            "number": 7,
+            "state": "open",
+            "html_url": "https://github.com/o/n/pull/7",
+            "base": {"ref": "main"},
+        }
+    ]
+
+    def handle(request):
+        requests.append(request)
+        if request.method == "GET":
+            wanted = request.url.params.get("base")
+            return httpx.Response(
+                200, json=[pr for pr in open_prs if wanted in (None, pr["base"]["ref"])]
+            )
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"state": "open"})
+        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    url = await ensure_draft_pull_request(
+        repo="o/n",
+        head_branch="agent/athr_1",
+        base_branch="dev",
+        title="[agent] Fix retries",
+        body="Summary",
+        credential=GitHubCredential("t"),
+    )
+
+    assert url == "https://github.com/o/n/pull/7"
+    assert [request.method for request in requests] == ["GET", "PATCH"]
+    assert json.loads(requests[1].content) == {"title": "[agent] Fix retries", "body": "Summary"}
 
 
 async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):

@@ -6352,6 +6352,58 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage,
     assert "nope" in created.text
 
 
+@pytest.mark.parametrize("on_branch", [True, False])
+async def test_a_pinned_commit_must_be_on_the_branch_the_pr_will_target(
+    store: FakeStorage, monkeypatch, on_branch
+):
+    """The server checks the base_ref it records, even when the caller pinned the commit.
+
+    It used to store the caller's base_ref verbatim beside a caller's base_sha:
+    a tag, or a branch the commit is not on, then reached PR creation only
+    after the push.
+    """
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    from cloud_agent.api.deps import get_agent_app_credentials
+
+    asked: list[tuple[str, str, str]] = []
+
+    class PinnedApp(_FakeGitHubApp):
+        async def resolve_ref(self, repo: str, ref: str) -> str:
+            raise AssertionError("a pinned commit is not resolved again")
+
+        async def branch_contains(self, repo: str, branch: str, sha: str) -> bool:
+            asked.append((repo, branch, sha))
+            return on_branch
+
+    app = _build_app(_store_with_grants(store))
+    app.dependency_overrides[get_agent_app_credentials] = lambda: PinnedApp(
+        installations=[], repos_by_installation={}
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post(
+            "/v1/agent/jobs",
+            json={
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "m",
+                "base_ref": "release/1.2",
+                "base_sha": "c" * 40,
+            },
+        )
+
+    assert asked == [("owner/name", "release/1.2", "c" * 40)]
+    if on_branch:
+        assert created.status_code == 201
+        assert (created.json()["base_ref"], created.json()["base_sha"]) == (
+            "release/1.2",
+            "c" * 40,
+        )
+    else:
+        assert created.status_code == 400
+        assert "is not a branch of owner/name" in created.text
+
+
 @pytest.mark.parametrize(
     "base_ref", ["../../../../installation/repositories", "main?x=1", "-main", "a..b"]
 )

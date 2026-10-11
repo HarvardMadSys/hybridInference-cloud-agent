@@ -475,9 +475,19 @@ async def _create_job_as(
     # different tree by the time it ran, and the publisher applies its patch
     # onto a pinned commit.
     base_sha = body.base_sha
-    if base_sha is None and body.base_ref and app_credentials is not None:
+    if body.base_ref and app_credentials is not None:
         try:
-            base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
+            if base_sha is None:
+                base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
+                on_branch = True
+            else:
+                # The caller pinned the commit, and base_ref is still what the
+                # draft PR will target: it has to be a branch that commit is
+                # on, or the PR either cannot be opened once the branch is
+                # pushed or shows commits the agent never made.
+                on_branch = await app_credentials.branch_contains(
+                    body.repo, body.base_ref, base_sha
+                )
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
@@ -488,6 +498,19 @@ async def _create_job_as(
                     }
                 },
             ) from exc
+        if not on_branch:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": (
+                            f"{body.base_ref!r} is not a branch of {body.repo} that "
+                            f"contains {base_sha}"
+                        ),
+                    }
+                },
+            )
 
     metadata = dict(body.metadata or {})
     # Reserved display fact: caller metadata must not be able to claim the

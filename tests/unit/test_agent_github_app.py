@@ -520,6 +520,65 @@ async def test_a_ref_to_resolve_can_only_ever_name_a_ref(config):
 
 
 @pytest.mark.parametrize(
+    ("branch_status", "compare_status", "expected"),
+    [
+        (200, "ahead", True),
+        (200, "identical", True),
+        (200, "behind", False),
+        (200, "diverged", False),
+        (404, None, False),
+        (301, None, False),
+    ],
+)
+async def test_a_pinned_commit_must_be_on_the_branch_its_pr_targets(
+    config, branch_status, compare_status, expected
+):
+    """A tag is no PR base, and a branch the commit is not on fills the PR with others' work."""
+    pinned, head = "a" * 40, "b" * 40
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/n/installation":
+            return httpx.Response(200, json={"id": 9})
+        if request.url.path == "/app/installations/9/access_tokens":
+            return httpx.Response(
+                201, json={"token": "ghs_read", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        requested.append(request.url.path)
+        if request.url.path == "/repos/o/n/branches/release/1.2":
+            return httpx.Response(branch_status, json={"commit": {"sha": head}})
+        assert request.url.path == f"/repos/o/n/compare/{pinned}...{head}"
+        return httpx.Response(200, json={"status": compare_status})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.branch_contains("o/n", "release/1.2", pinned) is expected
+        assert await credentials.branch_contains("o/n", "release/..", pinned) is False
+        assert await credentials.branch_contains("o/n", "release/1.2", "--upload-pack") is False
+
+    assert len(requested) == (2 if branch_status == 200 else 1)
+
+
+async def test_a_branch_github_cannot_read_is_an_error_not_a_refusal(config):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/n/installation":
+            return httpx.Response(200, json={"id": 9})
+        if request.url.path == "/app/installations/9/access_tokens":
+            return httpx.Response(
+                201, json={"token": "ghs_read", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        return httpx.Response(502, text="bad gateway")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GitHubAppError) as raised:
+            await GitHubAppCredentials(config, client=client).branch_contains(
+                "o/n", "dev", "a" * 40
+            )
+
+    assert raised.value.status == 502
+
+
+@pytest.mark.parametrize(
     ("ref", "accepted"),
     [
         ("main", True),
