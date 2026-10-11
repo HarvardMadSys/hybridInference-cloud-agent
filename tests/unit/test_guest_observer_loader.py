@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import textwrap
@@ -20,6 +21,8 @@ import textwrap
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from guest_serializer import _compiler, _function_body
+
+from cloud_agent_host.guest_observer import GUEST_OBSERVER_ROTATE_BYTES
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SANDBOX = REPO_ROOT / "deploy" / "sandbox"
@@ -200,3 +203,86 @@ def test_a_probe_gives_its_census_back_and_names_an_incomplete_one(tmp_path):
     assert answered["outstanding"] == 0
     assert answered["complete"] == answered["ok"]
     assert answered["incomplete"] == answered["incomplete_status"]
+
+
+def test_tool_marks_leave_the_rest_of_the_journal_to_process_records(tmp_path):
+    """Any member can send marks, so marks alone must not fill the journal.
+
+    Process records are what a sibling's census is complete by; once the
+    journal is full they are dropped, and every overlapping observation reads
+    as lost events. Marks therefore stop where the host replaces an idle
+    journal, which leaves the rest to process records and means a journal that
+    marks have filled is one the next idle turn rotates.
+    """
+    source = OBSERVER_C.read_text(encoding="utf-8")
+    limits = "\n".join(re.findall(r"^#define MAX_\w*JOURNAL\w* .*$", source, re.MULTILINE))
+    write_all = _function_body(source, "static int write_all(")
+    journal_tool_mark = _function_body(source, "static int journal_tool_mark(")
+    rotation = GUEST_OBSERVER_ROTATE_BYTES
+    binary = _build(
+        tmp_path,
+        "tool-mark-harness",
+        f"""
+        #define _GNU_SOURCE
+        #include <errno.h>
+        #include <fcntl.h>
+        #include <inttypes.h>
+        #include <stdbool.h>
+        #include <stdint.h>
+        #include <stdio.h>
+        #include <string.h>
+        #include <sys/socket.h>
+        #include <unistd.h>
+
+        #include "guest-observer.h"
+        #include "tool-mark.h"
+
+        {limits}
+
+        struct observer {{
+            int events_fd;
+            uint64_t event_seq;
+            uint64_t journal_bytes;
+        }};
+
+        {write_all}
+
+        {journal_tool_mark}
+
+        static int mark_at(uint64_t journal_bytes)
+        {{
+            struct observer observer = {{
+                .events_fd = open("/dev/null", O_WRONLY),
+                .event_seq = 0,
+                .journal_bytes = journal_bytes,
+            }};
+            struct fi_tool_mark mark = {{
+                .version = FI_TOOL_MARK_VERSION,
+                .phase = FI_TOOL_MARK_PRE,
+                .mono_ns = 1,
+                .tool_use_id = "toolu_flood",
+            }};
+            struct ucred credential = {{.pid = 42, .uid = 11001, .gid = 11001}};
+            int written = journal_tool_mark(&observer, &mark, &credential);
+
+            close(observer.events_fd);
+            return written;
+        }}
+
+        int main(void)
+        {{
+            printf("{{\\"below\\":%d,\\"at_rotation\\":%d,\\"journal_cap\\":%llu}}\\n",
+                   mark_at({rotation}ULL - 4096ULL),
+                   mark_at({rotation}ULL),
+                   (unsigned long long)MAX_JOURNAL_BYTES);
+            return 0;
+        }}
+        """,
+    )
+
+    answered = _run(binary)
+
+    assert answered["below"] == 0
+    assert answered["at_rotation"] == -1, "a mark took room only process records may use"
+    # What is left past the marks' share is real room, not a rounding margin.
+    assert answered["journal_cap"] - rotation >= 8 * 1024 * 1024
