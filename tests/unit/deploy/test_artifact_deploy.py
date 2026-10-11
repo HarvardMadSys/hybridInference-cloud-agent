@@ -335,7 +335,11 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert (state / ".shared-live-ready").read_text().strip() == COMMIT
         sandbox = next(a["image"] for a in manifest()["artifacts"] if a["role"] == "sandbox")
         assert any(c["args"] == ["pull", sandbox] for c in calls)
-        drain = next(i for i, c in enumerate(calls) if c["args"][-2:] == ["stop", "runner"])
+        drain = next(
+            i
+            for i, c in enumerate(calls)
+            if c["args"] == ["stop", "--time=-1", "runner-1", "runner-2", "runner-3"]
+        )
         pulls = [
             i
             for i, c in enumerate(calls)

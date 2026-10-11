@@ -28,6 +28,7 @@ def _host(
     *,
     slots: str | None = "3",
     running_containers: int = 1,
+    runner_ps_exit: int = 0,
     turn_starts: bool = True,
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
@@ -105,7 +106,7 @@ def _host(
         '  *\' config --format json\') echo \'{"name":"test-retained","services":{"runner":{"image":"test-candidate-runner"}}}\' ;;\n'
         f"  run*'cloud_agent_host.candidate_check') exit {candidate_exit} ;;\n"
         f"  run*'network_from_env()') exit {network_settings_exit} ;;\n"
-        f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
+        f"  *' ps -q runner') printf '%s\\n' '{runner_ids}'; exit {runner_ps_exit} ;;\n"
         f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
@@ -246,15 +247,33 @@ def test_target_sha_marker_is_a_rollout_fence_not_a_topology_switch() -> None:
     assert "AGENT_SHARED_LIVE_SANDBOX" not in host_script
 
 
-def test_host_builds_then_drains_runners_before_replacing_the_broker() -> None:
+def test_host_builds_then_drains_runners_without_killing_before_replacing_broker() -> None:
     script = SANDBOX_HOST.read_text()
 
     build = script.index("compose build")
     marker = script.index("prepare_shared_live_marker", build)
-    drain = script.index("compose stop runner", marker)
+    lookup = script.index('runner_ids_text="$(compose ps -q runner)"', marker)
+    resolve = script.index("mapfile -t runner_ids", lookup)
+    drain = script.index('docker stop --time=-1 "${runner_ids[@]}"', resolve)
     replace = script.index("compose up -d --no-build --remove-orphans", drain)
 
-    assert build < marker < drain < replace
+    assert build < marker < lookup < resolve < drain < replace
+    assert "compose stop runner" not in script
+
+
+def test_host_refuses_replacement_when_runner_lookup_fails(tmp_path: Path) -> None:
+    env = _host(tmp_path, runner_ps_exit=23)
+    _add_required_host_paths(env, tmp_path)
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+
+    result = _run(env, "activate")
+
+    assert result.returncode != 0
+    assert (
+        "could not resolve the existing runner containers; refusing to replace the stack"
+        in result.stderr
+    )
+    assert "starting the three purpose-scoped tunnels" not in result.stdout
 
 
 def test_direct_host_commands_support_environment_only_configuration(tmp_path: Path) -> None:

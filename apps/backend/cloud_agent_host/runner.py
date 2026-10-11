@@ -3122,17 +3122,14 @@ _STOPPING = threading.Event()
 def _drain_on_sigterm() -> None:
     """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
 
-    The split is deliberate. `docker stop` and `compose up -d` send SIGTERM and
-    then wait `stop_grace_period` — that wait is exactly the room to let a job
-    end, and the container is being replaced anyway, so exiting after it is
-    right. A person pressing Ctrl-C means *now*, and turning that into a
+    The split is deliberate. `docker stop` sends SIGTERM; supported activation
+    asks the Engine to wait indefinitely, so a job finishes before its runner
+    is replaced. Direct, out-of-band Compose operations retain their configured
+    grace period. A person pressing Ctrl-C means *now*, and turning that into a
     several-minute wait would be its own surprise.
 
-    The lease machinery remains the backstop, not the plan: a job outlasting
-    the grace period is SIGKILLed, its lease expires, and the control plane
-    supersedes the attempt — which is what happened to every job through a
-    deploy before this, and is exactly the outcome this narrows to the rare
-    case.
+    The lease machinery remains the backstop for a host failure or an explicit
+    forced kill, not the deployment plan.
     """
 
     def handler(signum: int, frame: object) -> None:
@@ -3450,8 +3447,8 @@ def _serve_turn(
     # Installed before the answer, so there is no window in which this process
     # owns a turn and SIGTERM would still kill it outright. From here the turn
     # is this process's: SIGTERM means the container is being replaced, the
-    # turn still runs to its end, and the grace period bounds that exactly as
-    # it did when a replica ran one job at a time.
+    # turn still runs to its end, and supported activation has no forced-kill
+    # deadline.
     _drain_on_sigterm()
     write_handover(handover_fd, f"{HANDOVER_ACCEPTED} {job.job_id}")
     # Only an accepted turn can finish and deliver the inherited measurement,

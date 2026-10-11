@@ -231,16 +231,11 @@ services:
       - internal
 
   runner:
-    # How long docker waits after SIGTERM before SIGKILL, and therefore how
-    # long a job gets to finish when this container is replaced. The host
-    # service stops claiming on SIGTERM, each turn already running finishes in
-    # its own process, and the service exits after the last of them.
-    #
-    # Bounded on purpose. A job may run up to AGENT_TIMEOUT_S (an hour by
-    # default) and a deploy cannot wait that long, so past this the container
-    # is killed, the lease expires and the control plane supersedes the
-    # attempt — the behaviour every job through a deploy used to get, now
-    # narrowed to the jobs that genuinely outlast the window.
+    # Fallback grace period for direct, out-of-band Compose operations. The
+    # supported host activation path calls Engine `stop --time=-1` for this
+    # service's exact container IDs: the service stops claiming on SIGTERM,
+    # lets every child turn finish, and a deployment never converts that drain
+    # into SIGKILL.
     stop_grace_period: ${AGENT_RUNNER_STOP_GRACE:-5m}
     # One container per host, on purpose. It runs one service that enrolls,
     # heartbeats and claims, and starts a process per turn as it claims one —
