@@ -30,7 +30,7 @@ vi.mock('@/lib/api/adminSettings', () => ({
 }));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
-import { getAgentAdminSettings } from '@/lib/api/adminSettings';
+import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
 
 import AdminSettingsPage from './page';
 
@@ -153,6 +153,18 @@ function submit(control: HTMLElement) {
   fireEvent.submit(control.closest('form')!);
 }
 
+type SettingsTab = 'Application' | 'Agent versions' | 'Sandbox';
+
+function selectSettingsTab(name: SettingsTab) {
+  fireEvent.click(screen.getByRole('tab', { name }));
+}
+
+function renderSettings(tab: SettingsTab = 'Application') {
+  const view = render(<AdminSettingsPage />);
+  if (tab !== 'Application') selectSettingsTab(tab);
+  return view;
+}
+
 beforeEach(() => {
   auth.id = 'admin-a';
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
@@ -185,26 +197,119 @@ describe('admin Settings', () => {
     expect(getAgentAdminSettings).not.toHaveBeenCalled();
   });
 
-  it('admits a free account with admin permission and shows versions and sandbox settings', async () => {
-    render(<AdminSettingsPage />);
-    await screen.findByLabelText('Claude Code');
+  it('admits a free account with admin permission and opens Application settings', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('tabpanel', { name: 'Application' })).toBeVisible();
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
       'Application settings',
-      'Agent versions',
-      'Sandbox',
     ]);
+    selectSettingsTab('Agent versions');
+    expect(screen.getByRole('heading', { name: 'Agent versions' })).toBeVisible();
     expect(screen.queryByLabelText('New sandbox location')).not.toBeInTheDocument();
     expect(screen.queryByText('Runtime settings')).not.toBeInTheDocument();
     expect(
       screen.getByText(/Existing sessions and their forks keep their version/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/EXTRA_VERSIONS/)).not.toBeInTheDocument();
+    selectSettingsTab('Sandbox');
+    expect(screen.getByRole('heading', { name: 'Sandbox' })).toBeVisible();
+  });
+
+  it('exposes one selected tab and its related panel at a time', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
+    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox'];
+    expect(within(tablist).getAllByRole('tab')).toHaveLength(3);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(3);
+
+    for (const name of names) {
+      selectSettingsTab(name);
+      const tab = within(tablist).getByRole('tab', { name });
+      const panel = screen.getByRole('tabpanel', { name });
+      expect(screen.getAllByRole('tabpanel')).toEqual([panel]);
+      expect(panel).toBeVisible();
+      expect(tab).toHaveAttribute('aria-selected', 'true');
+      expect(tab).toHaveAttribute('tabindex', '0');
+      expect(tab).toHaveAttribute('aria-controls', panel.id);
+      expect(panel).toHaveAttribute('aria-labelledby', tab.id);
+      for (const otherName of names.filter((other) => other !== name)) {
+        const otherTab = within(tablist).getByRole('tab', { name: otherName });
+        expect(otherTab).toHaveAttribute('aria-selected', 'false');
+        expect(otherTab).toHaveAttribute('tabindex', '-1');
+        expect(document.getElementById(otherTab.getAttribute('aria-controls')!)).not.toBeVisible();
+      }
+    }
+  });
+
+  it('selects and focuses tabs with Arrow, Home, and End keys', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    screen.getByRole('tab', { name: 'Application' }).focus();
+    const move = (key: string, name: SettingsTab) => {
+      fireEvent.keyDown(document.activeElement!, { key });
+      const tab = screen.getByRole('tab', { name });
+      expect(tab).toHaveFocus();
+      expect(tab).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tabpanel', { name })).toBeVisible();
+    };
+    move('ArrowRight', 'Agent versions');
+    move('End', 'Sandbox');
+    move('ArrowRight', 'Application');
+    move('ArrowLeft', 'Sandbox');
+    move('Home', 'Application');
+  });
+
+  it('preserves unsaved application, version, and sandbox drafts when switching tabs', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue({
+      revision: 1,
+      definitions: [
+        {
+          key: 'site.app_name',
+          label: 'Application name',
+          description: 'Name shown in the application.',
+          category: 'Appearance',
+          kind: 'string',
+          default: 'Cloud Agent',
+          secret: false,
+        },
+      ],
+      values: { 'site.app_name': 'Cloud Agent' },
+      secret_configured: {},
+      bootstrap: [],
+    });
+    renderSettings();
+    fireEvent.change(await screen.findByLabelText('Application name'), {
+      target: { value: 'My agent' },
+    });
+    selectSettingsTab('Agent versions');
+    fireEvent.change(await screen.findByLabelText('Claude Code'), {
+      target: { value: '2.1.235' },
+    });
+    selectSettingsTab('Sandbox');
+    fireEvent.change(await screen.findByLabelText('Turn time limit for all servers'), {
+      target: { value: '2' },
+    });
+
+    selectSettingsTab('Application');
+    expect(screen.getByLabelText('Application name')).toHaveValue('My agent');
+    expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
+    selectSettingsTab('Agent versions');
+    expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
+    selectSettingsTab('Sandbox');
+    expect(screen.getByLabelText('Turn time limit for all servers')).toHaveValue(2);
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(setAgentAdminSettings).not.toHaveBeenCalled();
+    expect(setVersion).not.toHaveBeenCalled();
+    expect(setLimit).not.toHaveBeenCalled();
   });
 
   it('recovers from an initial read failure without claiming the settings are empty', async () => {
     list.mockRejectedValueOnce(new Error('Service unavailable'));
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     expect(await screen.findByRole('alert')).toHaveTextContent('Service unavailable');
     expect(
       screen.queryByText('No server has reported available versions yet.'),
@@ -223,7 +328,7 @@ describe('admin Settings', () => {
         ],
       }),
     );
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     await screen.findByLabelText('Future limit for all servers');
     const card = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
     expect(within(card).getByLabelText('Future limit for all servers')).toBeInTheDocument();
@@ -232,7 +337,7 @@ describe('admin Settings', () => {
 
 describe('agent versions', () => {
   it('offers the server default before every version the pool holds', async () => {
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText<HTMLSelectElement>('Claude Code');
     expect([...select.options].map((option) => option.textContent)).toEqual([
       'Server default (2.1.220)',
@@ -245,13 +350,13 @@ describe('agent versions', () => {
 
   it('shows the global selection rather than the installed server default', async () => {
     list.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     expect(await screen.findByLabelText('Claude Code')).toHaveValue('2.1.235');
   });
 
   it('waits for Save, sends the choice, and takes the returned snapshot', async () => {
     setVersion.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
     fireEvent.change(select, { target: { value: '2.1.235' } });
     expect(setVersion).not.toHaveBeenCalled();
@@ -271,7 +376,7 @@ describe('agent versions', () => {
   it('clears to the server default with null, not an empty version string', async () => {
     list.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     setVersion.mockResolvedValue(pool());
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
     fireEvent.change(select, { target: { value: '' } });
     submit(select);
@@ -280,7 +385,7 @@ describe('agent versions', () => {
 
   it('explains an unavailable menu without hiding the section', async () => {
     list.mockResolvedValue(pool({ hosts: [host({ runtime_versions_available: null })] }));
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     await screen.findByText('No server has reported available versions yet.');
     expect(screen.getByRole('heading', { name: 'Agent versions' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Claude Code')).not.toBeInTheDocument();
@@ -290,7 +395,7 @@ describe('agent versions', () => {
     list.mockResolvedValue(
       pool({ hosts: [host({ runtime_versions_available: { codex: ['0.145.0'] } })] }),
     );
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText<HTMLSelectElement>('Codex');
     expect([...select.options].map((option) => option.textContent)).toEqual([
       'Server default',
@@ -301,7 +406,7 @@ describe('agent versions', () => {
   it('keeps an unavailable saved version visible and lets the admin clear it', async () => {
     list.mockResolvedValue(pool({ hosts: [], runtime_versions: { 'claude-code': '2.1.235' } }));
     setVersion.mockResolvedValue(pool({ hosts: [] }));
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
     expect(select).toHaveValue('2.1.235');
     expect(screen.getByText('2.1.235 (unavailable)')).toBeInTheDocument();
@@ -319,7 +424,7 @@ describe('agent versions', () => {
     setVersion.mockResolvedValue(
       pool({ hosts: [host(), lacking], runtime_versions: { 'claude-code': '2.1.235' } }),
     );
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
     expect(screen.queryByText(/Not on runner-b/)).not.toBeInTheDocument();
     fireEvent.change(select, { target: { value: '2.1.235' } });
@@ -338,7 +443,7 @@ describe('agent versions', () => {
         hosts: [host(), host({ host: 'runner-b', runtime_versions: { 'claude-code': '2.1.235' } })],
       }),
     );
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     const select = await screen.findByLabelText<HTMLSelectElement>('Claude Code');
     expect(select.options[0]).toHaveTextContent('Server default (varies by server)');
   });
@@ -347,14 +452,14 @@ describe('agent versions', () => {
 describe('global limits', () => {
   it('does not offer controls when no limits were reported', async () => {
     list.mockResolvedValue(pool({ host_setting_definitions: undefined }));
-    render(<AdminSettingsPage />);
-    await screen.findByLabelText('Claude Code');
+    renderSettings('Sandbox');
+    expect(await screen.findByText('No sandbox settings are available.')).toBeVisible();
     expect(screen.queryByLabelText('Turn time limit for all servers')).not.toBeInTheDocument();
   });
 
   it('saves one value and reports actual application separately', async () => {
     setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 7200 } }));
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     const input = await screen.findByLabelText('Turn time limit for all servers');
     expect(screen.getAllByText('Deployment default: 1 h')).toHaveLength(1);
     expect(screen.getByLabelText('Turn time limit for all servers unit')).toHaveValue('h');
@@ -366,7 +471,7 @@ describe('global limits', () => {
   });
 
   it('rejects an out-of-range value without sending it', async () => {
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     const input = await screen.findByLabelText('Turn time limit for all servers');
     fireEvent.change(input, { target: { value: '30' } });
     submit(input);
@@ -377,7 +482,7 @@ describe('global limits', () => {
   it('clears a global value so servers fall back to their own defaults', async () => {
     list.mockResolvedValue(pool({ host_settings: { terminal_max_sessions: 16 } }));
     setLimit.mockResolvedValue(pool());
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ terminal_max_sessions: null }));
   });
@@ -389,7 +494,7 @@ describe('global limits', () => {
         host_setting_definitions: [definitions[0], definitions[6]],
       }),
     );
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     await screen.findByLabelText('Turn time limit for all servers');
     expect(screen.getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
@@ -397,7 +502,7 @@ describe('global limits', () => {
   it('retains a draft after a rejected save so it can be retried', async () => {
     setLimit.mockRejectedValueOnce(new Error('Could not save'));
     setLimit.mockResolvedValueOnce(pool({ host_settings: { agent_timeout_s: 7200 } }));
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     const input = await screen.findByLabelText('Turn time limit for all servers');
     fireEvent.change(input, { target: { value: '2' } });
     submit(input);
@@ -410,7 +515,7 @@ describe('global limits', () => {
 
   it('takes an amount in the unit the admin picks', async () => {
     setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 5400 } }));
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     const input = await screen.findByLabelText('Turn time limit for all servers');
     fireEvent.change(screen.getByLabelText('Turn time limit for all servers unit'), {
       target: { value: 'min' },
@@ -422,7 +527,7 @@ describe('global limits', () => {
   });
 
   it('warns before a shorter terminal lifetime closes open terminals', async () => {
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     const input = await screen.findByLabelText('Terminal max lifetime for all servers');
     fireEvent.change(input, { target: { value: '4' } });
     expect(screen.getByText('Open terminals older than 4 h will close.')).toBeInTheDocument();
@@ -434,7 +539,7 @@ describe('global limits', () => {
     list.mockResolvedValue(
       pool({ hosts: [host({ settings_desired: { terminal_max_sessions: 128 } })] }),
     );
-    render(<AdminSettingsPage />);
+    renderSettings('Sandbox');
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
   });
 });
@@ -442,9 +547,10 @@ describe('global limits', () => {
 describe('polling and account boundaries', () => {
   it('preserves drafts while polling, then updates application status', async () => {
     vi.useFakeTimers();
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText('Claude Code'), { target: { value: '2.1.235' } });
+    selectSettingsTab('Sandbox');
     fireEvent.change(screen.getByLabelText('Turn time limit for all servers'), {
       target: { value: '2' },
     });
@@ -469,7 +575,7 @@ describe('polling and account boundaries', () => {
 
   it('discards a read that started before a successful save', async () => {
     vi.useFakeTimers();
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
     let finishPoll!: (value: AgentRunnerHostPool) => void;
     list.mockImplementationOnce(
@@ -493,7 +599,7 @@ describe('polling and account boundaries', () => {
 
   it('keeps the last snapshot on a failed poll and labels the failure', async () => {
     vi.useFakeTimers();
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
     list.mockRejectedValue(new Error('Connection lost'));
     await vi.advanceTimersByTimeAsync(30_000);
@@ -503,7 +609,7 @@ describe('polling and account boundaries', () => {
 
   it('clears protected data and stops polling when admin access is revoked', async () => {
     vi.useFakeTimers();
-    render(<AdminSettingsPage />);
+    renderSettings('Agent versions');
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
     list.mockRejectedValue(new APIError('FORBIDDEN', 'Forbidden', 403));
     await vi.advanceTimersByTimeAsync(30_000);
@@ -521,12 +627,13 @@ describe('polling and account boundaries', () => {
           finishSave = resolve;
         }),
     );
-    const view = render(<AdminSettingsPage />);
+    const view = renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
     fireEvent.change(select, { target: { value: '2.1.235' } });
     submit(select);
     auth.id = 'admin-b';
     view.rerender(<AdminSettingsPage />);
+    selectSettingsTab('Agent versions');
     expect(await screen.findByLabelText('Claude Code')).toHaveValue('');
     finishSave(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     await waitFor(() => expect(screen.getByLabelText('Claude Code')).toHaveValue(''));
