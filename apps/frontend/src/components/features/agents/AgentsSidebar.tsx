@@ -612,7 +612,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   />
                 ))}
                 <ListStatus
-                  loading={pinnedList.loading}
+                  loading={pinnedList.showLoading}
                   error={pinnedList.error}
                   empty={false}
                   more={pinnedRows.length > visiblePinned.length || Boolean(pinnedList.cursor)}
@@ -766,7 +766,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   ),
                 )}
               <ListStatus
-                loading={search.loading || debounced !== query.trim()}
+                loading={search.showLoading || debounced !== query.trim()}
                 error={search.error}
                 empty={!search.rows.length}
                 more={Boolean(search.cursor)}
@@ -787,7 +787,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 />
               ))}
               <ListStatus
-                loading={list.loading}
+                loading={list.showLoading}
                 error={list.error}
                 empty={!flatRows.length}
                 more={Boolean(list.cursor)}
@@ -832,7 +832,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               ))}
               {!folders.length && (
                 <ListStatus
-                  loading={list.loading || projectsLoading}
+                  loading={list.showLoading || projectsLoading}
                   error={list.error}
                   empty
                   more={false}

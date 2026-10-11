@@ -47,7 +47,7 @@ export function useConversationList({
   }>({ identity, rows: [], cursor: null, loadedRefresh: null });
   const dataRef = useRef(data);
   dataRef.current = data;
-  const [loading, setLoading] = useState(false);
+  const [loadMode, setLoadMode] = useState<'foreground' | 'background' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const busy = useRef(false);
@@ -115,10 +115,16 @@ export function useConversationList({
   const fetchPage = useCallback(
     async (next?: string, version = generation.current) => {
       busy.current = true;
-      setLoading(true);
+      const previous = dataRef.current;
+      // Refresh even an empty loaded list without inserting a status row and
+      // shifting the sidebar. First loads and explicit pagination show progress.
+      setLoadMode(
+        !next && previous.identity === identity && previous.loadedRefresh !== null
+          ? 'background'
+          : 'foreground',
+      );
       setError(null);
       try {
-        const previous = dataRef.current;
         const targetCount = !next && previous.identity === identity ? previous.rows.length : 0;
         const merged = new Map(
           (next && previous.identity === identity ? previous.rows : []).map((row) => [
@@ -157,7 +163,7 @@ export function useConversationList({
       } finally {
         if (generation.current === version) {
           busy.current = false;
-          setLoading(false);
+          setLoadMode(null);
         }
       }
     },
@@ -167,7 +173,7 @@ export function useConversationList({
     const version = ++generation.current;
     setError(null);
     busy.current = false;
-    setLoading(false);
+    setLoadMode(null);
     if (enabled) void fetchPage(undefined, version);
     return () => {
       generation.current += 1;
@@ -179,5 +185,14 @@ export function useConversationList({
   const loadMore = useCallback(() => {
     if (cursor && !busy.current) void fetchPage(cursor);
   }, [cursor, fetchPage]);
-  return { rows, cursor, loadedRefresh, loading, error, loadMore, reload };
+  return {
+    rows,
+    cursor,
+    loadedRefresh,
+    loading: loadMode !== null,
+    showLoading: loadMode === 'foreground',
+    error,
+    loadMore,
+    reload,
+  };
 }

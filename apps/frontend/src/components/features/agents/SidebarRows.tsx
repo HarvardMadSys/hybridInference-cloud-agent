@@ -415,7 +415,7 @@ export function ProjectFolder({
             <TaskRow key={row.key} row={row} {...actions} reorderProps={taskReorder(rows, row)} />
           ))}
           <ListStatus
-            loading={list.loading}
+            loading={list.showLoading}
             error={list.error}
             empty={!rows.length}
             more={rows.length > visible.length || Boolean(list.cursor)}

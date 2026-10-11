@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   sessions: vi.fn(),
   setArchived: vi.fn(),
   pin: vi.fn(),
+  replace: vi.fn(),
   pathname: '/',
   params: '',
   user: 'alice',
@@ -22,7 +23,7 @@ const api = vi.hoisted(() => ({
 vi.mock('next/navigation', () => ({
   usePathname: () => api.pathname,
   useSearchParams: () => new URLSearchParams(api.params),
-  useRouter: () => ({ replace: vi.fn() }),
+  useRouter: () => ({ replace: api.replace }),
 }));
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
@@ -106,6 +107,77 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it.each(['project', 'flat'] as const)(
+    'keeps the %s sidebar steady while archiving, navigating and receiving the archive push',
+    async (group) => {
+      localStorage.setItem(
+        sidebarPreferencesKey('alice'),
+        JSON.stringify({ ...DEFAULT_PREFERENCES, group }),
+      );
+      api.pathname = '/a';
+      let archived = false;
+      const pinned = conversation('pinned');
+      pinned.job.pinned_at = '2026-09-10T00:00:00Z';
+      const refreshes: (() => void)[] = [];
+      api.list.mockImplementation(
+        ({ pinned: pins }: { pinned?: boolean }) =>
+          new Promise((resolve) => {
+            const complete = () =>
+              resolve({
+                conversations: pins ? [pinned] : archived ? [base[1]] : base,
+                next_cursor: null,
+              });
+            if (archived) refreshes.push(complete);
+            else complete();
+          }),
+      );
+      api.get.mockResolvedValue(base[0].job);
+      api.thread.mockImplementation(async () => ({
+        jobs: [base[0].job],
+        title: base[0].title,
+        archived_at: archived ? '2026-09-10T00:00:00Z' : null,
+      }));
+      api.archive.mockImplementation(async () => {
+        archived = true;
+        announceAgentSessionsChanged({ threadIds: ['thread-a'], archived: true });
+        return { thread_id: 'thread-a', archived: true };
+      });
+      const view = render(<AgentsSidebar />);
+      const remaining = await screen.findByRole('link', {
+        name: group === 'flat' ? 'Task b · owner/repo' : 'Task b',
+      });
+      const pin = await screen.findByRole('link', { name: 'Task pinned · owner/repo' });
+      await waitFor(() => expect(screen.queryAllByText('Loading…')).toHaveLength(0));
+      const expectSteady = () => {
+        expect(remaining).toBeInTheDocument();
+        expect(pin).toBeInTheDocument();
+        expect(screen.queryByText('Task a')).not.toBeInTheDocument();
+        expect(screen.queryAllByText('Loading…')).toHaveLength(0);
+      };
+
+      fireEvent.click(screen.getByRole('button', { name: 'Archive Task a' }));
+      await waitFor(() => expect(api.replace).toHaveBeenCalledWith('/'));
+      expect(refreshes.length).toBeGreaterThan(0);
+      expectSteady();
+
+      api.pathname = '/';
+      view.rerender(<AgentsSidebar />);
+      expectSteady();
+      await act(async () => refreshes.splice(0).forEach((complete) => complete()));
+      expectSteady();
+
+      vi.useFakeTimers();
+      act(() => {
+        receiveThreadChange({ id: 'thread-a', revision: 1, archived_at: '2026-09-10T00:00:00Z' });
+        vi.advanceTimersByTime(PUSH_BATCH_MS);
+      });
+      expect(refreshes.length).toBeGreaterThan(0);
+      expectSteady();
+      await act(async () => refreshes.splice(0).forEach((complete) => complete()));
+      expectSteady();
+    },
+  );
+
   it('keeps project and conversation lists steady during tool and usage updates', async () => {
     render(<AgentsSidebar />);
     await screen.findByText('Task a');
