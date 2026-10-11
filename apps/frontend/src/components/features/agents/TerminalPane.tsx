@@ -156,6 +156,7 @@ interface TerminalPaneProps {
   /** Terminals whose shell has ended, so their tabs can say so. */
   exitedIds?: ReadonlySet<string>;
   paneIndex: number;
+  idPrefix: string;
   ready: boolean;
   /** Take keyboard focus once open, unless someone is typing elsewhere. */
   autoFocus?: boolean;
@@ -163,7 +164,7 @@ interface TerminalPaneProps {
   canSplit: boolean;
   busy: boolean;
   maxInputBytes?: number;
-  onSelect: (terminalId: string) => void;
+  onSelect: (terminalId: string, focus: 'terminal' | 'tab') => void;
   onNew: () => void;
   onSplit: () => void;
   onKill: () => void;
@@ -176,6 +177,7 @@ export function TerminalPane({
   sessions,
   exitedIds,
   paneIndex,
+  idPrefix,
   ready,
   autoFocus = false,
   canCreate,
@@ -507,7 +509,7 @@ export function TerminalPane({
           aria-label={`Terminals in pane ${paneIndex + 1}`}
           className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
-          {sessions.map((candidate) => {
+          {sessions.map((candidate, index) => {
             const exited = exitedIds?.has(candidate.id) || candidate.state === 'exited';
             const label = `${terminalLabel(candidate, sessions)} · ${
               exited ? 'exited' : candidate.shell
@@ -521,11 +523,30 @@ export function TerminalPane({
                   else tabRefs.current.delete(candidate.id);
                 }}
                 type="button"
+                id={`${idPrefix}-tab-${candidate.id}`}
                 role="tab"
+                aria-controls={`${idPrefix}-panel-${candidate.id}`}
                 aria-selected={selected}
+                tabIndex={selected ? 0 : -1}
                 title={label}
                 disabled={busy}
-                onClick={() => onSelect(candidate.id)}
+                onClick={(event) => onSelect(candidate.id, event.detail === 0 ? 'tab' : 'terminal')}
+                onKeyDown={(event) => {
+                  const target =
+                    event.key === 'ArrowRight'
+                      ? (index + 1) % sessions.length
+                      : event.key === 'ArrowLeft'
+                        ? (index + sessions.length - 1) % sessions.length
+                        : event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? sessions.length - 1
+                            : null;
+                  if (target !== null && !busy) {
+                    event.preventDefault();
+                    onSelect(sessions[target].id, 'tab');
+                  }
+                }}
                 className={`shrink-0 rounded-md px-2 py-1 text-[13px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50 ${
                   selected
                     ? 'bg-gray-100 dark:bg-white/5 text-gray-900 dark:text-gray-50'
@@ -570,13 +591,26 @@ export function TerminalPane({
           </button>
         </div>
       </header>
-      <div
-        role="application"
-        aria-label={`${selectedLabel} terminal`}
-        className="agent-xterm flex min-h-64 flex-1 flex-col bg-white dark:bg-gray-900 p-3"
-      >
-        <div ref={mountRef} className="relative min-h-0 min-w-0 flex-1" />
-      </div>
+      {sessions.map((candidate) => (
+        <div
+          key={candidate.id}
+          id={`${idPrefix}-panel-${candidate.id}`}
+          role="tabpanel"
+          aria-labelledby={`${idPrefix}-tab-${candidate.id}`}
+          hidden={candidate.id !== terminal.id}
+          className={candidate.id === terminal.id ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}
+        >
+          {candidate.id === terminal.id ? (
+            <div
+              role="application"
+              aria-label={`${selectedLabel} terminal`}
+              className="agent-xterm flex min-h-0 flex-1 flex-col bg-white dark:bg-gray-900 p-3"
+            >
+              <div ref={mountRef} className="relative min-h-0 min-w-0 flex-1" />
+            </div>
+          ) : null}
+        </div>
+      ))}
     </section>
   );
 }

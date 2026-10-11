@@ -100,6 +100,30 @@ describe('reasoning in the transcript', () => {
   });
 });
 
+describe('per-message actions', () => {
+  it.each([
+    { role: 'assistant' as const, label: 'Fork from here' },
+    { role: 'user' as const, label: 'Edit & rewind' },
+  ])('keeps the $label action keyboard reachable and respects busy state', ({ role, label }) => {
+    const onAction = vi.fn();
+    const message = { ...ROUND, role, content: 'Review this message.' };
+    const props = role === 'assistant' ? { onFork: onAction } : { onRewind: onAction };
+    const { rerender } = render(<ThreadTurn message={message} {...props} />);
+
+    const action = screen.getByRole('button', { name: label });
+    action.focus();
+    expect(action).toHaveFocus();
+    fireEvent.click(action);
+    expect(onAction).toHaveBeenCalledTimes(1);
+
+    rerender(<ThreadTurn message={message} {...props} busy />);
+    expect(screen.getByRole('button', { name: label })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: label }));
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeEnabled();
+  });
+});
+
 describe('an automatic round', () => {
   it('is a system marker, not a message somebody sent', () => {
     round({ source: 'goal', round: 3 });
@@ -435,7 +459,9 @@ describe('grouped tool calls', () => {
     render(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
 
     const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
-    expect(reasoning).toHaveAttribute('data-block-key', 'ajob_1:e1');
+    const anchor = reasoning.closest('[data-block-key]');
+    expect(anchor).toHaveAttribute('data-block-key', 'ajob_1:e1');
+    expect(anchor).toBeVisible();
     expect(reasoning).not.toHaveAttribute('open');
     const texts = [
       'Inspect the entry point.',
@@ -462,6 +488,36 @@ describe('grouped tool calls', () => {
       expect(
         document.querySelectorAll(`[data-block-key="ajob_1:e${event.sourceEventId}"]`),
       ).toHaveLength(1);
+    }
+  });
+
+  it('keeps grouped reasoning navigation anchors visible while its disclosure stays collapsed', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the files.', sourceEventId: 1 },
+      { kind: 'thinking', text: 'Verify the change.', sourceEventId: 2 },
+      { kind: 'message', text: 'The change is ready.', sourceEventId: 3 },
+    ];
+    const props = { events, jobId, renderEvent };
+    const { rerender } = render(<EventList {...props} presentation="standard" />);
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    const anchors = events.map((event) =>
+      document.querySelector(`[data-block-key="${jobId}:e${event.sourceEventId}"]`),
+    );
+
+    for (const presentation of ['compact', 'detailed', 'standard'] as const) {
+      rerender(<EventList {...props} presentation={presentation} />);
+      expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+      expect(reasoning).not.toHaveAttribute('open');
+      expect(within(reasoning).getByText('Inspect the files.')).not.toBeVisible();
+      expect(within(reasoning).getByText('Verify the change.')).not.toBeVisible();
+      expect(document.querySelectorAll('[data-block-key]')).toHaveLength(events.length);
+      for (const [index, event] of events.entries()) {
+        const anchor = document.querySelector(
+          `[data-block-key="${jobId}:e${event.sourceEventId}"]`,
+        );
+        expect(anchor).toBe(anchors[index]);
+        expect(anchor).toBeVisible();
+      }
     }
   });
 

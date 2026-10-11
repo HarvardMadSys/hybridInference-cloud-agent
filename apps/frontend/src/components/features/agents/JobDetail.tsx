@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -394,6 +395,7 @@ function GitPanel({
   onReview?: () => void;
 }) {
   const [view, setView] = useState<GitView>('diff');
+  const gitId = useId();
   const [live, setLive] = useState<AgentGitWorkspaceApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -443,7 +445,7 @@ function GitPanel({
   }, [files, selectedPath]);
 
   return (
-    <div className="space-y-4" aria-label="Git workspace">
+    <div className="agent-git-workspace min-w-0 space-y-4" aria-label="Git workspace">
       <header className="flex flex-wrap items-center gap-3 border-b border-gray-200 dark:border-white/10 pb-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">
@@ -473,15 +475,35 @@ function GitPanel({
       <div
         className="flex items-center gap-5 border-b border-gray-200 dark:border-white/10"
         role="tablist"
+        aria-label="Git views"
       >
-        {(['diff', 'review', 'commits'] as GitView[]).map((item) => (
+        {(['diff', 'review', 'commits'] as GitView[]).map((item, index, views) => (
           <button
             key={item}
             type="button"
             role="tab"
+            id={`${gitId}-tab-${item}`}
+            aria-controls={`${gitId}-panel-${item}`}
             aria-selected={view === item}
+            tabIndex={view === item ? 0 : -1}
             onClick={() => setView(item)}
-            className={`border-b-2 px-1 pb-2 text-xs font-medium capitalize ${
+            onKeyDown={(event) => {
+              const next =
+                event.key === 'ArrowRight'
+                  ? (index + 1) % views.length
+                  : event.key === 'ArrowLeft'
+                    ? (index + views.length - 1) % views.length
+                    : event.key === 'Home'
+                      ? 0
+                      : event.key === 'End'
+                        ? views.length - 1
+                        : null;
+              if (next === null) return;
+              event.preventDefault();
+              setView(views[next]);
+              document.getElementById(`${gitId}-tab-${views[next]}`)?.focus();
+            }}
+            className={`ui-tab min-h-9 px-2 py-2 text-xs font-medium capitalize ${
               view === item
                 ? 'border-gray-900 dark:border-gray-100 text-gray-900 dark:text-gray-50'
                 : 'border-transparent text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'
@@ -502,134 +524,160 @@ function GitPanel({
         <p className="text-xs text-red-600 dark:text-red-400">{ownerFailureMessage(error)}</p>
       ) : null}
 
-      {view === 'diff' && files.length ? (
-        <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 lg:grid lg:grid-cols-[minmax(14rem,0.35fr)_minmax(0,1fr)]">
-          <div className="border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-gray-900/60 lg:border-b-0 lg:border-r">
-            <div className="flex items-center px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400">
-              <span>
-                {files.length} changed file{files.length === 1 ? '' : 's'}
-              </span>
-              <span className="ml-auto font-mono">Changes</span>
-            </div>
-            <div className="max-h-[34rem] overflow-auto border-t border-gray-200 dark:border-white/10">
-              {files.map((file) => (
-                <button
-                  key={file.path}
-                  type="button"
-                  onClick={() => setSelectedPath(file.path)}
-                  className={`flex w-full items-center gap-3 border-b border-gray-100 dark:border-white/5 px-3 py-2.5 text-left text-xs last:border-b-0 ${
-                    selected?.path === file.path
-                      ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-50'
-                      : 'text-gray-600 dark:text-gray-400 hover:bg-white dark:hover:bg-white/10'
-                  }`}
-                >
-                  <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
-                  <span className="shrink-0 font-mono">
-                    <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>{' '}
-                    <span className="text-red-500 dark:text-red-400">−{file.del}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="min-w-0 bg-white dark:bg-gray-900">
-            <div className="border-b border-gray-100 dark:border-white/5 px-4 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400">
-              {selected?.path}
-            </div>
-            <pre className="max-h-[34rem] overflow-auto font-mono text-xs leading-relaxed">
-              <code>
-                {selected?.lines.map((line, index) => (
-                  <span
-                    key={index}
-                    className={`block min-w-max px-4 ${DIFF_LINE_CLASS[line.marker]}`}
+      <div id={`${gitId}-panel-${view}`} role="tabpanel" aria-labelledby={`${gitId}-tab-${view}`}>
+        {view === 'diff' && files.length ? (
+          <section className="agent-git-diff overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
+            <div className="agent-git-file-list border-b border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-gray-900/60">
+              <div className="flex items-center px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400">
+                <span>
+                  {files.length} changed file{files.length === 1 ? '' : 's'}
+                </span>
+                <span className="ml-auto font-mono">Changes</span>
+              </div>
+              <div className="max-h-[34rem] overflow-auto border-t border-gray-200 dark:border-white/10">
+                {files.map((file) => (
+                  <button
+                    key={file.path}
+                    type="button"
+                    onClick={() => setSelectedPath(file.path)}
+                    aria-pressed={selected?.path === file.path}
+                    title={file.path}
+                    className={`ui-focus-ring flex w-full items-center gap-3 border-b border-gray-100 dark:border-white/5 px-3 py-2.5 text-left text-xs last:border-b-0 ${
+                      selected?.path === file.path
+                        ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-50'
+                        : 'text-gray-600 dark:text-gray-400 hover:bg-white dark:hover:bg-white/10'
+                    }`}
                   >
-                    {line.text || ' '}
-                  </span>
-                ))}
-              </code>
-            </pre>
-          </div>
-        </section>
-      ) : view === 'diff' ? (
-        <div className="rounded-xl border border-dashed border-gray-200 dark:border-white/10 px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
-          No changes yet.
-        </div>
-      ) : view === 'review' ? (
-        <section className="space-y-4 rounded-xl border border-gray-200 dark:border-white/10 p-5">
-          <div className="flex items-center gap-3">
-            <div>
-              <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
-                {files.length} changed file{files.length === 1 ? '' : 's'}
-              </p>
-              <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
-                Compared with {job.baseRef || job.baseSha || 'the pinned base'}
-              </p>
-            </div>
-            <p className="ml-auto font-mono text-xs">
-              <span className="text-emerald-600 dark:text-emerald-400">+{stat.add}</span>{' '}
-              <span className="text-red-500 dark:text-red-400">−{stat.del}</span>
-            </p>
-          </div>
-          {files.length ? (
-            <ul className="divide-y divide-gray-100 dark:divide-white/5 border-y border-gray-100 dark:border-white/5">
-              {files.map((file) => (
-                <li key={file.path} className="flex gap-3 py-2.5 font-mono text-xs">
-                  <span className="min-w-0 flex-1 truncate text-gray-600 dark:text-gray-400">
-                    {file.path}
-                  </span>
-                  <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>
-                  <span className="text-red-500 dark:text-red-400">−{file.del}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {job.prUrl ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <a
-                href={job.prUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-xs font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
-              >
-                Open pull request
-              </a>
-              <ReviewButton onReview={onReview} />
-            </div>
-          ) : (
-            <p className="text-xs text-gray-400 dark:text-gray-500">
-              Pull request not published yet.
-            </p>
-          )}
-        </section>
-      ) : (
-        <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
-          {live?.available && live.commits.length ? (
-            <ul className="divide-y divide-gray-100 dark:divide-white/5">
-              {live.commits.map((commit) => (
-                <li key={commit.sha} className="px-4 py-3">
-                  <div className="flex items-start gap-3">
-                    <span className="font-mono text-xs text-gray-400 dark:text-gray-500">
-                      {commit.short_sha}
+                    <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
+                    <span className="shrink-0 font-mono">
+                      <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>{' '}
+                      <span className="text-red-500 dark:text-red-400">−{file.del}</span>
                     </span>
-                    <div className="min-w-0">
-                      <p className="truncate text-sm text-gray-700 dark:text-gray-300">
-                        {commit.subject}
-                      </p>
-                      <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
-                        {commit.author} · {commit.authored_at}
-                      </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="min-w-0 bg-white dark:bg-gray-900">
+              <label className="agent-git-file-picker border-b border-border bg-surface-muted px-3 py-2 text-xs text-muted">
+                <span>
+                  {files.length} changed file{files.length === 1 ? '' : 's'}
+                </span>
+                <select
+                  aria-label="Changed file"
+                  value={selected?.path ?? ''}
+                  onChange={(event) => setSelectedPath(event.target.value)}
+                  className="ui-input mt-1 w-full min-w-0 py-2 font-mono text-xs"
+                >
+                  {files.map((file) => (
+                    <option key={file.path} value={file.path}>
+                      {file.path} (+{file.add} −{file.del})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="agent-git-selected-path border-b border-gray-100 dark:border-white/5 px-4 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400">
+                {selected?.path}
+              </div>
+              <pre
+                tabIndex={0}
+                role="region"
+                aria-label={`Diff for ${selected?.path ?? 'selected file'}`}
+                className="ui-focus-ring max-h-[34rem] overflow-auto font-mono text-xs leading-relaxed"
+              >
+                <code>
+                  {selected?.lines.map((line, index) => (
+                    <span
+                      key={index}
+                      className={`block min-w-max px-4 ${DIFF_LINE_CLASS[line.marker]}`}
+                    >
+                      {line.text || ' '}
+                    </span>
+                  ))}
+                </code>
+              </pre>
+            </div>
+          </section>
+        ) : view === 'diff' ? (
+          <div className="rounded-xl border border-dashed border-gray-200 dark:border-white/10 px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
+            No changes yet.
+          </div>
+        ) : view === 'review' ? (
+          <section className="space-y-4 rounded-xl border border-gray-200 dark:border-white/10 p-5">
+            <div className="flex items-center gap-3">
+              <div>
+                <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                  {files.length} changed file{files.length === 1 ? '' : 's'}
+                </p>
+                <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                  Compared with {job.baseRef || job.baseSha || 'the pinned base'}
+                </p>
+              </div>
+              <p className="ml-auto font-mono text-xs">
+                <span className="text-emerald-600 dark:text-emerald-400">+{stat.add}</span>{' '}
+                <span className="text-red-500 dark:text-red-400">−{stat.del}</span>
+              </p>
+            </div>
+            {files.length ? (
+              <ul className="divide-y divide-gray-100 dark:divide-white/5 border-y border-gray-100 dark:border-white/5">
+                {files.map((file) => (
+                  <li key={file.path} className="flex gap-3 py-2.5 font-mono text-xs">
+                    <span className="min-w-0 flex-1 truncate text-gray-600 dark:text-gray-400">
+                      {file.path}
+                    </span>
+                    <span className="text-emerald-600 dark:text-emerald-400">+{file.add}</span>
+                    <span className="text-red-500 dark:text-red-400">−{file.del}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {job.prUrl ? (
+              <div className="flex flex-wrap items-center gap-3">
+                <a
+                  href={job.prUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-xs font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
+                >
+                  Open pull request
+                </a>
+                <ReviewButton onReview={onReview} />
+              </div>
+            ) : (
+              <p className="text-xs text-gray-400 dark:text-gray-500">
+                Pull request not published yet.
+              </p>
+            )}
+          </section>
+        ) : (
+          <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
+            {live?.available && live.commits.length ? (
+              <ul className="divide-y divide-gray-100 dark:divide-white/5">
+                {live.commits.map((commit) => (
+                  <li key={commit.sha} className="px-4 py-3">
+                    <div className="flex items-start gap-3">
+                      <span className="font-mono text-xs text-gray-400 dark:text-gray-500">
+                        {commit.short_sha}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm text-gray-700 dark:text-gray-300">
+                          {commit.subject}
+                        </p>
+                        <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
+                          {commit.author} · {commit.authored_at}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
-              Commit history is available for live workspaces.
-            </p>
-          )}
-        </section>
-      )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="px-5 py-12 text-center text-sm text-gray-400 dark:text-gray-500">
+                Commit history is available for live workspaces.
+              </p>
+            )}
+          </section>
+        )}
+      </div>
     </div>
   );
 }
@@ -1531,7 +1579,7 @@ export function JobDetail({
   const panelOpen = workspaceOpen || inspector !== null;
   const content = (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
-      <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
         {isArchived ? (
           <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
             <Link
@@ -1544,114 +1592,126 @@ export function JobDetail({
             <span>{t('sessionArchive.badge')}</span>
           </div>
         ) : null}
-        <div className="flex w-full flex-wrap items-center gap-2 py-3.5 pr-14 sm:flex-nowrap sm:gap-3">
-          <div className="min-w-0 basis-full flex-1 sm:basis-auto">
-            <h1 className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50">
-              {title}
-            </h1>
-            <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <svg
-                aria-hidden="true"
-                className="h-3.5 w-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
+        <div className="agent-conversation-toolbar flex w-full items-center gap-3 py-3.5 pr-14">
+          <div className="agent-conversation-context flex min-w-0 flex-1 items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <h1
+                title={title}
+                className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
-                />
-              </svg>
-              <span className="truncate">{job.repo}</span>
+                {title}
+              </h1>
+              <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <svg
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
+                  />
+                </svg>
+                <span className="truncate">{job.repo}</span>
+              </div>
             </div>
+            <ThreadActions
+              key={job.threadId ?? job.id}
+              job={{ ...job, title }}
+              canFork={canForkCurrent}
+              forking={forking}
+              onFork={() => void forkFrom(job.id)}
+              onRename={setTitle}
+            />
           </div>
-          <ThreadActions
-            key={job.threadId ?? job.id}
-            job={{ ...job, title }}
-            canFork={canForkCurrent}
-            forking={forking}
-            onFork={() => void forkFrom(job.id)}
-            onRename={setTitle}
-          />
-          <nav aria-label="Run views" className="mr-3 flex shrink-0 items-center gap-1 text-[13px]">
-            {(['chat', 'trajectory'] as const).map((view) => (
+          <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-2">
+            <nav
+              aria-label="Run views"
+              className="mr-3 flex shrink-0 items-center gap-1 text-[13px]"
+            >
+              {(['chat', 'trajectory'] as const).map((view) => (
+                <button
+                  key={view}
+                  type="button"
+                  onClick={() => setTab(view)}
+                  aria-current={tab === view ? 'page' : undefined}
+                  className={`ui-focus-ring min-h-9 rounded-lg px-2.5 py-1 capitalize transition-colors ${
+                    tab === view
+                      ? 'bg-gray-100 dark:bg-white/5 font-medium text-gray-900 dark:text-gray-50'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                  }`}
+                >
+                  {view}
+                </button>
+              ))}
+            </nav>
+            {tab === 'chat' ? (
+              <TranscriptPresentationControl
+                value={presentation}
+                onChange={(mode) => {
+                  scroll.holdReading();
+                  setPresentation(mode);
+                }}
+              />
+            ) : null}
+            {hasActivity ? (
               <button
-                key={view}
+                ref={activityToggleRef}
                 type="button"
-                onClick={() => setTab(view)}
-                aria-current={tab === view ? 'page' : undefined}
-                className={`rounded-lg px-2.5 py-1 capitalize transition-colors ${
-                  tab === view
-                    ? 'bg-gray-100 dark:bg-white/5 font-medium text-gray-900 dark:text-gray-50'
-                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                onClick={toggleActivity}
+                aria-label={
+                  activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'
+                }
+                aria-expanded={activityVisible}
+                aria-controls="job-activity-window"
+                title="Tasks and subagents"
+                className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-crimson ${
+                  activityVisible
+                    ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
+                    : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
                 }`}
               >
-                {view}
+                <ActivityIcon />
               </button>
-            ))}
-          </nav>
-          {tab === 'chat' ? (
-            <TranscriptPresentationControl
-              value={presentation}
-              onChange={(mode) => {
-                scroll.holdReading();
-                setPresentation(mode);
-              }}
-            />
-          ) : null}
-          {hasActivity ? (
-            <button
-              ref={activityToggleRef}
-              type="button"
-              onClick={toggleActivity}
-              aria-label={activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'}
-              aria-expanded={activityVisible}
-              aria-controls="job-activity-window"
-              title="Tasks and subagents"
-              className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-crimson ${
-                activityVisible
-                  ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
-                  : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
-              }`}
-            >
-              <ActivityIcon />
-            </button>
-          ) : null}
-          {job.diffFiles.length ? (
-            <button
-              type="button"
-              onClick={() => openWorkspace('git')}
-              className="hidden rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 sm:block"
-            >
-              Changes
-              <span className="ml-1 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[11px]">
-                {job.diffFiles.length}
-              </span>
-            </button>
-          ) : null}
-          {isActive ? (
-            <button
-              type="button"
-              onClick={() => void stop()}
-              disabled={stopping}
-              aria-label="Stop"
-              title="Stop run (Esc)"
-              className="inline-flex items-center gap-1.5 rounded-md bg-gray-900 dark:bg-gray-100 px-2.5 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 transition-colors hover:bg-gray-800 dark:hover:bg-white disabled:opacity-60"
-            >
-              <span className="h-2.5 w-2.5 rounded-sm bg-white dark:bg-gray-900" />
-              {stopping ? 'Stopping…' : 'Stop'}
-              {!stopping ? (
-                <kbd
-                  aria-hidden="true"
-                  className="rounded bg-white/15 px-1 text-[10px] dark:bg-gray-900/15"
-                >
-                  Esc
-                </kbd>
-              ) : null}
-            </button>
-          ) : null}
+            ) : null}
+            {job.diffFiles.length ? (
+              <button
+                type="button"
+                onClick={() => openWorkspace('git')}
+                className="ui-focus-ring hidden min-h-9 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 sm:block"
+              >
+                Changes
+                <span className="ml-1 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[11px]">
+                  {job.diffFiles.length}
+                </span>
+              </button>
+            ) : null}
+            {isActive ? (
+              <button
+                type="button"
+                onClick={() => void stop()}
+                disabled={stopping}
+                aria-label="Stop"
+                title="Stop run (Esc)"
+                className="inline-flex items-center gap-1.5 rounded-md bg-gray-900 dark:bg-gray-100 px-2.5 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 transition-colors hover:bg-gray-800 dark:hover:bg-white disabled:opacity-60"
+              >
+                <span className="h-2.5 w-2.5 rounded-sm bg-white dark:bg-gray-900" />
+                {stopping ? 'Stopping…' : 'Stop'}
+                {!stopping ? (
+                  <kbd
+                    aria-hidden="true"
+                    className="rounded bg-white/15 px-1 text-[10px] dark:bg-gray-900/15"
+                  >
+                    Esc
+                  </kbd>
+                ) : null}
+              </button>
+            ) : null}
+          </div>
         </div>
         <button
           type="button"
@@ -1661,7 +1721,7 @@ export function JobDetail({
           aria-controls="job-workspace-pane"
           aria-keyshortcuts="Meta+J Control+J"
           title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'} (⌘J / Ctrl+J)`}
-          className={`absolute right-6 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md border transition-colors ${
+          className={`ui-focus-ring absolute right-6 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md border transition-colors ${
             workspaceOpen
               ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'
               : 'border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100'
@@ -2377,6 +2437,7 @@ export function JobDetail({
             onSelect={openWorkspace}
             onAdd={workspaceTabs.add}
             onClose={workspaceTabs.close}
+            onBack={toggleWorkspace}
           />
           <div
             id="workspace-panel-git"

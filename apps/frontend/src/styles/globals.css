@@ -167,3 +167,54 @@
     }
   }
 }
+
+/* The sidebar and resizable workspace change available width independently of
+   the viewport, so these controls follow their own container. */
+.agent-conversation-header {
+  container: conversation-header / inline-size;
+}
+
+@container conversation-header (max-width: 900px) {
+  .agent-conversation-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .agent-conversation-context,
+  .agent-conversation-controls {
+    width: 100%;
+  }
+}
+
+@container conversation-header (max-width: 600px) {
+  .agent-conversation-controls > label > span {
+    display: none;
+  }
+}
+
+.agent-git-workspace {
+  container: git-workspace / inline-size;
+}
+.agent-git-file-list,
+.agent-git-selected-path {
+  display: none;
+}
+.agent-git-file-picker {
+  display: block;
+}
+@container git-workspace (min-width: 640px) {
+  .agent-git-diff {
+    display: grid;
+    grid-template-columns: minmax(12rem, 0.35fr) minmax(0, 1fr);
+  }
+  .agent-git-file-list {
+    display: block;
+    border-bottom: 0;
+    border-right: 1px solid rgb(var(--ui-border));
+  }
+  .agent-git-selected-path {
+    display: block;
+  }
+  .agent-git-file-picker {
+    display: none;
+  }
+}

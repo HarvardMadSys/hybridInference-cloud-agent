@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { useT } from '@/components/providers';
 import type { AgentJobFileApi, AgentJobFileEntryApi } from '@/lib/api/agents';
@@ -286,9 +286,12 @@ function TreeLevel({
               type="button"
               onClick={() => (isDirectory ? onToggle(entry.path) : onOpen(entry.path))}
               aria-expanded={isDirectory ? open : undefined}
-              title={entry.name}
+              aria-current={active ? 'true' : undefined}
+              aria-label={entry.path}
+              data-workspace-file={isDirectory ? undefined : entry.path}
+              title={entry.path}
               style={indent}
-              className={`flex w-full items-center gap-2 rounded-md py-[5px] pr-2 text-left text-[13px] ${
+              className={`ui-focus-ring flex min-h-8 w-full items-center gap-2 rounded-md py-[5px] pr-2 text-left text-[13px] ${
                 active
                   ? 'bg-gray-200/60 dark:bg-white/10 text-gray-900 dark:text-gray-50'
                   : 'text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'
@@ -346,17 +349,27 @@ function ChangedList({
           key={row.path}
           type="button"
           onClick={() => onOpen(row.path)}
+          aria-label={row.path}
+          aria-current={selected === row.path ? 'true' : undefined}
+          data-workspace-file={row.path}
           title={row.path}
-          className={`flex w-full items-center gap-2 rounded-md py-[5px] pl-2 pr-2 text-left text-[13px] ${
+          className={`ui-focus-ring flex min-h-10 w-full items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left text-[13px] ${
             selected === row.path
               ? 'bg-gray-200/60 dark:bg-white/10 text-gray-900 dark:text-gray-50'
               : 'text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'
           }`}
         >
           <FileGlyph name={basename(row.path)} />
-          <span className="min-w-0 flex-1 truncate">{basename(row.path)}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block break-all">{basename(row.path)}</span>
+            {dirname(row.path) ? (
+              <span className="mt-0.5 block break-all text-[11px] text-muted">
+                {dirname(row.path)}
+              </span>
+            ) : null}
+          </span>
           {row.stat ? (
-            <span className="shrink-0 font-mono text-[10px] text-gray-400 dark:text-gray-500">
+            <span aria-hidden="true" className="shrink-0 font-mono text-[10px] text-muted">
               <span className="text-emerald-600 dark:text-emerald-400">+{row.stat.add}</span>{' '}
               <span className="text-red-500 dark:text-red-400">−{row.stat.del}</span>
             </span>
@@ -594,7 +607,13 @@ export function WorkspaceFiles({
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [paneWidth, setPaneWidth] = useState(0);
   const [mode, setMode] = useState<SidebarMode>('files');
+  const listId = useId();
   const paneRef = useRef<HTMLElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const tabRefs = useRef<Partial<Record<SidebarMode, HTMLButtonElement | null>>>({});
+  const focusPreview = useRef(false);
+  const returnPath = useRef<string | null>(null);
+  const focusList = useRef(false);
 
   const root = directories[''];
   // The workspace pane is user-resizable, so whether there is room for two
@@ -604,6 +623,36 @@ export function WorkspaceFiles({
   // When it is not, the tree and the file take turns and the header button
   // walks back to the tree.
   const showTree = sidebarOpen && !(narrow && selected);
+
+  function chooseFile(path: string) {
+    returnPath.current = path;
+    focusPreview.current = narrow;
+    openFile(path);
+  }
+
+  function returnToList() {
+    returnPath.current = selected;
+    focusList.current = true;
+    setSidebarOpen(true);
+    closeFile();
+  }
+
+  useEffect(() => {
+    if (!active) return;
+    if (narrow && selected && focusPreview.current) {
+      focusPreview.current = false;
+      previewRef.current?.focus({ preventScroll: true });
+    }
+    if (showTree && focusList.current) {
+      focusList.current = false;
+      const panel = document.getElementById(`${listId}-panel-${mode}`);
+      const row = Array.from(
+        panel?.querySelectorAll<HTMLButtonElement>('[data-workspace-file]') ?? [],
+      ).find((button) => button.dataset.workspaceFile === returnPath.current);
+      (row ?? tabRefs.current[mode])?.focus({ preventScroll: true });
+      row?.scrollIntoView?.({ block: 'nearest' });
+    }
+  }, [active, listId, mode, narrow, selected, showTree]);
 
   const attachPane = useCallback((node: HTMLElement | null) => {
     paneRef.current = node;
@@ -641,37 +690,53 @@ export function WorkspaceFiles({
       aria-label="Workspace files"
       className="flex h-[36rem] max-h-[calc(100vh-11rem)] flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
     >
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-gray-200 dark:border-white/10 bg-gray-50/70 dark:bg-gray-900/60 px-2.5">
-        <button
-          type="button"
-          onClick={() => (narrow && selected ? closeFile() : setSidebarOpen((open) => !open))}
-          aria-label={showTree ? 'Hide file tree' : 'Show file tree'}
-          aria-pressed={showTree}
-          className={`shrink-0 rounded-md p-1.5 ${
-            showTree
-              ? 'bg-gray-200/70 dark:bg-white/10 text-gray-700 dark:text-gray-300'
-              : 'text-gray-400 dark:text-gray-500 hover:bg-gray-200/50 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200'
-          }`}
-        >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.8}
-            className="h-4 w-4"
+      <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-border bg-surface-muted px-2.5 py-2">
+        {narrow && selected ? (
+          <button
+            type="button"
+            onClick={returnToList}
+            aria-label="Back to file list"
+            className="ui-button ui-button-ghost shrink-0 px-2 text-xs"
           >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </button>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+              <path
+                d="m14 6-6 6 6 6"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Back
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((open) => !open)}
+            aria-label={showTree ? 'Hide file tree' : 'Show file tree'}
+            aria-pressed={showTree}
+            className={`ui-icon-button ui-button-ghost shrink-0 ${showTree ? 'bg-surface-hover text-foreground' : ''}`}
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              className="h-4 w-4"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+        )}
 
         {selected ? (
-          <span className="flex min-w-0 items-baseline gap-2">
-            <span className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-50">
+          <span className="min-w-0 flex-1" title={selected}>
+            <span className="block break-all text-[13px] font-medium text-foreground">
               {basename(selected)}
             </span>
-            {dirname(selected) && !narrow ? (
-              <span className="truncate text-[11px] text-gray-400 dark:text-gray-500">
+            {dirname(selected) ? (
+              <span className="mt-0.5 block break-all text-[11px] text-muted">
                 {dirname(selected)}
               </span>
             ) : null}
@@ -694,42 +759,62 @@ export function WorkspaceFiles({
               narrow ? 'w-full' : 'w-56'
             }`}
           >
-            <div
-              role="tablist"
-              aria-label="File list"
-              className="flex shrink-0 items-center gap-3 border-b border-gray-200 dark:border-white/10 px-3 py-2 text-[12px]"
-            >
-              {(
-                [
-                  ['files', 'Files'],
-                  ['changes', 'Changes'],
-                ] as Array<[SidebarMode, string]>
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === key}
-                  onClick={() => setMode(key)}
-                  className={
-                    mode === key
-                      ? 'font-medium text-gray-900 dark:text-gray-50'
-                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'
-                  }
-                >
-                  {label}
-                  {key === 'changes' && job.diffFiles.length ? (
-                    <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">
-                      {job.diffFiles.length}
-                    </span>
-                  ) : null}
-                </button>
-              ))}
+            <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 text-[12px]">
+              <div
+                role="tablist"
+                aria-label="File list"
+                className="flex min-w-0 items-center gap-1"
+              >
+                {(
+                  [
+                    ['files', 'Files'],
+                    ['changes', 'Changes'],
+                  ] as Array<[SidebarMode, string]>
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    ref={(node) => {
+                      tabRefs.current[key] = node;
+                    }}
+                    id={`${listId}-tab-${key}`}
+                    role="tab"
+                    aria-selected={mode === key}
+                    aria-controls={`${listId}-panel-${key}`}
+                    tabIndex={mode === key ? 0 : -1}
+                    onClick={() => setMode(key)}
+                    onKeyDown={(event) => {
+                      const next =
+                        event.key === 'Home'
+                          ? 'files'
+                          : event.key === 'End'
+                            ? 'changes'
+                            : ['ArrowLeft', 'ArrowRight'].includes(event.key)
+                              ? key === 'files'
+                                ? 'changes'
+                                : 'files'
+                              : null;
+                      if (!next) return;
+                      event.preventDefault();
+                      setMode(next);
+                      tabRefs.current[next]?.focus();
+                    }}
+                    className="ui-tab min-h-10 px-2 font-medium"
+                  >
+                    {label}
+                    {key === 'changes' && job.diffFiles.length ? (
+                      <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">
+                        {job.diffFiles.length}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={reload}
                 aria-label="Refresh files"
-                className="ml-auto rounded p-1 text-gray-400 dark:text-gray-500 hover:bg-gray-200/60 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200"
+                className="ui-icon-button ui-button-ghost ml-auto"
               >
                 <svg
                   aria-hidden="true"
@@ -747,7 +832,13 @@ export function WorkspaceFiles({
                 </svg>
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto px-1 py-1">
+            <div
+              id={`${listId}-panel-files`}
+              role="tabpanel"
+              aria-labelledby={`${listId}-tab-files`}
+              hidden={mode !== 'files'}
+              className="min-h-0 flex-1 overflow-auto px-1 py-1"
+            >
               {mode === 'files' ? (
                 <TreeLevel
                   path=""
@@ -756,17 +847,38 @@ export function WorkspaceFiles({
                   expanded={expanded}
                   selected={selected}
                   onToggle={toggleDirectory}
-                  onOpen={openFile}
+                  onOpen={chooseFile}
                 />
-              ) : (
-                <ChangedList job={job} selected={selected} onOpen={openFile} />
-              )}
+              ) : null}
+            </div>
+            <div
+              id={`${listId}-panel-changes`}
+              role="tabpanel"
+              aria-labelledby={`${listId}-tab-changes`}
+              hidden={mode !== 'changes'}
+              className="min-h-0 flex-1 overflow-auto px-1 py-1"
+            >
+              {mode === 'changes' ? (
+                <ChangedList job={job} selected={selected} onOpen={chooseFile} />
+              ) : null}
             </div>
           </aside>
         ) : null}
 
         <div
-          className={`min-w-0 flex-1 overflow-auto bg-white dark:bg-gray-900 ${showTree && narrow ? 'hidden' : ''}`}
+          ref={previewRef}
+          role="region"
+          aria-label={selected ? `Preview of ${selected}` : 'File preview'}
+          aria-busy={fileLoading}
+          tabIndex={selected ? 0 : -1}
+          onKeyDown={(event) => {
+            if (narrow && selected && event.key === 'Escape' && !event.defaultPrevented) {
+              event.preventDefault();
+              event.stopPropagation();
+              returnToList();
+            }
+          }}
+          className={`ui-focus-ring min-w-0 flex-1 overflow-auto bg-surface -outline-offset-2 ${showTree && narrow ? 'hidden' : ''}`}
         >
           {fileLoading ? (
             <PaneMessage>Loading file…</PaneMessage>

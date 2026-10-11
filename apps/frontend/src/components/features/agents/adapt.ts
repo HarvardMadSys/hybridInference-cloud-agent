@@ -462,7 +462,7 @@ const INFRASTRUCTURE_FAILURE_PATTERNS = [
 const REPOSITORY_TOO_LARGE =
   /source (?:checkout|archive)(?: \((\S+ \S+) including its Git objects\))? exceeds (?:this host's (\S+ \S+)|the) retained import size limit/i;
 
-function isRepositoryTooLarge(detail: string | null | undefined): boolean {
+export function isRepositoryTooLarge(detail: string | null | undefined): boolean {
   return Boolean(detail && REPOSITORY_TOO_LARGE.test(detail));
 }
 

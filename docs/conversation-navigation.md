@@ -101,6 +101,23 @@ and updates the button's tooltip and accessible name. It does not automatically
 pull you back to the live end. Switching from Chat to Trajectory and back keeps
 the page's reading position; reloading opens at the end again.
 
+## Workspace navigation
+
+Open the workspace from the header or with Ctrl/Command+J. On smaller screens,
+**Back to conversation** returns to Chat and preserves the selected workspace
+view. The task title and controls adapt to the space left by the sidebar.
+
+Workspace, Git, file-list, and terminal tabs use Left/Right arrows, Home, and End
+to select a view while keeping keyboard focus in the tab strip. Narrow Git panes
+use a changed-file selector so the diff keeps the available width. The diff and
+file preview are keyboard-scrollable regions.
+
+Opening a file in a narrow pane focuses its preview. **Back** or Escape returns
+to the file list and focuses the file you opened. Changed files show their parent
+paths to distinguish matching names in different directories. Terminal splits
+follow the pane's width and scroll vertically when the screen is too short to
+show both shells.
+
 ## Accessibility
 
 The rail is a named navigation region with real buttons. Each mark names its

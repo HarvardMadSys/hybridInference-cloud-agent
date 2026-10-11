@@ -43,6 +43,20 @@ export const en = {
   'transcript.callUnknown': 'Pairing unknown',
   'transcript.callInterrupted': 'Call interrupted',
   'transcript.callFailed': 'Call failed',
+  'runDetails.summary': 'Turn {number} summary',
+  'runDetails.publishing': 'Publishing',
+  'runDetails.notRecorded': 'Status not recorded',
+  'runDetails.elapsed': 'Elapsed',
+  'runDetails.failureMissing':
+    'The run stopped before it could finish. No failure details were recorded.',
+  'runDetails.followUp': 'Review these details before sending a follow-up to try again.',
+  'runDetails.stoppedFollowUp': 'Send a follow-up to continue from any saved intermediate changes.',
+  'runDetails.contextLost':
+    'We couldn’t reconnect this chat. You can review its conversation and available files. Start a new chat to continue.',
+  'runDetails.repositoryLimit':
+    'A follow-up would fail the same way. Ask an admin to raise the repository import limit, or use a smaller repository.',
+  'runDetails.siteMisconfigured':
+    'An admin needs to finish setting up the site before you try another turn.',
   'turnResults.region': 'Recorded turn results',
   'turnResults.title': 'Recorded changes',
   'turnResults.files': '{count} changed files',

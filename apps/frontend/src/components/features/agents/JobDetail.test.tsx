@@ -3095,6 +3095,79 @@ describe('JobDetail', () => {
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
   });
 
+  it('navigates Git views from the keyboard and associates the selected panel', async () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    openWorkspace();
+    const tabs = within(screen.getByRole('tablist', { name: 'Git views' })).getAllByRole('tab');
+    tabs[0].focus();
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[0]]);
+    fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
+    expect(tabs[2]).toHaveFocus();
+    expect(tabs[2]).toHaveAttribute('aria-selected', 'true');
+    expect(document.getElementById(tabs[2].getAttribute('aria-controls')!)).toHaveAttribute(
+      'aria-labelledby',
+      tabs[2].id,
+    );
+    fireEvent.keyDown(tabs[2], { key: 'Home' });
+    expect(tabs[0]).toHaveFocus();
+    fireEvent.keyDown(tabs[0], { key: 'ArrowRight' });
+    expect(tabs[1]).toHaveFocus();
+    fireEvent.keyDown(tabs[1], { key: 'End' });
+    expect(tabs[2]).toHaveFocus();
+  });
+
+  it('selects full changed paths without a tall file list and exposes a keyboard-scrollable diff', async () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          diffFileDetails: [
+            {
+              path: 'src/auth/index.ts',
+              add: 1,
+              del: 0,
+              lines: [{ marker: 'add', text: '+auth' }],
+            },
+            { path: 'src/ui/index.ts', add: 1, del: 0, lines: [{ marker: 'add', text: '+ui' }] },
+          ],
+        })}
+      />,
+    );
+    openWorkspace();
+    const picker = screen.getByRole('combobox', { name: 'Changed file' });
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['src/auth/index.ts (+1 −0)', 'src/ui/index.ts (+1 −0)']);
+    fireEvent.change(picker, { target: { value: 'src/ui/index.ts' } });
+    const diff = screen.getByRole('region', { name: 'Diff for src/ui/index.ts' });
+    expect(diff).toHaveTextContent('+ui');
+    expect(diff).not.toHaveTextContent('+auth');
+    expect(diff).toHaveAttribute('tabindex', '0');
+  });
+
+  it('returns to the conversation from the workspace without losing its selected view', async () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    const trigger = screen.getByRole('button', { name: 'Open workspace' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(
+      within(screen.getByRole('tablist', { name: 'Workspace views' })).getByRole('tab', {
+        name: 'Files',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Back to conversation' }));
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+    fireEvent.click(trigger);
+    expect(
+      within(screen.getByRole('tablist', { name: 'Workspace views' })).getByRole('tab', {
+        name: 'Files',
+      }),
+    ).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('says nothing in the Git header while the live workspace is still answering', async () => {
     let settle: (value: Awaited<ReturnType<typeof getAgentJobGit>>) => void = () => {};
     vi.mocked(getAgentJobGit)
@@ -3390,17 +3463,22 @@ describe('JobDetail', () => {
       render(<JobDetail job={makeJob()} />);
       openWorkspace();
       fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
-      fireEvent.click(await screen.findByRole('button', { name: /README\.md/ }));
+      const row = await screen.findByRole('button', { name: /README\.md/ });
+      row.focus();
+      fireEvent.click(row);
 
       // The file takes the pane rather than sharing it with a 200px sidebar…
       await waitFor(() =>
         expect(screen.getByLabelText('Workspace files')).toHaveTextContent('# Narrow'),
       );
       expect(screen.queryByRole('button', { name: /README\.md/ })).not.toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Preview of README.md' })).toHaveFocus();
 
       // …and the header button walks back to the tree instead of hiding it.
-      fireEvent.click(screen.getByRole('button', { name: 'Show file tree' }));
-      expect(await screen.findByRole('button', { name: /README\.md/ })).toBeInTheDocument();
+      const back = screen.getByRole('button', { name: 'Back to file list' });
+      expect(back).toHaveTextContent('Back');
+      fireEvent.click(back);
+      expect(await screen.findByRole('button', { name: /README\.md/ })).toHaveFocus();
     } finally {
       if (clientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth);
       else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
@@ -3424,10 +3502,12 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
     fireEvent.click(await screen.findByRole('tab', { name: /Changes/ }));
 
-    fireEvent.click(screen.getByRole('button', { name: /example\.ts/ }));
+    const changedFile = screen.getByRole('button', { name: 'src/example.ts' });
+    expect(within(changedFile).getByText('src')).toBeVisible();
+    fireEvent.click(changedFile);
 
     await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledWith('ajob_1', 'src/example.ts'));
-    expect(await screen.findByText('src')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Preview of src/example.ts' })).toBeVisible();
     expect(screen.getByLabelText('Workspace files')).toHaveTextContent('modified');
   });
 

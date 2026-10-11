@@ -261,6 +261,15 @@ export function AgentsSidebar({
     const keydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !collapsed) {
         event.preventDefault();
+        // Search must not pull focus out of a modal, including dialogs that
+        // render through a portal outside the sidebar.
+        if (
+          [...document.querySelectorAll('[aria-modal="true"], dialog[open]')].some(
+            (dialog) => !dialog.closest('[hidden], [aria-hidden="true"]'),
+          )
+        ) {
+          return;
+        }
         setSearchOpen(true);
         requestAnimationFrame(() => searchInput.current?.focus());
       }

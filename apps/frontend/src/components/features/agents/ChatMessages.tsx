@@ -384,6 +384,7 @@ export function EventList({
 }: {
   events: AgentEvent[];
   jobId: string;
+  /** Ungrouped rows; reasoning and tool groups use the shared transcript views. */
   renderEvent: (event: AgentEvent, index: number, blockKey: string) => ReactNode;
   /** Keep task/delegation calls compact when their overview is shown elsewhere. */
   showActivityDetails?: boolean;
@@ -467,16 +468,16 @@ export function EventList({
       node: (
         <Fragment>
           {firstReasoning ? (
-            <div key="reasoning" className="relative">
-              {renderEvent(
-                {
+            <div key="reasoning" data-block-key={firstReasoning.blockKey} className="relative">
+              {/* The group owns its anchors outside the collapsed disclosure;
+                  the shared view keeps standalone and grouped reasoning identical. */}
+              <ReasoningMessage
+                event={{
                   ...firstReasoning.event,
                   text: reasoningBlocks.map((block) => block.text).join('\n\n'),
                   reasoningBlocks,
-                },
-                firstReasoning.index,
-                firstReasoning.blockKey,
-              )}
+                }}
+              />
               {/* Grouped reasoning keeps each reading anchor at its shared section. */}
               {reasoning.slice(1).map((item) => (
                 <span
@@ -688,14 +689,14 @@ export function MessageActionButton({
       disabled={disabled}
       aria-label={label}
       title={label}
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-40"
+      className="ui-focus-ring inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-40"
     >
       {children}
     </button>
   );
 }
 
-/** Hover-revealed per-message actions; focus keeps them visible for keyboards. */
+/** Actions stay visible on touch; hover and keyboard focus reveal them on desktop. */
 export function MessageActions({
   align = 'start',
   className = '',
@@ -707,7 +708,7 @@ export function MessageActions({
 }) {
   return (
     <div
-      className={`mt-1 flex gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
+      className={`mt-1 flex flex-wrap gap-1 opacity-100 transition-opacity md:opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:!opacity-100 [@media(pointer:coarse)]:!opacity-100 ${
         align === 'end' ? 'justify-end' : ''
       } ${className}`}
     >
@@ -880,6 +881,54 @@ function UserMessage({
   );
 }
 
+function ReasoningMessage({
+  event,
+  blockKey,
+}: {
+  event: Extract<AgentEvent, { kind: 'thinking' }>;
+  blockKey?: string;
+}) {
+  const blocks = (event.reasoningBlocks ?? [{ text: event.text, channel: undefined }]).filter(
+    (block) => block.text.trim(),
+  );
+  if (blocks.length) {
+    return (
+      <details
+        data-block-key={blockKey}
+        aria-label="Agent reasoning"
+        className="group my-2 rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/[0.025]"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+          <Chevron className="transition-transform group-open:rotate-90" />
+          Reasoning
+        </summary>
+        <div className="space-y-3 border-t border-gray-200 px-3 py-3 text-gray-600 dark:border-white/10 dark:text-gray-400">
+          {blocks.map((block, index) => (
+            <div key={`${block.channel ?? 'text'}:${index}`}>
+              {blocks.length > 1 && block.channel ? (
+                <p className="mb-1 text-xs font-medium">
+                  {block.channel === 'summary' ? 'Summary' : 'Detailed reasoning'}
+                </p>
+              ) : null}
+              <Markdown text={block.text} />
+            </div>
+          ))}
+        </div>
+      </details>
+    );
+  }
+  return (
+    <div
+      data-block-key={blockKey}
+      aria-label="Agent reasoning"
+      className="flex items-center gap-2.5 py-2 text-[13px] text-gray-400 dark:text-gray-500"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
+      Agent is reasoning
+    </div>
+  );
+}
+
 export function EventRow({
   event,
   onFork,
@@ -906,47 +955,7 @@ export function EventRow({
   const t = useT();
   if (event.kind === 'lifecycle')
     return <LifecycleRow text={event.text} blockKey={blockKey} firstRun={firstRun} />;
-  if (event.kind === 'thinking') {
-    const blocks = (event.reasoningBlocks ?? [{ text: event.text, channel: undefined }]).filter(
-      (block) => block.text.trim(),
-    );
-    if (blocks.length) {
-      return (
-        <details
-          data-block-key={blockKey}
-          aria-label="Agent reasoning"
-          className="group my-2 rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/[0.025]"
-        >
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
-            <Chevron className="transition-transform group-open:rotate-90" />
-            Reasoning
-          </summary>
-          <div className="space-y-3 border-t border-gray-200 px-3 py-3 text-gray-600 dark:border-white/10 dark:text-gray-400">
-            {blocks.map((block, index) => (
-              <div key={`${block.channel ?? 'text'}:${index}`}>
-                {blocks.length > 1 && block.channel ? (
-                  <p className="mb-1 text-xs font-medium">
-                    {block.channel === 'summary' ? 'Summary' : 'Detailed reasoning'}
-                  </p>
-                ) : null}
-                <Markdown text={block.text} />
-              </div>
-            ))}
-          </div>
-        </details>
-      );
-    }
-    return (
-      <div
-        data-block-key={blockKey}
-        aria-label="Agent reasoning"
-        className="flex items-center gap-2.5 py-2 text-[13px] text-gray-400 dark:text-gray-500"
-      >
-        <span className="h-1.5 w-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
-        Agent is reasoning
-      </div>
-    );
-  }
+  if (event.kind === 'thinking') return <ReasoningMessage event={event} blockKey={blockKey} />;
   if (event.kind === 'message') {
     return (
       <AssistantMessage

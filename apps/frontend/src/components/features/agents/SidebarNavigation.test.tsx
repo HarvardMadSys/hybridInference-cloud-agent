@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
+import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi, AgentSessionListOptions } from '@/lib/api/agents';
@@ -53,6 +54,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   unpinAgentJob: api.pin,
 }));
 import { AgentsSidebar } from './AgentsSidebar';
+import { SkillDialog } from './skills/SkillDialog';
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
@@ -515,6 +517,94 @@ describe('sidebar navigation interactions', () => {
     act(() => announceAgentSessionsChanged({ threadIds: [deleted.job.thread_id!], deleted: true }));
     await waitFor(() => expect(screen.queryByText('Deleted conversation')).not.toBeInTheDocument());
     expect(screen.queryByText('Current')).not.toBeInTheDocument();
+  });
+
+  it.each([{ ctrlKey: true }, { metaKey: true }])(
+    'preserves a portaled modal focus cycle when search is requested with %j',
+    async (modifier) => {
+      function Workspace() {
+        const [open, setOpen] = useState(true);
+        return open ? (
+          <SkillDialog title="Skills" onClose={() => setOpen(false)}>
+            <input aria-label="Find skills" />
+          </SkillDialog>
+        ) : null;
+      }
+      render(
+        <>
+          <AgentsSidebar />
+          <Workspace />
+        </>,
+      );
+      await screen.findByText('Task a');
+      const input = screen.getByRole('textbox', { name: 'Find skills' });
+      expect(input).toHaveFocus();
+
+      fireEvent.keyDown(input, { key: 'k', ...modifier });
+      await act(async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      });
+
+      expect(input).toHaveFocus();
+      expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Search tasks' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+
+      fireEvent.keyDown(input, { key: 'Tab' });
+      expect(screen.getByRole('button', { name: 'Close skill dialog' })).toHaveFocus();
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: 'k', ...modifier });
+      await waitFor(() =>
+        expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+      );
+    },
+  );
+
+  it('waits until a native dialog closes before moving focus to search', async () => {
+    render(
+      <>
+        <AgentsSidebar />
+        <dialog open aria-label="Task details">
+          <input aria-label="Task title" />
+        </dialog>
+      </>,
+    );
+    await screen.findByText('Task a');
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    input.focus();
+
+    fireEvent.keyDown(input, { key: 'k', ctrlKey: true });
+
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+
+    screen.getByRole('dialog', { name: 'Task details' }).removeAttribute('open');
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
+  });
+
+  it('can search while an inactive modal remains hidden', async () => {
+    render(
+      <>
+        <AgentsSidebar />
+        <div hidden>
+          <div role="dialog" aria-modal="true" aria-label="Inactive dialog" />
+        </div>
+      </>,
+    );
+    await screen.findByText('Task a');
+
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
   });
 
   it('searches server history including archived results, escapes highlights, and restores grouping', async () => {
