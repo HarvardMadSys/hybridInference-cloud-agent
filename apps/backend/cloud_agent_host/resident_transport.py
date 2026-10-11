@@ -668,6 +668,11 @@ class ResidentTransportFactory:
                     raise
                 child_id = next(iter(recovered))
         elif not child_id and runtime_id == "claude-code":
+            # Claude's result can precede the asynchronous transcript write.
+            # EOF and reap the settled source before the helper reads its
+            # historical boundary. The supervisor resumes this exact source
+            # after the fork, under the source member's existing turn lock.
+            source.close()
             child_id = self._fork_claude(
                 spec,
                 source_id,

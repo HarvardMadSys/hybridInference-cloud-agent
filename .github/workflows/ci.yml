@@ -326,6 +326,14 @@ jobs:
             "@anthropic-ai/claude-code@${version}"
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
+      - name: Install the sandbox's pinned Claude SDK
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^[[:space:]]*org\.freeinference\.helper\.claude-agent-sdk\.version="\([^"]*\)".*/\1/p' deploy/sandbox/Dockerfile.agent-sandbox)
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          uv pip install --python .venv/bin/python --target "${RUNNER_TEMP}/claude-context-sdk" \
+            "claude-agent-sdk==${version}"
+
       # `-n 4 --dist load`, deliberately not the `--dist loadfile` the other
       # suites use: loadfile groups by file, and here the file *is* the suite,
       # so it would hand all four tests to a single worker and change nothing.
@@ -335,6 +343,8 @@ jobs:
       # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
         timeout-minutes: 10
+        env:
+          PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
         run: uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py
 
   # The other half of that command. `test` above deselects `dbtest`, and until

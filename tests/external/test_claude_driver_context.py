@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from tests.external.test_credential_rotation import _pinned_cli_version
@@ -272,3 +274,64 @@ def test_driver_flushes_last_reply_before_immediate_resume_and_failed_turn_retry
     assert retried.status == "completed"
     assert session.runtime.session_id == session_id
     _assert_history(gateway.requests[-1], expected)
+
+
+@pytest.mark.parametrize("source_native_turn_no", [1, 2])
+def test_closed_native_source_forks_at_the_selected_settled_reply(
+    native_driver, monkeypatch, source_native_turn_no
+):
+    sdk = pytest.importorskip("claude_agent_sdk")
+    gateway, open_session, config = native_driver
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    workdir = str(config.parent / "workspace")
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "deploy/sandbox/claude-session-fork"),
+        run_name="test_claude_session_fork",
+    )
+    source = open_session()
+    expected = []
+    for index in range(2):
+        prompt = f"Source prompt {index}, preserved in the native review fork."
+        gateway.reply_text = f"Source reply {index}, preserved independently."
+        result, _ = _turn(source, prompt)
+        assert result.status == "completed"
+        assert result.native_turn_settled
+        expected.extend([("user", prompt), ("assistant", result.final_output)])
+    source_id = source.runtime.session_id
+    assert source_id
+
+    # A result event can precede the CLI's JSONL write. Review must EOF and
+    # reap the settled source before the native helper reads its boundary.
+    source.close()
+    anchor = helper["assistant_anchor"](
+        helper["_session_entries"](source_id, directory=workdir),
+        source_native_turn_no,
+    )
+    fork = sdk.fork_session(source_id, directory=workdir, up_to_message_id=anchor)
+    assert fork.session_id != source_id
+
+    def assert_source_history(request, selected):
+        _assert_history(request, selected)
+        source_texts = {text for _, text in expected}
+        actual = [
+            (message["role"], block["text"])
+            for message in request["messages"]
+            for block in message["content"]
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and block.get("text") in source_texts
+        ]
+        assert actual == selected
+
+    child = open_session(fork.session_id)
+    child_result, _ = _turn(child, "Continue the selected review fork.")
+    assert child_result.status == "completed"
+    assert child.runtime.session_id == fork.session_id
+    assert_source_history(gateway.requests[-1], expected[: 2 * source_native_turn_no])
+    child.close()
+
+    source = open_session(source_id)
+    source_result, _ = _turn(source, "Continue the complete source conversation.")
+    assert source_result.status == "completed"
+    assert source.runtime.session_id == source_id
+    assert_source_history(gateway.requests[-1], expected)

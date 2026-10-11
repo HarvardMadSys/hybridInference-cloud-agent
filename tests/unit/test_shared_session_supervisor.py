@@ -965,6 +965,40 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
     assert writes[1]["state"] == "ready"
 
 
+def test_claude_fork_flushes_the_source_before_reading_its_historical_boundary(monkeypatch):
+    manager = _Manager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    target_launch = _launch("athr_child", native_session_id=None, slot=2)
+    lifecycle: list[object] = []
+    source = SimpleNamespace(
+        native_session_id="native-source",
+        launch=source_launch,
+        close=lambda: lifecycle.append("flush"),
+    )
+    monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
+    monkeypatch.setattr(factory, "_write_fork_journal", lambda *_args: None)
+
+    def fork_claude(spec, source_id, source_slot, source_native_turn_no):
+        assert lifecycle == ["flush"]
+        assert spec == _spec()
+        lifecycle.append((source_id, source_slot, source_native_turn_no))
+        return "native-child"
+
+    monkeypatch.setattr(factory, "_fork_claude", fork_claude)
+
+    child_id = factory.fork_native(
+        _spec(),
+        source,  # type: ignore[arg-type]
+        "fork-claude",
+        target_launch,
+        2,
+    )
+
+    assert child_id == "native-child"
+    assert lifecycle == ["flush", ("native-source", 0, 2)]
+
+
 def test_pi_fork_exposes_the_source_owned_child_session_to_its_target(monkeypatch):
     manager = _Manager()
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
