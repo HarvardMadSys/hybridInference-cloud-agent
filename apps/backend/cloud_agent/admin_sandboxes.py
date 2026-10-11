@@ -151,6 +151,7 @@ class AdminSandboxDetail(BaseModel):
     sandbox: AdminSandbox
     members: list[AdminSandboxMember] = Field(max_length=128)
     observed_at: datetime
+    terminal_activity_error: str | None = None
 
 
 class AdminSandboxStopRequest(BaseModel):

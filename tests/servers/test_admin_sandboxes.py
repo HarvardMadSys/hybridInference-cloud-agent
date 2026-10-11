@@ -1,7 +1,8 @@
 """Admin authorization, pagination and content boundaries for retained sandboxes."""
 
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from fastapi import FastAPI
@@ -15,6 +16,8 @@ from cloud_agent.admin_sandboxes import SANDBOX_CURSOR_SCOPE, SandboxCursor
 from cloud_agent.api import admin_sandboxes
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
+from cloud_agent.broker_routing import BrokerUrlRefused
+from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 PREFIX = "/admin/agent/sandboxes"
 
@@ -94,6 +97,57 @@ def setup(run_setup):  # noqa: F811 — imported pytest fixture
     app.include_router(admin_sandboxes.router)
     app.dependency_overrides[admin_sandboxes.get_admin_sandbox_queries] = lambda: queries
     return app, queries, gateway
+
+
+def sandbox_detail(**overrides):
+    """A running, otherwise idle container with an unavailable terminal census."""
+    return {
+        "sandbox": sandbox()
+        | {
+            "active_operation_count": 0,
+            "snapshot_state": "none",
+            "terminal_count": None,
+            "terminal_count_observed_at": None,
+            "resource_usage": None,
+        }
+        | overrides,
+        "members": [],
+        "observed_at": END,
+    }
+
+
+@pytest.fixture
+def terminal_probe(setup, monkeypatch):
+    """Expose the owning host broker and the fenced observation command."""
+    app, queries, _ = setup
+    queries.detail = AsyncMock(return_value=sandbox_detail())
+    commands = SimpleNamespace(
+        record_terminal_observation=AsyncMock(return_value=True),
+        request_admin_stop=AsyncMock(return_value="accepted"),
+    )
+    host_pool = SimpleNamespace(get_host=AsyncMock(return_value={"host": "runner-one"}))
+    broker = SimpleNamespace(
+        list_sandboxes=AsyncMock(
+            return_value=[
+                {
+                    "sandbox_id": "asbx_other",
+                    "origin_thread_id": "athr_other",
+                    "container_id": "container-one",
+                    "generation": 1,
+                    "running": True,
+                    "shared_live": True,
+                    "terminal_count": 0,
+                    "group_busy": False,
+                }
+            ]
+        )
+    )
+    broker_factory = Mock(return_value=broker)
+    monkeypatch.setattr(admin_sandboxes, "broker_for_host", broker_factory)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        sandbox=commands, admin_sandboxes=queries, host_pool=host_pool
+    )
+    return app, queries, commands, host_pool, broker, broker_factory
 
 
 @pytest.mark.parametrize("auth", ["missing", "invalid", "revoked"])
@@ -209,6 +263,182 @@ async def test_detail_sanitizes_members_and_preserves_stopped_state(setup):
     assert missing.status_code == 404
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"terminal_count": None},
+        {"terminal_count": None, "terminal_count_observed_at": END},
+        {"terminal_count": 0, "terminal_count_observed_at": None},
+        {"terminal_count": 0, "terminal_count_observed_at": END - timedelta(seconds=91)},
+    ],
+)
+@pytest.mark.parametrize("count", [0, 2])
+async def test_detail_refreshes_unavailable_terminal_activity_before_rereading(
+    terminal_probe, overrides, count
+):
+    app, queries, commands, host_pool, broker, broker_factory = terminal_probe
+    fresh = sandbox_detail(terminal_count=count, terminal_count_observed_at=END)
+    queries.detail.side_effect = [sandbox_detail(**overrides), fresh]
+    broker.list_sandboxes.return_value[0]["terminal_count"] = count
+    sequence = Mock()
+    sequence.attach_mock(queries.detail, "detail")
+    sequence.attach_mock(broker.list_sandboxes, "list_sandboxes")
+    sequence.attach_mock(commands.record_terminal_observation, "record_terminal_observation")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sandbox"]["terminal_count"] == count
+    assert body["sandbox"]["terminal_count_observed_at"] == END.isoformat().replace("+00:00", "Z")
+    assert body["terminal_activity_error"] is None
+    assert body["sandbox"]["resource_usage"] is None
+    host_pool.get_host.assert_awaited_once_with(host="runner-one")
+    broker_factory.assert_called_once_with(host_pool.get_host.return_value)
+    assert sequence.mock_calls == [
+        call.detail("asbx_other"),
+        call.list_sandboxes(timeout=5),
+        call.record_terminal_observation(
+            sandbox_id="asbx_other",
+            host="runner-one",
+            generation=1,
+            container_id="container-one",
+            terminal_count=count,
+        ),
+        call.detail("asbx_other"),
+    ]
+    commands.request_admin_stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"terminal_count": 0, "terminal_count_observed_at": END},
+        {"terminal_count": 2, "terminal_count_observed_at": END},
+        {"terminal_count": 0, "terminal_count_observed_at": END - timedelta(seconds=90)},
+        {"state": "stopped"},
+    ],
+)
+async def test_detail_does_not_probe_current_census_or_stopped_container(terminal_probe, overrides):
+    app, queries, commands, host_pool, broker, _ = terminal_probe
+    queries.detail.return_value = sandbox_detail(**overrides)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["terminal_activity_error"] is None
+    queries.detail.assert_awaited_once_with("asbx_other")
+    host_pool.get_host.assert_not_awaited()
+    broker.list_sandboxes.assert_not_awaited()
+    commands.record_terminal_observation.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing_host", "missing_broker", "refused_url", "broker_error"]
+)
+async def test_detail_explains_unavailable_broker_without_recording_an_idle_census(
+    terminal_probe, failure
+):
+    app, queries, commands, host_pool, broker, broker_factory = terminal_probe
+    if failure == "missing_host":
+        host_pool.get_host.return_value = None
+    elif failure == "missing_broker":
+        broker_factory.return_value = None
+    elif failure == "refused_url":
+        broker_factory.side_effect = BrokerUrlRefused("not allowed")
+    else:
+        broker.list_sandboxes.side_effect = WorkspaceBrokerError(503, "PRIVATE diagnostic")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sandbox"]["terminal_count"] is None
+    assert "workspace broker" in body["terminal_activity_error"]
+    assert "connection" in body["terminal_activity_error"]
+    assert "PRIVATE" not in response.text
+    queries.detail.assert_awaited_once_with("asbx_other")
+    commands.record_terminal_observation.assert_not_awaited()
+    commands.request_admin_stop.assert_not_awaited()
+    if failure == "broker_error":
+        broker.list_sandboxes.assert_awaited_once_with(timeout=5)
+        assert "refresh details" in body["terminal_activity_error"]
+    else:
+        broker.list_sandboxes.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sandbox_id": "asbx_replaced"},
+        {"origin_thread_id": "athr_replaced"},
+        {"container_id": "container-replaced"},
+        {"generation": 2},
+        {"running": False},
+        {"shared_live": False},
+    ],
+)
+async def test_detail_rejects_broker_census_for_a_different_or_inactive_container(
+    terminal_probe, overrides
+):
+    app, queries, commands, _, broker, _ = terminal_probe
+    broker.list_sandboxes.return_value[0].update(overrides)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sandbox"]["terminal_count"] is None
+    assert "container changed" in body["terminal_activity_error"]
+    queries.detail.assert_awaited_once_with("asbx_other")
+    commands.record_terminal_observation.assert_not_awaited()
+
+
+@pytest.mark.parametrize("count", [None, True, False, "0", 0.0, -1, 4097])
+async def test_detail_rejects_missing_or_invalid_broker_terminal_counts(terminal_probe, count):
+    app, queries, commands, _, broker, _ = terminal_probe
+    broker.list_sandboxes.return_value[0]["terminal_count"] = count
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sandbox"]["terminal_count"] is None
+    assert "Update its workspace broker" in body["terminal_activity_error"]
+    queries.detail.assert_awaited_once_with("asbx_other")
+    commands.record_terminal_observation.assert_not_awaited()
+
+
+@pytest.mark.parametrize("group_busy", [True, None])
+async def test_detail_does_not_treat_legacy_origin_terminal_count_as_group_idle(
+    terminal_probe, group_busy
+):
+    app, queries, commands, _, broker, _ = terminal_probe
+    row = broker.list_sandboxes.return_value[0]
+    row["thread_id"] = row.pop("origin_thread_id")
+    row["group_busy"] = group_busy
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sandbox"]["terminal_count"] is None
+    assert "Wait until it is idle" in body["terminal_activity_error"]
+    queries.detail.assert_awaited_once_with("asbx_other")
+    commands.record_terminal_observation.assert_not_awaited()
+
+
+async def test_detail_keeps_activity_unavailable_if_container_changes_before_recording(
+    terminal_probe,
+):
+    app, queries, commands, _, _, _ = terminal_probe
+    commands.record_terminal_observation.return_value = False
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sandbox"]["terminal_count"] is None
+    assert "container changed" in body["terminal_activity_error"]
+    commands.record_terminal_observation.assert_awaited_once()
+    queries.detail.assert_awaited_once_with("asbx_other")
+
+
 @pytest.mark.parametrize("path", ["/asbx_other", "/asbx_other/stop"])
 async def test_detail_and_control_require_current_admin_access(setup, path):
     app, _, gateway = setup
@@ -250,6 +480,9 @@ async def test_reviewed_stop_passes_authenticated_actor_to_atomic_command(setup,
             observed_at=END,
         )
     )
+    if result == "activity_unknown":
+        # A missing current detail cannot supply a safe broker probe target.
+        queries.detail.return_value = None
     commands = SimpleNamespace(request_admin_stop=AsyncMock(return_value=result))
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
         sandbox=commands, admin_sandboxes=queries
@@ -275,6 +508,101 @@ async def test_reviewed_stop_passes_authenticated_actor_to_atomic_command(setup,
     )
     if result == "accepted":
         assert response.json()["sandbox"]["state"] == "stopping"
+        queries.detail.assert_awaited_once_with("asbx_other")
+    elif result == "activity_unknown":
+        assert "terminal activity is unavailable" in response.json()["detail"]
+        queries.detail.assert_awaited_once_with("asbx_other")
+    else:
+        queries.detail.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("retry_result", "status", "message"),
+    [
+        ("accepted", 202, None),
+        ("stale", 409, "Sandbox activity or container changed"),
+        ("busy", 409, "active turn, operation, or snapshot"),
+        ("terminals_open", 409, "open terminals"),
+        ("activity_unknown", 409, "terminal activity is unavailable"),
+    ],
+)
+async def test_stop_probes_unknown_activity_then_retries_all_original_review_fences(
+    terminal_probe, retry_result, status, message
+):
+    app, queries, commands, _, broker, _ = terminal_probe
+    # Activity can move while the broker probe is in flight. The retry must
+    # still pass the administrator's older reviewed timestamp to the command.
+    current = sandbox_detail(last_activity_at=END + timedelta(seconds=1))
+    stopped = sandbox_detail(state="stopping", stop_requested_at=END)
+    queries.detail.side_effect = [current, stopped]
+    commands.request_admin_stop.side_effect = ["activity_unknown", retry_result]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{PREFIX}/asbx_other/stop",
+            headers=ADMIN,
+            json={
+                "generation": 1,
+                "container_id": "container-one",
+                "last_activity_at": END.isoformat(),
+            },
+        )
+    assert response.status_code == status
+    reviewed_fences = call(
+        sandbox_id="asbx_other",
+        generation=1,
+        container_id="container-one",
+        last_activity_at=END,
+        actor_id="admin-token",
+        admin_ip="127.0.0.1",
+    )
+    assert commands.request_admin_stop.await_args_list == [reviewed_fences, reviewed_fences]
+    broker.list_sandboxes.assert_awaited_once_with(timeout=5)
+    commands.record_terminal_observation.assert_awaited_once_with(
+        sandbox_id="asbx_other",
+        host="runner-one",
+        generation=1,
+        container_id="container-one",
+        terminal_count=0,
+    )
+    if retry_result == "accepted":
+        assert response.json()["sandbox"]["state"] == "stopping"
+        assert queries.detail.await_count == 2
+    else:
+        assert message in response.json()["detail"]
+        queries.detail.assert_awaited_once_with("asbx_other")
+
+
+@pytest.mark.parametrize("failure", ["broker_error", "container_changed", "record_refused"])
+async def test_stop_does_not_retry_if_terminal_probe_cannot_record_a_safe_observation(
+    terminal_probe, failure
+):
+    app, queries, commands, _, broker, _ = terminal_probe
+    commands.request_admin_stop.return_value = "activity_unknown"
+    if failure == "broker_error":
+        broker.list_sandboxes.side_effect = WorkspaceBrokerError(503, "unreachable")
+    elif failure == "container_changed":
+        broker.list_sandboxes.return_value[0]["generation"] = 2
+    else:
+        commands.record_terminal_observation.return_value = False
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{PREFIX}/asbx_other/stop",
+            headers=ADMIN,
+            json={
+                "generation": 1,
+                "container_id": "container-one",
+                "last_activity_at": END.isoformat(),
+            },
+        )
+    assert response.status_code == 409
+    expected = "Restore its connection" if failure == "broker_error" else "Refresh details"
+    assert expected in response.json()["detail"]
+    commands.request_admin_stop.assert_awaited_once()
+    queries.detail.assert_awaited_once_with("asbx_other")
+    if failure == "record_refused":
+        commands.record_terminal_observation.assert_awaited_once()
+    else:
+        commands.record_terminal_observation.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

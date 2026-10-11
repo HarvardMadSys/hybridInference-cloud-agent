@@ -84,6 +84,7 @@ export interface AdminSandboxDetail {
   sandbox: AdminSandbox;
   members: AdminSandboxMember[];
   observed_at: string;
+  terminal_activity_error?: string | null;
 }
 
 export interface AdminSandboxStopRequest {

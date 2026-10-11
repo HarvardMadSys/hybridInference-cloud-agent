@@ -555,6 +555,76 @@ async def stored_resources(db, sandbox_id="asbx_resources"):
     return result
 
 
+@pytest.mark.parametrize("count", [0, 4096])
+async def test_direct_terminal_observation_accepts_observed_count_bounds(db, store, count):
+    await seed(db, store, "asbx_resources")
+    assert await store.sandbox.record_terminal_observation(
+        sandbox_id="asbx_resources",
+        host="runner-one",
+        generation=1,
+        container_id="container-asbx_resources",
+        terminal_count=count,
+    )
+    row = await stored_resources(db)
+    assert row["terminal_count"] == count
+    assert row["terminal_count_observed_at"] is not None
+    assert row["resource_snapshot"] is None
+
+
+@pytest.mark.parametrize("count", [None, True, -1, 4097, 1.0, "1"])
+async def test_direct_terminal_observation_rejects_invalid_counts_without_writes(db, store, count):
+    await seed(db, store, "asbx_resources")
+    previous = await stored_resources(db)
+    with pytest.raises(ValueError, match="Invalid terminal count"):
+        await store.sandbox.record_terminal_observation(
+            sandbox_id="asbx_resources",
+            host="runner-one",
+            generation=1,
+            container_id="container-asbx_resources",
+            terminal_count=count,
+        )
+    assert await stored_resources(db) == previous
+
+
+@pytest.mark.parametrize(
+    ("bad_fence", "state"),
+    [
+        ({"sandbox_id": "asbx_missing"}, "running"),
+        ({"host": "different-host"}, "running"),
+        ({"generation": 2}, "running"),
+        ({"container_id": "different-container"}, "running"),
+        ({}, "stopping"),
+        ({}, "stopped"),
+        ({}, "stopped_dirty"),
+        ({}, "lost"),
+        ({}, "provisioning"),
+    ],
+)
+async def test_direct_terminal_observation_requires_exact_running_container(
+    db, store, bad_fence, state
+):
+    job = await seed(db, store, "asbx_resources")
+    await store.sandbox.reconcile_thread_sandbox_observation(**observation(job), terminal_count=2)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = $1 WHERE id = 'asbx_resources'", state
+        )
+    previous = await stored_resources(db)
+    assert not await store.sandbox.record_terminal_observation(
+        **(
+            {
+                "sandbox_id": "asbx_resources",
+                "host": "runner-one",
+                "generation": 1,
+                "container_id": "container-asbx_resources",
+                "terminal_count": 0,
+            }
+            | bad_fence
+        )
+    )
+    assert await stored_resources(db) == previous
+
+
 async def test_container_resources_include_source_age_and_current_group_stats(db, store):
     job = await seed(db, store, "asbx_resources")
     await member(db, "asbx_resources", job, 0)
@@ -771,17 +841,25 @@ async def test_valid_measurement_repairs_corrupt_snapshot_without_sample_identit
     assert "PRIVATE" not in row.model_dump_json()
 
 
-async def test_telemetry_database_failure_does_not_roll_back_container_lifecycle(
-    db, store, monkeypatch
+@pytest.mark.parametrize(
+    ("method", "invalid_update"),
+    [
+        ("_record_terminal_observation", "terminal_count = -1"),
+        ("_record_resource_observation", "resource_snapshot = '[]'::jsonb"),
+    ],
+)
+async def test_observation_database_failures_do_not_roll_back_container_lifecycle(
+    db, store, monkeypatch, method, invalid_update
 ):
     job = await seed(db, store, "asbx_resources")
 
     async def unavailable_telemetry(conn, *, sandbox_id, **_kwargs):
         await conn.execute(
-            "UPDATE agent_sandboxes SET terminal_count = -1 WHERE id = $1", sandbox_id
+            f"UPDATE agent_sandboxes SET {invalid_update} WHERE id = $1",
+            sandbox_id,
         )
 
-    monkeypatch.setattr(store.sandbox, "_record_resource_observation", unavailable_telemetry)
+    monkeypatch.setattr(store.sandbox, method, unavailable_telemetry)
     assert (
         await store.sandbox.reconcile_thread_sandbox_observation(
             **observation(job, running=False), resource_usage=sample()
@@ -794,6 +872,59 @@ async def test_telemetry_database_failure_does_not_roll_back_container_lifecycle
             == "stopped"
         )
     assert (await stored_resources(db))["terminal_count"] is None
+
+
+@pytest.mark.parametrize(
+    ("previous_count", "observed_count", "stop_result"),
+    [(None, 0, "accepted"), (0, 1, "terminals_open")],
+)
+async def test_resource_sql_failure_preserves_fresh_terminal_stop_safety(
+    db, store, previous_count, observed_count, stop_result
+):
+    job = await seed(db, store, "asbx_resources")
+    await store.sandbox.reconcile_thread_sandbox_observation(
+        **observation(job), resource_usage=sample(), terminal_count=previous_count
+    )
+    previous = await stored_resources(db)
+    detail = await store.admin_sandboxes.detail("asbx_resources")
+    assert detail is not None
+    request = {
+        "sandbox_id": detail.sandbox.id,
+        "generation": detail.sandbox.generation,
+        "container_id": detail.sandbox.container_id,
+        "last_activity_at": detail.sandbox.last_activity_at,
+        "actor_id": "admin:operator",
+        "admin_ip": "127.0.0.1",
+    }
+    if previous_count is None:
+        assert await store.sandbox.request_admin_stop(**request) == "activity_unknown"
+    async with db.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE agent_sandboxes ADD CONSTRAINT test_reject_resource_sample "
+            "CHECK (resource_snapshot->>'sample_id' IS DISTINCT FROM 'unavailable-sample')"
+        )
+    try:
+        assert (
+            await store.sandbox.reconcile_thread_sandbox_observation(
+                **observation(job),
+                resource_usage=sample(sample_id="unavailable-sample", sample_age_ms=0.0),
+                terminal_count=observed_count,
+            )
+            == "running"
+        )
+        current = await stored_resources(db)
+        for field in ("resource_snapshot", "resource_sampled_at", "resource_received_at"):
+            assert current[field] == previous[field]
+        assert current["terminal_count"] == observed_count
+        assert current["terminal_count_observed_at"] is not None
+        if previous["terminal_count_observed_at"] is not None:
+            assert current["terminal_count_observed_at"] > previous["terminal_count_observed_at"]
+        assert await store.sandbox.request_admin_stop(**request) == stop_result
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE agent_sandboxes DROP CONSTRAINT test_reject_resource_sample"
+            )
 
 
 async def test_nullable_resource_measurements_remain_unknown_in_admin_inventory(db, store):

@@ -83,12 +83,13 @@ export function SandboxManagement({
           : ['pending', 'snapshotting', 'importing'].includes(sandbox.snapshot_state ?? '')
             ? 'Wait for the workspace snapshot to finish.'
             : sandbox.terminal_count == null || !Number.isFinite(terminalObserved)
-              ? 'Wait for the host to report its open terminals.'
-              : sandbox.terminal_count > 0
-                ? 'Close all open terminals before stopping the sandbox.'
-                : !Number.isFinite(serverNow) ||
-                    serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
-                  ? 'Wait for a fresh terminal report from the host.'
+              ? (detail?.terminal_activity_error ??
+                'Terminal activity is unavailable. Refresh details to check the host.')
+              : !Number.isFinite(serverNow) || serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
+                ? (detail?.terminal_activity_error ??
+                  'Terminal activity is stale. Refresh details to check the host.')
+                : sandbox.terminal_count > 0
+                  ? 'Close all open terminals before stopping the sandbox.'
                   : sandbox.generation == null || !sandbox.container_id
                     ? 'The current container identity is unavailable.'
                     : null;

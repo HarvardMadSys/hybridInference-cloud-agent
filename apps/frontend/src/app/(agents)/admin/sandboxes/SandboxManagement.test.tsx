@@ -130,8 +130,11 @@ describe('sandbox member visibility and control', () => {
     [{ snapshot_state: 'snapshotting' }, 'Wait for the workspace snapshot'],
     [{ snapshot_state: 'importing' }, 'Wait for the workspace snapshot'],
     [{ terminal_count: 1 }, 'Close all open terminals'],
-    [{ terminal_count: null }, 'Wait for the host to report'],
-    [{ terminal_count_observed_at: '2026-10-10T09:57:00Z' }, 'Wait for a fresh terminal report'],
+    [{ terminal_count: null }, 'Terminal activity is unavailable. Refresh details'],
+    [
+      { terminal_count_observed_at: '2026-10-10T09:57:00Z' },
+      'Terminal activity is stale. Refresh details',
+    ],
     [{ generation: undefined }, 'container identity is unavailable'],
   ] as const)(
     'does not offer stopping when the reviewed snapshot is unsafe: %j',
@@ -140,6 +143,33 @@ describe('sandbox member visibility and control', () => {
       mount();
       expect(await screen.findByRole('button', { name: 'Stop idle sandbox' })).toBeDisabled();
       expect(screen.getByText(new RegExp(message))).toBeInTheDocument();
+      expect(stopAdminSandbox).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { terminal_count: null, terminal_count_observed_at: null },
+    { terminal_count: 0, terminal_count_observed_at: '2026-10-10T09:57:00Z' },
+    { terminal_count: 2, terminal_count_observed_at: '2026-10-10T09:57:00Z' },
+  ])(
+    'shows the broker recovery message until refreshed activity is current: %j',
+    async (overrides) => {
+      const message =
+        "The host's workspace broker is unavailable. Restore its connection and refresh details.";
+      vi.mocked(getAdminSandbox)
+        .mockResolvedValueOnce({ ...detail(overrides), terminal_activity_error: message })
+        .mockResolvedValue(detail({ terminal_count: 0, terminal_count_observed_at: observedAt }));
+      mount();
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeDisabled();
+      expect(stopAdminSandbox).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh details' }));
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeEnabled(),
+      );
+      expect(getAdminSandbox).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText(message)).not.toBeInTheDocument();
       expect(stopAdminSandbox).not.toHaveBeenCalled();
     },
   );

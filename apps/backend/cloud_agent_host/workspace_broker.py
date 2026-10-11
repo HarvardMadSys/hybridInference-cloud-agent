@@ -2347,6 +2347,9 @@ def create_app(
                 members[0],
             )
             origin = dict(origin)
+            # Descriptors count each member's PTYs; the heartbeat observes the
+            # whole shared container, including terminals opened by a fork.
+            origin["terminal_count"] = sum(row["terminal_count"] for row in members)
             origin["shared_live"] = True
             origin["members"] = [
                 {

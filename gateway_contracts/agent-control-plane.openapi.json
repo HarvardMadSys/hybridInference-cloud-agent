@@ -1828,6 +1828,17 @@
           },
           "sandbox": {
             "$ref": "#/components/schemas/AdminSandbox"
+          },
+          "terminal_activity_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Activity Error"
           }
         },
         "required": [

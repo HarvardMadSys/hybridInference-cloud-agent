@@ -375,6 +375,29 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin_count,child_count", [(0, 2), (1, 2), (2, 0), (0, 0)])
+async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
+    origin_count, child_count
+):
+    supervisor = _SharedSupervisor()
+    supervisor.list = lambda: [
+        replace(_descriptor("athr_source"), terminal_count=origin_count),
+        replace(_descriptor("athr_child"), terminal_count=child_count),
+    ]
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "broker-secret"}
+        )
+
+    assert response.status_code == 200
+    rows = response.json()["sandboxes"]
+    assert len(rows) == 1
+    assert rows[0]["thread_id"] == "athr_source"
+    assert rows[0]["terminal_count"] == origin_count + child_count
+
+
+@pytest.mark.asyncio
 async def test_native_question_routes_require_authentication_and_forward_exact_answers():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)

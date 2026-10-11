@@ -33,6 +33,40 @@ class PostgresSandboxRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
+    async def record_terminal_observation(
+        self,
+        *,
+        sandbox_id: str,
+        host: str,
+        generation: int,
+        container_id: str,
+        terminal_count: int,
+    ) -> bool:
+        """Refresh terminal activity only for the exact running container."""
+        if (
+            isinstance(terminal_count, bool)
+            or not isinstance(terminal_count, int)
+            or not 0 <= terminal_count <= 4096
+        ):
+            raise ValueError("Invalid terminal count")
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_sandboxes
+                    SET terminal_count = $5, terminal_count_observed_at = NOW()
+                    WHERE id = $1 AND host = $2 AND generation = $3
+                      AND container_id = $4 AND state = 'running'
+                    RETURNING TRUE
+                    """,
+                    sandbox_id,
+                    host,
+                    generation,
+                    container_id,
+                    terminal_count,
+                )
+            )
+
     async def request_admin_stop(
         self,
         *,
@@ -1217,9 +1251,19 @@ class PostgresSandboxRepository:
                 sandbox_id,
                 container_id,
             )
-            # Diagnostics share the exact ownership fence above, but their
-            # savepoint cannot roll back the lifecycle observation if monitoring
-            # becomes unavailable during a rollout or a collector failure.
+            # Terminal observations fence administrator stops independently of
+            # optional monitoring. Resource failures must not roll back a fresh
+            # terminal count, and neither savepoint can lose lifecycle progress.
+            try:
+                async with conn.transaction():
+                    await self._record_terminal_observation(
+                        conn,
+                        sandbox_id=sandbox_id,
+                        running=running,
+                        terminal_count=terminal_count,
+                    )
+            except Exception:
+                logger.warning("sandbox_terminal_observation_unavailable", exc_info=True)
             try:
                 async with conn.transaction():
                     await self._record_resource_observation(
@@ -1227,7 +1271,6 @@ class PostgresSandboxRepository:
                         sandbox_id=sandbox_id,
                         running=running,
                         resource_usage=resource_usage,
-                        terminal_count=terminal_count,
                     )
             except Exception:
                 logger.warning("sandbox_resource_snapshot_unavailable", exc_info=True)
@@ -1377,28 +1420,15 @@ class PostgresSandboxRepository:
             return None if row is None else str(row["state"])
 
     @staticmethod
-    async def _record_resource_observation(
+    async def _record_terminal_observation(
         conn: asyncpg.Connection,
         *,
         sandbox_id: str,
         running: bool,
-        resource_usage: dict[str, Any] | None,
         terminal_count: int | None,
     ) -> None:
-        """Store only new, valid counters for an already fenced container."""
-        if not running:
-            await conn.execute(
-                """
-                UPDATE agent_sandboxes
-                SET resource_snapshot = NULL, resource_sampled_at = NULL,
-                    resource_received_at = NULL, terminal_count = NULL,
-                    terminal_count_observed_at = NULL
-                WHERE id = $1
-                """,
-                sandbox_id,
-            )
-            return
-        count = terminal_count
+        """Persist current terminal safety data for an already fenced container."""
+        count = terminal_count if running else None
         if count is not None and (
             isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096
         ):
@@ -1413,6 +1443,27 @@ class PostgresSandboxRepository:
             sandbox_id,
             count,
         )
+
+    @staticmethod
+    async def _record_resource_observation(
+        conn: asyncpg.Connection,
+        *,
+        sandbox_id: str,
+        running: bool,
+        resource_usage: dict[str, Any] | None,
+    ) -> None:
+        """Store only new, valid counters for an already fenced container."""
+        if not running:
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET resource_snapshot = NULL, resource_sampled_at = NULL,
+                    resource_received_at = NULL
+                WHERE id = $1
+                """,
+                sandbox_id,
+            )
+            return
         sample = parse_sandbox_resource_sample(resource_usage)
         if sample is None:
             return

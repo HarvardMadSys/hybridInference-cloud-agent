@@ -18,6 +18,18 @@ if TYPE_CHECKING:
 class SandboxRepository(Protocol):
     """Port: retained sandbox groups and the members that live in them."""
 
+    async def record_terminal_observation(
+        self,
+        *,
+        sandbox_id: str,
+        host: str,
+        generation: int,
+        container_id: str,
+        terminal_count: int,
+    ) -> bool:
+        """Refresh terminal activity only for the exact running container."""
+        ...
+
     async def request_admin_stop(
         self,
         *,
