@@ -429,6 +429,8 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="GATEWAY_GRANT_DISPATCH_TOKEN",
         secret=True,
+        minimum_bytes=32,
+        description="A random credential of at least 32 bytes, the same value the Gateway holds.",
     ),
     Setting(
         "gateway_grant_base_path",
@@ -589,6 +591,8 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_ONCALL_DISPATCH_TOKEN",
         secret=True,
+        minimum_bytes=32,
+        description="A random credential of at least 32 bytes, the same value the alert relay sends. Empty opens nothing.",
     ),
     _numeric(
         "residency_ttl_s",
@@ -784,7 +788,8 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CONTROL_TOKEN_SECRET",
         secret=True,
-        description="Use a random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
+        minimum_bytes=32,
+        description="A random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
     ),
     Setting(
         "source_control_encryption_key",
@@ -793,7 +798,8 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
         secret=True,
-        description="Use a random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
+        minimum_bytes=32,
+        description="A random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
     ),
     Setting(
         "compute_encryption_key",
@@ -1072,6 +1078,11 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
                     normalized = raw.strip().lower()
                     value = normalized if normalized in {"text", "json"} else "text"
                 value = setting.validate(value)
+            except SettingTooShort:
+                raise ValueError(
+                    f"Invalid initial configuration for {setting.label} ({setting.env}): "
+                    f"use at least {setting.minimum_bytes} bytes"
+                ) from None
             except (ValueError, OverflowError):
                 raise ValueError(f"Invalid initial configuration for {setting.label}") from None
         values[setting.key] = value

@@ -84,7 +84,7 @@ def test_secrets_are_encrypted_imported_write_only_and_bound_to_their_key(monkey
 def test_secret_configuration_requires_a_stable_key(monkeypatch):
     monkeypatch.delenv("AGENT_SESSION_SECRET", raising=False)
     with pytest.raises(SourceControlError):
-        settings.encode_changes({"gateway_dispatch_token": "secret-must-not-be-persisted"})
+        settings.encode_changes({"gateway_dispatch_token": "secret-that-must-never-be-persisted"})
     assert settings.encode_changes({"github_publish_token": None}) == {"github_publish_token": ""}
 
 
@@ -198,6 +198,46 @@ def test_a_stored_key_shorter_than_its_minimum_is_kept_and_reported(caplog):
     )
     with pytest.raises(ValueError, match="at least 32 bytes"):
         settings.encode_changes({"session_signing_secret": "another-short-key"})
+
+
+_KEYS_WITH_A_MINIMUM = (
+    "control_signing_secret",
+    "source_control_encryption_key",
+    "gateway_dispatch_token",
+    "oncall_dispatch_token",
+)
+
+
+@pytest.mark.parametrize("key", _KEYS_WITH_A_MINIMUM)
+def test_a_short_signing_key_or_credential_is_refused_wherever_it_enters(key, monkeypatch):
+    """The HMAC key's tokens sit inside every sandbox, a ready offline oracle.
+
+    The editor, the API and the first-start import all refuse a value a person
+    could have typed; the editor reads the floor from the definition.
+    """
+    definition = settings.SETTINGS_BY_KEY[key]
+    assert definition.definition()["minimum_bytes"] == 32
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        settings.encode_changes({key: "cloudagent2026"})
+    assert settings.encode_changes({key: "k" * 32})[key]
+    assert definition.env
+    monkeypatch.setenv(definition.env, "k" * 31)
+    with pytest.raises(ValueError, match=f"{definition.env}.*at least 32 bytes"):
+        settings.initial_settings()
+
+
+def test_a_short_signing_key_saved_before_the_minimum_keeps_its_hosts_working():
+    """Refusing it on load would invalidate every host and worker credential."""
+    from cloud_agent import tokens
+
+    definition = settings.SETTINGS_BY_KEY["control_signing_secret"]
+    stored = {
+        **settings.initial_settings(),
+        "control_signing_secret": settings._encode(definition, "a-short-legacy-key"),
+    }
+    settings.apply_settings(1, stored)
+    minted = tokens.mint_worker_token(job_id="ajob_1", attempt_id=1, lease_generation=1)
+    assert tokens.parse_worker_token(minted)["job_id"] == "ajob_1"
 
 
 def test_an_update_still_cannot_save_an_ordering_it_breaks():
@@ -314,13 +354,15 @@ async def test_upgrade_imports_new_fields_once_without_reimporting_old_settings(
     repository.values = {"publish_base_branch": "saved-branch", "max_attempts": 3}
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-env-branch")
     monkeypatch.setenv("GATEWAY_ISSUER", "https://original.example")
-    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "private-host-signing-key")
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "private-host-signing-key-of-32-bytes")
     await settings.initialize_settings(repository)
     assert repository.revision == 5
     assert settings.text_setting("publish_base_branch") == "saved-branch"
     assert settings.text_setting("gateway_issuer") == "https://original.example"
-    assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "private-host-signing-key"
-    assert "private-host-signing-key" not in json.dumps(repository.values)
+    assert (
+        settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "private-host-signing-key-of-32-bytes"
+    )
+    assert "private-host-signing-key-of-32-bytes" not in json.dumps(repository.values)
     monkeypatch.setenv("GATEWAY_ISSUER", "https://stale-new-env.example")
     await settings.initialize_settings(repository)
     assert repository.seeds == 1
@@ -356,15 +398,15 @@ def test_complete_required_setup_and_unused_optional_features_do_not_prompt():
         settings.encode_changes(
             {
                 "gateway_base_url": "https://gateway.example",
-                "gateway_dispatch_token": "test-dispatch-key",
+                "gateway_dispatch_token": "test-dispatch-key-of-at-least-32-bytes",
                 "gateway_issuer": "https://identity.example",
                 "gateway_jwks_url": "https://gateway.example/jwks",
                 "gateway_authorize_url": "https://gateway.example/authorize",
                 "session_redirect_uri": "https://agents.example/callback",
                 "web_base_url": "https://agents.example",
-                "control_signing_secret": "test-control-key",
+                "control_signing_secret": "test-control-key-of-at-least-32-bytes",
                 "workspace_broker_token": "test-broker-key",
-                "source_control_encryption_key": "test-user-credential-key",
+                "source_control_encryption_key": "test-user-credential-key-of-32-bytes",
             }
         )
     )

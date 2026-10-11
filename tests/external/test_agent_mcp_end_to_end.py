@@ -65,7 +65,7 @@ _TOOL_TEXT = "issue 7: a bug"
 _RESOURCE_TEXT = "embedded issue context"
 _UPSTREAM_SECRET = "upstream-secret-token"
 _MCP_TOKEN_SECRET = "e2e-signing-secret-32-bytes-long"
-_ENCRYPTION_KEY = "e2e-encryption-key"
+_ENCRYPTION_KEY = "e2e-encryption-key-at-least-32-bytes"
 _MODEL_TOOL_CALL = f"session__{_ALIAS}__{_TOOL}"
 
 
