@@ -235,6 +235,7 @@ function TreeLevel({
   expanded,
   selected,
   onToggle,
+  onRetry,
   onOpen,
 }: {
   path: string;
@@ -243,20 +244,28 @@ function TreeLevel({
   expanded: Record<string, boolean>;
   selected: string | null;
   onToggle: (path: string) => void;
+  onRetry: (path: string) => void;
   onOpen: (path: string) => void;
 }) {
+  const t = useT();
   const state = directories[path];
   const indent = { paddingLeft: `${0.5 + depth * 0.875}rem` };
 
   if (state?.error) {
     return (
-      <p
-        role="alert"
-        style={indent}
-        className="py-1 pr-2 text-[11px] text-red-600 dark:text-red-400"
-      >
-        {state.error}
-      </p>
+      <div style={indent} className="space-y-1 py-1 pr-2 text-[11px]">
+        <p role="alert" className="text-red-600 dark:text-red-400">
+          {state.error}
+        </p>
+        <button
+          type="button"
+          onClick={() => onRetry(path)}
+          aria-label={t('workspaceFiles.retryFolder', { path: path || '/' })}
+          className="rounded px-2 py-1 text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-gray-300 dark:hover:bg-white/10"
+        >
+          {t('workspaceFiles.retry')}
+        </button>
+      </div>
     );
   }
   if (!state?.entries) {
@@ -309,6 +318,7 @@ function TreeLevel({
                 expanded={expanded}
                 selected={selected}
                 onToggle={onToggle}
+                onRetry={onRetry}
                 onOpen={onOpen}
               />
             ) : null}
@@ -570,12 +580,16 @@ export function WorkspaceFiles({
     directories,
     expanded,
     selected,
+    directoryPath,
     file,
     fileLoading,
     fileError,
     source,
     toggleDirectory,
+    retryDirectory,
     openFile,
+    retryFile,
+    showRootDirectory,
     closeFile,
     reload,
   } = useWorkspaceFiles(job.id, active, `${job.state}:${settledDiffCount}`);
@@ -608,12 +622,50 @@ export function WorkspaceFiles({
   const [paneWidth, setPaneWidth] = useState(0);
   const [mode, setMode] = useState<SidebarMode>('files');
   const listId = useId();
+  const [pathInput, setPathInput] = useState('');
+  const [copying, setCopying] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<{ error: boolean; text: string } | null>(null);
+  // Clipboard promises belong to the selection they started from.
+  const copyScope = useMemo(() => ({ jobId: job.id, selected, file }), [job.id, selected, file]);
+  const currentCopyScope = useRef(copyScope);
+  currentCopyScope.current = copyScope;
+  const mounted = useRef(true);
   const paneRef = useRef<HTMLElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef<Partial<Record<SidebarMode, HTMLButtonElement | null>>>({});
   const focusPreview = useRef(false);
   const returnPath = useRef<string | null>(null);
   const focusList = useRef(false);
+
+  useEffect(() => {
+    setCopyNotice(null);
+    setCopying(false);
+  }, [copyScope]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  async function copy(value: string, kind: 'path' | 'contents') {
+    const scope = currentCopyScope.current;
+    setCopyNotice(null);
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(value);
+      if (mounted.current && currentCopyScope.current === scope)
+        setCopyNotice({
+          error: false,
+          text: t(kind === 'path' ? 'workspaceFiles.pathCopied' : 'workspaceFiles.contentsCopied'),
+        });
+    } catch {
+      if (mounted.current && currentCopyScope.current === scope)
+        setCopyNotice({ error: true, text: t('workspaceFiles.copyFailed') });
+    } finally {
+      if (mounted.current && currentCopyScope.current === scope) setCopying(false);
+    }
+  }
 
   const root = directories[''];
   // The workspace pane is user-resizable, so whether there is room for two
@@ -639,9 +691,12 @@ export function WorkspaceFiles({
 
   useEffect(() => {
     if (!active) return;
-    if (narrow && selected && focusPreview.current) {
+    if (narrow && focusPreview.current && !fileLoading) {
       focusPreview.current = false;
-      previewRef.current?.focus({ preventScroll: true });
+      if (selected) previewRef.current?.focus({ preventScroll: true });
+      // A typed path can open a folder instead of a preview. Keep keyboard
+      // focus in the visible list after its contents replace the pending read.
+      else focusList.current = true;
     }
     if (showTree && focusList.current) {
       focusList.current = false;
@@ -652,7 +707,7 @@ export function WorkspaceFiles({
       (row ?? tabRefs.current[mode])?.focus({ preventScroll: true });
       row?.scrollIntoView?.({ block: 'nearest' });
     }
-  }, [active, listId, mode, narrow, selected, showTree]);
+  }, [active, fileLoading, listId, mode, narrow, selected, showTree]);
 
   const attachPane = useCallback((node: HTMLElement | null) => {
     paneRef.current = node;
@@ -678,7 +733,7 @@ export function WorkspaceFiles({
     };
   }, []);
 
-  const sourceLabel = root?.error
+  const sourceLabel = directories[directoryPath ?? '']?.error
     ? 'Unavailable'
     : (file?.source ?? source) === 'workspace'
       ? null
@@ -750,7 +805,55 @@ export function WorkspaceFiles({
             {sourceLabel}
           </span>
         ) : null}
+        {selected ? (
+          <button
+            type="button"
+            disabled={copying}
+            onClick={() => void copy(selected, 'path')}
+            className="ml-auto shrink-0 rounded px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/10"
+          >
+            {t('workspaceFiles.copyPath')}
+          </button>
+        ) : null}
       </div>
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!pathInput || !active) return;
+          setSidebarOpen(true);
+          setMode('files');
+          chooseFile(pathInput);
+        }}
+        className="flex shrink-0 items-center gap-2 border-b border-gray-200 px-3 py-2 dark:border-white/10"
+      >
+        <input
+          type="text"
+          value={pathInput}
+          onChange={(event) => setPathInput(event.target.value)}
+          aria-label={t('workspaceFiles.pathLabel')}
+          placeholder={t('workspaceFiles.pathPlaceholder')}
+          maxLength={4096}
+          spellCheck={false}
+          autoComplete="off"
+          className="min-w-0 flex-1 rounded-md border border-gray-200 bg-transparent px-2 py-1.5 font-mono text-xs text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-white/10 dark:text-gray-100 dark:placeholder:text-gray-500"
+        />
+        <button
+          type="submit"
+          disabled={!pathInput || !active}
+          className="shrink-0 rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+        >
+          {t('workspaceFiles.openPath')}
+        </button>
+      </form>
+      {copyNotice ? (
+        <p
+          role={copyNotice.error ? 'alert' : 'status'}
+          className={`shrink-0 px-3 py-1 text-[11px] ${copyNotice.error ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-300'}`}
+        >
+          {copyNotice.text}
+        </p>
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         {showTree ? (
@@ -832,6 +935,23 @@ export function WorkspaceFiles({
                 </svg>
               </button>
             </div>
+            {directoryPath && mode === 'files' ? (
+              <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 px-2 py-1.5 text-[11px] dark:border-white/10">
+                <button
+                  type="button"
+                  onClick={showRootDirectory}
+                  className="shrink-0 rounded px-1 py-1 text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-gray-300 dark:hover:bg-white/10"
+                >
+                  {t('workspaceFiles.root')}
+                </button>
+                <span
+                  title={directoryPath}
+                  className="min-w-0 truncate font-mono text-gray-500 dark:text-gray-400"
+                >
+                  {directoryPath}
+                </span>
+              </div>
+            ) : null}
             <div
               id={`${listId}-panel-files`}
               role="tabpanel"
@@ -841,12 +961,13 @@ export function WorkspaceFiles({
             >
               {mode === 'files' ? (
                 <TreeLevel
-                  path=""
+                  path={directoryPath ?? ''}
                   depth={0}
                   directories={directories}
                   expanded={expanded}
                   selected={selected}
                   onToggle={toggleDirectory}
+                  onRetry={retryDirectory}
                   onOpen={chooseFile}
                 />
               ) : null}
@@ -884,23 +1005,33 @@ export function WorkspaceFiles({
             <PaneMessage>Loading file…</PaneMessage>
           ) : fileError ? (
             <PaneMessage>
-              <span role="alert" className="text-red-600 dark:text-red-400">
-                {fileError}
+              <span className="flex flex-col items-center gap-3">
+                <span role="alert" className="text-red-600 dark:text-red-400">
+                  {fileError}
+                </span>
+                <button
+                  type="button"
+                  onClick={retryFile}
+                  aria-label={t('workspaceFiles.retryFile')}
+                  className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/5"
+                >
+                  {t('workspaceFiles.retry')}
+                </button>
               </span>
             </PaneMessage>
           ) : !selected || !file ? (
             <PaneMessage>
-              {root?.error ? (
+              {directoryPath === null && root?.error ? (
                 <span className="flex flex-col items-center gap-3">
                   <span role="alert" className="text-red-600 dark:text-red-400">
                     {root.error}
                   </span>
                   <button
                     type="button"
-                    onClick={reload}
+                    onClick={() => retryDirectory('')}
                     className="rounded-md border border-gray-200 dark:border-white/10 px-3 py-1.5 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5"
                   >
-                    Try again
+                    {t('workspaceFiles.retry')}
                   </button>
                 </span>
               ) : (
@@ -919,6 +1050,16 @@ export function WorkspaceFiles({
                   <span className={`font-medium ${statusClass(file.status)}`}>{file.status}</span>
                 ) : null}
                 {file.truncated ? <span>Preview truncated</span> : null}
+                {!file.binary && !file.truncated && file.content !== null ? (
+                  <button
+                    type="button"
+                    disabled={copying}
+                    onClick={() => void copy(file.content!, 'contents')}
+                    className="ml-auto rounded px-2 py-1 font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/10"
+                  >
+                    {t('workspaceFiles.copyContents')}
+                  </button>
+                ) : null}
                 {assets?.download ? (
                   <a
                     href={assets.download}

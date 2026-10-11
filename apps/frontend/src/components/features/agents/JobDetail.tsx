@@ -2614,6 +2614,7 @@ export function JobDetail({
             className="min-h-0 flex-1 overflow-y-auto p-5"
           >
             <WorkspaceFiles
+              key={workspaceScope}
               job={job}
               active={workspaceOpen && workspaceTab === 'files'}
               requestedPath={

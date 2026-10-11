@@ -4241,6 +4241,81 @@ describe('JobDetail', () => {
     await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledTimes(2));
   });
 
+  it.each(['conversation', 'account'] as const)(
+    'clears the workspace preview and cached tree when the %s changes',
+    async (scope) => {
+      vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+        if (path)
+          return {
+            path,
+            kind: 'file',
+            content: 'Previous workspace contents',
+            size: 27,
+            binary: false,
+            truncated: false,
+          };
+        return {
+          path: '',
+          kind: 'directory',
+          entries: [{ name: 'private.txt', path: 'private.txt', kind: 'file' }],
+        };
+      });
+      const job = makeJob({ threadId: 'thread-1' });
+      const { rerender } = render(<JobDetail job={job} userId="owner-1" />);
+      openWorkspace();
+      fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+      fireEvent.click(await screen.findByRole('button', { name: /private\.txt/ }));
+      await screen.findByText('Previous workspace contents');
+
+      let finishRoot!: (value: AgentJobFilesApi) => void;
+      vi.mocked(getAgentJobFiles).mockClear();
+      vi.mocked(getAgentJobFiles).mockReturnValue(
+        new Promise((resolve) => {
+          finishRoot = resolve;
+        }),
+      );
+      const nextJob =
+        scope === 'conversation' ? { ...job, id: 'ajob_2', threadId: 'thread-2' } : job;
+      rerender(<JobDetail job={nextJob} userId={scope === 'account' ? 'owner-2' : 'owner-1'} />);
+
+      expect(screen.queryByText('Previous workspace contents')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /private\.txt/ })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+      expect(getAgentJobFiles).toHaveBeenCalledExactlyOnceWith(nextJob.id, '');
+      await act(async () => finishRoot({ path: '', kind: 'directory', entries: [] }));
+    },
+  );
+
+  it('keeps the selected workspace file when a new turn opens in the same conversation', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (jobId, path = '') => {
+      if (path)
+        return {
+          path,
+          kind: 'file',
+          content: jobId,
+          size: jobId.length,
+          binary: false,
+          truncated: false,
+        };
+      return {
+        path: '',
+        kind: 'directory',
+        entries: [{ name: 'notes.txt', path: 'notes.txt', kind: 'file' }],
+      };
+    });
+    const job = makeJob({ threadId: 'thread-1' });
+    const { rerender } = render(<JobDetail job={job} userId="owner-1" />);
+    openWorkspace();
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+    fireEvent.click(await screen.findByRole('button', { name: /notes\.txt/ }));
+    await screen.findByText('ajob_1');
+
+    rerender(<JobDetail job={{ ...job, id: 'ajob_2', turnNo: 2 }} userId="owner-1" />);
+
+    await waitFor(() => expect(getAgentJobFiles).toHaveBeenCalledWith('ajob_2', 'notes.txt'));
+    expect(await screen.findByText('ajob_2')).toBeInTheDocument();
+  });
+
   it('copies a message to the clipboard', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });

@@ -568,12 +568,17 @@ export interface WorkspaceFilesState {
   directories: Record<string, WorkspaceDirectory>;
   expanded: Record<string, boolean>;
   selected: string | null;
+  /** A directly opened folder remains browsable even when a parent listing omits it. */
+  directoryPath: string | null;
   file: AgentJobFileApi | AgentJobSymlinkApi | null;
   fileLoading: boolean;
   fileError: string | null;
   source: 'workspace' | null;
   toggleDirectory: (path: string) => void;
+  retryDirectory: (path: string) => void;
   openFile: (path: string) => void;
+  retryFile: () => void;
+  showRootDirectory: () => void;
   closeFile: () => void;
   reload: () => void;
 }
@@ -597,6 +602,7 @@ export function useWorkspaceFiles(
   const [directories, setDirectories] = useState<Record<string, WorkspaceDirectory>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<string | null>(null);
+  const [directoryPath, setDirectoryPath] = useState<string | null>(null);
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -608,7 +614,8 @@ export function useWorkspaceFiles(
   // generation belong to a workspace state the user is no longer looking at.
   const generation = useRef(0);
   const directoryGenerations = useRef(new Map<string, number>());
-  const directoryRequests = useRef(new Map<string, number>());
+  const directoryRequests = useRef(new Map<string, { generation: number; request: number }>());
+  const directoryRequest = useRef(0);
   const fileRequest = useRef(0);
   const alive = useRef(true);
   const expandedRef = useRef(expanded);
@@ -629,14 +636,20 @@ export function useWorkspaceFiles(
   const loadDirectory = useCallback(
     async (path: string) => {
       const mine = generation.current;
-      directoryRequests.current.set(path, mine);
+      if (directoryRequests.current.get(path)?.generation === mine) return;
+      const request = ++directoryRequest.current;
+      directoryRequests.current.set(path, { generation: mine, request });
+      const isCurrent = () =>
+        alive.current &&
+        mine === generation.current &&
+        directoryRequests.current.get(path)?.request === request;
       setDirectories((current) => ({
         ...current,
         [path]: { entries: current[path]?.entries ?? null, loading: true, error: null },
       }));
       try {
         const node = await getAgentJobFiles(jobId, path);
-        if (!alive.current || mine !== generation.current) return;
+        if (!isCurrent()) return;
         directoryGenerations.current.set(path, mine);
         setDirectories((current) => ({
           ...current,
@@ -648,13 +661,14 @@ export function useWorkspaceFiles(
         }));
         if (path === '') setSource(node.source ?? null);
       } catch (cause) {
-        if (!alive.current || mine !== generation.current) return;
+        if (!isCurrent()) return;
         setDirectories((current) => ({
           ...current,
           [path]: { entries: null, loading: false, error: filesError(cause) },
         }));
       } finally {
-        if (directoryRequests.current.get(path) === mine) directoryRequests.current.delete(path);
+        if (directoryRequests.current.get(path)?.request === request)
+          directoryRequests.current.delete(path);
       }
     },
     [jobId],
@@ -672,15 +686,28 @@ export function useWorkspaceFiles(
         const node = await getAgentJobFiles(jobId, path);
         if (!isCurrent()) return;
         if (node.kind === 'directory') {
-          // The entry turned out to be a directory — show it in the tree.
-          directoryGenerations.current.set(path, mine);
+          // A typed folder may have parents that the tree has never loaded.
+          // Reveal them too, using the path accepted by the workspace API.
+          const parts = node.path.split('/').filter(Boolean);
+          const ancestors = parts.map((_, index) => parts.slice(0, index + 1).join('/'));
+          directoryRequests.current.delete(node.path);
+          directoryGenerations.current.set(node.path, mine);
           setDirectories((current) => ({
             ...current,
-            [path]: { entries: node.entries ?? [], loading: false, error: null },
+            [node.path]: { entries: node.entries ?? [], loading: false, error: null },
           }));
-          setExpanded((current) => ({ ...current, [path]: true }));
+          setExpanded((current) => ({
+            ...current,
+            ...Object.fromEntries(ancestors.map((ancestor) => [ancestor, true])),
+          }));
+          for (const ancestor of ancestors.slice(0, -1)) {
+            if (directoryGenerations.current.get(ancestor) !== mine) void loadDirectory(ancestor);
+          }
           setSelected(null);
+          setDirectoryPath(node.path);
+          selectedRef.current = null;
           setFile(null);
+          if (node.source) setSource(node.source);
         } else {
           setFile(node);
         }
@@ -692,7 +719,7 @@ export function useWorkspaceFiles(
         if (isCurrent()) setFileLoading(false);
       }
     },
-    [jobId],
+    [jobId, loadDirectory],
   );
 
   useEffect(() => {
@@ -718,7 +745,7 @@ export function useWorkspaceFiles(
         !open &&
         (!directories[path]?.entries ||
           directoryGenerations.current.get(path) !== generation.current) &&
-        directoryRequests.current.get(path) !== generation.current
+        directoryRequests.current.get(path)?.generation !== generation.current
       ) {
         void loadDirectory(path);
       }
@@ -728,6 +755,7 @@ export function useWorkspaceFiles(
 
   const openFile = useCallback(
     (path: string) => {
+      selectedRef.current = path;
       setSelected(path);
       setFile(null);
       void loadFile(path);
@@ -737,22 +765,45 @@ export function useWorkspaceFiles(
 
   const closeFile = useCallback(() => {
     fileRequest.current += 1;
+    selectedRef.current = null;
     setSelected(null);
     setFile(null);
     setFileLoading(false);
     setFileError(null);
   }, []);
 
+  const retryDirectory = useCallback((path: string) => void loadDirectory(path), [loadDirectory]);
+  const retryFile = useCallback(() => {
+    if (selectedRef.current) void loadFile(selectedRef.current);
+  }, [loadFile]);
+  const showRootDirectory = useCallback(() => {
+    setDirectoryPath(null);
+    // A path read can resolve to either a file or a folder. Returning to the
+    // root supersedes that navigation, so a late folder must not focus the
+    // tree again. Keep an already loaded preview beside the root tree.
+    fileRequest.current += 1;
+    setFileLoading(false);
+    if (!file) {
+      selectedRef.current = null;
+      setSelected(null);
+      setFileError(null);
+    }
+  }, [file]);
+
   return {
     directories,
     expanded,
     selected,
+    directoryPath,
     file,
     fileLoading,
     fileError,
     source,
     toggleDirectory,
+    retryDirectory,
     openFile,
+    retryFile,
+    showRootDirectory,
     closeFile,
     reload,
   };

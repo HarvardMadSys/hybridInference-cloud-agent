@@ -39,6 +39,7 @@ guides run from the repository root unless the guide says otherwise.
 | [Native conversation recall](context-recall.md) | Understand retained sessions, runtime-specific behavior, and recall verification |
 | [Native agent questions](operations.md#native-agent-questions) | Answer a waiting agent request and understand reload, skip, and stale-answer handling |
 | [Conversation navigation](conversation-navigation.md) | Understand the turn rail, previews, jumps, and reading position |
+| [Workspace files](workspace-files.md) | Open repository files by path, retry reads, and copy or download previews |
 | [Sidebar navigation](sidebar-navigation.md) | Understand project grouping and conversation actions |
 
 ## Designs and historical evidence
