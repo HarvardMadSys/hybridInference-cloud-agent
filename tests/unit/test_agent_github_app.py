@@ -251,6 +251,83 @@ async def test_forget_drops_cached_state(config):
         httpx.AsyncClient = original
 
 
+async def test_a_reinstalled_app_is_looked_up_again_rather_than_minted_against_forever(config):
+    """Installing the App again gives the repository a new installation id.
+
+    The remembered installation then refuses to mint. One fresh lookup finds
+    the new one; before, every claim released with a 503 until a restart.
+    """
+    installation = {"id": 1}
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/repos/o/n/installation":
+            return httpx.Response(200, json=installation)
+        if request.url.path == f"/app/installations/{installation['id']}/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": f"ghs_{installation['id']}", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.token_for("o/n", permissions={"contents": "read"}) == "ghs_1"
+        installation["id"] = 2
+        # Another scope has no cached token, so it mints against the remembered id.
+        assert await credentials.token_for("o/n", permissions={"contents": "write"}) == "ghs_2"
+
+    assert seen == [
+        "GET /repos/o/n/installation",
+        "POST /app/installations/1/access_tokens",
+        "POST /app/installations/1/access_tokens",
+        "GET /repos/o/n/installation",
+        "POST /app/installations/2/access_tokens",
+    ]
+
+
+@pytest.mark.parametrize("still_named", [True, False])
+async def test_an_installation_gone_for_good_is_settled_not_an_outage(config, still_named):
+    """A mint refused again after a fresh lookup means the App does not cover the repo."""
+    from cloud_agent.github_app import AppNotInstalled
+
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/n/installation":
+            lookups.append(1)
+            if still_named or len(lookups) == 1:
+                return httpx.Response(200, json={"id": 1})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AppNotInstalled):
+            await GitHubAppCredentials(config, client=client).token_for("o/n")
+
+    assert len(lookups) == 2
+
+
+async def test_a_repository_s_installation_is_not_remembered_forever(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        lookups.append(1)
+        return httpx.Response(200, json={"id": 1})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n") == 1
+        assert len(lookups) == 1
+        monkeypatch.setattr(github_app, "_INSTALLATION_TTL_S", 0.0)
+        assert await credentials.installation_id_for("o/n") == 1
+
+    assert len(lookups) == 2
+
+
 def test_private_key_never_appears_in_an_error(config):
     """A failure message must not carry the key it failed to use."""
     # Assembled rather than written out. A PEM header is a credential shape,

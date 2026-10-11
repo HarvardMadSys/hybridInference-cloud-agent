@@ -50,6 +50,14 @@ _JWT_TTL_S = 540
 # Installation tokens last an hour; refresh early so a job never starts with a
 # credential that expires mid-push.
 _TOKEN_REFRESH_MARGIN_S = 300
+# How long a repository's installation id is reused. Installing the App again
+# gives the repository a new installation, and an id kept for the life of the
+# process minted against one that no longer exists until a restart.
+_INSTALLATION_TTL_S = 300.0
+# What the token endpoint answers for an installation it no longer knows: gone
+# (404), refused for this repository (422), or the JWT refused (401). Each is
+# worth exactly one fresh look at which installation covers the repository.
+_STALE_INSTALLATION_STATUSES = frozenset({401, 404, 422})
 # How long one user's repository answer is reused. Entitlement is asked on every
 # workspace file read and terminal open; a minute keeps those off GitHub while
 # bounding how long a revoked permission still reads as granted.
@@ -243,7 +251,8 @@ class GitHubAppCredentials:
         self._config = config
         self._timeout_override = timeout_s
         self._tokens: dict[tuple[int, str], _CachedToken] = {}
-        self._installations: dict[str, int] = {}
+        #: Per repository: when its installation was looked up, and the id.
+        self._installations: dict[str, tuple[float, int]] = {}
         #: Per user, per set of connected installations: when the answer was
         #: read, and the repositories it named.
         self._user_repositories: dict[tuple[str, tuple[int, ...]], tuple[float, list[str]]] = {}
@@ -379,8 +388,9 @@ class GitHubAppCredentials:
         the user has not installed the App there, and the publisher must say so
         rather than appear to be broken.
         """
-        if repo in self._installations:
-            return self._installations[repo]
+        cached = self._installations.get(repo)
+        if cached is not None and time.monotonic() - cached[0] < _INSTALLATION_TTL_S:
+            return cached[1]
         owner, _, name = repo.partition("/")
         if not owner or not name:
             raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
@@ -399,7 +409,7 @@ class GitHubAppCredentials:
         installation_id = body.get("id")
         if not isinstance(installation_id, int):
             raise AppNotInstalled(f"no App installation covers {repo}")
-        self._installations[repo] = installation_id
+        self._installations[repo] = (time.monotonic(), installation_id)
         return installation_id
 
     async def token_for(
@@ -418,13 +428,33 @@ class GitHubAppCredentials:
         that is how one App serves both the publisher (write, to push a branch)
         and the runner (read, to check the repository out) without handing the
         runner push rights on a host that executes untrusted code.
+
+        An installation that refuses to mint is looked up afresh once: the App
+        may have been installed again under a new id. If the installation
+        GitHub then names is gone too, the App does not cover the repository —
+        :class:`AppNotInstalled`, a settled answer rather than an outage.
         """
         installation_id = await self.installation_id_for(repo)
-        token, minted = await self._token_in_scope(
-            installation_id,
-            permissions=permissions,
-            repository=repo if repository_scoped else None,
-        )
+        scope = repo if repository_scoped else None
+        try:
+            token, minted = await self._token_in_scope(
+                installation_id, permissions=permissions, repository=scope
+            )
+        except GitHubAppError as exc:
+            if exc.status not in _STALE_INSTALLATION_STATUSES:
+                raise
+            self.forget(repo)
+            installation_id = await self.installation_id_for(repo)
+            try:
+                token, minted = await self._token_in_scope(
+                    installation_id, permissions=permissions, repository=scope
+                )
+            except GitHubAppError as retry_exc:
+                if retry_exc.status == 404:
+                    raise AppNotInstalled(
+                        f"no App installation covers {repo}", status=404
+                    ) from retry_exc
+                raise
         if minted:
             logger.info(
                 "agent_github_app_token_minted",
@@ -936,8 +966,9 @@ class GitHubAppCredentials:
 
     def forget(self, repo: str) -> None:
         """Drop cached state for a repo, e.g. after the App is uninstalled."""
-        installation_id = self._installations.pop(repo, None)
-        if installation_id is not None:
+        cached = self._installations.pop(repo, None)
+        if cached is not None:
+            installation_id = cached[1]
             for key in [k for k in self._tokens if k[0] == installation_id]:
                 self._tokens.pop(key, None)
 
