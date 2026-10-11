@@ -18,7 +18,9 @@ Order of operations is load-bearing:
 3. Push the group snapshot onto its stable ``agent/<origin-thread-id>`` branch
    with a pinned refspec.
 4. Open a **draft** PR against the branch the job was started from, so a human
-   reviews before anything can merge and the diff is the agent's own work.
+   reviews before anything can merge and the diff is the agent's own work. A
+   later snapshot reuses the conversation's draft PR while it is open, and
+   opens a new one once someone has closed or merged it.
 
 A rejected patch marks the snapshot/group dirty without rewriting successful
 Agent turns. Gate violations are human-review situations, and a retry loop
@@ -93,6 +95,9 @@ _PUBLISH_SCOPE = {"contents": "write", "pull_requests": "write"}
 # A branch called `deadbee-release` is not affected either way.
 _LOOKS_LIKE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
+# The number at the end of a recorded PR link, `https://github.com/o/n/pull/7`.
+_PR_NUMBER = re.compile(r"/pull/(\d+)/?$")
+
 
 def _pr_base_branch(job: dict[str, Any], fallback: str) -> str:
     """The branch this job's PR should target.
@@ -156,11 +161,7 @@ async def create_draft_pull_request(
     ) as client:
         response = await client.post(
             f"{credential.api_base}/repos/{repo}/pulls",
-            headers={
-                "Authorization": f"Bearer {credential.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=_github_headers(credential),
             json={
                 "title": title,
                 "head": head_branch,
@@ -184,6 +185,66 @@ async def create_draft_pull_request(
             f"GitHub accepted the draft PR ({response.status_code}) but returned no html_url"
         )
     return url
+
+
+async def pull_request_is_closed(
+    *,
+    repo: str,
+    pr_url: str,
+    credential: GitHubCredential,
+    timeout_s: float | None = None,
+) -> bool:
+    """Whether GitHub says the PR at ``pr_url`` is closed, merged or not.
+
+    A conversation keeps one draft PR across its turns, but the owner can close
+    or merge it. Commits pushed afterwards land on the branch and appear in no
+    open PR, so the conversation needs a new one rather than the old link.
+
+    Only a definite "closed" counts. An unreadable link, a failed request or an
+    unexpected answer reads as still open: the branch is already pushed, and
+    keeping the existing link is the old behaviour, where guessing wrong the
+    other way would open a duplicate PR.
+    """
+    match = _PR_NUMBER.search(pr_url)
+    if match is None:
+        return False
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_s
+            if timeout_s is not None
+            else number_setting("publish_pr_timeout_s", 30.0)
+        ) as client:
+            response = await client.get(
+                f"{credential.api_base}/repos/{repo}/pulls/{match.group(1)}",
+                headers=_github_headers(credential),
+            )
+        payload = response.json() if response.status_code < 400 else None
+    except (httpx.HTTPError, ValueError):
+        logger.warning(
+            "agent_job_pr_state_unknown",
+            extra={"event": "agent_job_pr_state_unknown", "pr_url": pr_url},
+            exc_info=True,
+        )
+        return False
+    if not isinstance(payload, dict):
+        logger.warning(
+            "agent_job_pr_state_unknown",
+            extra={
+                "event": "agent_job_pr_state_unknown",
+                "pr_url": pr_url,
+                "status_code": response.status_code,
+            },
+        )
+        return False
+    return payload.get("state") == "closed"
+
+
+def _github_headers(credential: GitHubCredential) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {credential.token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
 
 def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
@@ -508,6 +569,14 @@ async def _publish_claimed(
             include_base_bundle=True,
         )
         pr_url = job.get("parent_pr_url")
+        if pr_url and await pull_request_is_closed(
+            repo=job["repo"], pr_url=pr_url, credential=credential
+        ):
+            logger.info(
+                "agent_job_pr_closed",
+                extra={"event": "agent_job_pr_closed", "job_id": job_id, "pr_url": pr_url},
+            )
+            pr_url = None
         if not pr_url:
             pr_url = await create_draft_pull_request(
                 repo=job["repo"],

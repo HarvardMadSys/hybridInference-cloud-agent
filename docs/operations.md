@@ -891,6 +891,9 @@ discovery, push, and draft PR publishing use short-lived GitHub App installation
 tokens. New draft PR titles use a short excerpt from the included turns' closing
 summaries, with Markdown removed, and fall back to the changed files when no
 usable closing summary exists. The original task remains in the PR body.
+A conversation keeps one draft PR across its turns while that PR is open; once
+someone closes or merges it, the next published snapshot opens a new draft PR
+from the same `agent/…` branch.
 GitLab is intentionally narrower in this release: it verifies the
 authenticated GitLab user and shows their accessible projects for discovery.
 GitLab projects do not appear in the Agent task composer, and the control plane does
