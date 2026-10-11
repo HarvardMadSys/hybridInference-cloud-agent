@@ -61,6 +61,26 @@ _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 # A rate limit, abuse detection or the App's own client secret being refused
 # says nothing about the user's grant, and must not cost them their connection.
 _REVOKED_REFRESH_ERRORS = frozenset({"bad_refresh_token", "invalid_grant"})
+# Characters `git check-ref-format` refuses anywhere in a ref name.
+_REF_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
+
+
+def is_ref_name(ref: str) -> bool:
+    """Whether git would accept ``ref`` as the name of a branch or tag.
+
+    The rules of ``git check-ref-format --allow-onelevel``, plus no leading
+    ``-``, which git refuses for a branch. A user's ref is sent to GitHub inside
+    an API path, and these rules are also what keep it a ref there: no ``..``
+    or dot-leading segment for the HTTP client to collapse into another
+    endpoint, no ``?`` to start a query string, no control characters.
+    """
+    if not ref or ref == "@" or ref.startswith(("-", "/")) or ref.endswith(("/", ".")):
+        return False
+    if ".." in ref or "//" in ref or "@{" in ref:
+        return False
+    if any(char in _REF_FORBIDDEN_CHARS or ord(char) < 0x20 or ord(char) == 0x7F for char in ref):
+        return False
+    return not any(part.startswith(".") or part.endswith(".lock") for part in ref.split("/"))
 
 
 class GitHubAppError(Exception):
@@ -808,9 +828,7 @@ class GitHubAppCredentials:
         Read with the repository's own installation token, so a caller cannot
         learn anything about a repository the App does not cover.
         """
-        owner, _, name = repo.partition("/")
-        if not owner or not name:
-            raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+        endpoint = f"{self._config.api_base}{_repository_endpoint(repo)}"
         token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
         headers = {
             "Authorization": f"Bearer {token}",
@@ -818,11 +836,9 @@ class GitHubAppCredentials:
             "X-GitHub-Api-Version": "2022-11-28",
         }
         async with self._http() as client:
-            meta = await client.get(
-                f"{self._config.api_base}/repos/{owner}/{name}", headers=headers
-            )
+            meta = await client.get(endpoint, headers=headers)
             listing = await client.get(
-                f"{self._config.api_base}/repos/{owner}/{name}/branches",
+                f"{endpoint}/branches",
                 params={"per_page": 100},
                 headers=headers,
             )
@@ -840,14 +856,17 @@ class GitHubAppCredentials:
         The job stores the *sha*, never the branch name. A branch moves; a job
         that recorded "dev" would silently mean a different tree by the time it
         ran, and the publisher applies its patch onto a pinned commit.
+
+        ``ref`` is the requester's text: only a name git accepts is sent, and
+        encoded, so it can never select another endpoint or add a query.
         """
-        owner, _, name = repo.partition("/")
-        if not owner or not name:
-            raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+        endpoint = _repository_endpoint(repo)
+        if not is_ref_name(ref):
+            raise GitHubAppError(f"{ref!r} is not a valid Git ref name")
         token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
         async with self._http() as client:
             response = await client.get(
-                f"{self._config.api_base}/repos/{owner}/{name}/commits/{ref}",
+                f"{self._config.api_base}{endpoint}/commits/{quote(ref, safe='/')}",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
@@ -971,12 +990,17 @@ async def read_repository_contents(
     return body
 
 
-def _repository_content_endpoint(repo: str, path: str) -> str:
-    """Validate and encode a repository-relative GitHub Contents path."""
+def _repository_endpoint(repo: str) -> str:
+    """Validate ``owner/name`` and return its ``/repos/...`` path, each segment encoded."""
     owner, separator, name = repo.partition("/")
     if not owner or separator != "/" or not name or "/" in name:
         raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+    return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
 
+
+def _repository_content_endpoint(repo: str, path: str) -> str:
+    """Validate and encode a repository-relative GitHub Contents path."""
+    endpoint = f"{_repository_endpoint(repo)}/contents"
     parts = path.split("/") if path else []
     if (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/") or any(
         not part
@@ -988,7 +1012,6 @@ def _repository_content_endpoint(repo: str, path: str) -> str:
     ):
         raise GitHubAppError("repository content path is not a safe relative path")
 
-    endpoint = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents"
     if parts:
         endpoint += "/" + "/".join(quote(part, safe="") for part in parts)
     return endpoint

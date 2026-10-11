@@ -411,6 +411,76 @@ async def test_repository_contents_rejects_a_moving_ref(config):
         await GitHubAppCredentials(config).repository_contents("o/n", ref="dev")
 
 
+async def test_a_ref_to_resolve_can_only_ever_name_a_ref(config):
+    """The requester's ref reaches the commits endpoint encoded, or not at all.
+
+    Interpolated raw, `../../../../installation/repositories` was collapsed by
+    the HTTP client into another endpoint and `main?x=1` added a query, both
+    sent with an installation token.
+    """
+    requested: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/n/installation":
+            return httpx.Response(200, json={"id": 9})
+        if request.url.path == "/app/installations/9/access_tokens":
+            return httpx.Response(
+                201, json={"token": "ghs_read", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        requested.append(request.url.raw_path)
+        return httpx.Response(200, json={"sha": "f" * 40})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        for ref in ("../../../../installation/repositories", "main?x=1", "..", "-x", "a b"):
+            with pytest.raises(GitHubAppError, match="not a valid Git ref name"):
+                await credentials.resolve_ref("o/n", ref)
+        assert requested == []
+        assert await credentials.resolve_ref("o/n", "release/1.2") == "f" * 40
+        assert await credentials.resolve_ref("o/n", "fix#12%") == "f" * 40
+
+    assert requested == [b"/repos/o/n/commits/release/1.2", b"/repos/o/n/commits/fix%2312%25"]
+
+
+@pytest.mark.parametrize(
+    ("ref", "accepted"),
+    [
+        ("main", True),
+        ("release/1.2", True),
+        ("v1.0.0", True),
+        ("a" * 40, True),
+        ("feature/x#1", True),
+        ("", False),
+        ("@", False),
+        ("-main", False),
+        ("/main", False),
+        ("main/", False),
+        ("main.", False),
+        ("a..b", False),
+        ("a//b", False),
+        ("a@{1}", False),
+        (".hidden", False),
+        ("x/.hidden", False),
+        ("x.lock", False),
+        ("x.lock/y", False),
+        ("a b", False),
+        ("a~1", False),
+        ("a^", False),
+        ("a:b", False),
+        ("a?b", False),
+        ("a*", False),
+        ("a[b", False),
+        ("a\\b", False),
+        ("a\x7fb", False),
+        ("a\nb", False),
+    ],
+)
+def test_ref_names_follow_git_s_own_rules(ref, accepted):
+    from cloud_agent.github_app import is_ref_name
+
+    assert is_ref_name(ref) is accepted
+
+
 def _entitlement_handler(minted: list[dict], listed: list[int]):
     """Answer the three calls repository entitlement makes, counting each."""
 

@@ -6352,6 +6352,44 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage,
     assert "nope" in created.text
 
 
+@pytest.mark.parametrize(
+    "base_ref", ["../../../../installation/repositories", "main?x=1", "-main", "a..b"]
+)
+async def test_a_base_ref_git_would_refuse_never_reaches_github(
+    store: FakeStorage, monkeypatch, base_ref
+):
+    """The ref is sent inside a GitHub API path, so only a real ref name is accepted."""
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    from cloud_agent.api.deps import get_agent_app_credentials
+
+    resolved: list[str] = []
+
+    class RecordingApp(_FakeGitHubApp):
+        async def resolve_ref(self, repo: str, ref: str) -> str:
+            resolved.append(ref)
+            return "f" * 40
+
+    app = _build_app(_store_with_grants(store))
+    app.dependency_overrides[get_agent_app_credentials] = lambda: RecordingApp(
+        installations=[], repos_by_installation={}
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post(
+            "/v1/agent/jobs",
+            json={
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "m",
+                "base_ref": base_ref,
+            },
+        )
+
+    assert created.status_code == 422
+    assert "base_ref" in created.text
+    assert resolved == []
+
+
 async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeStorage, monkeypatch):
     """This reads through the platform's installation, so it needs the same gate.
 

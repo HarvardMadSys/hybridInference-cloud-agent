@@ -31,6 +31,7 @@ from cloud_agent.capacity_protocol import (
 )
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.github_app import is_ref_name
 from cloud_agent.goals.models import (
     GoalInput,
     GoalLimits,
@@ -219,6 +220,14 @@ class AgentJobCreate(BaseModel):
         ),
     )
     metadata: dict[str, Any] | None = Field(None, description="Opaque caller metadata.")
+
+    @field_validator("base_ref")
+    @classmethod
+    def base_ref_is_a_git_ref_name(cls, value: str | None) -> str | None:
+        """Refuse a name git would refuse: it is sent to GitHub inside an API path."""
+        if value and not is_ref_name(value):
+            raise ValueError("base_ref must be a valid Git branch or tag name")
+        return value
 
     @model_validator(mode="before")
     @classmethod
