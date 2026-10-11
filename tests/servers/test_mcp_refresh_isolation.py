@@ -41,7 +41,7 @@ async def test_catalogue_does_not_contact_an_oauth_endpoint(
     _oauth(store)
     refreshed = []
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
         await asyncio.Event().wait()
 
@@ -60,7 +60,7 @@ async def test_a_healthy_tool_does_not_wait_for_another_connections_refresh(
     _oauth(store)
     refreshed = []
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
         if row["id"] == 7:
             await asyncio.Event().wait()
@@ -101,7 +101,7 @@ async def test_changes_during_refresh_prevent_dispatch(
     started = asyncio.Event()
     finish = asyncio.Event()
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         if row["id"] == 7:
             started.set()
             await finish.wait()
@@ -147,7 +147,7 @@ async def test_a_refresh_failure_is_local_to_the_selected_connection(
     _oauth(store)
     refreshed = []
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
         if row["id"] == 7:
             raise RefreshRefused("fixture issuer unavailable")
@@ -170,7 +170,7 @@ async def test_a_refresh_failure_is_local_to_the_selected_connection(
 async def test_the_selected_call_uses_its_fresh_credential(client, store, host, monkeypatch):
     _oauth(store)
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         assert row["id"] == 7
         store.connections[7]["access_token_ciphertext"] = mcp_cipher().encrypt("fresh-fixture")
         return dict(store.connections[7])
@@ -191,7 +191,7 @@ async def test_approval_cannot_dispatch_after_its_refresh_outlives_the_lease(
     store.wait_action = "pending"
     started, finish = asyncio.Event(), asyncio.Event()
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         if store.created_invocations:
             started.set()
             await finish.wait()

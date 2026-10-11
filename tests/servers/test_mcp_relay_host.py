@@ -998,7 +998,7 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
         store.connections[7]["deleted_at"] = "disconnected"
     refreshed = []
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
         assert row["id"] == 8, "inactive connection must not enter refresh"
         return row

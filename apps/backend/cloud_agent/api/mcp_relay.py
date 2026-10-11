@@ -358,9 +358,13 @@ async def _resolve_binding(
 
     try:
         # Before the credential is read, so a token that aged out during a long
-        # job is renewed instead of being sent and refused.
+        # job is renewed instead of being sent and refused. Under the deployment
+        # policy, the same one authorization, Test and the dial use: a token
+        # endpoint those doors admit must not be refused only when a job asks.
         if refresh_credentials:
-            connection_row = dict(await ensure_fresh(store.mcp, row=connection_row))
+            connection_row = dict(
+                await ensure_fresh(store.mcp, row=connection_row, policy=policy_from_environment())
+            )
     except RefreshRefused as exc:
         logger.warning(
             "agent_mcp_refresh_refused",
