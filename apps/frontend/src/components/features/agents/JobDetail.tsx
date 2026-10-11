@@ -1580,6 +1580,8 @@ export function JobDetail({
     job.conversationState !== undefined
       ? isActiveConversationState(job.conversationState)
       : Boolean(latestQuestionTurn && isBusyJob(latestQuestionTurn));
+  // An idle send resumes a paused queue oldest-first. This action must start
+  // its own request, so wait until the queue is known to have no other work.
   const canWatchPr = Boolean(
     userId &&
     job.prUrl &&
@@ -1592,7 +1594,9 @@ export function JobDetail({
     !mcp.saving &&
     !publicationPending &&
     watchPrAcceptedJobId !== job.id &&
-    !queue.messages.some((message) => message.prompt === watchPrPrompt) &&
+    queue.loaded &&
+    queue.messages.length === 0 &&
+    !queue.resuming &&
     !conversationBusy,
   );
 
