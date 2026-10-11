@@ -52,6 +52,21 @@ import json, re, shlex, subprocess
 from pathlib import Path
 def _default_path(value, expected):
     return isinstance(value, str) and value.rstrip('/') == expected
+def _toml_key_path(value):
+    keys = []
+    remaining = value.strip()
+    while remaining:
+        match = re.match(r"(?:([A-Za-z0-9_-]+)|\"([^\"\\]*)\"|'([^']*)')", remaining)
+        if not match:
+            return None
+        keys.append(next(part for part in match.groups() if part is not None))
+        remaining = remaining[match.end():].strip()
+        if not remaining:
+            return tuple(keys)
+        if not remaining.startswith('.'):
+            return None
+        remaining = remaining[1:].strip()
+    return None
 def _daemon_config_default(path, daemon, explicit=False):
     try:
         config = Path(path)
@@ -67,23 +82,41 @@ def _daemon_config_default(path, daemon, explicit=False):
             if any(key in value and not _default_path(value[key], '/var/lib/docker') for key in ('data-root', 'graph')):
                 return False
             return 'containerd' not in value or value['containerd'] in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock')
-        # Ubuntu 22.04's Python has no tomllib. Read only literal top-level
-        # keys; imported or indirect configuration cannot attest a default root.
+        # Ubuntu 22.04's Python has no tomllib. Inspect literal top-level and
+        # grpc keys; imported/indirect config cannot attest the root or socket.
+        section = ()
         for raw in text.splitlines():
             line = raw.strip()
             if not line or line.startswith('#'):
                 continue
             if line.startswith('['):
-                break
-            match = re.fullmatch(r"(?:([A-Za-z0-9_-]+)|['\"]([A-Za-z0-9_-]+)['\"])\s*=\s*(.*)", line)
+                header = re.fullmatch(r'(\[\[?)(.*?)(\]\]?)\s*(?:#.*)?', line)
+                if not header or len(header[1]) != len(header[3]):
+                    return False
+                section = _toml_key_path(header[2])
+                if section is None or section[0] == 'grpc' and (section != ('grpc',) or len(header[1]) != 1):
+                    return False
+                continue
+            if section not in ((), ('grpc',)):
+                continue
+            match = re.fullmatch(r'(.*?)\s*=\s*(.*)', line)
             if not match:
                 return False
-            key, value = match[1] or match[2], match[3]
-            if key == 'imports' and value.split('#', 1)[0].strip() != '[]':
+            key, value = _toml_key_path(match[1]), match[2]
+            if key is None:
                 return False
-            if key == 'root':
+            key = section + key
+            if key == ('imports',) and value.split('#', 1)[0].strip() != '[]':
+                return False
+            if key == ('grpc',) or key[0] == 'root' and key != ('root',) or key[:2] == ('grpc', 'address') and len(key) != 2:
+                return False
+            if key in (('root',), ('grpc', 'address')):
                 words = shlex.split(value, comments=True)
-                if len(words) != 1 or not _default_path(words[0], '/var/lib/containerd') or '\\' in value:
+                if len(words) != 1 or '\\' in value:
+                    return False
+                if key == ('root',) and not _default_path(words[0], '/var/lib/containerd'):
+                    return False
+                if key == ('grpc', 'address') and words[0] not in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock'):
                     return False
         return True
     except (OSError, ValueError, UnicodeError):
@@ -97,23 +130,24 @@ def _daemon_argv_default(argv, daemon):
     config = '/etc/docker/daemon.json' if daemon == 'dockerd' else '/etc/containerd/config.toml'
     roots = ('--data-root', '--graph', '-g') if daemon == 'dockerd' else ('--root', '-r')
     configs = ('--config-file',) if daemon == 'dockerd' else ('--config', '-c')
+    addresses = ('--containerd',) if daemon == 'dockerd' else ('--address', '-a')
     explicit = False
     index = 1
     while index < len(argv):
         word = argv[index]
         option, separator, value = word.partition('=')
-        if option in roots + configs + ('--containerd',):
+        if option in roots + configs + addresses:
             if not separator:
                 index += 1
                 if index >= len(argv):
                     return False
                 value = argv[index]
-        elif any(word.startswith(short) and len(word) > len(short) for short in roots + configs if short.startswith('-') and not short.startswith('--')):
+        elif any(word.startswith(short) and len(word) > len(short) for short in roots + configs + addresses if short.startswith('-') and not short.startswith('--')):
             option, value = word[:2], word[2:].removeprefix('=')
         else:
             # Grouped short options can hide a legacy root flag (-Dg/path).
             # Accept only known standalone options outside the root/config set.
-            short_options = ('-H', '-D', '-l', '-s', '-p') if daemon == 'dockerd' else ('-a', '-l')
+            short_options = ('-H', '-D', '-l', '-s', '-p') if daemon == 'dockerd' else ('-l',)
             if word.startswith('-') and not word.startswith('--') and word not in short_options:
                 return False
             index += 1
@@ -124,7 +158,7 @@ def _daemon_argv_default(argv, daemon):
             if not value.startswith('/'):
                 return False
             config, explicit = value, True
-        if option == '--containerd' and value not in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock'):
+        if option in addresses and value not in ('/run/containerd/containerd.sock', '/var/run/containerd/containerd.sock'):
             return False
         index += 1
     return _daemon_config_default(config, daemon, explicit)

@@ -45,6 +45,21 @@ UNSUPPORTED = [
         "/etc/containerd/custom.toml",
     ),
     ("containerd", "", 'imports = ["/etc/containerd/custom.toml"]\n', None),
+    ("containerd", "--address=/custom/containerd.sock", None, None),
+    ("containerd", "--address /custom/containerd.sock", None, None),
+    ("containerd", "-a /custom/containerd.sock", None, None),
+    ("containerd", "-a=/custom/containerd.sock", None, None),
+    ("containerd", "-a/custom/containerd.sock", None, None),
+    ("containerd", "", '[grpc]\naddress = "/custom/containerd.sock"\n', None),
+    ("containerd", "", 'grpc.address = "/custom/containerd.sock"\n', None),
+    (
+        "containerd",
+        "",
+        '[plugins."io.containerd.grpc.v1.cri"]\nsandbox_image="pause"\n'
+        '["grpc"]\n"address" = "/custom/containerd.sock"\n',
+        None,
+    ),
+    ("containerd", "", 'grpc = {address = "/custom/containerd.sock"}\n', None),
 ]
 
 
@@ -107,16 +122,22 @@ def test_deploy_rejects_custom_daemon_storage_before_any_write_or_service_mutati
     )
 
 
-@pytest.mark.parametrize("service", ["docker", "containerd"])
-def test_current_process_root_is_checked_as_well_as_restart_configuration(
-    disk, monkeypatch, capsys, service
+@pytest.mark.parametrize(
+    "service,flag,value",
+    [
+        ("docker", "--data-root", "/custom/data"),
+        ("containerd", "--root", "/custom/data"),
+        ("containerd", "--address", "/custom/containerd.sock"),
+    ],
+)
+def test_current_process_storage_is_checked_as_well_as_restart_configuration(
+    disk, monkeypatch, capsys, service, flag, value
 ):
     configure(disk, service, running=True)
     pid = disk.units[service]["MainPID"]
     daemon = "dockerd" if service == "docker" else "containerd"
-    flag = "--data-root" if service == "docker" else "--root"
     (disk.root / "proc" / pid / "cmdline").write_bytes(
-        f"/usr/bin/{daemon}\0{flag}=/custom/data\0".encode()
+        f"/usr/bin/{daemon}\0{flag}={value}\0".encode()
     )
     checks = inspect(disk, monkeypatch, capsys)
     assert checks["data_mount_available"]
@@ -139,6 +160,27 @@ def test_current_process_root_is_checked_as_well_as_restart_configuration(
             "containerd",
             "--root /var/lib/containerd",
             'version=2\nroot="/var/lib/containerd"\nimports=[]\n',
+            None,
+        ),
+        ("containerd", "--address=/run/containerd/containerd.sock", None, None),
+        ("containerd", "--address /var/run/containerd/containerd.sock", None, None),
+        ("containerd", "-a /run/containerd/containerd.sock", None, None),
+        ("containerd", "-a=/var/run/containerd/containerd.sock", None, None),
+        ("containerd", "-a/run/containerd/containerd.sock", None, None),
+        (
+            "containerd",
+            "",
+            'version=2\nroot="/var/lib/containerd"\n[grpc] # default socket\n'
+            'address="/run/containerd/containerd.sock"\n'
+            '[plugins."io.containerd.grpc.v1.cri"]\nsandbox_image="pause"\n',
+            None,
+        ),
+        ("containerd", "", 'grpc.address="/var/run/containerd/containerd.sock"\n', None),
+        (
+            "containerd",
+            "",
+            '[plugins."io.containerd.grpc.v1.cri"]\nsandbox_image="pause"\n'
+            "[ 'grpc' ]\n'address'='/run/containerd/containerd.sock'\n",
             None,
         ),
     ],
