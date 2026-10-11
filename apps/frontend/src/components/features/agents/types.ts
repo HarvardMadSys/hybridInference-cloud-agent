@@ -348,6 +348,8 @@ export interface AgentJob {
   events: AgentEvent[];
   /** Current attempt's tool or model activity, derived from its live events. */
   liveNote?: string;
+  /** Recorded start of the current activity, retained across refreshes. */
+  liveNoteStartedAt?: string;
   diffFiles: string[];
   /** Whether the current shared workspace diff was actually readable. */
   workspaceDiffAvailable?: boolean;

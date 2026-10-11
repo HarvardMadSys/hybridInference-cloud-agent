@@ -1,11 +1,17 @@
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 import { projectProtocolEvents, rawNotification, record } from './trajectoryProtocol';
 
-/** Infer current activity from the live attempt's recorded runtime boundaries. */
-export function agentLiveNote(
+export interface AgentLiveStatus {
+  note: string;
+  /** Recorded boundary that began the current visible activity, when known. */
+  startedAt?: string;
+}
+
+/** Infer current activity and its start from the live attempt's recorded boundaries. */
+export function agentLiveStatus(
   job: Pick<AgentJobApi, 'id' | 'state' | 'current_attempt_id'>,
   events: AgentJobEventApi[],
-): string | undefined {
+): AgentLiveStatus | undefined {
   if (job.state !== 'running' || job.current_attempt_id == null) return undefined;
 
   const current = events.filter(
@@ -16,6 +22,7 @@ export function agentLiveNote(
   const pendingTools = new Set<string>();
   let response: 'waiting' | 'streaming' | undefined;
   let settled = false;
+  let status: AgentLiveStatus | undefined;
 
   for (const event of projectProtocolEvents(current)) {
     // Cancellation drains the runtime stream; those late records cannot
@@ -83,11 +90,33 @@ export function agentLiveNote(
       response = undefined;
       settled = event.event_type === 'attempt_superseded';
     }
+
+    // Time the visible activity, not every progress record. Parallel calls and
+    // streaming deltas cannot restart an interval that is still in progress.
+    const note =
+      pendingTools.size > 0
+        ? 'Running tool call'
+        : response === 'waiting'
+          ? 'Waiting for LLM response'
+          : response === 'streaming'
+            ? 'Receiving LLM response'
+            : undefined;
+    if (note !== status?.note) {
+      const startedAt =
+        event.created_at && Number.isFinite(Date.parse(event.created_at))
+          ? event.created_at
+          : undefined;
+      status = note ? { note, ...(startedAt ? { startedAt } : {}) } : undefined;
+    }
   }
 
-  // A sibling call returning does not end the other parallel tools' activity.
-  if (pendingTools.size > 0) return 'Running tool call';
-  if (response === 'waiting') return 'Waiting for LLM response';
-  if (response === 'streaming') return 'Receiving LLM response';
-  return undefined;
+  return status;
+}
+
+/** Keep the text-only projection available for callers that do not need timing. */
+export function agentLiveNote(
+  job: Pick<AgentJobApi, 'id' | 'state' | 'current_attempt_id'>,
+  events: AgentJobEventApi[],
+): string | undefined {
+  return agentLiveStatus(job, events)?.note;
 }

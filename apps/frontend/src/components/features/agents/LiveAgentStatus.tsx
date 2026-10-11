@@ -1,21 +1,58 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import type { AgentJob } from './types';
+
+function ActivityTimer({ startedAt }: { startedAt?: string }) {
+  const [observedAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const recordedAt = Date.parse(startedAt ?? '');
+  const seconds = Math.max(
+    0,
+    Math.floor((now - (Number.isFinite(recordedAt) ? recordedAt : observedAt)) / 1000),
+  );
+  const minutes = Math.floor(seconds / 60);
+  const elapsed = minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+
+  return (
+    <span
+      role="timer"
+      aria-label="Elapsed activity time"
+      aria-live="off"
+      className="shrink-0 whitespace-nowrap tabular-nums"
+    >
+      {elapsed}
+    </span>
+  );
+}
 
 export function LiveAgentStatus({ job }: { job: AgentJob }) {
   if (job.state !== 'running' || !job.liveNote) return null;
 
   return (
-    <div
-      role="status"
-      aria-label="Agent status"
-      aria-live="polite"
-      aria-atomic="true"
-      className="mb-2 flex items-center gap-2.5 px-2 text-[13px] text-gray-500 dark:text-gray-400"
-    >
+    <div className="mb-2 flex items-center gap-2.5 px-2 text-[13px] text-gray-500 dark:text-gray-400">
       <span
         aria-hidden="true"
         className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500 motion-reduce:animate-none"
       />
-      {job.liveNote}
+      <span
+        role="status"
+        aria-label="Agent status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="min-w-0 truncate"
+      >
+        {job.liveNote}
+      </span>
+      <ActivityTimer
+        key={`${job.id}:${job.currentAttemptId ?? ''}:${job.liveNote}:${job.liveNoteStartedAt ?? ''}`}
+        startedAt={job.liveNoteStartedAt}
+      />
     </div>
   );
 }

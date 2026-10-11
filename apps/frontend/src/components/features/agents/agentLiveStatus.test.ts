@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 import { toDisplayJob } from './adapt';
-import { agentLiveNote } from './agentLiveStatus';
+import { agentLiveNote, agentLiveStatus } from './agentLiveStatus';
 
 const job = { id: 'job', state: 'running', current_attempt_id: 2 } as AgentJobApi;
 function event(
@@ -12,6 +12,20 @@ function event(
 ): AgentJobEventApi {
   return { id, seq: id, attempt_id, event_type, payload, created_at: null };
 }
+
+function timedEvent(
+  id: number,
+  event_type: string,
+  created_at: string | null,
+  payload: Record<string, unknown> = {},
+  attempt_id = 2,
+): AgentJobEventApi {
+  return { ...event(id, event_type, payload, attempt_id), created_at };
+}
+
+const start = '2026-10-10T12:00:00Z';
+const later = '2026-10-10T12:00:05Z';
+const end = '2026-10-10T12:00:10Z';
 
 describe('live agent status', () => {
   it('keeps workspace setup quiet, then waits once the prompt is dispatched', () => {
@@ -229,10 +243,142 @@ describe('live agent status', () => {
     ).toBeUndefined();
   });
 
-  it('wires the live note through the API adapter', () => {
+  it('wires the live note and its start through the API adapter', () => {
     const api = { ...job, task_prompt: 'Fix tests', repo: 'owner/repo', runtime: 'pi' };
     expect(
-      toDisplayJob(api, { events: [event(1, 'lifecycle', { phase: 'turn_started' })] }).liveNote,
-    ).toBe('Waiting for LLM response');
+      toDisplayJob(api, {
+        events: [timedEvent(1, 'lifecycle', start, { phase: 'turn_started' })],
+      }),
+    ).toMatchObject({ liveNote: 'Waiting for LLM response', liveNoteStartedAt: start });
+  });
+
+  it('anchors model waiting to its first visible boundary, including after a reload', () => {
+    const events = [
+      timedEvent(1, 'lifecycle', start, { phase: 'turn_started' }),
+      timedEvent(2, 'lifecycle', later, { phase: 'init' }),
+      timedEvent(3, 'thinking', later, { text: 'Working' }),
+      timedEvent(4, 'usage', end, { output_tokens: 10 }),
+    ];
+
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Waiting for LLM response',
+      startedAt: start,
+    });
+    expect(agentLiveStatus(job, [...events])).toEqual(agentLiveStatus(job, events));
+  });
+
+  it('keeps one tool interval across parallel calls and starts waiting when the last returns', () => {
+    const events = [
+      timedEvent(1, 'lifecycle', start, { phase: 'turn_started' }),
+      timedEvent(2, 'tool_use', later, { id: 'a' }),
+      timedEvent(3, 'tool_use', end, { id: 'b' }),
+      timedEvent(4, 'tool_result', end, { tool_use_id: 'a' }),
+      timedEvent(5, 'tool_result', end, { tool_use_id: 'unrelated' }),
+      timedEvent(6, 'raw', end, {
+        protocol: 'reply-preview',
+        preview_id: 'reply',
+        delta: 'Progress',
+      }),
+    ];
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Running tool call',
+      startedAt: later,
+    });
+
+    events.push(timedEvent(7, 'tool_result', end, { tool_use_id: 'b', is_error: true }));
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Waiting for LLM response',
+      startedAt: end,
+    });
+  });
+
+  it('keeps the first response delta as its start and resets at message and retry boundaries', () => {
+    const preview = { protocol: 'reply-preview', preview_id: 'reply', delta: 'Hello' };
+    const events = [
+      timedEvent(1, 'lifecycle', start, { phase: 'turn_started' }),
+      timedEvent(2, 'raw', later, preview),
+      timedEvent(3, 'raw', end, { ...preview, reset: true }),
+    ];
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Receiving LLM response',
+      startedAt: later,
+    });
+
+    events.push(timedEvent(4, 'message', end, { preview_id: 'reply', text: 'Hello' }));
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Waiting for LLM response',
+      startedAt: end,
+    });
+    events.push(timedEvent(5, 'raw', '2026-10-10T12:00:15Z', preview));
+    events.push(timedEvent(6, 'lifecycle', '2026-10-10T12:00:20Z', { phase: 'api_retry' }));
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Waiting for LLM response',
+      startedAt: '2026-10-10T12:00:20Z',
+    });
+  });
+
+  it('uses recorded timestamps through native protocol projections', () => {
+    const events = [
+      timedEvent(1, 'raw', start, {
+        protocol: 'codex-app-server',
+        notification: { method: 'turn/started', params: {} },
+      }),
+      timedEvent(2, 'raw', later, {
+        protocol: 'codex-app-server',
+        notification: {
+          method: 'item/agentMessage/delta',
+          params: { itemId: 'reply', delta: 'Hello' },
+        },
+      }),
+      timedEvent(3, 'raw', end, {
+        protocol: 'codex-app-server',
+        notification: {
+          method: 'item/agentMessage/delta',
+          params: { itemId: 'reply', delta: ' again' },
+        },
+      }),
+    ];
+    expect(agentLiveStatus(job, events)).toEqual({
+      note: 'Receiving LLM response',
+      startedAt: later,
+    });
+  });
+
+  it.each([null, 'invalid timestamp'])(
+    'does not invent a start when the boundary time is %s',
+    (at) => {
+      const events = [
+        timedEvent(1, 'lifecycle', at, { phase: 'turn_started' }),
+        timedEvent(2, 'thinking', later),
+      ];
+      expect(agentLiveStatus(job, events)).toEqual({ note: 'Waiting for LLM response' });
+
+      events.push(timedEvent(3, 'tool_use', end, { id: 'a' }));
+      expect(agentLiveStatus(job, events)).toEqual({ note: 'Running tool call', startedAt: end });
+    },
+  );
+
+  it('ignores timestamp boundaries belonging to another attempt or conversation turn', () => {
+    expect(
+      agentLiveStatus(job, [
+        timedEvent(1, 'lifecycle', start, { phase: 'turn_started' }, 1),
+        {
+          ...timedEvent(2, 'tool_use', start, { id: 'a' }),
+          job_id: 'other',
+        } as AgentJobEventApi,
+        timedEvent(3, 'lifecycle', later, { phase: 'turn_started' }),
+      ]),
+    ).toEqual({ note: 'Waiting for LLM response', startedAt: later });
+  });
+
+  it('clears settled timing and ignores late activity before the job state catches up', () => {
+    const events = [
+      timedEvent(1, 'tool_use', start, { id: 'a' }),
+      timedEvent(2, 'lifecycle', later, { phase: 'cancelled_by_owner' }),
+      timedEvent(3, 'tool_result', end, { tool_use_id: 'a' }),
+      timedEvent(4, 'lifecycle', end, { phase: 'turn_started' }),
+    ];
+    expect(agentLiveStatus(job, events)).toBeUndefined();
+    expect(agentLiveStatus({ ...job, state: 'succeeded' }, events.slice(0, 1))).toBeUndefined();
   });
 });
