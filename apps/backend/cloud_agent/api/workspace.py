@@ -528,7 +528,14 @@ async def list_agent_job_terminals(
             if measure is not None:
                 measure.outcome = "completed"
                 measure.measurement.facts["terminal_count"] = len(payload.get("terminals") or [])
-            response = measured_response(AgentTerminalSessionListResponse, measure, payload)
+            # The broker's advertised limits are what the browser enforces
+            # before asking; an older broker that sends none keeps the old shape.
+            response = measured_response(
+                AgentTerminalSessionListResponse,
+                measure,
+                payload,
+                omit_if_none=("max_sessions", "max_input_bytes"),
+            )
             record_measurement(
                 store=_require_store(store),
                 job=job,

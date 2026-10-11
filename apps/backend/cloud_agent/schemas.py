@@ -1412,6 +1412,11 @@ class AgentTerminalSessionListResponse(BaseModel):
     """Interactive terminal sessions retained by one live workspace."""
 
     terminals: list[AgentTerminalSessionResponse] = Field(default_factory=list)
+    #: The owning broker's per-workspace terminal limit. Absent when the broker
+    #: predates advertising it; the browser then assumes its own default.
+    max_sessions: int | None = None
+    #: The most input bytes the owning broker accepts in one request.
+    max_input_bytes: int | None = None
     #: Present only on a measured list request; the instrumented handler adds
     #: it after serializing, so an unmeasured reply has no key at all.
     profiling: AgentOperationProfilingFragment | None = None

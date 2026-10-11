@@ -3708,6 +3708,34 @@ async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
     ]
 
 
+async def test_terminal_list_passes_the_brokers_advertised_limits_through(
+    store: FakeStorage, monkeypatch
+):
+    """The browser checks these limits before asking, so it has to receive them."""
+    broker = _TerminalSessionBroker()
+    advertised = {
+        "terminals": [_terminal_session_descriptor()],
+        "max_sessions": 2,
+        "max_input_bytes": 1024,
+    }
+
+    async def list_terminals(workspace_id: str, *, profiling=None):
+        broker.calls.append(("list", workspace_id))
+        return advertised
+
+    monkeypatch.setattr(broker, "list_terminals", list_terminals)
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        store.jobs[job_id]["state"] = "succeeded"
+        listed = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
+
+    assert listed.status_code == 200
+    assert listed.json() == advertised
+
+
 async def test_terminal_controls_use_the_attached_session_capability(
     store: FakeStorage, monkeypatch
 ):

@@ -5623,6 +5623,28 @@
       "AgentTerminalSessionListResponse": {
         "description": "Interactive terminal sessions retained by one live workspace.",
         "properties": {
+          "max_input_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Input Bytes"
+          },
+          "max_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Sessions"
+          },
           "profiling": {
             "anyOf": [
               {
