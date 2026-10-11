@@ -19,6 +19,7 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../AdminNavigation';
 import { TurnResults } from '../runs/AllRuns';
 import { StepResults } from '../runs/StepResults';
+import { SandboxResults } from '../sandboxes/SandboxResults';
 import { presetKey } from '../usage/present';
 import {
   accessDenied,
@@ -83,12 +84,18 @@ function windowFilters(
 }
 
 /**
- * The levels the Sessions tab lists, one selection at a time.
+ * The levels Activity lists, one selection at a time.
  *
  * A session is made of turns, and a turn of steps (its model requests), so
- * each level is the same selection read at a finer grain.
+ * those levels share a turn selection. Sandboxes show the current fleet.
  */
 const LEVELS = [
+  {
+    key: 'sandboxes',
+    label: 'Sandboxes',
+    description:
+      'Current sandboxes across users, including idle containers retained between turns.',
+  },
   {
     key: 'sessions',
     label: 'Sessions',
@@ -122,8 +129,9 @@ export default function AdminConversationsPage() {
 /**
  * Read the linked filters once, keyed by the query so a new link remounts.
  *
- * `level=turns` or `level=steps` opens that level. It chooses what is listed
- * rather than which turns match, so it is taken off before the filters are read.
+ * `level=sandboxes`, `level=turns` or `level=steps` opens that level. It chooses
+ * what is listed rather than which turns match, so it is taken off before the
+ * filters are read.
  */
 function LinkedConversationsList() {
   const params = new URLSearchParams(useSearchParams().toString());
@@ -218,7 +226,7 @@ function ConversationsList({
               </button>
             ))}
           </div>
-          {selection && (
+          {level !== 'sandboxes' && selection && (
             <span
               className="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400"
               title={selection}
@@ -226,91 +234,95 @@ function ConversationsList({
               {selection}
             </span>
           )}
-          <div role="group" aria-label="Filters" className="ml-auto flex items-center gap-2">
-            {windowDays === 'custom' && (
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                {shortDay(filters.since)} – {shortDay(filters.until)}
-              </span>
-            )}
-            <label className="shrink-0">
-              <span className="sr-only">Turn created</span>
-              <select
-                className={TOOLBAR_SELECT}
-                value={windowDays}
-                onChange={(e) => {
-                  // Choosing a preset is the only action that re-anchors the
-                  // window, and it keeps every other filter, including the
-                  // identity a usage link arrived with.
-                  const nextDays = Number(e.target.value);
-                  setLinkedWindow(false);
-                  setFilters((current) => windowFilters(nextDays, current));
-                }}
-              >
-                <option value={7}>Last 7 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={90}>Last 90 days</option>
-                {windowDays === 'custom' && <option value="custom">Custom</option>}
-              </select>
-            </label>
-            <label className="shrink-0">
-              <span className="sr-only">Turn result</span>
-              <select
-                className={TOOLBAR_SELECT}
-                value={filters.state ?? ''}
-                onChange={(e) =>
-                  // Status is not part of the window. Changing it keeps the exact
-                  // since/until on screen: re-deriving them from a preset here
-                  // widened a one-day link back to seven days.
-                  setFilters((current) => ({
-                    ...current,
-                    state: (e.target.value || undefined) as AgentJobApiState | undefined,
-                  }))
+          {level !== 'sandboxes' && (
+            <div role="group" aria-label="Filters" className="ml-auto flex items-center gap-2">
+              {windowDays === 'custom' && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {shortDay(filters.since)} – {shortDay(filters.until)}
+                </span>
+              )}
+              <label className="shrink-0">
+                <span className="sr-only">Turn created</span>
+                <select
+                  className={TOOLBAR_SELECT}
+                  value={windowDays}
+                  onChange={(e) => {
+                    // Choosing a preset is the only action that re-anchors the
+                    // window, and it keeps every other filter, including the
+                    // identity a usage link arrived with.
+                    const nextDays = Number(e.target.value);
+                    setLinkedWindow(false);
+                    setFilters((current) => windowFilters(nextDays, current));
+                  }}
+                >
+                  <option value={7}>Last 7 days</option>
+                  <option value={30}>Last 30 days</option>
+                  <option value={90}>Last 90 days</option>
+                  {windowDays === 'custom' && <option value="custom">Custom</option>}
+                </select>
+              </label>
+              <label className="shrink-0">
+                <span className="sr-only">Turn result</span>
+                <select
+                  className={TOOLBAR_SELECT}
+                  value={filters.state ?? ''}
+                  onChange={(e) =>
+                    // Status is not part of the window. Changing it keeps the exact
+                    // since/until on screen: re-deriving them from a preset here
+                    // widened a one-day link back to seven days.
+                    setFilters((current) => ({
+                      ...current,
+                      state: (e.target.value || undefined) as AgentJobApiState | undefined,
+                    }))
+                  }
+                >
+                  <option value="">All results</option>
+                  {STATES.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className={ICON_BUTTON}
+                type="button"
+                aria-label="Refresh"
+                title="Refresh"
+                disabled={loading}
+                onClick={() =>
+                  setFilters((current) =>
+                    // A linked window is absolute and stays as linked. Any other
+                    // window keeps its own length and re-anchors at now, which is
+                    // what refreshing a list is for.
+                    linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
+                  )
                 }
               >
-                <option value="">All results</option>
-                {STATES.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              className={ICON_BUTTON}
-              type="button"
-              aria-label="Refresh"
-              title="Refresh"
-              disabled={loading}
-              onClick={() =>
-                setFilters((current) =>
-                  // A linked window is absolute and stays as linked. Any other
-                  // window keeps its own length and re-anchors at now, which is
-                  // what refreshing a list is for.
-                  linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
-                )
-              }
-            >
-              <svg
-                aria-hidden
-                viewBox="0 0 20 20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={1.6}
-                className="h-4 w-4"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
-                />
-              </svg>
-            </button>
-          </div>
+                <svg
+                  aria-hidden
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
+                  className="h-4 w-4"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
+                  />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
 
         {linked.error ? (
           // A broken link has nothing to retry: the URL has to change.
           <ErrorNotice>{linked.error}</ErrorNotice>
+        ) : level === 'sandboxes' ? (
+          <SandboxResults onDenied={onDenied} />
         ) : level === 'sessions' ? (
           <SessionResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         ) : level === 'turns' ? (
