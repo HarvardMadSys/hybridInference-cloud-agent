@@ -717,6 +717,63 @@ async def test_an_allowed_tool_is_forwarded(client, upstream):
     assert len(upstream.requests) == 1
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Python refuses the byte; a server that decodes with replacement
+        # characters still reads a tools/call for the denied tool.
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"get_issue","arguments":{"note":"\xff"}}}',
+        # Invisible to the decision here; the method itself to a server whose
+        # JSON decoder matches field names without regard to case.
+        b'{"jsonrpc":"2.0","id":1,"METHOD":"tools/call","params":{"name":"get_issue"}}',
+        b"{not json",
+    ],
+)
+async def test_a_body_the_relay_cannot_read_never_reaches_the_upstream(
+    monkeypatch, store, upstream, body
+):
+    """What the relay could not decide on is refused, not handed on to decide."""
+    store.bindings = [_binding(rules={"get_issue": {"policy": "deny", "fingerprint": ""}})]
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            content=body,
+            headers={**_auth(), "content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32700
+    assert upstream.requests == []
+    assert store.created_invocations == []
+
+
+async def test_the_upstream_receives_the_message_the_relay_decided(client, upstream):
+    """Forwarded is the relay's own encoding of what it read, not the sandbox's bytes.
+
+    The duplicate key is read here as its last value, ``get_issue``. A server
+    that keeps the first would have run ``create_issue`` -- which discovery
+    never saw -- had the original bytes, or a charset the sandbox named for
+    them, travelled on.
+    """
+    body = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"create_issue","name":"get_issue","arguments":{"q":"caf\xc3\xa9"}}}'
+    )
+    response = await client.post(
+        f"/v1/agent/mcp/{_ALIAS}",
+        content=body,
+        headers={**_auth(), "content-type": "application/json; charset=utf-16"},
+    )
+
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert b"create_issue" not in sent.content
+    assert sent.content.isascii()
+    assert json.loads(sent.content) == json.loads(body)
+    assert sent.headers.get_list("content-type") == ["application/json"]
+
+
 async def test_a_denied_tool_is_never_advertised(monkeypatch, store, upstream):
     """A model cannot be talked into a tool it was never offered."""
     upstream.body = _catalogue("get_issue", "create_issue")

@@ -34,6 +34,14 @@ a reply on the long-lived ``GET`` stream rather than on the ``POST`` that asked
 for it, and an id table built from one request cannot recognize a catalogue
 arriving on the other. Matching ``result.tools`` catches it wherever it lands,
 and needs no state to carry between requests.
+
+**What is forwarded is what was read.** The upstream does not parse a body the
+way this module does: a server that decodes invalid UTF-8 with replacement
+characters, keeps the first of two duplicate keys, or matches field names
+without regard to case reads a different message out of the same bytes. So a
+request is read once, strictly, and the upstream is sent this module's own
+encoding of that reading (:func:`canonical_request`) rather than the sandbox's
+bytes. A body that cannot be read exactly one way is refused, never passed on.
 """
 
 from __future__ import annotations
@@ -41,6 +49,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from cloud_agent.mcp.jsonrpc import PARSE_ERROR
 
 if TYPE_CHECKING:
     from cloud_agent.mcp.models import McpServer
@@ -64,6 +74,17 @@ MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_BUFFERED_RESPONSE_BYTES = MAX_FRAME_BYTES
 
 _FRAME_SEPARATOR = b"\n\n"
+
+#: The fields an authorization decision reads, on a message and on its params.
+#: A case variant of one (``METHOD``, ``Name``, ``params`` spelled with a long
+#: s) is invisible to the decision here and is the field itself to a server
+#: that folds case.
+_MESSAGE_FIELDS = frozenset({"jsonrpc", "id", "method", "params"})
+_PARAMS_FIELDS = frozenset({"name", "arguments", "uri"})
+
+
+class MalformedRequest(ValueError):
+    """A relayed body that cannot be read as exactly one JSON-RPC message."""
 
 
 @dataclass(frozen=True)
@@ -90,24 +111,83 @@ def _error(payload: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
+def _refuse_constant(name: str) -> Any:
+    """Refuse ``NaN`` and the infinities, which are not JSON."""
+    raise MalformedRequest(f"{name} is not a JSON value")
+
+
+def _refuse_case_variants(mapping: dict[str, Any], names: frozenset[str], where: str) -> None:
+    """Refuse a key that only folds to one of ``names``."""
+    for key in mapping:
+        if key not in names and key.casefold() in names:
+            raise MalformedRequest(f"{where} field {key!r} is not {key.casefold()!r}")
+
+
+def parse_request(body: bytes) -> Any:
+    """Read a relayed body as exactly one JSON-RPC message or batch, or refuse it.
+
+    Strict UTF-8, strict JSON, and no case variants of the fields a decision
+    reads. Each of those is a way for the upstream to see a different message
+    than the one authorized here; duplicate keys are not refused, because
+    :func:`canonical_request` forwards only the value this read kept.
+    """
+    try:
+        document = json.loads(body.decode("utf-8"), parse_constant=_refuse_constant)
+    except MalformedRequest:
+        raise
+    except (ValueError, RecursionError) as exc:
+        # Invalid UTF-8 included: ``UnicodeDecodeError`` is a ``ValueError``.
+        raise MalformedRequest(str(exc)) from exc
+    for message in document if isinstance(document, list) else [document]:
+        if not isinstance(message, dict):
+            continue
+        _refuse_case_variants(message, _MESSAGE_FIELDS, "message")
+        params = message.get("params")
+        if isinstance(params, dict):
+            _refuse_case_variants(params, _PARAMS_FIELDS, "params")
+    return document
+
+
+def canonical_request(body: bytes) -> bytes:
+    """Re-encode a relayed body as the message :func:`parse_request` read from it.
+
+    This, not the sandbox's bytes, is what is authorized and forwarded. ASCII
+    only, so no charset the sandbox names can make it decode differently.
+    """
+    document = parse_request(body)
+    try:
+        return json.dumps(document, ensure_ascii=True, allow_nan=False).encode()
+    except ValueError as exc:
+        # A number too large for a float, read as an infinity.
+        raise MalformedRequest(str(exc)) from exc
+
+
+def parse_error(exc: MalformedRequest) -> dict[str, Any]:
+    """Build the JSON-RPC reply for a body that was refused unread."""
+    return {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {
+            "code": PARSE_ERROR,
+            "message": f"The request is not a JSON-RPC message this relay can read: {exc}",
+        },
+    }
+
+
 def plan_request(body: bytes, server: McpServer) -> RequestPlan:
     """Decide whether a request may be forwarded.
 
-    Unparseable bodies are forwarded untouched: the upstream server owns the
-    protocol and will answer a malformed request better than a guess here
-    would. Nothing is weakened by that — a body the proxy cannot parse is not a
-    ``tools/call`` it failed to notice, since noticing one is the same parse,
-    and the response filter is independent of this decision.
+    A body that cannot be read is refused, not forwarded for the upstream to
+    answer. The upstream is not the same parser: a server that reads a
+    ``tools/call`` out of bytes this module could not read would run a tool
+    nothing here ever checked, with the owner's credential.
     """
     # No early return for an "unfiltered" server: there is no such server. An
-    # empty reachable set means nothing is callable, and a body that cannot be
-    # parsed is still forwarded untouched -- the response filter is independent
-    # of this decision, so nothing is weakened by letting the upstream answer a
-    # malformed request itself.
+    # empty reachable set means nothing is callable.
     try:
-        document = json.loads(body or b"{}")
-    except (json.JSONDecodeError, ValueError):
-        return RequestPlan()
+        document = parse_request(body)
+    except MalformedRequest as exc:
+        return RequestPlan(rejection=parse_error(exc))
 
     batch = document if isinstance(document, list) else [document]
     blocked: list[str] = []
@@ -253,10 +333,14 @@ __all__ = [
     "METHOD_NOT_FOUND",
     "TOOLS_CALL",
     "TOOLS_LIST",
+    "MalformedRequest",
     "RequestPlan",
     "SseFilter",
+    "canonical_request",
     "filter_json_body",
     "filter_message",
     "filter_sse_frame",
+    "parse_error",
+    "parse_request",
     "plan_request",
 ]

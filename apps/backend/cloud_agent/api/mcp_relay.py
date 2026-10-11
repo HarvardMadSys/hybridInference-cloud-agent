@@ -72,8 +72,12 @@ from cloud_agent.mcp.transports import TransportError, guard_target, pinned_tran
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
     METHOD_NOT_FOUND,
+    MalformedRequest,
     SseFilter,
+    canonical_request,
     filter_json_body,
+    parse_error,
+    parse_request,
     plan_request,
 )
 from cloud_agent.settings import number_setting
@@ -124,9 +128,11 @@ _APPROVAL_POLL_S = 1.0
 # above all, but equally Cookie, X-Forwarded-*, and whatever else the CLI or an
 # intermediary attaches -- is dropped: the upstream sees a request this control
 # plane made, carrying the owner's credential and nothing of the sandbox's.
+# Content-Type is not forwarded either: the body is the relay's own encoding,
+# so the relay names its type, and a charset the sandbox named would describe
+# bytes that are not the ones sent.
 _FORWARD_TO_UPSTREAM = (
     "accept",
-    "content-type",
     "mcp-session-id",
     "mcp-protocol-version",
     "last-event-id",
@@ -785,11 +791,15 @@ async def _capability_decision(
     the platform would be proxying a capability it cannot reason about, with a
     credential it is responsible for. Notifications are the exception, because
     they ask for nothing and carry no reply.
+
+    A body that cannot be read is refused for the same reason. The upstream is
+    not this parser, and a ``tools/call`` it reads out of bytes this could not
+    read would reach the server without an allowlist or an approval.
     """
     try:
-        document = json.loads(body or b"{}")
-    except (json.JSONDecodeError, ValueError):
-        return None
+        document = parse_request(body)
+    except MalformedRequest as exc:
+        return parse_error(exc)
     payloads = document if isinstance(document, list) else [document]
     for payload in payloads:
         if not isinstance(payload, dict):
@@ -939,12 +949,15 @@ async def _proxy(
             f"The {server.name!r} MCP connection could not be reached: {exc}",
         ) from exc
     assert server.url is not None
+    headers = _upstream_headers(request, server)
+    if body:
+        headers["content-type"] = "application/json"
     client = build_upstream_client(server.request_timeout_s)
     upstream_request = client.build_request(
         method,
         server.url,
         content=body or None,
-        headers=_upstream_headers(request, server),
+        headers=headers,
     )
     try:
         upstream = await client.send(upstream_request, stream=True)
@@ -1739,7 +1752,13 @@ async def mcp_post(
         request_id = payload.get("id") if isinstance(payload, dict) else None
         return JSONResponse(_error_reply(request_id, str(exc.detail)))
     assert store is not None
-    body = await request.body()
+    try:
+        # Decided and forwarded as one message: this relay's encoding of what
+        # it read, never the sandbox's bytes. An upstream that parses those
+        # bytes another way would otherwise run a call nothing here checked.
+        body = canonical_request(await request.body())
+    except MalformedRequest as exc:
+        return JSONResponse(parse_error(exc), status_code=400)
 
     held = await _capability_decision(
         authorized,

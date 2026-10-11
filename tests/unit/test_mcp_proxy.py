@@ -23,8 +23,17 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from cloud_agent.mcp.jsonrpc import PARSE_ERROR
 from cloud_agent.mcp.models import McpServer, Transport
-from cloud_agent.mcp_proxy import SseFilter, filter_json_body, plan_request
+from cloud_agent.mcp_proxy import (
+    MalformedRequest,
+    SseFilter,
+    canonical_request,
+    filter_json_body,
+    plan_request,
+)
 
 _GATEWAY = "https://gateway.example.com"
 _TOKEN = "ajt.job.attempt.signature"
@@ -91,9 +100,86 @@ def test_a_batch_with_one_blocked_tool_is_refused_whole():
     assert [entry["id"] for entry in plan.rejection] == [2]
 
 
-def test_a_malformed_body_is_passed_through_rather_than_guessed_at():
-    """The upstream owns the protocol and answers a bad request better."""
-    assert not plan_request(b"{not json", _server()).rejected
+def test_a_malformed_body_is_refused_rather_than_passed_through():
+    """The upstream is not this parser, so nothing unread is forwarded to it."""
+    plan = plan_request(b"{not json", _server())
+    assert plan.rejected
+    assert plan.rejection["error"]["code"] == PARSE_ERROR
+    assert plan.rejection["id"] is None
+
+
+def test_a_tool_call_with_invalid_utf8_is_refused_not_forwarded():
+    """A server that decodes with replacement still reads the tool's name.
+
+    Python refuses the byte and a Node or Go server substitutes U+FFFD for it,
+    so passing the body through would deliver a ``tools/call`` for a blocked
+    tool that this check never saw.
+    """
+    body = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"create_issue","arguments":{"note":"\xff"}}}'
+    )
+    plan = plan_request(body, _server())
+    assert plan.rejected
+    assert plan.rejection["error"]["code"] == PARSE_ERROR
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"jsonrpc": "2.0", "id": 1, "METHOD": "tools/call", "params": {"name": "create_issue"}},
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "Params": {"name": "create_issue"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "param\N{LATIN SMALL LETTER LONG S}": {"name": "x"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "get_issue", "NAME": "create_issue"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "get_issue", "Arguments": {"hidden": True}},
+        },
+        [{"jsonrpc": "2.0", "id": 1, "Method": "tools/call", "params": {"name": "x"}}],
+    ],
+)
+def test_a_case_variant_of_a_decided_field_is_refused(message):
+    """A server that folds case reads ``METHOD`` as the method this never saw."""
+    body = json.dumps(message, ensure_ascii=False).encode()
+    with pytest.raises(MalformedRequest):
+        canonical_request(body)
+    assert plan_request(body, _server()).rejected
+
+
+@pytest.mark.parametrize("body", [b"", b"\xef\xbb\xbf{}", b"[NaN]", b"[1e400]", b"[" * 100_000])
+def test_bodies_without_one_exact_reading_are_refused(body):
+    """Empty, BOM-led, non-JSON numbers, and nesting too deep to read."""
+    with pytest.raises(MalformedRequest):
+        canonical_request(body)
+
+
+def test_what_is_forwarded_is_exactly_what_was_read():
+    """A duplicate key reaches the upstream as the one value checked here.
+
+    A first-key-wins server handed the original bytes would run
+    ``create_issue``; handed the canonical body, there is nothing else to read.
+    """
+    body = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"create_issue","name":"get_issue","arguments":{"q":"caf\xc3\xa9"}}}'
+    )
+    forwarded = canonical_request(body)
+    assert b"create_issue" not in forwarded
+    assert forwarded.isascii()
+    assert json.loads(forwarded) == json.loads(body)
+    assert not plan_request(forwarded, _server()).rejected
 
 
 def test_an_empty_reachable_set_is_nothing_not_everything():
