@@ -25,7 +25,7 @@ async def test_claim_retry_upgrade_preserves_existing_jobs_and_round_trips(store
     try:
         downgrade_to(config, "0045_admin_sandbox_deletion")
         for _ in range(2):
-            apply_migrations(config)
+            apply_migrations(config, "0046_job_claim_retry")
             async with pool.acquire() as conn:
                 assert (
                     await conn.fetchval("SELECT version_num FROM alembic_version")

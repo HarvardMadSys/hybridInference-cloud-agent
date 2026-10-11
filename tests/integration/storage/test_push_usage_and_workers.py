@@ -640,10 +640,12 @@ async def test_the_hints_and_wake_ups_go_with_a_downgrade_and_come_back(store, p
         return {row["proname"] for row in rows}
 
     assert len(await functions()) == 9
+    # Seed with the current writer before restoring the historical schema:
+    # newer thread columns need not exist at the revision under test.
+    job = await _create_job(store)
     try:
         downgrade_to(config, "0031_owner_change_notify")
         assert await functions() == set()
-        job = await _create_job(store)
         background = await _listen(BACKGROUND)
         try:
             async with pool.acquire() as conn:
