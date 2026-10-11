@@ -72,6 +72,10 @@ restores built-in defaults. Database access, identity, encryption, security and
 deployment infrastructure remain bootstrap configuration. See the
 [Settings runbook](docs/operations.md#admin-settings) for migration and key setup.
 
+**Admin → Database** opens the optional pgAdmin website for PostgreSQL
+administration. Enable the private service and its separate login using the
+[pgAdmin runbook](docs/operations.md#pgadmin).
+
 ## Architecture
 
 ```mermaid

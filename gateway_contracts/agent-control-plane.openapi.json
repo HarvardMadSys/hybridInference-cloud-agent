@@ -7880,6 +7880,36 @@
         "title": "CreateUpload",
         "type": "object"
       },
+      "DatabaseTools": {
+        "description": "Whether the configured pgAdmin is reachable, and where to open it.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "enabled",
+          "available"
+        ],
+        "title": "DatabaseTools",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "description": "Approve or deny one pending call.",
@@ -16677,6 +16707,56 @@
           }
         },
         "summary": "Get Admin Conversation"
+      }
+    },
+    "/admin/agent/database-tools": {
+      "get": {
+        "description": "Show a launch link only while the private service answers its health ping.",
+        "operationId": "database_tools_admin_agent_database_tools_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseTools"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Database Tools",
+        "tags": [
+          "admin-database"
+        ]
       }
     },
     "/admin/agent/host-settings": {

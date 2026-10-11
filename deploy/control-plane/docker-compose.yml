@@ -50,6 +50,9 @@ services:
       # proxy in front would serve that cookie over plain HTTP.
       - "${AGENT_CONTROL_PLANE_BIND:-127.0.0.1}:${AGENT_CONTROL_PLANE_PORT:-8000}:8000"
     environment:
+      # Optional pgAdmin service, reached only through the admin-checked API.
+      AGENT_PGADMIN_URL: ${AGENT_PGADMIN_URL:-}
+      AGENT_PGADMIN_PUBLIC_URL: ${AGENT_PGADMIN_PUBLIC_URL:-}
       # --- Database ---------------------------------------------------------
       # A database this service owns outright. Sharing the gateway's would
       # reintroduce exactly the coupling the split removes.
@@ -359,6 +362,35 @@ services:
     networks: [control-plane]
     restart: unless-stopped
 
+  # Optional database UI. No host port: every browser request must cross the
+  # control plane's current agent.admin check, then pgAdmin's own login.
+  pgadmin:
+    profiles: [pgadmin]
+    image: dpage/pgadmin4:9.18@sha256:c332c5f6dfba995d9ebc4af261d93506d6876085d712eaaa3defc8dd1a3f26de
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${AGENT_PGADMIN_EMAIL:-}
+      PGADMIN_DEFAULT_PASSWORD_FILE: /run/secrets/pgadmin-password
+      PGADMIN_DISABLE_POSTFIX: "1"
+      PGADMIN_LISTEN_PORT: "5050"
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+      PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: "1"
+      PGADMIN_CONFIG_SESSION_COOKIE_SECURE: ${AGENT_PGADMIN_COOKIE_SECURE:-True}
+    secrets: [pgadmin-password]
+    volumes:
+      - agent-pgadmin:/var/lib/pgadmin
+      - ${AGENT_PGADMIN_SERVERS_FILE:-./pgadmin-servers.json}:/pgadmin4/servers.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [control-plane]
+    healthcheck:
+      test: ["CMD", "/venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5050/misc/ping', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -395,3 +427,8 @@ networks:
 
 volumes:
   agent-postgres:
+  agent-pgadmin:
+
+secrets:
+  pgadmin-password:
+    file: ${AGENT_PGADMIN_PASSWORD_FILE:-./pgadmin-password}

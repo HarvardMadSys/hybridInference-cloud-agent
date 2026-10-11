@@ -23,6 +23,7 @@ Start with the task you need:
 | Start or inspect the host service | [Running self-hosted](#running-self-hosted) |
 | Enable isolation for untrusted repositories | [Provisioning Kata](#provisioning-kata-on-a-runner-host) |
 | Change application behavior, integrations, or appearance | [Admin Settings](#admin-settings) |
+| Open PostgreSQL administration | [pgAdmin](#pgadmin) |
 | Change concurrency, sandbox settings, or placement | [How many runners](#how-many-runners), [which machine runs the jobs](#which-machine-runs-the-jobs) |
 | Add a host on another machine | [Tunnels and broker routing](#running-runners-on-another-machine) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
@@ -79,6 +80,61 @@ authentication, host/broker credentials, security and isolation policy,
 networking and listeners, build routing, mounted files, and trusted compute
 deployment profiles remain deployment configuration. These bootstrap names
 appear on the page with hidden values. See [the environment inventory](../ENVIRONMENT.md#settings-and-bootstrap-configuration).
+
+## pgAdmin
+
+Open **Admin → Database → Open pgAdmin** to manage PostgreSQL. The page checks
+the private service before offering the link. The existing same-origin API
+proxy carries pgAdmin pages, assets, forms, downloads, and SQL requests, so the
+gateway and standalone edge need no new public route or port. Every request
+requires current `agent.admin` permission. pgAdmin retains its own login and
+CSRF checks; Agent cookies and bearer credentials are never sent upstream.
+
+Enable the optional service in the control-plane deployment's `.env`:
+
+```dotenv
+COMPOSE_PROFILES=pgadmin
+AGENT_PGADMIN_URL=http://pgadmin:5050
+AGENT_PGADMIN_EMAIL=database-admin@example.org
+AGENT_PGADMIN_PASSWORD_FILE=/srv/cloud-agent-secrets/pgadmin-password
+```
+
+Retain any existing profiles, for example `COMPOSE_PROFILES=edge,pgadmin`.
+Provision the password file privately outside the checkout and make it readable
+by pgAdmin's UID 5050; Compose mounts it as `/run/secrets/pgadmin-password`.
+Run the normal control-plane deployment workflow. An existing stack can start
+the service and apply its new control-plane environment with:
+
+```bash
+docker compose --env-file .env -f <selected-compose-file> up -d pgadmin control-plane
+```
+
+Use the release-generated Compose file for an artifact deployment. Its bundled
+server definitions are resolved from the selected recipe. The default public
+URL is `<AGENT_WEB_BASE_URL>/api/admin/agent/pgadmin/`; set
+`AGENT_PGADMIN_PUBLIC_URL` if the API has a different public prefix.
+
+Sign in with the configured pgAdmin email and password. The initial server
+definition points to `postgres:5432`, database/user `cloudagent`. Enter the
+deployment's PostgreSQL password when connecting. If the database name or user
+differs, supply a custom `AGENT_PGADMIN_SERVERS_FILE` before initialization, or
+edit the connection in pgAdmin. Database passwords are not preloaded or exposed
+in the dashboard. Saved accounts and connections persist in the separate
+`agent-pgadmin` volume; changing initial credentials does not reset an existing
+account. Manage that account in pgAdmin.
+
+For the HTTP-only local stack, use `AGENT_PGADMIN_COOKIE_SECURE=False` alongside
+the existing local Agent-cookie setting. Keep the default `True` for HTTPS.
+If the dashboard reports unavailable, inspect `docker compose logs pgadmin`
+and its health state. Missing account settings, an unreadable password file,
+or unavailable PostgreSQL prevent startup. Opening pgAdmin records
+`agent.database.pgadmin.open` in the Agent audit log; pgAdmin manages SQL
+activity itself. Removing `AGENT_PGADMIN_URL` disables access immediately after
+restarting the control plane; removing the profile and stopping pgAdmin
+preserves its volume.
+
+See [pgAdmin's container documentation](https://www.pgadmin.org/docs/pgadmin4/9.18/container_deployment.html)
+for account and server initialization behavior.
 
 ## What a job does
 

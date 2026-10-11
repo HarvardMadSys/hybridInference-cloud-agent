@@ -39,6 +39,8 @@ logger = get_logger(__name__)
 #: The admin observation reads. Their bodies are time-varying and describe
 #: other users' runs, so no intermediary may store one.
 ADMIN_READ_PREFIXES = (
+    "/admin/agent/database-tools",
+    "/admin/agent/pgadmin",
     "/admin/agent/audit-log",
     "/admin/agent/runs",
     "/admin/agent/steps",
@@ -120,6 +122,7 @@ def create_app() -> FastAPI:
         admin_audit,
         admin_compute,
         admin_conversations,
+        admin_database,
         admin_hosts,
         admin_llm_requests,
         admin_measurements,
@@ -170,6 +173,7 @@ def create_app() -> FastAPI:
     # has no other credential yet.
     app.include_router(compute_registration.router)
     app.include_router(admin_conversations.router)
+    app.include_router(admin_database.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_sandboxes.router)
     app.include_router(admin_settings.router)

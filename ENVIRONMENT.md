@@ -97,6 +97,22 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | existing | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | **NEW** | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
 
+### pgAdmin database administration
+
+The optional `pgadmin` Compose profile adds **Admin → Database → Open pgAdmin**.
+The private service has no published port. Every request requires a current
+`agent.admin` decision; pgAdmin also requires its own account login. Its
+accounts, sessions, and saved connections persist in `agent-pgadmin`.
+
+| Variable | New? | Value / who provisions |
+|---|---|---|
+| `AGENT_PGADMIN_URL` | optional | Private pgAdmin origin; use `http://pgadmin:5050` for the bundled service. Empty disables the launch link. Credentials, paths, queries, and fragments are refused. Set `COMPOSE_PROFILES=pgadmin` to start the service, or add `pgadmin` to existing profiles. |
+| `AGENT_PGADMIN_PUBLIC_URL` | optional override | Full public proxy URL ending in `/admin/agent/pgadmin`. Normally derived from `AGENT_WEB_BASE_URL` plus `/api/admin/agent/pgadmin`, preserving `/agents` when present. Set explicitly for a separately mounted API. Never derived from browser headers. |
+| `AGENT_PGADMIN_EMAIL` | required with profile | Email for the initial pgAdmin administrator account. Account initialization runs only against a new `agent-pgadmin` volume. Manage later accounts and password changes in pgAdmin. |
+| `AGENT_PGADMIN_PASSWORD_FILE` | required with profile | Absolute path to an operator-owned password file, mounted as a Docker secret. Keep it outside the checkout, private and readable by the container's UID 5050. Passwords never belong in Compose, server definitions, or source control. |
+| `AGENT_PGADMIN_SERVERS_FILE` | optional | Read-only server-definition JSON. Defaults to the bundled `pgadmin-servers.json`, which registers `postgres:5432` with database/user `cloudagent` and no password. Supply an absolute custom file if `AGENT_POSTGRES_USER` or `AGENT_POSTGRES_DB` differs. Artifact deployments resolve the default file from the selected release recipe. Imported on first initialization; later edits are made in pgAdmin. |
+| `AGENT_PGADMIN_COOKIE_SECURE` | optional | pgAdmin Python boolean, default `True`. Use `False` only for an HTTP local stack. The proxy independently scopes pgAdmin cookies to its public route, sets HttpOnly and SameSite=Lax, and requires Secure on HTTPS. |
+
 ### Gateway contracts
 
 | Variable | New? | Value / who provisions |
@@ -131,7 +147,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
-| `COMPOSE_PROFILES` (`edge`) | **NEW** | Compose-level, read by `docker compose` not by this service. `edge` starts the nginx edge for a deployment that owns its own hostname: `/api/*` to the control plane with the prefix stripped, everything else to the web app, on one loopback port for the tunnel to point at. Unset under the gateway's hostname, where the console does that job. |
+| `COMPOSE_PROFILES` (`edge`, `pgadmin`) | **NEW** | Compose-level, read by `docker compose` not by this service. `edge` starts the nginx edge for a deployment that owns its own hostname: `/api/*` to the control plane with the prefix stripped, everything else to the web app. `pgadmin` starts the private PostgreSQL administration UI. Combine profiles with commas, for example `edge,pgadmin`. |
 | `AGENT_EDGE_BIND` / `AGENT_EDGE_PORT` | **NEW** | Where the edge listens; defaults `127.0.0.1` / `3003`. Only meaningful with the `edge` profile. |
 | `AGENT_CONTROL_PLANE_BIND` / `AGENT_CONTROL_PLANE_PORT` | existing | Compose main-API binding, defaults `127.0.0.1` / `8000`. Put a TLS reverse proxy in front of public access. |
 | `AGENT_MCP_RELAY_BIND` / `AGENT_MCP_RELAY_PORT` | existing | Compose MCP-only listener binding, defaults `127.0.0.1` / `8001`. Keep sandbox tools on this listener. |

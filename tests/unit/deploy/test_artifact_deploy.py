@@ -87,6 +87,7 @@ with log.open("a") as f:
                        "deployed_at": os.getenv("AGENT_WEB_DEPLOYED_AT"),
                        "sandbox": os.getenv("AGENT_SANDBOX_IMAGE"),
                        "edge": os.getenv("AGENT_EDGE_CONFIG_FILE"),
+                       "pgadmin_servers": os.getenv("AGENT_PGADMIN_SERVERS_FILE"),
                        "physical_host": os.getenv("AGENT_PHYSICAL_HOST"),
                        "runner_host": os.getenv("AGENT_RUNNER_HOST")}) + "\n")
 if "config" in a and "--environment" in a:
@@ -269,6 +270,25 @@ def run(script: Path, env: dict, *arguments: str) -> tuple[subprocess.CompletedP
     log = Path(env["TEST_COMMAND_LOG"])
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, calls
+
+
+@pytest.mark.parametrize("custom_definitions", [False, True])
+def test_pgadmin_definitions_resolve_from_recipe_or_operator_override(
+    tmp_path: Path, custom_definitions: bool
+):
+    """The generated Compose file runs outside the extracted recipe directory."""
+    script, env = deployment(tmp_path, "control-plane")
+    definitions = script.parent / "pgadmin-servers.json"
+    if custom_definitions:
+        definitions = tmp_path / "custom-servers.json"
+        definitions.write_text('{"Servers": {}}\n')
+        with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
+            config.write(f"AGENT_PGADMIN_SERVERS_FILE={definitions}\n")
+    result, calls = run(script, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    activation = next(call for call in calls if "--remove-orphans" in call["args"])
+    assert activation["pgadmin_servers"] == str(definitions)
+    assert definitions.is_file()
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])

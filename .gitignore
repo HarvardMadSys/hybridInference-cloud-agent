@@ -22,6 +22,7 @@ htmlcov/
 *.pem
 *.key
 .compute-secrets/
+pgadmin-password
 
 # Node / Next.js (apps/frontend/)
 node_modules/

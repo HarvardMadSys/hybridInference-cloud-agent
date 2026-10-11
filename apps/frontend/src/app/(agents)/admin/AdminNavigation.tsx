@@ -14,6 +14,7 @@ export function AdminNavigation({
     | 'usage'
     | 'measurements'
     | 'settings'
+    | 'database'
     | 'audit';
 }) {
   const section = current === 'runs' ? 'activity' : current;
@@ -33,6 +34,7 @@ export function AdminNavigation({
         { key: 'usage', label: 'Usage', href: '/admin/usage' },
         { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
         { key: 'settings', label: 'Settings', href: '/admin/settings' },
+        { key: 'database', label: 'Database', href: '/admin/database' },
         { key: 'audit', label: 'Audit log', href: '/admin/audit' },
       ].map((item) => (
         <Link

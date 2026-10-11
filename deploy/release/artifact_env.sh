@@ -87,6 +87,11 @@ prepare_artifact_deployment() {
       source_compose="$ARTIFACT_RECIPE_ROOT/deploy/control-plane/docker-compose.yml"
       AGENT_EDGE_CONFIG_FILE="$ARTIFACT_RECIPE_ROOT/deploy/control-plane/edge.nginx.conf"
       export AGENT_EDGE_CONFIG_FILE
+      # Generated Compose lives in DEPLOY_ROOT; the bundled definitions live
+      # in the selected recipe. Preserve an operator-owned override.
+      AGENT_PGADMIN_SERVERS_FILE="$(artifact_env_value AGENT_PGADMIN_SERVERS_FILE)"
+      AGENT_PGADMIN_SERVERS_FILE="${AGENT_PGADMIN_SERVERS_FILE:-$ARTIFACT_RECIPE_ROOT/deploy/control-plane/pgadmin-servers.json}"
+      export AGENT_PGADMIN_SERVERS_FILE
       ;;
     host)
       COMPOSE_FILE="$PWD/deploy/host/.release-${SHA}.yml"
