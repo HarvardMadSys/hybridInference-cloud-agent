@@ -1,5 +1,12 @@
 import type { AgentJob } from './types';
 
+/** All tabs watching one published boundary share the server's submission receipt. */
+export function watchPullRequestRequestId(job: AgentJob): string {
+  const boundary =
+    job.workspaceEpoch === undefined ? `job:${job.id}` : `epoch:${job.workspaceEpoch}`;
+  return `watch-pr:v1:${job.threadId ?? job.id}:${boundary}`;
+}
+
 /** A follow-up action uses the published PR, never an inferred branch URL. */
 export function watchPullRequestPrompt(job: AgentJob): string {
   return [

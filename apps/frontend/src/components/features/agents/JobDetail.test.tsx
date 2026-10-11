@@ -696,9 +696,10 @@ describe('JobDetail', () => {
     fireEvent.click(watch);
 
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
-    const [threadId, body] = vi.mocked(submitThreadMessage).mock.calls[0];
+    const [threadId, body, options] = vi.mocked(submitThreadMessage).mock.calls[0];
     expect(threadId).toBe('original-thread');
     expect(body).toEqual({ prompt: expect.any(String) });
+    expect(options).toEqual({ requestId: 'watch-pr:v1:original-thread:job:ajob_1' });
     expect(body.prompt).toContain(prUrl);
     expect(body.prompt).toContain('owner/repository');
     expect(body.prompt).toContain('agent/ajob_1');
@@ -744,9 +745,11 @@ describe('JobDetail', () => {
       fireEvent.click(button);
     }
     expect(submitThreadMessage).toHaveBeenCalledTimes(1);
-    expect(submitThreadMessage).toHaveBeenCalledWith('original-thread', {
-      prompt: expect.stringContaining(prUrl),
-    });
+    expect(submitThreadMessage).toHaveBeenCalledWith(
+      'original-thread',
+      { prompt: expect.stringContaining(prUrl) },
+      { requestId: 'watch-pr:v1:original-thread:job:ajob_1' },
+    );
     const prompt = vi.mocked(submitThreadMessage).mock.calls[0][1].prompt;
     await act(async () =>
       finishSend({
@@ -819,6 +822,58 @@ describe('JobDetail', () => {
     expect(originalWatch).toBeEnabled();
     fireEvent.click(originalWatch);
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+  });
+
+  it('reuses a published workspace request across mounts and historical turns, then uses a new key after publication', async () => {
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      conversationState: 'idle',
+      workspacePublicationState: 'published',
+      workspaceEpoch: 7,
+      prUrl: 'https://github.com/owner/repository/pull/7',
+    });
+    const existingReceipt = { pending: null, job: { id: 'ajob_watch_shared' } } as never;
+    vi.mocked(submitThreadMessage)
+      .mockResolvedValueOnce(existingReceipt)
+      .mockResolvedValueOnce(existingReceipt)
+      .mockResolvedValueOnce({ pending: null, job: { id: 'ajob_watch_next' } } as never);
+    const first = render(<JobDetail job={job} userId="alice" />);
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(watch).toBeEnabled());
+    fireEvent.click(watch);
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
+    const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
+    expect(firstRequestId).toBe('watch-pr:v1:original-thread:epoch:7');
+    first.unmount();
+
+    window.history.pushState(null, '', '/ajob_older');
+    const second = render(
+      <JobDetail job={{ ...job, id: 'ajob_older', turnNo: 2 }} userId="alice" />,
+    );
+    const historicalWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(historicalWatch).toBeEnabled());
+    fireEvent.click(historicalWatch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
+    const [, historicalBody, historicalOptions] = vi.mocked(submitThreadMessage).mock.calls[1];
+    expect(historicalOptions?.requestId).toBe(firstRequestId);
+    expect(historicalBody).toEqual(vi.mocked(submitThreadMessage).mock.calls[0][1]);
+
+    second.rerender(
+      <JobDetail
+        job={{ ...job, id: 'ajob_published_next', turnNo: 3, workspaceEpoch: 8 }}
+        userId="alice"
+      />,
+    );
+    const nextWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    await waitFor(() => expect(nextWatch).toBeEnabled());
+    fireEvent.click(nextWatch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_next'));
+    const nextRequestId = vi.mocked(submitThreadMessage).mock.calls[2][2]?.requestId;
+    expect(nextRequestId).toBe('watch-pr:v1:original-thread:epoch:8');
+    expect(nextRequestId).not.toBe(firstRequestId);
   });
 
   it.each([
@@ -1016,9 +1071,11 @@ describe('JobDetail', () => {
       expect(screen.queryByRole('region', { name: 'Queued messages' })).not.toBeInTheDocument();
       fireEvent.click(watch);
       await waitFor(() =>
-        expect(submitThreadMessage).toHaveBeenCalledWith('original-thread', {
-          prompt: expect.stringContaining('https://github.com/owner/repository/pull/7'),
-        }),
+        expect(submitThreadMessage).toHaveBeenCalledWith(
+          'original-thread',
+          { prompt: expect.stringContaining('https://github.com/owner/repository/pull/7') },
+          { requestId: 'watch-pr:v1:original-thread:job:ajob_1' },
+        ),
       );
     },
   );
@@ -1117,6 +1174,9 @@ describe('JobDetail', () => {
     for (const [, body] of vi.mocked(submitThreadMessage).mock.calls) {
       expect(body).toEqual({ prompt: expect.stringContaining(prUrl) });
     }
+    const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
+    expect(firstRequestId).toBe('watch-pr:v1:original-thread:job:ajob_1');
+    expect(vi.mocked(submitThreadMessage).mock.calls[1][2]?.requestId).toBe(firstRequestId);
     expect(deleteAttachment).not.toHaveBeenCalled();
     expect(forkAgentJob).not.toHaveBeenCalled();
 

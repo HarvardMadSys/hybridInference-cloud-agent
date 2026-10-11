@@ -104,7 +104,7 @@ import {
 import { useFirstRun } from './firstRun';
 import { SideChat } from './SideChat';
 import { codeReviewPrompt } from './codeReview';
-import { watchPullRequestPrompt } from './watchPullRequest';
+import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
 import { WorkspaceTabBar } from './WorkspaceTabBar';
 import { useWorkspaceTabs, type WorkspaceTab } from './useWorkspaceTabs';
 import {
@@ -1609,7 +1609,13 @@ export function JobDetail({
     try {
       // This action sends its own message. Unsent text, uploads and composer
       // selections belong to the owner's next message and stay in place.
-      const result = await submitThreadMessage(threadId, { prompt: watchPrPrompt });
+      // The server replays this receipt under the thread lock, including for
+      // another tab viewing a different turn of the same published workspace.
+      const result = await submitThreadMessage(
+        threadId,
+        { prompt: watchPrPrompt },
+        { requestId: watchPullRequestRequestId(job) },
+      );
       if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
       // Keep the completed source action closed while the next turn loads.
       // Queued watches are guarded by their queue card, which can be removed.
