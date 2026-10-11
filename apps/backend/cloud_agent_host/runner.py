@@ -2572,16 +2572,16 @@ def _run_shared_live_attempt(
         # Before the turn is admitted, so the agent never observes a half-written
         # directory.
         stage = "uploads"
-        imported_uploads = (
-            0
-            if recovered_initial
-            else _import_uploads(
-                job=job,
-                control=control,
-                manager=manager,
-                spec=spec,
-                fresh_container=not has_context,
-            )
+        imported_uploads = _import_uploads(
+            job=job,
+            control=control,
+            manager=manager,
+            spec=spec,
+            # A recovered baseline belongs to the same retained container, so
+            # its earlier thread uploads are already present. A replacement
+            # first-turn job can still add files of its own and must import the
+            # thread's current attachment set before prompt admission.
+            fresh_container=not has_context and not recovered_initial,
         )
         if imported_uploads:
             control.append_event(

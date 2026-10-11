@@ -463,7 +463,7 @@ class SandboxArchiveController:
         members: Sequence[SharedMemberManifest],
     ) -> dict[str, object]:
         """Probe using the immutable service revision acquired for this call."""
-        slot, _marker = self._acquire_initial_slot(
+        slot, marker = self._acquire_initial_slot(
             backend,
             expected_container_id=expected_container_id,
             preparation_id=preparation_id,
@@ -471,10 +471,17 @@ class SandboxArchiveController:
         if slot is None:
             return {"enabled": False, "prepared": False, "stored": False}
         try:
+            # The marker names the activation that created the immutable
+            # baseline. A later never-settled job may recover it, but recovery
+            # must continue using that original identity all the way through
+            # the service's marker and S3 checks.
+            effective_preparation_id = (
+                marker.preparation_id if marker is not None else preparation_id
+            )
             return slot.service.probe_initial(
                 backend,
                 expected_container_id=expected_container_id,
-                preparation_id=preparation_id,
+                preparation_id=effective_preparation_id,
                 members=members,
             )
         finally:
@@ -504,7 +511,7 @@ class SandboxArchiveController:
                 return slot.service.probe_initial(
                     backend,
                     expected_container_id=expected_container_id,
-                    preparation_id=preparation_id,
+                    preparation_id=marker.preparation_id,
                     members=members,
                 )
             return slot.service.capture_initial(
@@ -611,7 +618,11 @@ class SandboxArchiveController:
                 raise SandboxArchiveBlocked(
                     "final archive is blocked by a prior native flush failure"
                 )
+        replace_uploaded_history = bool(
+            stopped and existing is not None and existing.state == "uploaded"
+        )
         added_pin = False
+        services_to_close: list[_ArchiveService] = []
         with self._condition:
             if self._closed or not self._started:
                 raise SandboxError("sandbox archive controller is not running")
@@ -619,7 +630,33 @@ class SandboxArchiveController:
             if policy is None:
                 raise SandboxError("sandbox archive policy has not been delivered")
             slot = self._final_pins.get(key)
-            if existing is not None:
+            if replace_uploaded_history:
+                assert existing is not None
+                if slot is not None and slot.policy != existing.policy:
+                    raise SandboxError(
+                        "final archive in-memory pin does not match its durable policy"
+                    )
+                current_slot = self._current
+                if policy.enabled and (current_slot is None or current_slot.policy != policy):
+                    raise SandboxError("sandbox archive service does not match current policy")
+
+                # The uploaded marker completed the prior stopped lifecycle.
+                # Starting the same container again needs a fresh fence under
+                # today's policy so a start fail-stop cannot reuse that receipt.
+                if slot is not None:
+                    self._final_pins.pop(key, None)
+                    slot.pins.discard(key)
+                self._final_receipts.pop(key, None)
+                marker_policy = policy
+                slot = current_slot
+                if marker_policy.enabled:
+                    assert slot is not None
+                    self._final_pins[key] = slot
+                    slot.pins.add(key)
+                    added_pin = True
+                services_to_close = self._closable_locked()
+                self._condition.notify_all()
+            elif existing is not None:
                 # A marker that made it to the broker-private filesystem is
                 # the durable revision fence. A replacement broker may see a
                 # newer (or disabled) DB policy before it finishes stopping a
@@ -670,7 +707,8 @@ class SandboxArchiveController:
                     self._final_pins[key] = slot
                     slot.pins.add(key)
                     added_pin = True
-        if existing is not None:
+        self._close_services(services_to_close)
+        if existing is not None and not replace_uploaded_history:
             return
         marker = _FinalArchiveMarker.create(
             namespace=self._namespace,
@@ -690,7 +728,7 @@ class SandboxArchiveController:
                 expected_container_id=inspection.container_id,
             )
         except BaseException:
-            services_to_close: list[_ArchiveService] = []
+            services_to_close = []
             if added_pin:
                 with self._condition:
                     if self._final_pins.get(key) is slot:
@@ -871,7 +909,6 @@ class SandboxArchiveController:
                 or marker.sandbox_id != backend.spec.sandbox_id
                 or marker.generation != backend.spec.generation
                 or marker.container_id != expected_container_id
-                or marker.preparation_id != preparation_id
             ):
                 raise SandboxError("initial archive marker does not match this preparation")
 

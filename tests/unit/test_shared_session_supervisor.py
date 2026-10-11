@@ -67,6 +67,7 @@ class _Manager:
         self.host_rule_checks = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
+        self.initial_archive_marker: bytes | None = None
 
     @staticmethod
     def _inspection(spec: ChatSandboxSpec, *, running: bool = True) -> ChatSandboxInspection:
@@ -132,6 +133,15 @@ class _Manager:
     ) -> bytes | None:
         del expected_container_id
         return None
+
+    def read_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        assert self.items[spec.container_name].container_id == expected_container_id
+        return self.initial_archive_marker
 
     def start(
         self,
@@ -3111,6 +3121,180 @@ def test_initial_archive_is_fenced_while_a_group_start_is_in_progress() -> None:
     assert captured is False
     token, _ = opened[0]
     supervisor.operation_closed("athr_peer", token)
+
+
+def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -> None:
+    manager = _Manager()
+    prepared: list[bool] = []
+    archived: list[tuple[bool, tuple[str, ...]]] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped_archive_hook=lambda _spec, inspection, _members: archived.append(
+            (inspection.running, inspection.networks)
+        ),
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    initial_failure = RuntimeError("initial upload failed")
+
+    def capture(*_args):
+        manager.initial_archive_marker = b"prepared-initial-marker"
+        raise initial_failure
+
+    with pytest.raises(RuntimeError, match="initial upload failed") as raised:
+        supervisor.capture_initial_archive(
+            "athr_source",
+            lease.token,
+            capture=capture,
+        )
+
+    status = supervisor.status("athr_source")
+    assert raised.value is initial_failure
+    assert prepared == [True]
+    assert archived == [(False, ("agent-net",))]
+    assert manager.stop_count == 2
+    assert manager.items[_spec().container_name].networks == ()
+    assert status.running is False
+    assert status.snapshotting is False
+    assert all(event[0] != "thaw" for event in manager.events)
+
+
+def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws() -> None:
+    manager = _Manager()
+    prepared: list[bool] = []
+    final_failure = RuntimeError("final upload failed")
+
+    def archive(*_args) -> None:
+        raise final_failure
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped_archive_hook=archive,
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    initial_failure = RuntimeError("initial upload failed")
+
+    def capture(*_args):
+        manager.initial_archive_marker = b"prepared-initial-marker"
+        raise initial_failure
+
+    with pytest.raises(RuntimeError, match="final upload failed") as raised:
+        supervisor.capture_initial_archive(
+            "athr_source",
+            lease.token,
+            capture=capture,
+        )
+
+    status = supervisor.status("athr_source")
+    assert raised.value is final_failure
+    assert raised.value.__cause__ is initial_failure
+    assert prepared == [True]
+    assert manager.stop_count == 1
+    assert manager.items[_spec().container_name].networks == ("agent-net",)
+    assert status.running is False
+    assert status.snapshotting is False
+    assert supervisor.has_pending_archive_work() is True
+    assert all(event[0] != "thaw" for event in manager.events)
+    with pytest.raises(SessionBusy, match="final archive retry"):
+        supervisor.operation_opened("athr_source")
+
+
+def test_failed_initial_preservation_stop_keeps_the_snapshot_barrier() -> None:
+    class StopFailureManager(_Manager):
+        def stop(self, spec, **_kwargs):
+            self.stop_count += 1
+            raise SandboxError("docker stop failed")
+
+    manager = StopFailureManager()
+    archive_calls: list[object] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda *_args: None,
+        stopped_archive_hook=lambda *args: archive_calls.append(args),
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    initial_failure = RuntimeError("initial upload failed")
+
+    def capture(*_args):
+        manager.initial_archive_marker = b"prepared-initial-marker"
+        raise initial_failure
+
+    with pytest.raises(SandboxError, match="docker stop failed") as raised:
+        supervisor.capture_initial_archive(
+            "athr_source",
+            lease.token,
+            capture=capture,
+        )
+
+    status = supervisor.status("athr_source")
+    assert raised.value.__cause__ is initial_failure
+    assert manager.stop_count == 1
+    assert archive_calls == []
+    assert status.running is True
+    assert status.snapshotting is True
+    assert supervisor.has_pending_archive_work() is True
+    assert all(event[0] != "thaw" for event in manager.events)
+    with pytest.raises(SessionBusy, match="snapshot capture"):
+        supervisor.operation_opened("athr_source")
+
+
+def test_failed_initial_archive_before_marker_thaws_without_stopping() -> None:
+    manager = _Manager()
+    prepared: list[bool] = []
+    archived: list[object] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    initial_failure = RuntimeError("initial capture failed before marker")
+
+    with pytest.raises(RuntimeError, match="before marker") as raised:
+        supervisor.capture_initial_archive(
+            "athr_source",
+            lease.token,
+            capture=lambda *_args: (_ for _ in ()).throw(initial_failure),
+        )
+
+    status = supervisor.status("athr_source")
+    assert raised.value is initial_failure
+    assert prepared == []
+    assert archived == []
+    assert manager.stop_count == 0
+    assert status.running is True
+    assert status.snapshotting is False
+    assert manager.events[0] == ("freeze", (0, 1))
+    assert manager.events[1][0] == "thaw"
 
 
 @pytest.mark.parametrize("entrypoint", ["operation", "terminal"])

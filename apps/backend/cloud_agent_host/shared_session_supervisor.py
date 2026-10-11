@@ -3047,6 +3047,7 @@ class SharedChatSessionSupervisor:
             authoritative_spec = group.spec
             authoritative_members = self._archive_members_locked(group)
             expected_container_id = group.inspection.container_id
+            activation_generation = member.activation_generation
             slots = [peer.resident_slot_id for peer in group.members.values()]
 
         manifest: str | None = None
@@ -3066,9 +3067,52 @@ class SharedChatSessionSupervisor:
             )
         except BaseException as exc:
             capture_error = exc
+        preserve_frozen_writers = False
+        release_snapshot_barrier = True
+        marker_read_error: BaseException | None = None
+        preservation_error: BaseException | None = None
+        preservation_inspection_error: BaseException | None = None
+        if capture_error is not None and manifest is not None:
+            try:
+                initial_marker = self._manager.read_initial_archive_marker(
+                    authoritative_spec,
+                    expected_container_id=expected_container_id,
+                )
+            except BaseException as exc:
+                # A timed-out marker read cannot prove that the immutable
+                # initial object was not prepared. Preserve the frozen bytes
+                # exactly as if the marker had been observed.
+                marker_read_error = exc
+                preserve_frozen_writers = True
+            else:
+                preserve_frozen_writers = initial_marker is not None
+            if preserve_frozen_writers:
+                try:
+                    stopped = self.stop_if_idle(
+                        thread_id,
+                        generation=authoritative_spec.generation,
+                        activation_generation=activation_generation,
+                        reason="orphaned_attempt",
+                    )
+                except BaseException as exc:
+                    preservation_error = exc
+                    try:
+                        current = self._require_current_inspection(group)
+                    except BaseException as inspection_exc:
+                        preservation_inspection_error = inspection_exc
+                        release_snapshot_barrier = False
+                    else:
+                        # A failed final upload leaves the exact container
+                        # stopped with its bridge and pending marker retained.
+                        # A pre-stop failure must keep this admission barrier:
+                        # thawing or admitting a new writer would destroy the
+                        # only bytes that can reconcile the initial object.
+                        release_snapshot_barrier = not current.running
+                else:
+                    release_snapshot_barrier = not stopped.running
         thaw_error: BaseException | None = None
         identity_error: BaseException | None = None
-        if manifest is not None:
+        if manifest is not None and not preserve_frozen_writers:
             try:
                 self._require_current_inspection(group)
             except BaseException as exc:
@@ -3099,14 +3143,44 @@ class SharedChatSessionSupervisor:
                 and group.lifecycle_generation == lifecycle_generation
                 and member.lease_token == token
             )
-            group.snapshotting = False
-            self._arm_idle_if_quiescent(group)
+            if release_snapshot_barrier:
+                group.snapshotting = False
+                self._arm_idle_if_quiescent(group)
             self._condition.notify_all()
+        if preservation_error is not None:
+            preservation_error.add_note(
+                "initial archive capture failed before fail-stop preservation: "
+                f"{type(capture_error).__name__}: {capture_error}"
+            )
+            if marker_read_error is not None:
+                preservation_error.add_note(
+                    "the initial archive marker could not be read, so its presence "
+                    "was treated as uncertain: "
+                    f"{type(marker_read_error).__name__}: {marker_read_error}"
+                )
+            if preservation_inspection_error is not None:
+                preservation_error.add_note(
+                    "the exact container state could not be confirmed after fail-stop; "
+                    "the snapshot admission barrier remains set: "
+                    f"{type(preservation_inspection_error).__name__}: "
+                    f"{preservation_inspection_error}"
+                )
+            elif not release_snapshot_barrier:
+                preservation_error.add_note(
+                    "fail-stop did not stop the exact container; the snapshot "
+                    "admission barrier remains set"
+                )
+            raise preservation_error from capture_error
         if thaw_error is not None:
             raise thaw_error
         if identity_error is not None:
             raise identity_error
         if capture_error is not None:
+            if marker_read_error is not None:
+                capture_error.add_note(
+                    "the initial archive marker could not be read; the exact sandbox "
+                    "was fail-stopped while its writers remained frozen"
+                )
             raise capture_error
         if result is None:
             raise SandboxError("initial archive capture returned no result")

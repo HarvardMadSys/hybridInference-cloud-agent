@@ -59,6 +59,7 @@ class _Service:
         self.fail_close = False
         self.final_calls = 0
         self.initial_probe_calls = 0
+        self.initial_probe_preparation_ids: list[str] = []
         self.initial_capture_calls = 0
 
     def start(self) -> None:
@@ -75,6 +76,7 @@ class _Service:
 
     def probe_initial(self, _backend, **_kwargs: Any) -> dict[str, object]:
         self.initial_probe_calls += 1
+        self.initial_probe_preparation_ids.append(_kwargs["preparation_id"])
         self.probe_entered.set()
         if self.block_probe:
             assert self.probe_release.wait(timeout=5)
@@ -462,6 +464,8 @@ def test_restart_after_uploaded_receipt_does_not_create_a_duplicate_version() ->
     controller.prepare_final(spec, inspection)
     controller.queue_final(spec, inspection, ())
     assert services[0].final_calls == 1
+    uploaded = manager.marker
+    assert uploaded is not None
     controller.close()
 
     replacement, replacement_services = _controller(manager)
@@ -470,6 +474,53 @@ def test_restart_after_uploaded_receipt_does_not_create_a_duplicate_version() ->
     replacement.queue_final(spec, inspection, ())
 
     assert all(service.final_calls == 0 for service in replacement_services)
+    assert manager.marker == uploaded
+    replacement.close()
+
+
+@pytest.mark.parametrize(
+    "current_policy",
+    [
+        pytest.param(_policy(2, enabled=False), id="disabled"),
+        pytest.param(_policy(2, kms_key=_KMS_KEY_2), id="kms-changed"),
+    ],
+)
+def test_prepare_start_replaces_uploaded_history_with_current_policy_fence(
+    current_policy,
+) -> None:
+    manager = _MarkerManager()
+    first, first_services = _controller(manager)
+    first.start()
+    first.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    stopped = SimpleNamespace(container_id="container")
+    first.prepare_final(spec, stopped)
+    first.queue_final(spec, stopped, ())
+    assert first_services[0].final_calls == 1
+    assert manager.marker is not None and b'"state":"uploaded"' in manager.marker
+    first.close()
+
+    replacement, replacement_services = _controller(manager)
+    replacement.start()
+    replacement.apply(current_policy)
+
+    replacement.prepare_start(spec, stopped)
+
+    assert manager.marker is not None
+    marker = archive_runtime._FinalArchiveMarker.decode(manager.marker)
+    assert marker.state == "pending"
+    assert marker.policy == SandboxArchivePolicy.from_mapping(current_policy)
+
+    replacement.apply(_policy(3, enabled=False) if marker.policy.enabled else _policy(3))
+    if marker.policy.enabled:
+        pinned = next(service for service in replacement_services if service.config.revision == 2)
+        assert pinned.closed is False
+        replacement.queue_final(spec, stopped, ())
+        assert pinned.final_calls == 1
+        assert pinned.closed is True
+    else:
+        replacement.queue_final(spec, stopped, ())
+        assert all(service.final_calls == 0 for service in replacement_services)
     replacement.close()
 
 
@@ -600,6 +651,26 @@ def test_initial_recovery_uses_marker_policy_before_current_policy(current_polic
     assert recovered.config.revision == 1
     assert recovered.config.kms_key_arn == _KMS_KEY
     assert recovered.config.max_archive_bytes == 2 * 1024 * 1024 * 1024
+    controller.close()
+
+
+def test_new_first_turn_recovers_the_abandoned_jobs_prepared_marker() -> None:
+    manager = _MarkerManager()
+    manager.initial_marker = _initial_marker(_policy(1), preparation_id="ajob_abandoned")
+    controller, services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(2))
+
+    status = controller.probe_initial(
+        _initial_backend(),
+        expected_container_id="container",
+        preparation_id="ajob_replacement",
+        members=(),
+    )
+
+    recovered = next(service for service in services if service.initial_probe_calls)
+    assert status["stored"] is True
+    assert recovered.initial_probe_preparation_ids == ["ajob_abandoned"]
     controller.close()
 
 

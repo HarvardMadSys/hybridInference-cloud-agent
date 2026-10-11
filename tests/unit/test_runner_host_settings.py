@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, encode_turn
 from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.runtimes import get_runtime
@@ -163,6 +163,7 @@ def _run_new_chat(
     *,
     reservation_change: dict[str, Any] | None = None,
     reservation_omits_disk: bool = False,
+    initial_archive_status: dict[str, object] | None = None,
 ) -> SimpleNamespace:
     """Drive a first turn of a new chat to its settlement, with collaborators mocked."""
     backend = ContainerBackend(image="img")
@@ -170,7 +171,8 @@ def _run_new_chat(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: Mock())
+    manager = Mock()
+    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
     monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
     monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
     monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
@@ -183,6 +185,9 @@ def _run_new_chat(
     )
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
+    if job.thread_attachment_count:
+        control.list_attachments.return_value = [{"id": 17}]
+        control.read_attachment.return_value = ("replacement.txt", b"replacement")
 
     def reserve(seed):
         response = {
@@ -206,11 +211,15 @@ def _run_new_chat(
         "context_status": "new",
         "resident_state": "live",
     }
-    supervisor.initial_archive_status.return_value = {
-        "enabled": False,
-        "prepared": False,
-        "stored": False,
-    }
+    supervisor.initial_archive_status.return_value = (
+        {
+            "enabled": False,
+            "prepared": False,
+            "stored": False,
+        }
+        if initial_archive_status is None
+        else initial_archive_status
+    )
     supervisor.capture_initial_archive.return_value = {
         "enabled": False,
         "stored": False,
@@ -244,7 +253,15 @@ def _run_new_chat(
     if result != 0:
         assert not supervisor.acquire_shared.called
         assert not control.settle_chat_sandbox.called
-        return SimpleNamespace(result=result, reserved=reserved, failure=finish.call_args.args[1])
+        return SimpleNamespace(
+            result=result,
+            reserved=reserved,
+            failure=finish.call_args.args[1],
+            control=control,
+            manager=manager,
+            supervisor=supervisor,
+            finish=finish,
+        )
     assert control.settle_chat_sandbox.called, finish.call_args
     settled = control.settle_chat_sandbox.call_args.kwargs
     launches = [call.kwargs["launch"] for call in supervisor.ensure_shared_resident.call_args_list]
@@ -255,7 +272,42 @@ def _run_new_chat(
         checkouts=checkouts,
         launches=launches,
         spec=supervisor.acquire_shared.call_args.args[0],
+        control=control,
+        manager=manager,
+        supervisor=supervisor,
+        finish=finish,
     )
+
+
+def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch):
+    recovered_base = "c" * 40
+    replacement = replace(
+        _JOB,
+        job_id="ajob_replacement",
+        thread_attachment_count=1,
+        turn_attachment_count=1,
+    )
+
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        replacement,
+        initial_archive_status={
+            "enabled": True,
+            "prepared": True,
+            "stored": True,
+            "base_sha": recovered_base,
+        },
+    )
+
+    assert run.result == 0
+    assert run.supervisor.capture_initial_archive.called is False
+    assert run.supervisor.initial_archive_status.call_args.kwargs["preparation_id"] == (
+        replacement.job_id
+    )
+    [upload] = run.manager.import_archive.call_args_list
+    assert upload.args[1] == CHAT_UPLOADS_DIR
+    assert run.finish.call_args.kwargs["base_sha"] == recovered_base
 
 
 def test_new_sandbox_resource_settings_reach_the_docker_limits(monkeypatch):
