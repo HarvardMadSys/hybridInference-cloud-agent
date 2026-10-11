@@ -133,6 +133,13 @@ S3-compatible endpoint and object prefix. The matching
 are first introduced; later environment changes do not override saved settings.
 An empty bucket leaves deletion unavailable.
 
+The bucket field also accepts an S3 URI in the browser. Saving
+`s3://freeinference/cloud-agent/sandbox` sets the bucket to `freeinference` and
+the prefix to `cloud-agent/sandbox` in one update. A bucket-root URI clears the
+prefix; entering only a bucket name leaves the prefix unchanged. Direct API
+updates and initial environment imports require the bucket name and prefix in
+their separate settings.
+
 Provision the main control plane's AWS SDK credential chain, preferably with an
 IAM workload role. Its archive role needs `s3:PutObject` and `s3:GetObject` on the
 configured archive prefix; `HeadObject` uses `s3:GetObject`. If SSE-KMS is applied

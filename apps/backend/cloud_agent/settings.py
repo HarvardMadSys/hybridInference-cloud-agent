@@ -130,6 +130,12 @@ class Setting:
                 except (ValueError, ValidationError):
                     valid = False
         if not valid:
+            if self.key == "sandbox_archive.bucket":
+                raise ValueError(
+                    f"Invalid value for {self.label} ({self.key}). "
+                    "Use a bucket name such as freeinference; set cloud-agent/sandbox "
+                    "in Sandbox archive S3 prefix."
+                )
             raise ValueError(f"Invalid value for {self.label} ({self.key})")
         return value
 
@@ -764,7 +770,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
-        description="Required for sandbox deletion. The control plane verifies the completed archive before the host may remove its stopped container. Empty disables deletion.",
+        description="Enter a bucket name, or paste an S3 URI such as s3://freeinference/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
     ),
     Setting(
         "sandbox_archive.region",

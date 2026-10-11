@@ -106,6 +106,40 @@ function snapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSettings {
   };
 }
 
+function archiveSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSettings {
+  const current = snapshot();
+  return {
+    ...current,
+    definitions: [
+      ...current.definitions,
+      {
+        key: 'sandbox_archive.bucket',
+        label: 'Sandbox archive S3 bucket',
+        description: 'S3 bucket for sandbox deletion.',
+        category: 'Sandbox archives',
+        kind: 'string',
+        default: '',
+        secret: false,
+      },
+      {
+        key: 'sandbox_archive.prefix',
+        label: 'Sandbox archive S3 prefix',
+        description: 'Object key prefix for new deletion requests.',
+        category: 'Sandbox archives',
+        kind: 'string',
+        default: 'sandbox-archives',
+        secret: false,
+      },
+    ],
+    values: {
+      ...current.values,
+      'sandbox_archive.bucket': '',
+      'sandbox_archive.prefix': 'sandbox-archives',
+    },
+    ...over,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -306,6 +340,161 @@ describe('application settings', () => {
     expect(input.closest('details')).toHaveAttribute('open');
     expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
+  });
+
+  it('saves an archive URI as an atomic bucket and prefix patch and resets both drafts', async () => {
+    const current = archiveSnapshot();
+    read.mockResolvedValue(current);
+    write.mockResolvedValue(
+      archiveSnapshot({
+        revision: 2,
+        values: {
+          ...current.values,
+          'sandbox_archive.bucket': 'freeinference',
+          'sandbox_archive.prefix': 'cloud-agent/sandbox',
+        },
+      }),
+    );
+    render(<ApplicationSettings />);
+    fireEvent.change(await screen.findByLabelText('Product name'), {
+      target: { value: 'Unsaved name' },
+    });
+    selectCategory('Sandbox archives');
+    expect(screen.getByText(/Saving an S3 URI replaces the prefix/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Sandbox archive S3 prefix'), {
+      target: { value: 'unsaved-prefix' },
+    });
+    fireEvent.change(screen.getByLabelText('Sandbox archive S3 bucket'), {
+      target: { value: 's3://freeinference/cloud-agent/sandbox' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
+    await screen.findByText('Sandbox archive S3 bucket saved. Prefix set to cloud-agent/sandbox.');
+    expect(write).toHaveBeenCalledExactlyOnceWith(
+      {
+        'sandbox_archive.bucket': 'freeinference',
+        'sandbox_archive.prefix': 'cloud-agent/sandbox',
+      },
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByLabelText('Sandbox archive S3 bucket')).toHaveValue('freeinference');
+    expect(screen.getByLabelText('Sandbox archive S3 prefix')).toHaveValue('cloud-agent/sandbox');
+    expect(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save Sandbox archive S3 prefix' })).toBeDisabled();
+    selectCategory('Site');
+    expect(screen.getByLabelText('Product name')).toHaveValue('Unsaved name');
+  });
+
+  it('saves a bare archive bucket without changing a saved prefix or its unsaved draft', async () => {
+    const current = archiveSnapshot();
+    read.mockResolvedValue(current);
+    write.mockResolvedValue(
+      archiveSnapshot({
+        values: { ...current.values, 'sandbox_archive.bucket': 'freeinference' },
+      }),
+    );
+    render(<ApplicationSettings />);
+    await screen.findByLabelText('Product name');
+    selectCategory('Sandbox archives');
+    fireEvent.change(screen.getByLabelText('Sandbox archive S3 prefix'), {
+      target: { value: 'unsaved-prefix' },
+    });
+    fireEvent.change(screen.getByLabelText('Sandbox archive S3 bucket'), {
+      target: { value: 'freeinference' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
+    await screen.findByText('Sandbox archive S3 bucket saved.');
+    expect(write).toHaveBeenCalledExactlyOnceWith(
+      { 'sandbox_archive.bucket': 'freeinference' },
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByLabelText('Sandbox archive S3 prefix')).toHaveValue('unsaved-prefix');
+    expect(screen.getByRole('button', { name: 'Save Sandbox archive S3 prefix' })).toBeEnabled();
+  });
+
+  it.each([
+    ['s3://freeinference/cloud-agent/sandbox/', 'cloud-agent/sandbox'],
+    ['s3://freeinference', ''],
+    ['s3://freeinference/', ''],
+    [`s3://freeinference/${'a'.repeat(512)}`, 'a'.repeat(512)],
+  ])('saves the canonical prefix for %s', async (uri, prefix) => {
+    const current = archiveSnapshot();
+    read.mockResolvedValue(current);
+    write.mockResolvedValue(
+      archiveSnapshot({
+        values: {
+          ...current.values,
+          'sandbox_archive.bucket': 'freeinference',
+          'sandbox_archive.prefix': prefix,
+        },
+      }),
+    );
+    render(<ApplicationSettings />);
+    await screen.findByLabelText('Product name');
+    selectCategory('Sandbox archives');
+    fireEvent.change(screen.getByLabelText('Sandbox archive S3 bucket'), {
+      target: { value: uri },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
+    await screen.findByText(
+      `Sandbox archive S3 bucket saved. Prefix set to ${prefix || '(empty)'}.`,
+    );
+    expect(write).toHaveBeenCalledExactlyOnceWith(
+      { 'sandbox_archive.bucket': 'freeinference', 'sandbox_archive.prefix': prefix },
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByLabelText('Sandbox archive S3 bucket')).toHaveValue('freeinference');
+    expect(screen.getByLabelText('Sandbox archive S3 prefix')).toHaveValue(prefix);
+  });
+
+  it('rejects malformed archive buckets and URIs before making an API call', async () => {
+    read.mockResolvedValue(archiveSnapshot());
+    render(<ApplicationSettings />);
+    await screen.findByLabelText('Product name');
+    selectCategory('Sandbox archives');
+    const input = screen.getByLabelText('Sandbox archive S3 bucket');
+    for (const value of [
+      's3:/freeinference/cloud-agent/sandbox',
+      'S3://freeinference/cloud-agent/sandbox',
+      'https://freeinference/cloud-agent/sandbox',
+      's3:///cloud-agent/sandbox',
+      's3://user@freeinference/cloud-agent/sandbox',
+      's3://freeinference:443/cloud-agent/sandbox',
+      's3://FreeInference/cloud-agent/sandbox',
+      's3://freeinference/cloud agent/sandbox',
+      's3://freeinference/cloud-agent/sandbox?version=1',
+      's3://freeinference/cloud-agent/sandbox#fragment',
+      's3://freeinference//',
+      's3://freeinference/cloud-agent//sandbox',
+      's3://freeinference/cloud-agent/sandbox//',
+      's3://freeinference/cloud-agent/./sandbox',
+      's3://freeinference/cloud-agent/../sandbox',
+      's3://freeinference/cloud-agent/%2e%2e/sandbox',
+      's3://freeinference/cloud-agent%2fsandbox',
+      `s3://freeinference/${'a'.repeat(513)}`,
+      ' s3://freeinference/cloud-agent/sandbox',
+      'invalid..bucket',
+      'invalid.-bucket',
+      'invalid-.bucket',
+      '127.0.0.1',
+      'xn--bucket',
+      'sthree-bucket',
+      'amzn-s3-demo-bucket',
+      'bucket-s3alias',
+      'bucket--ol-s3',
+      'bucket.mrap',
+      'bucket--x-s3',
+      'bucket--table-s3',
+      'ab',
+      'a'.repeat(64),
+    ]) {
+      fireEvent.change(input, { target: { value } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /Enter (a valid S3 bucket name|an S3 URI)/,
+      );
+      expect(input).toHaveAttribute('aria-invalid', 'true');
+      expect(write).not.toHaveBeenCalled();
+    }
   });
 
   it('shows one category with accessible navigation and keeps other fields mounted', async () => {

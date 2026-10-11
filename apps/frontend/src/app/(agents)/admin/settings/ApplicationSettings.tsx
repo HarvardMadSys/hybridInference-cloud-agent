@@ -21,17 +21,56 @@ import {
 const INPUT_CLASS =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
+const ARCHIVE_BUCKET = 'sandbox_archive.bucket';
+const ARCHIVE_PREFIX = 'sandbox_archive.prefix';
+
+type ParsedValue =
+  | { value: AdminSettingValue; additionalChanges?: Record<string, AdminSettingValue> }
+  | { error: string };
+
+function parseArchiveBucket(draft: string): ParsedValue {
+  if (!draft) return { value: '' };
+  const uri = draft.startsWith('s3://');
+  // Keep raw components: URL parsers can silently normalize unsafe path segments.
+  const components = uri ? /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(draft) : null;
+  const bucket = uri ? (components?.[1] ?? '') : draft;
+  if (
+    /\s/.test(draft) ||
+    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
+    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(bucket) ||
+    /\.\.|\.-|-\./.test(bucket) ||
+    /^(?:xn--|sthree-|amzn-s3-demo-)/.test(bucket) ||
+    /(?:-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(bucket)
+  ) {
+    return { error: 'Enter a valid S3 bucket name or an S3 URI such as s3://bucket/prefix.' };
+  }
+  if (!uri) return { value: bucket };
+  const path = components?.[2] ?? '';
+  const prefix = path.endsWith('/') ? path.slice(0, -1) : path;
+  if (
+    path.startsWith('/') ||
+    path.includes('//') ||
+    new TextEncoder().encode(prefix).length > 512 ||
+    (prefix &&
+      (!/^[a-zA-Z0-9_./-]+$/.test(prefix) ||
+        prefix.split('/').some((part) => !part || part === '.' || part === '..')))
+  ) {
+    return {
+      error:
+        'Enter an S3 URI with a prefix of at most 512 bytes using letters, numbers, underscores, dots, hyphens, and single slashes. Do not use . or .. path segments, query strings, or fragments.',
+    };
+  }
+  return { value: bucket, additionalChanges: { [ARCHIVE_PREFIX]: prefix } };
+}
 
 function displayValue(value: AdminSettingValue): string {
   return typeof value === 'boolean' ? (value ? 'Enabled' : 'Disabled') : String(value);
 }
 
-function parseValue(
-  definition: AdminSettingDefinition,
-  draft: string,
-): { value: AdminSettingValue } | { error: string } {
+function parseValue(definition: AdminSettingDefinition, draft: string): ParsedValue {
   if (definition.kind === 'boolean') return { value: draft === 'true' };
   if (definition.kind === 'string') {
+    if (definition.key === ARCHIVE_BUCKET) return parseArchiveBucket(draft);
     if (definition.choices?.length && !definition.choices.includes(draft)) {
       return { error: 'Choose one of the available values.' };
     }
@@ -69,7 +108,11 @@ function SettingField({
   value: AdminSettingValue | null | undefined;
   configured: boolean;
   busy: boolean;
-  onSave: (key: string, value: AdminSettingValue | null) => void;
+  onSave: (
+    key: string,
+    value: AdminSettingValue | null,
+    additionalChanges?: Record<string, AdminSettingValue>,
+  ) => void;
 }) {
   const incoming = definition.secret ? '' : String(value ?? definition.default);
   const [baseline, setBaseline] = useState(incoming);
@@ -120,7 +163,7 @@ function SettingField({
             return;
           }
           setError(null);
-          onSave(definition.key, parsed.value);
+          onSave(definition.key, parsed.value, parsed.additionalChanges);
         }}
       >
         <div className="min-w-0">
@@ -129,6 +172,8 @@ function SettingField({
           </label>
           <p id={helpId} className="mt-1.5 break-words text-sm leading-6 text-muted">
             {definition.description}
+            {definition.key === ARCHIVE_BUCKET &&
+              ' Saving an S3 URI replaces the prefix; a bucket-root URI clears it.'}
           </p>
           <p className="mt-2 break-words text-xs leading-5 text-muted">
             {definition.secret
@@ -341,7 +386,11 @@ export function useApplicationSettings({
     return () => window.removeEventListener('hashchange', revealHash);
   }, [snapshot, onRevealCategory]);
 
-  const save = async (key: string, value: AdminSettingValue | null) => {
+  const save = async (
+    key: string,
+    value: AdminSettingValue | null,
+    additionalChanges?: Record<string, AdminSettingValue>,
+  ) => {
     if (!enabled || writing.current || revoked.current) return;
     writing.current = true;
     setBusy(true);
@@ -351,16 +400,29 @@ export function useApplicationSettings({
     const controller = new AbortController();
     request.current = controller;
     const current = ++sequence.current;
+    const changes = { [key]: value, ...additionalChanges };
     try {
       const next = recoveryToken
-        ? await setAgentAdminSettings({ [key]: value }, controller.signal, recoveryToken)
-        : await setAgentAdminSettings({ [key]: value }, controller.signal);
+        ? await setAgentAdminSettings(changes, controller.signal, recoveryToken)
+        : await setAgentAdminSettings(changes, controller.signal);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
       setSnapshot(next);
-      // Only the saved row resets its draft; unrelated edits stay intact.
-      setSaved((previous) => ({ ...previous, [key]: (previous[key] ?? 0) + 1 }));
+      // Reset every saved row to its canonical value; unrelated edits stay intact.
+      setSaved((previous) => {
+        const updated = { ...previous };
+        for (const changedKey of Object.keys(changes)) {
+          updated[changedKey] = (previous[changedKey] ?? 0) + 1;
+        }
+        return updated;
+      });
       const label = next.definitions.find((definition) => definition.key === key)?.label ?? key;
-      setNotice(value === null ? `${label} reset to its default.` : `${label} saved.`);
+      setNotice(
+        additionalChanges && ARCHIVE_PREFIX in additionalChanges
+          ? `${label} saved. Prefix set to ${additionalChanges[ARCHIVE_PREFIX] || '(empty)'}.`
+          : value === null
+            ? `${label} reset to its default.`
+            : `${label} saved.`,
+      );
     } catch (cause) {
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
       fail(cause);
@@ -473,7 +535,7 @@ export function ApplicationSettingsFeedback({ settings }: { settings: Applicatio
       {notice && (
         <p
           role="status"
-          className="mt-5 rounded-xl border border-status-success/20 bg-status-success/5 p-4 text-sm text-status-success"
+          className="mt-5 break-words rounded-xl border border-status-success/20 bg-status-success/5 p-4 text-sm text-status-success"
         >
           {notice}
         </p>
@@ -561,7 +623,7 @@ export function ApplicationSettingsCategory({
             value={snapshot?.values[definition.key]}
             configured={snapshot?.secret_configured[definition.key] ?? false}
             busy={busy}
-            onSave={(key, value) => void save(key, value)}
+            onSave={(key, value, additionalChanges) => void save(key, value, additionalChanges)}
           />
         ))}
       </div>
