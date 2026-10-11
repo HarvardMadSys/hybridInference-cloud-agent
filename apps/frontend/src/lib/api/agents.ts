@@ -693,6 +693,38 @@ export async function getAgentConfig(options: { fresh?: boolean } = {}): Promise
   return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/config${query}`));
 }
 
+export interface CreateGitHubRepositoryRequest {
+  name: string;
+  description?: string;
+  private: boolean;
+}
+
+export interface CreatedGitHubRepository {
+  repo: string;
+  web_url: string;
+  default_branch: string;
+  /** Whether the connected GitHub App can already use the repository. */
+  accessible: boolean;
+}
+
+/**
+ * Create a personal GitHub repository initialized with a README.
+ *
+ * A failed response can follow a successful creation on GitHub, so this
+ * operation is never retried automatically. The caller must check GitHub
+ * before repeating an ambiguous request.
+ */
+export async function createGitHubRepository(
+  request: CreateGitHubRepositoryRequest,
+): Promise<CreatedGitHubRepository> {
+  const resp = await fetchWithAuth(API_BASE, '/v1/agent/repositories', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return jsonOrThrow(resp);
+}
+
 export type AgentIntegrationProvider = 'github' | 'gitlab';
 
 /** The deployment's side of a provider, not the user's connection to it. */

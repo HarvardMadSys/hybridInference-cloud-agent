@@ -7977,6 +7977,71 @@
         "title": "CreateConnectionRequest",
         "type": "object"
       },
+      "CreateGitHubRepositoryRequest": {
+        "additionalProperties": false,
+        "description": "Create a personal GitHub repository without starting a conversation.",
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 350,
+            "pattern": "^[^\\x00]*$",
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "private": {
+            "default": true,
+            "title": "Private",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateGitHubRepositoryRequest",
+        "type": "object"
+      },
+      "CreateGitHubRepositoryResponse": {
+        "description": "The created repository and its separately checked Agent access.",
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "default_branch": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Default Branch",
+            "type": "string"
+          },
+          "repo": {
+            "maxLength": 140,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+            "title": "Repo",
+            "type": "string"
+          },
+          "web_url": {
+            "maxLength": 2048,
+            "pattern": "^https?://[^/]+/",
+            "title": "Web Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "web_url",
+          "default_branch",
+          "accessible"
+        ],
+        "title": "CreateGitHubRepositoryResponse",
+        "type": "object"
+      },
       "CreateSkill": {
         "additionalProperties": false,
         "description": "Create instructions directly or after reviewing an uploaded Markdown file.",
@@ -24708,6 +24773,63 @@
           }
         },
         "summary": "Rewrite Agent Prompt"
+      }
+    },
+    "/v1/agent/repositories": {
+      "post": {
+        "description": "Create an initialized personal repository and check existing Agent access.",
+        "operationId": "create_github_repository_v1_agent_repositories_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGitHubRepositoryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateGitHubRepositoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Github Repository"
       }
     },
     "/v1/agent/service/oncall/jobs": {

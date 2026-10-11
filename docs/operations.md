@@ -840,9 +840,29 @@ database and takes precedence over the mounted key. The legacy
 import in deployments that pass it through. The mounted file remains available
 when the saved inline key is empty.
 
-The App needs `contents: write` and `pull_requests: write` and nothing else —
-notably not `workflows`, so a patch touching `.github/` cannot be pushed even
-if the gate were bypassed. Revocation is uninstalling the App.
+For checkout and publication, the App needs `contents: write` and
+`pull_requests: write`. To enable **Create repository** in the workspace and
+new-task pickers, also configure the GitHub App's repository permission
+**Repository creation: write**. GitHub also accepts
+**Administration: Read and write**, but Repository creation grants only the
+creation operations this feature needs. See GitHub's
+[repository creation permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps#repository-permissions-for-repository-creation).
+Existing installations may need their owners to approve the updated
+permissions on GitHub. Without that permission,
+repository creation reports that the App cannot create repositories; existing
+tasks continue to use their existing permissions. The App does not need
+`workflows`, so a patch touching `.github/` cannot be pushed even if the gate
+were bypassed. Revocation is uninstalling the App.
+
+Creation calls GitHub's `POST /user/repos` with the connected user's encrypted,
+refreshable GitHub App user token, kept in the control plane. It creates only
+in that user's personal account, defaults to private, and initializes a README.
+No long-lived credential enters a sandbox. Creation does not add a local
+repository grant or bypass the deployment allowlist: if the App installation
+covers only selected repositories, the owner grants access to the new one
+through **Configure repository access** and refreshes the picker. A transient
+access-check failure after creation is handled as a created repository awaiting
+access, rather than another creation attempt.
 
 For the _connect_ flow (a user authorizing their own repositories) the App
 also needs its OAuth half, with the callback pointing at this deployment's

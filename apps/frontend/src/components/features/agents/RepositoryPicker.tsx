@@ -1,7 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useId, useMemo, useRef, useState, type RefObject } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import { useT } from '@/components/providers';
 import { COMPOSER_MENU_ROW, COMPOSER_MENU_SURFACE } from './composerMenuStyles';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
@@ -45,6 +53,8 @@ export function RepositoryPicker({
   onRefresh,
   refreshing = false,
   onConfigure,
+  onCreate,
+  createDisabled = false,
   returnFocusTo,
 }: {
   repos: string[];
@@ -57,6 +67,10 @@ export function RepositoryPicker({
   refreshing?: boolean;
   /** Go straight to GitHub to add repositories; without it, the Integrations page. */
   onConfigure?: () => void;
+  /** Create a personal GitHub repository before starting a conversation. */
+  onCreate?: () => void;
+  /** Keep asynchronous composer work from moving focus behind the creation dialog. */
+  createDisabled?: boolean;
   /** Where focus goes after a choice. The trigger, unless the composer asked. */
   returnFocusTo?: RefObject<HTMLElement>;
 }) {
@@ -83,9 +97,14 @@ export function RepositoryPicker({
     ? sorted.filter((repo) => repo.toLocaleLowerCase().includes(needle))
     : sorted;
 
+  // The open menu must own the caret as soon as it appears, including when a
+  // restored draft opens it during an asynchronous config update.
+  useLayoutEffect(() => {
+    if (open) search.current?.focus();
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
-    search.current?.focus();
     function onPointerDown(event: PointerEvent) {
       const target = event.target as Node;
       if (panel.current?.contains(target) || trigger.current?.contains(target)) return;
@@ -272,6 +291,23 @@ export function RepositoryPicker({
               </p>
             ) : null}
           </div>
+          {onCreate ? (
+            <button
+              type="button"
+              disabled={createDisabled}
+              onClick={() => {
+                if (createDisabled) return;
+                close();
+                onCreate();
+              }}
+              className={`${COMPOSER_MENU_ROW} mt-1 shrink-0 border-t border-gray-100 pt-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/5`}
+            >
+              <span aria-hidden="true" className="w-4 text-center">
+                +
+              </span>
+              {t('repositoryCreate.title')}
+            </button>
+          ) : null}
           <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
             {onConfigure ? (
               <button

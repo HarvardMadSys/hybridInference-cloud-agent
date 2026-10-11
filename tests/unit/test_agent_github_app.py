@@ -8,6 +8,7 @@ wrong installation, or a private key leaking into a log line.
 
 from __future__ import annotations
 
+import json
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -795,3 +796,222 @@ def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_chang
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
     credentials.forget_user("alice")
     assert credentials.cached_user_repositories("alice", (77,)) is None
+
+
+@pytest.mark.parametrize("private", [True, False])
+async def test_creating_a_personal_repository_uses_the_users_token_and_initializes_it(
+    config, private
+):
+    """A personal repository uses the user's authority and starts with a branch."""
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            201,
+            json={
+                "full_name": "octocat/new-project",
+                "html_url": "https://github.com/octocat/new-project",
+                "default_branch": "main",
+                "owner": {"login": "octocat"},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await GitHubAppCredentials(config, client=client).create_personal_repository(
+            "ghu_user", name="new-project", description="New project", private=private
+        )
+        assert not client.is_closed
+
+    assert result == {
+        "full_name": "octocat/new-project",
+        "html_url": "https://github.com/octocat/new-project",
+        "default_branch": "main",
+    }
+    [request] = requests
+    assert (request.method, str(request.url)) == ("POST", "https://api.test/user/repos")
+    assert request.headers["authorization"] == "Bearer ghu_user"
+    assert request.headers["accept"] == "application/vnd.github+json"
+    assert request.headers["x-github-api-version"] == "2022-11-28"
+    assert json.loads(request.content) == {
+        "name": "new-project",
+        "description": "New project",
+        "private": private,
+        "auto_init": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "headers", "reason"),
+    [
+        (403, {"message": "secret-token upstream body"}, {}, "forbidden"),
+        (404, {"message": "secret-token upstream body"}, {}, "forbidden"),
+        (
+            422,
+            {
+                "message": "secret-token upstream body",
+                "errors": [{"resource": "Repository", "field": "name", "code": "already_exists"}],
+            },
+            {},
+            "already_exists",
+        ),
+        (
+            422,
+            {
+                "message": "secret-token upstream body",
+                "errors": [
+                    {
+                        "resource": "Repository",
+                        "field": "name",
+                        "code": "custom",
+                        "message": "name already exists on this account",
+                    }
+                ],
+            },
+            {},
+            "already_exists",
+        ),
+        (422, {"message": "name already exists: secret-token upstream body"}, {}, "invalid"),
+        (
+            422,
+            {
+                "message": "secret-token upstream body",
+                "errors": [{"resource": "Repository", "field": "name", "code": "invalid"}],
+            },
+            {},
+            "invalid",
+        ),
+        (
+            422,
+            {
+                "message": "secret-token upstream body",
+                "errors": [
+                    {"resource": "Repository", "field": "description", "code": "already_exists"}
+                ],
+            },
+            {},
+            "invalid",
+        ),
+        (429, {"message": "secret-token upstream body"}, {}, "unavailable"),
+        (
+            403,
+            {"message": "secret-token upstream body"},
+            {"X-RateLimit-Remaining": "0"},
+            "unavailable",
+        ),
+        (
+            403,
+            {"message": "secret-token upstream body"},
+            {"Retry-After": "60"},
+            "unavailable",
+        ),
+        (500, {"message": "secret-token upstream body"}, {}, "uncertain"),
+        (502, {"message": "secret-token upstream body"}, {}, "uncertain"),
+        (503, {"message": "secret-token upstream body"}, {}, "uncertain"),
+    ],
+)
+async def test_repository_creation_distinguishes_settled_errors_without_retrying_or_echoing(
+    config, status, body, headers, reason
+):
+    """Callers need a safe next step and must never replay an uncertain POST."""
+    from cloud_agent.github_app import RepositoryCreationError
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(status, json=body, headers=headers)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(RepositoryCreationError) as raised:
+            await GitHubAppCredentials(config, client=client).create_personal_repository(
+                "secret-token", name="new-project", description="", private=True
+            )
+
+    assert raised.value.reason == reason
+    assert raised.value.status == status
+    assert len(requests) == 1
+    assert "secret-token" not in str(raised.value)
+    assert "upstream body" not in str(raised.value)
+
+
+async def test_repository_creation_rejects_a_revoked_user_authorization(config):
+    """An invalid user token must trigger the existing reconnect flow."""
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(401, json={"message": "secret-token upstream body"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(UserAuthorizationRevoked) as raised:
+            await GitHubAppCredentials(config, client=client).create_personal_repository(
+                "secret-token", name="new-project", description="", private=True
+            )
+
+    assert len(requests) == 1
+    assert "secret-token" not in str(raised.value)
+    assert "upstream body" not in str(raised.value)
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError])
+async def test_repository_creation_network_errors_leave_the_result_uncertain(config, error_type):
+    """GitHub may have committed a timed-out request, so it cannot be retried."""
+    from cloud_agent.github_app import RepositoryCreationError
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        raise error_type("secret-token upstream body", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(RepositoryCreationError) as raised:
+            await GitHubAppCredentials(config, client=client).create_personal_repository(
+                "secret-token", name="new-project", description="", private=True
+            )
+
+    assert raised.value.reason == "uncertain"
+    assert raised.value.status is None
+    assert len(requests) == 1
+    assert "secret-token" not in str(raised.value)
+    assert "upstream body" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"not JSON secret-token upstream body",
+        b"[]",
+        b"null",
+        b"{}",
+        b'{"full_name":"octocat/new-project","html_url":"https://github.com/octocat/new-project"}',
+        b'{"full_name":1,"html_url":"https://github.com/octocat/new-project","default_branch":"main"}',
+        b'{"full_name":"octocat/new-project","html_url":"https://github.com/octocat/new-project","default_branch":""}',
+    ],
+)
+async def test_repository_creation_malformed_success_is_uncertain_and_never_retried(
+    config, content
+):
+    """A success that cannot identify the new repository is not safe to replay."""
+    from cloud_agent.github_app import RepositoryCreationError
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(201, content=content)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(RepositoryCreationError) as raised:
+            await GitHubAppCredentials(config, client=client).create_personal_repository(
+                "secret-token", name="new-project", description="", private=True
+            )
+
+    assert raised.value.reason == "uncertain"
+    assert raised.value.status == 201
+    assert len(requests) == 1
+    assert "secret-token" not in str(raised.value)
+    assert "upstream body" not in str(raised.value)

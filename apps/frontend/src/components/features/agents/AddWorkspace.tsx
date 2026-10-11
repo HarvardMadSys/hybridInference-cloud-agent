@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
 import { getAgentConfig, type AgentConfigApi } from '@/lib/api/agents';
+import { CreateRepositoryDialog } from './CreateRepositoryDialog';
 
 /** Add an accessible repository to this account's sidebar without creating a task. */
 export function AddWorkspace({
@@ -23,6 +24,7 @@ export function AddWorkspace({
   );
   const [query, setQuery] = useState('');
   const [retry, setRetry] = useState(0);
+  const [creatingFor, setCreatingFor] = useState<string | null>(null);
   const [data, setData] = useState<{
     userId?: string;
     config?: AgentConfigApi;
@@ -211,9 +213,33 @@ export function AddWorkspace({
                 {t('sidebar.manageRepositories')}
               </Link>
             )}
+            {config?.github_connected && (
+              <button
+                type="button"
+                onClick={() => {
+                  close();
+                  setCreatingFor(userId!);
+                }}
+                className="block w-full rounded-lg px-2.5 py-2 text-left font-medium text-crimson-dark hover:bg-gray-100 dark:text-rose-300 dark:hover:bg-white/10"
+              >
+                {t('repositoryCreate.title')}
+              </button>
+            )}
           </div>,
           document.body,
         )}
+      <CreateRepositoryDialog
+        key={userId}
+        open={Boolean(userId && creatingFor === userId)}
+        onClose={() => {
+          setCreatingFor(null);
+          trigger.current?.focus();
+        }}
+        onAvailable={(repo, config) => {
+          setData({ userId, config });
+          onSelect(repo);
+        }}
+      />
     </>
   );
 }

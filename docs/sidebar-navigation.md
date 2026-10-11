@@ -20,6 +20,29 @@ composer. The project appears immediately, even with no conversations. The
 picker links to **Integrations** when repository access needs configuration.
 Added projects are saved per account in this browser, independently of ordering.
 
+To create a repository before starting a conversation, choose **Create
+repository** in the workspace picker. The same action is available in the
+new-task repository picker, including when GitHub is connected but no
+repositories have been granted yet. Enter a name, an optional description, and
+choose **Private** or **Public**; Private is the default. Creation uses your
+connected personal GitHub account and adds a README so the repository has a
+default branch. Organization repository creation is not offered.
+
+If the GitHub App already has access, the new repository is selected and can be
+added to Projects without sending a message. Otherwise the dialog confirms
+creation and offers **Configure repository access**, which opens Integrations
+in a new tab. Choose **Configure repositories**, grant the App access on GitHub,
+return to the dialog, and use **Refresh** to select the repository.
+Refreshing access does not create another repository. A creation error leaves
+the entered values available; after a connection failure, check GitHub before
+trying creation again because the request may have succeeded there.
+
+Repository creation requires the GitHub App's **Repository creation: write**
+permission (or **Administration: Read and write**). Existing task execution and
+repository-access checks still apply; creating a repository does not itself
+grant the agent access. See the
+[GitHub App setup](operations.md) for operator configuration.
+
 ## Grouping and ordering
 
 The view menu controls two independent preferences:

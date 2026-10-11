@@ -299,6 +299,28 @@ export const en = {
   'composer.repositoryConfigure': 'Configure repository access',
   'composer.repositoryRefresh': 'Refresh',
   'composer.repositoryRefreshing': 'Refreshing…',
+  'repositoryCreate.title': 'Create repository',
+  'repositoryCreate.description':
+    'Create a repository in your personal GitHub account before starting a conversation.',
+  'repositoryCreate.name': 'Repository name',
+  'repositoryCreate.repositoryDescription': 'Description (optional)',
+  'repositoryCreate.visibility': 'Visibility',
+  'repositoryCreate.private': 'Private',
+  'repositoryCreate.privateDescription': 'Only you and people you grant access can see it.',
+  'repositoryCreate.public': 'Public',
+  'repositoryCreate.publicDescription': 'Anyone on the internet can see it.',
+  'repositoryCreate.readme': 'A README is included so the repository is ready for your first task.',
+  'repositoryCreate.cancel': 'Cancel',
+  'repositoryCreate.close': 'Close repository dialog',
+  'repositoryCreate.creating': 'Creating…',
+  'repositoryCreate.failed': 'Could not create the repository.',
+  'repositoryCreate.successTitle': 'Repository created',
+  'repositoryCreate.accessNeeded':
+    'Give the GitHub App access to this repository, then refresh to use it here.',
+  'repositoryCreate.refresh': 'Refresh availability',
+  'repositoryCreate.refreshFailed':
+    'Repository created. Could not check availability; refresh to try again.',
+  'repositoryCreate.notAvailable': 'This repository is not available to the GitHub App yet.',
   'composer.repositoryUnavailable':
     '{repo} is not available to you. Choose another repository, or configure repository access.',
   'composer.chooseRepository': 'Choose a repository first',

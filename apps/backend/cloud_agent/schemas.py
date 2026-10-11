@@ -2294,6 +2294,25 @@ class GitHubConnectionResponse(BaseModel):
     install_url: str | None = None
 
 
+class CreateGitHubRepositoryRequest(BaseModel):
+    """Create a personal GitHub repository without starting a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    description: str = Field("", max_length=350, pattern=r"^[^\x00]*$")
+    private: bool = Field(True, strict=True)
+
+
+class CreateGitHubRepositoryResponse(BaseModel):
+    """The created repository and its separately checked Agent access."""
+
+    repo: str = Field(..., pattern=REPO_PATTERN, max_length=140)
+    web_url: str = Field(..., pattern=r"^https?://[^/]+/", max_length=2048)
+    default_branch: str = Field(..., min_length=1, max_length=1024)
+    accessible: bool
+
+
 class SourceControlAccount(BaseModel):
     """Public identity metadata for a connected provider account."""
 

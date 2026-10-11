@@ -75,6 +75,15 @@ class UserAuthorizationRevoked(GitHubAppError):
     """
 
 
+class RepositoryCreationError(GitHubAppError):
+    """A safe repository-creation failure, including an uncertain outcome."""
+
+    def __init__(self, reason: str, *, status: int | None = None) -> None:
+        """Keep an actionable reason without retaining GitHub's response body."""
+        super().__init__(f"GitHub repository creation failed: {reason}", status=status)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class UserTokens:
     """What GitHub hands back for a user: a token, and how to renew it.
@@ -549,6 +558,82 @@ class GitHubAppCredentials:
         """Drop a user's remembered answer, when their connection changed."""
         for key in [key for key in self._user_repositories if key[0] == user_id]:
             self._user_repositories.pop(key, None)
+
+    async def create_personal_repository(
+        self, user_token: str, *, name: str, description: str, private: bool
+    ) -> dict[str, str]:
+        """Create an initialized repository in the authorizing user's account.
+
+        A user token and GitHub's personal-account endpoint select the owner;
+        neither an installation credential nor an owner supplied by the browser
+        can do so. This write is sent once. If the response is lost, callers
+        must check GitHub before trying again rather than risk another write.
+        """
+        try:
+            async with self._http() as client:
+                response = await client.post(
+                    f"{self._config.api_base}/user/repos",
+                    headers={
+                        "Authorization": f"Bearer {user_token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    json={
+                        "name": name,
+                        "description": description,
+                        "private": private,
+                        "auto_init": True,
+                    },
+                )
+        except httpx.RequestError as exc:
+            raise RepositoryCreationError("uncertain") from exc
+        status = response.status_code
+        if status == 401:
+            raise UserAuthorizationRevoked("GitHub refused the user's token", status=status)
+        if status == 429 or (
+            status == 403
+            and (
+                response.headers.get("x-ratelimit-remaining") == "0"
+                or "retry-after" in response.headers
+            )
+        ):
+            raise RepositoryCreationError("unavailable", status=status)
+        if status in (403, 404):
+            raise RepositoryCreationError("forbidden", status=status)
+        if status in (400, 422):
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            errors = body.get("errors", []) if isinstance(body, dict) else []
+            duplicate = isinstance(errors, list) and any(
+                isinstance(error, dict)
+                and error.get("resource") == "Repository"
+                and error.get("field") == "name"
+                and (
+                    error.get("code") == "already_exists"
+                    or (
+                        error.get("code") == "custom"
+                        and str(error.get("message", "")).lower().startswith("name already exists")
+                    )
+                )
+                for error in errors
+            )
+            raise RepositoryCreationError(
+                "already_exists" if duplicate else "invalid", status=status
+            )
+        if status != 201:
+            raise RepositoryCreationError("uncertain", status=status)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RepositoryCreationError("uncertain", status=status) from exc
+        fields = ("full_name", "html_url", "default_branch")
+        if not isinstance(body, dict) or any(
+            not isinstance(body.get(field), str) or not body[field] for field in fields
+        ):
+            raise RepositoryCreationError("uncertain", status=status)
+        return {field: body[field] for field in fields}
 
     async def writable_repositories_for_user(
         self, user_token: str, installation_id: int

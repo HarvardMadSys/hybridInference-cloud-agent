@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import (
@@ -25,10 +27,21 @@ from cloud_agent.api.deps import (
     require_store,
 )
 from cloud_agent.entitlement import RepoNotAllowed, repos_for_user, require_entitled_repo
-from cloud_agent.github_app import GitHubAppError
+from cloud_agent.github_app import (
+    GitHubAppError,
+    RepositoryCreationError,
+    UserAuthorizationRevoked,
+)
+from cloud_agent.github_user_token import (
+    UserTokenUnavailable,
+    forget_revoked_token,
+    user_access_token,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
+    CreateGitHubRepositoryRequest,
+    CreateGitHubRepositoryResponse,
     GitHubConnectionResponse,
     GitHubConnectRequest,
     McpIntegrationResponse,
@@ -92,6 +105,119 @@ def _oauth_error(exc: Exception) -> HTTPException:
         status_code=400,
         detail={"error": {"type": error_type, "message": message}},
     )
+
+
+def _repository_error(status: int, error_type: str, message: str) -> HTTPException:
+    """Build a stable creation error containing no upstream credential material."""
+    return HTTPException(
+        status_code=status, detail={"error": {"type": error_type, "message": message}}
+    )
+
+
+@router.post("/repositories", response_model=CreateGitHubRepositoryResponse, status_code=201)
+async def create_github_repository(
+    body: CreateGitHubRepositoryRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _SourceControlStorage | None = Depends(get_storage),
+    app_credentials: Any = Depends(get_agent_app_credentials),
+) -> CreateGitHubRepositoryResponse:
+    """Create an initialized personal repository and check existing Agent access."""
+    source_control = _require_store(store).source_control
+    if app_credentials is None or not github_connect_configured(app_credentials):
+        raise _repository_error(
+            503, "github_not_configured", "GitHub repository creation is not configured."
+        )
+    user_id = user["user_id"]
+    try:
+        token = await user_access_token(
+            user_id, store=source_control, app_credentials=app_credentials
+        )
+    except (GitHubAppError, UserTokenUnavailable, SourceControlError, httpx.RequestError) as exc:
+        raise _repository_error(
+            503,
+            "github_unavailable",
+            "Your GitHub connection is temporarily unavailable. Try again later.",
+        ) from exc
+    if token is None:
+        raise _repository_error(
+            409, "github_reconnect_required", "Connect GitHub before creating a repository."
+        )
+    try:
+        created = await app_credentials.create_personal_repository(
+            token.value, name=body.name, description=body.description, private=body.private
+        )
+        result = CreateGitHubRepositoryResponse(
+            repo=created["full_name"],
+            web_url=created["html_url"],
+            default_branch=created["default_branch"],
+            accessible=False,
+        )
+    except UserAuthorizationRevoked as exc:
+        await forget_revoked_token(user_id, token, store=source_control)
+        app_credentials.forget_user(user_id)
+        raise _repository_error(
+            409, "github_reconnect_required", "Reconnect GitHub before creating a repository."
+        ) from exc
+    except RepositoryCreationError as exc:
+        errors = {
+            "forbidden": (
+                403,
+                "repository_create_forbidden",
+                "GitHub denied repository creation. The GitHub App needs Repository creation write permission (or Administration write); accept its updated permissions or contact your administrator.",
+            ),
+            "already_exists": (
+                409,
+                "repository_already_exists",
+                "A repository with this name already exists in your GitHub account. Choose another name or add the existing repository.",
+            ),
+            "invalid": (
+                422,
+                "repository_create_invalid",
+                "GitHub rejected the repository details. Check the name and description and try again.",
+            ),
+            "unavailable": (
+                503,
+                "repository_creation_unavailable",
+                "GitHub is temporarily limiting repository creation. Try again later.",
+            ),
+        }
+        error = errors.get(exc.reason)
+        if error is not None:
+            raise _repository_error(*error) from exc
+        raise _repository_error(
+            503,
+            "repository_creation_unavailable",
+            "The repository creation result could not be confirmed. Check your GitHub repositories before trying again.",
+        ) from exc
+    except (ValidationError, KeyError, TypeError) as exc:
+        raise _repository_error(
+            503,
+            "repository_creation_unavailable",
+            "The repository creation result could not be confirmed. Check your GitHub repositories before trying again.",
+        ) from exc
+    # Creating a repository does not grant this App access to it. Existing
+    # installation permissions and operator allowlists remain the only sources
+    # of entitlement; a selected-repository installation may need an update.
+    app_credentials.forget_user(user_id)
+    try:
+        await require_entitled_repo(
+            result.repo, user_id, store=source_control, app_credentials=app_credentials
+        )
+        # An operator allowlist can authorize a repository without the App
+        # covering it. The new workspace also needs that coverage for checkout
+        # and publication; failure here cannot undo the successful creation.
+        await app_credentials.installation_id_for(result.repo)
+    except Exception:
+        # Creation already succeeded. A failed status lookup must leave a
+        # created repository waiting for access, not invite another POST.
+        pass
+    else:
+        result.accessible = True
+    logger.info(
+        "agent_github_repository_created",
+        extra={"event": "agent_github_repository_created", "accessible": result.accessible},
+    )
+    return result
 
 
 async def _connect_github_for_user(

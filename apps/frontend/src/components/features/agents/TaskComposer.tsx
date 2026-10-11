@@ -19,6 +19,7 @@ import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { Picker } from './Picker';
 import { RepositoryPicker } from './RepositoryPicker';
+import { CreateRepositoryDialog } from './CreateRepositoryDialog';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { PromptRewrite } from './PromptRewrite';
@@ -76,6 +77,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // account cannot use. Said out loud rather than swapped for another one.
   const [unavailableRepo, setUnavailableRepo] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [createRepositoryOpen, setCreateRepositoryOpen] = useState(false);
   // Which trip to GitHub is starting: connecting, or adding repository access.
   const [leaving, setLeaving] = useState<'connect' | 'manage' | null>(null);
   // The owner tried to run a task written before connecting GitHub. The card
@@ -524,6 +526,16 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             onAction={() => void goToGitHub('manage')}
             pending={leaving === 'manage'}
           />
+          <button
+            type="button"
+            disabled={rewriting || submitting}
+            onClick={() => {
+              if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+            }}
+            className="mt-3 rounded-lg px-3 py-2 text-sm font-medium text-crimson-dark hover:bg-crimson/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-rose-300 dark:hover:bg-white/5"
+          >
+            {t('repositoryCreate.title')}
+          </button>
         </div>
       ) : null}
 
@@ -679,6 +691,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                   onConfigure={
                     config?.github_install_url ? () => void goToGitHub('manage') : undefined
                   }
+                  onCreate={() => {
+                    if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+                  }}
+                  createDisabled={rewriting || submitting}
                   returnFocusTo={repoPickerFromTask ? taskBox : undefined}
                 />
                 <Picker
@@ -766,6 +782,15 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           }}
         />
       ) : null}
+      <CreateRepositoryDialog
+        open={createRepositoryOpen}
+        onClose={() => setCreateRepositoryOpen(false)}
+        onAvailable={(repo, config) => {
+          applyConfig(config);
+          chooseRepository(repo);
+          taskBox.current?.focus();
+        }}
+      />
 
       {skillLibrary.error ? (
         <div className="mt-3 text-center text-sm text-red-600 dark:text-red-400" role="alert">
