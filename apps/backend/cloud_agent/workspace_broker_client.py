@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
 
+SHARED_SESSION_FORK_TIMEOUT_S = 180.0
+# A new member can install its selected plugins before opening the native CLI.
+SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
+
+
 @dataclass
 class WorkspaceBrokerError(RuntimeError):
     """A bounded, owner-safe failure returned by the internal broker."""
@@ -599,7 +604,11 @@ class WorkspaceBrokerClient:
                 "source_launch": source_launch,
                 "target_launch": target_launch,
             },
-            timeout=180,
+            timeout=(
+                SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S
+                if source_launch.get("plugins") or target_launch.get("plugins")
+                else SHARED_SESSION_FORK_TIMEOUT_S
+            ),
         )
 
     @staticmethod

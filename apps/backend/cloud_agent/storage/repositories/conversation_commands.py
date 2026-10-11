@@ -91,6 +91,7 @@ class PostgresConversationCommands:
         reasoning_effort: str | None = None,
         base_sha: str | None = None,
         setup_script: str | None = None,
+        plugins: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
         skills: list[dict[str, Any]] | None = None,
@@ -147,7 +148,7 @@ class PostgresConversationCommands:
                          setup_script, execution_profile,
                          goal_id, goal_objective, goal_state, goal_max_rounds,
                          goal_revision, goal_created_at, goal_updated_at,
-                         user_input_seq)
+                         user_input_seq, plugins)
                     VALUES ($1, $2, $3, $4, 'fallback', $5, $6,
                             CASE WHEN $7::text IS NULL THEN NULL ELSE $9 END,
                             $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'active' END,
@@ -159,7 +160,7 @@ class PostgresConversationCommands:
                             -- itself with: a thread that says one while its own
                             -- first turn says zero makes that turn look older
                             -- than the message that created it.
-                            $10)
+                            $10, $11::jsonb)
                     """,
                     thread_id,
                     user_id,
@@ -171,6 +172,7 @@ class PostgresConversationCommands:
                     goal.max_rounds if goal is not None else None,
                     new_goal_id(),
                     user_input_seq,
+                    json.dumps(plugins or []),
                 )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(

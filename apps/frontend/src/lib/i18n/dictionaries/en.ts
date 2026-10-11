@@ -518,6 +518,37 @@ export const en = {
   'attach.mcpUnsupported': '{runtime} cannot be given MCP connections',
   'attach.skills': 'Skills',
   'attach.skillsDefaults': 'defaults',
+  'plugins.title': 'Plugins',
+  'plugins.description': 'Install {runtime} plugins when this conversation’s sandbox starts.',
+  'plugins.dismiss': 'Dismiss plugin dialog',
+  'plugins.plugin': 'Plugin',
+  'plugins.package': 'npm package',
+  'plugins.packageHint':
+    'Use a package name, optionally with an exact version. The npm: prefix is optional.',
+  'plugins.marketplace': 'Marketplace source',
+  'plugins.marketplaceHint':
+    'GitHub owner/repo or an HTTPS Git URL without credentials, query, or fragment.',
+  'plugins.empty': 'No plugins selected.',
+  'plugins.add': 'Add plugin',
+  'plugins.remove': 'Remove',
+  'plugins.removeNamed': 'Remove {name}',
+  'plugins.done': 'Done',
+  'plugins.manage': 'Manage plugins',
+  'plugins.limit': 'Select up to {limit} plugins.',
+  'plugins.invalidName':
+    'Enter a plugin as name@marketplace, for example code-review@claude-plugins-official.',
+  'plugins.invalidPackage':
+    'Enter an npm package name, optionally with an exact version such as @scope/plugin@1.2.3.',
+  'plugins.invalidCodexName':
+    'Enter name@marketplace using letters, numbers, hyphens, and underscores. Codex plugin names cannot contain dots.',
+  'plugins.invalidMarketplace':
+    'Enter a GitHub owner/repo or an HTTPS Git URL without credentials, query, or fragment.',
+  'plugins.duplicate': 'This plugin is already selected.',
+  'plugins.sourceConflict': 'Plugins from the same marketplace must use the same source.',
+  'plugins.unsupported':
+    '{runtime} does not support plugins. Remove the selected plugins or choose a supported agent to start this task.',
+  'plugins.incompatible':
+    'Selected plugins do not match {runtime}. Remove them or choose the agent they were added for.',
   'attach.uploading': 'uploading…',
   'attach.fileCount': '{count} files',
   'attach.remove': 'Remove {name}',

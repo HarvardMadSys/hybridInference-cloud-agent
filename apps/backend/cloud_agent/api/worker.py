@@ -898,6 +898,7 @@ async def worker_claim(
             claim.get("goal"),
         ),
         setup_script=claim.get("setup_script"),
+        plugins=claim.get("plugins") or [],
         runtime=claim["runtime"],
         model=claim["model"],
         execution_profile=claim.get("execution_profile", "trusted-v1"),

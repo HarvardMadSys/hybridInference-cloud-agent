@@ -2769,6 +2769,8 @@ class SharedChatSessionSupervisor:
         target_launch: ResidentLaunch,
     ) -> NativeSessionForkResult:
         """Run one fork while only the source member's turn lock is held."""
+        if source_launch.plugins != target_launch.plugins:
+            raise SandboxError("native fork cannot change plugins")
         # Docker start and CLI initialization can block for seconds. Neither
         # happens under the supervisor-wide metadata lock, so sibling turns
         # and terminals continue while this source is being prepared.
@@ -2792,6 +2794,7 @@ class SharedChatSessionSupervisor:
                 source.transport is None
                 or not source.transport.alive
                 or source.residency_generation != source_launch.residency_generation
+                or source.transport.launch.plugins != source_launch.plugins
             )
             if needs_restart:
                 stale_transport = source.transport

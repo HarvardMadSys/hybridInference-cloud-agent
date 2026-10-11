@@ -126,6 +126,8 @@ export function ComposerPlusMenu({
   onOpenGoal,
   mcp,
   mcpBlockedReason,
+  onOpenPlugins,
+  pluginSummary,
   onOpen,
   disabled = false,
 }: {
@@ -145,6 +147,8 @@ export function ComposerPlusMenu({
     toggle: (connection: McpChoice['connection'], on: boolean) => void;
   };
   mcpBlockedReason?: string;
+  onOpenPlugins?: () => void;
+  pluginSummary?: string;
   onOpen?: () => void;
   disabled?: boolean;
 }) {
@@ -380,6 +384,24 @@ export function ComposerPlusMenu({
                       {mcpBlockedReason ?? (mcp.count ? mcp.count : '')}
                     </span>
                     {mcpBlockedReason ? null : <ChevronIcon />}
+                  </button>
+                ) : null}
+                {onOpenPlugins ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    aria-haspopup="dialog"
+                    className={COMPOSER_MENU_ROW}
+                    onClick={() => {
+                      close();
+                      onOpenPlugins();
+                    }}
+                  >
+                    <McpIcon />
+                    <span className="shrink-0">{t('plugins.title')}</span>
+                    <span className={COMPOSER_MENU_DETAIL}>{pluginSummary}</span>
+                    <ChevronIcon />
                   </button>
                 ) : null}
               </div>

@@ -197,7 +197,8 @@ async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkey
 
 
 @pytest.mark.asyncio
-async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
+@pytest.mark.parametrize("plugins, timeout", [([], 180), ([{"plugin": "example"}], 960)])
+async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins, timeout):
     broker = WorkspaceBrokerClient("http://broker", "secret")
     calls: list[tuple] = []
 
@@ -227,8 +228,8 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
         source_native_turn_no=2,
         target_thread_id="athr_target",
         target_slot_id=1,
-        source_launch={},
-        target_launch={},
+        source_launch={"plugins": plugins},
+        target_launch={"plugins": plugins},
     )
 
     assert result == {"ok": True}
@@ -237,7 +238,9 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
     assert call[3]["origin_thread_id"] == "athr_origin"
     assert call[3]["source_native_turn_no"] == 2
     assert call[3]["disk_limit_mib"] == 16384
-    assert call[4] == 180
+    assert call[3]["source_launch"]["plugins"] == plugins
+    assert call[3]["target_launch"]["plugins"] == plugins
+    assert call[4] == timeout
 
 
 @pytest.mark.asyncio

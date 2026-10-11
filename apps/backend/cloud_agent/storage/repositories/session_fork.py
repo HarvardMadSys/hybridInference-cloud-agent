@@ -216,7 +216,7 @@ class PostgresSessionForkRepository:
             # history in, and a membership that already owns its resident
             # slot and can carry the residency the host is about to open.
             source_thread = await conn.fetchrow(
-                "SELECT repo, title, setup_script, execution_profile, "
+                "SELECT repo, title, setup_script, execution_profile, plugins, "
                 "goal_objective, goal_max_rounds "
                 "FROM agent_threads WHERE id = $1",
                 source["thread_id"],
@@ -235,7 +235,7 @@ class PostgresSessionForkRepository:
                      setup_script, execution_profile,
                      goal_id, goal_objective, goal_state, goal_pause_reason,
                      goal_pause_detail, goal_max_rounds, goal_revision,
-                     goal_created_at, goal_updated_at)
+                     goal_created_at, goal_updated_at, plugins)
                 VALUES ($1, $2, $3, $4, 'inherited', $5, $6,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE $9 END,
                         $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'paused' END,
@@ -244,7 +244,7 @@ class PostgresSessionForkRepository:
                              ELSE 'copied from another conversation; resume it to start working' END,
                         $8, CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
-                        CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END)
+                        CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END, $10::jsonb)
                 """,
                 target_thread_id,
                 user_id,
@@ -255,6 +255,7 @@ class PostgresSessionForkRepository:
                 source_thread["goal_objective"],
                 source_thread["goal_max_rounds"],
                 new_goal_id(),
+                json.dumps(load_json(source_thread["plugins"]) or []),
             )
             await conn.execute(
                 """
@@ -867,6 +868,8 @@ class PostgresSessionForkRepository:
                 SELECT id FROM agent_session_forks
                 WHERE state IN ('preparing', 'materialized')
                   AND updated_at < NOW() - make_interval(secs => $1)
+                  AND (state = 'materialized' OR coordinator_lease_expires_at IS NULL
+                       OR coordinator_lease_expires_at <= NOW())
                 ORDER BY id
                 """,
                 stall_seconds,
@@ -895,6 +898,8 @@ class PostgresSessionForkRepository:
                         updated_at = NOW(), completed_at = NOW()
                     WHERE id = $1 AND state = 'preparing'
                       AND updated_at < NOW() - make_interval(secs => $2)
+                      AND (coordinator_lease_expires_at IS NULL
+                           OR coordinator_lease_expires_at <= NOW())
                     RETURNING *
                     """,
                     operation["id"],

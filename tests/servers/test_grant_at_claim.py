@@ -213,10 +213,28 @@ async def test_the_sandbox_credential_is_the_gateways_grant(claim):
 
     assert response.status_code == 200
     assert response.json()["sandbox_token"] == "agr.header.signature"
+    assert response.json()["plugins"] == []
     # And the runner's own token is still this service's own, unchanged.
     from cloud_agent.tokens import SCOPE_FULL, parse_worker_token
 
     assert parse_worker_token(response.json()["worker_token"])["scope"] == SCOPE_FULL
+
+
+async def test_claim_delivers_the_threads_plugins(claim, monkeypatch):
+    store, grants = _ClaimStore(), _Grants()
+    plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]
+    original = store.claim_job
+
+    async def claim_with_plugins(**kwargs):
+        job = await original(**kwargs)
+        assert job is not None
+        return {**job, "plugins": plugins}
+
+    monkeypatch.setattr(store, "claim_job", claim_with_plugins)
+    response = await claim(store, grants)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["plugins"] == plugins
 
 
 async def test_the_grant_is_scoped_to_the_job(claim):

@@ -3156,8 +3156,9 @@ async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
     assert store.session_forks == {}
 
 
+@pytest.mark.parametrize("with_plugins, lease_seconds", [(False, 210), (True, 990)])
 async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
-    store: FakeStorage, monkeypatch
+    store: FakeStorage, monkeypatch, with_plugins: bool, lease_seconds: int
 ):
     """Clicking Fork immediately materializes a sibling process, not a clone."""
 
@@ -3173,6 +3174,8 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             assert kwargs["source_native_session_id"] == "native-session-source"
             assert kwargs["source_native_turn_no"] == 1
             assert kwargs["target_thread_id"] != source_thread_id
+            assert kwargs["source_launch"]["plugins"] == plugins
+            assert kwargs["target_launch"]["plugins"] == plugins
             return {
                 "operation_id": kwargs["operation_id"],
                 "sandbox_id": kwargs["sandbox_id"],
@@ -3192,11 +3195,15 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             }
 
     broker = Broker()
+    plugins = (
+        [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}] if with_plugins else []
+    )
     monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
         source = store.jobs[job_id]
+        source["plugins"] = plugins
         source["state"] = "succeeded"
         source["thread_sandbox"] = {
             "thread_id": source["thread_id"],
@@ -3229,6 +3236,8 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
     assert forked["thread_sandbox"]["sandbox_id"] == source["thread_sandbox"]["sandbox_id"]
     assert forked["thread_sandbox"]["container_id"] == source["thread_sandbox"]["container_id"]
     assert forked["thread_sandbox"]["native_session_id"] == "native-session-child"
+    assert response.json()["plugins"] == plugins
+    assert next(iter(store.session_forks.values()))["coordinator_lease_seconds"] == lease_seconds
     assert len(broker.calls) == 1
 
 
@@ -6442,6 +6451,90 @@ def _job_body(**overrides: Any) -> dict[str, Any]:
     return body
 
 
+@pytest.mark.parametrize(
+    ("runtime", "plugins"),
+    [
+        ("claude-code", [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]),
+        ("codex", [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]),
+        ("pi", [{"plugin": "@owner/agent-extension@1.2.3"}]),
+        ("opencode", [{"plugin": "@owner/agent-extension@1.2.3"}]),
+        ("kilo", [{"plugin": "@owner/agent-extension@1.2.3"}]),
+    ],
+)
+async def test_plugins_are_retained_and_visible_on_job_reads(
+    client: AsyncClient, store: FakeStorage, runtime: str, plugins: list[dict[str, str]]
+):
+    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime, plugins=plugins))
+
+    assert created.status_code == 201, created.text
+    job_id = created.json()["id"]
+    assert store.jobs[job_id]["plugins"] == plugins
+    assert [
+        {key: value for key, value in entry.items() if value is not None}
+        for entry in created.json()["plugins"]
+    ] == plugins
+    detail = await client.get(f"/v1/agent/jobs/{job_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["plugins"] == created.json()["plugins"]
+
+
+async def test_plugins_cannot_be_changed_in_a_follow_up(client: AsyncClient, store: FakeStorage):
+    parent_id = await _create_job(client)
+    response = await _send(client, store, parent_id, {"prompt": "continue", "plugins": []})
+
+    assert response.status_code == 422, response.text
+    assert store.pending == {}
+
+
+async def test_duplicate_plugins_are_refused_before_model_lookup(
+    client: AsyncClient, store: FakeStorage
+):
+    plugin = {"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}
+    response = await client.post(
+        "/v1/agent/jobs", json=_job_body(plugins=[plugin, plugin], model="no-such-model")
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error"]["type"] == "invalid_plugin_selection"
+    assert store.jobs == {}
+
+
+async def test_plugin_shape_is_validated_for_the_requested_runtime(
+    client: AsyncClient, store: FakeStorage
+):
+    response = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(plugins=[{"plugin": "reviewer", "marketplace": "owner/plugins"}]),
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error"]["type"] == "invalid_plugin_selection"
+    assert store.jobs == {}
+
+
+async def test_plugin_changes_cannot_reuse_a_submission_key(
+    client: AsyncClient, store: FakeStorage
+):
+    first_plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]
+    headers = {"Idempotency-Key": "plugin-submit"}
+    first = await client.post(
+        "/v1/agent/jobs", json=_job_body(plugins=first_plugins), headers=headers
+    )
+    assert first.status_code == 201, first.text
+    repeated = await client.post(
+        "/v1/agent/jobs", json=_job_body(plugins=first_plugins), headers=headers
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == first.json()["id"]
+    changed = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(plugins=[{**first_plugins[0], "marketplace": "owner/another-marketplace"}]),
+        headers=headers,
+    )
+    assert changed.status_code == 409, changed.text
+    assert len(store.jobs) == 1
+
+
 async def test_the_composer_is_told_which_connections_and_which_runtimes(
     client: AsyncClient, store: FakeStorage
 ):
@@ -6465,6 +6558,7 @@ async def test_the_composer_is_told_which_connections_and_which_runtimes(
     # The composer is told the same list the create path enforces, so a picker
     # cannot offer a runtime that would then be refused.
     assert config["mcp_runtimes"] == ["claude-code", "codex", "kilo", "opencode", "pi"]
+    assert sorted(config["plugin_runtimes"]) == ["claude-code", "codex", "kilo", "opencode", "pi"]
     assert [entry["tool_count"] for entry in config["mcp_connections"]] == [1, 1]
     assert all(entry["available"] for entry in config["mcp_connections"])
     assert _UPSTREAM_TOKEN not in json.dumps(config)

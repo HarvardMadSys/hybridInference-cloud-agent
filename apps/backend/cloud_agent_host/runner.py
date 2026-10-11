@@ -140,6 +140,7 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
@@ -319,6 +320,8 @@ class ClaimedJob:
     # Optional, so it carries a default rather than forcing every caller to
     # pass one.
     setup_script: str | None = None
+    # Explicit CLI plugins installed in this chat's private member state.
+    plugins: list[dict[str, str]] = field(default_factory=list)
     # Read-only, single-repo, short-lived: what the runner clones with. Stays
     # in the runner — it is never put in .git/config and never enters the
     # sandbox environment. ``None`` for a public repository.
@@ -352,6 +355,10 @@ class ClaimedJob:
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
         """Build from the claim endpoint's response."""
+        raw_plugins = body.get("plugins", [])
+        if not isinstance(raw_plugins, list) or len(raw_plugins) > MAX_SANDBOX_PLUGINS:
+            raise ValueError("claim plugins must be a bounded list")
+        plugins = validate_sandbox_plugins(body["runtime"], raw_plugins)
         return cls(
             job_id=body["job_id"],
             thread_id=body["thread_id"],
@@ -363,6 +370,7 @@ class ClaimedJob:
             base_sha=body.get("base_sha"),
             task_prompt=body["task_prompt"],
             setup_script=body.get("setup_script"),
+            plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],
             execution_profile=body.get("execution_profile") or "trusted-v1",
@@ -2680,6 +2688,7 @@ def _run_shared_live_attempt(
             reasoning_effort=job.reasoning_effort,
             gateway_base_url=gateway_base_url,
             credential=None,
+            plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
             # The MCP relay token is attempt-fenced. It is process-fixed only
             # when this turn actually exposes MCP endpoints; carrying an

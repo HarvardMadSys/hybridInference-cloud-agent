@@ -1630,6 +1630,180 @@ describe('durable new-task drafts', () => {
   });
 });
 
+describe('TaskComposer plugins', () => {
+  const plugin = {
+    plugin: 'code-review@claude-plugins-official',
+    marketplace: 'anthropics/claude-plugins-official',
+  };
+  beforeEach(() => {
+    account.id = 'alice';
+    sessionStorage.clear();
+    navigation.push.mockReset();
+    vi.mocked(getAgentConfig)
+      .mockReset()
+      .mockResolvedValue(
+        config({ runtimes: ['claude-code', 'pi'], plugin_runtimes: ['claude-code'] }),
+      );
+    vi.mocked(listRepoBranches)
+      .mockReset()
+      .mockResolvedValue({ default: 'dev', branches: ['dev'] });
+    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listMcpConnections).mockResolvedValue({ connections: [], templates: [] });
+    vi.mocked(getMcpConnectionCapabilities).mockResolvedValue([]);
+    vi.mocked(createAgentJob)
+      .mockReset()
+      .mockResolvedValue({ id: 'plugin-task' } as AgentJobApi);
+  });
+  afterEach(cleanup);
+
+  async function openPlugins() {
+    const menu = await openAttachMenu();
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Plugins/ }));
+    return screen.findByRole('dialog', { name: 'Plugins' });
+  }
+
+  async function selectPlugin() {
+    const dialog = within(await openPlugins());
+    fireEvent.change(dialog.getByLabelText('Plugin'), { target: { value: plugin.plugin } });
+    fireEvent.change(dialog.getByLabelText(/Marketplace source/), {
+      target: { value: plugin.marketplace },
+    });
+    fireEvent.click(dialog.getByRole('button', { name: 'Add plugin' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+  }
+
+  it.each(['Review the change', '/goal Review the change'])(
+    'sends selected plugins with %s',
+    async (prompt) => {
+      render(<TaskComposer initialRepo="owner/repository" />);
+      const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
+      await selectPlugin();
+      fireEvent.change(box, { target: { value: prompt } });
+      fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+      await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ plugins: [plugin] });
+      expect(vi.mocked(createAgentJob).mock.calls[0][0].goal).toEqual(
+        prompt.startsWith('/goal') ? { objective: 'Review the change' } : undefined,
+      );
+    },
+  );
+
+  it('omits plugins when none are selected', async () => {
+    render(<TaskComposer initialRepo="owner/repository" />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Review' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('plugins');
+  });
+
+  it.each(['pi', 'opencode', 'kilo'])(
+    'submits npm packages for %s without a marketplace',
+    async (runtime) => {
+      vi.mocked(getAgentConfig).mockResolvedValue(
+        config({ runtimes: [runtime], plugin_runtimes: [runtime] }),
+      );
+      render(<TaskComposer initialRepo="owner/repository" />);
+      const box = await screen.findByRole('textbox');
+      const dialog = within(await openPlugins());
+      fireEvent.change(dialog.getByLabelText(/^npm package/), {
+        target: { value: 'npm:@scope/plugin@1.2.3' },
+      });
+      fireEvent.click(dialog.getByRole('button', { name: 'Add plugin' }));
+      fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+      fireEvent.change(box, { target: { value: 'Review' } });
+      fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+      await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({
+        runtime,
+        plugins: [{ plugin: '@scope/plugin@1.2.3' }],
+      });
+    },
+  );
+
+  it('retains npm package selections when reopening the composer', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ runtimes: ['pi'], plugin_runtimes: ['pi'] }),
+    );
+    const first = render(<TaskComposer initialRepo="owner/repository" />);
+    await screen.findByRole('textbox');
+    const dialog = within(await openPlugins());
+    fireEvent.change(dialog.getByLabelText(/^npm package/), {
+      target: { value: '@scope/plugin@1.2.3' },
+    });
+    fireEvent.click(dialog.getByRole('button', { name: 'Add plugin' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+    first.unmount();
+    render(<TaskComposer initialRepo="owner/repository" />);
+    expect(within(await openPlugins()).getByText('@scope/plugin@1.2.3')).toBeInTheDocument();
+  });
+
+  it('blocks incompatible plugin formats when switching between supported agents', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ runtimes: ['claude-code', 'pi'], plugin_runtimes: ['claude-code', 'pi'] }),
+    );
+    render(<TaskComposer initialRepo="owner/repository" />);
+    const box = await screen.findByRole('textbox');
+    await selectPlugin();
+    fireEvent.change(box, { target: { value: 'Review' } });
+    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'pi' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Selected plugins do not match pi');
+    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(createAgentJob).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'claude-code' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ plugins: [plugin] });
+  });
+
+  it('restores selections after navigation and isolates accounts', async () => {
+    const first = render(<TaskComposer initialRepo="owner/repository" />);
+    await screen.findByRole('textbox');
+    await selectPlugin();
+    first.unmount();
+    const second = render(<TaskComposer initialRepo="owner/repository" />);
+    expect(within(await openPlugins()).getByText(plugin.plugin)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    account.id = 'bob';
+    second.rerender(<TaskComposer initialRepo="owner/repository" />);
+    expect(within(await openPlugins()).getByText('No plugins selected.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    account.id = 'alice';
+    second.rerender(<TaskComposer initialRepo="owner/repository" />);
+    expect(within(await openPlugins()).getByText(plugin.plugin)).toBeInTheDocument();
+  });
+
+  it('retains incompatible selections and blocks submission until they are removed', async () => {
+    render(<TaskComposer initialRepo="owner/repository" />);
+    const box = await screen.findByRole('textbox');
+    await selectPlugin();
+    fireEvent.change(box, { target: { value: '/goal Review the change' } });
+    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'pi' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('pi does not support plugins');
+    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(createAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage plugins' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Plugins' }));
+    expect(dialog.getByText(plugin.plugin)).toBeInTheDocument();
+    fireEvent.click(dialog.getByRole('button', { name: `Remove ${plugin.plugin}` }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+    expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('plugins');
+  });
+
+  it('hides plugin setup when the control plane advertises no support', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    render(<TaskComposer />);
+    expect(
+      within(await openAttachMenu()).queryByRole('menuitem', { name: /Plugins/ }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe('TaskComposer reasoning effort', () => {
   beforeEach(() => {
     navigation.push.mockReset();

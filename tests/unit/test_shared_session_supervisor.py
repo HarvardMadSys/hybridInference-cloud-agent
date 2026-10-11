@@ -2024,7 +2024,10 @@ def test_snapshot_start_failure_releases_the_admission_barrier():
 
 
 @pytest.mark.parametrize("reserved_child", [False, True])
-def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reserved_child):
+@pytest.mark.parametrize("with_plugins", [False, True])
+def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(
+    reserved_child, with_plugins
+):
     manager = _Manager()
     factory = _TransportFactory()
     supervisor: SharedChatSessionSupervisor
@@ -2033,6 +2036,7 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
         assert source_transport.native_session_id == "native-source"
         assert operation_id == "fork-one"
         assert source_native_turn_no == 1
+        assert target_launch.plugins == source_transport.launch.plugins
         token, peer = supervisor.operation_opened("athr_peer")
         assert peer.operation_count == 1
         assert supervisor.status("athr_source").operation_count == 1
@@ -2054,7 +2058,12 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
         manifest=_members(),
         expected_container_id="container-shared",
     )
-    source_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    plugins = (
+        ({"plugin": "review@fixture", "marketplace": "owner/marketplace"},) if with_plugins else ()
+    )
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), plugins=plugins
+    )
     supervisor.ensure_resident("athr_source", lease.token, source_launch)
     supervisor.settle(
         "athr_source",
@@ -2084,7 +2093,9 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
         target_thread_id="athr_child",
         target_slot_id=2,
         source_launch=source_launch,
-        target_launch=_launch("athr_child", native_session_id=None, slot=2),
+        target_launch=replace(
+            _launch("athr_child", native_session_id=None, slot=2), plugins=plugins
+        ),
     )
 
     assert result.container_id == "container-shared"
@@ -2092,6 +2103,8 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
     assert supervisor.status("athr_child").resident_state == "live"
     assert supervisor.status("athr_source").operation_count == 0
     assert supervisor.status("athr_source").idle_deadline_monotonic is not None
+    assert factory.opened[-1].thread_id == "athr_child"
+    assert factory.opened[-1].plugins == plugins
 
     if reserved_child:
         # A concurrent Files/Git request can still carry the pending database

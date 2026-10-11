@@ -2545,6 +2545,27 @@ credentials stay outside the sandbox; member-scoped inference and MCP tokens
 enter their CLI processes. The sandbox runs unprivileged, so `apt install`
 does not work — use `pip --user`, a virtualenv, `npm ci`.
 
+New chats can also select up to eight runtime plugins through **+ → Plugins**
+or the create request's `plugins` field. This is thread configuration: follow-ups
+keep the selections, and Fork copies them to the new member. Claude Code and
+Codex use entries such as
+`{"plugin": "review@example", "marketplace": "example/plugins"}`; their
+marketplace source may be a GitHub repository or a credential-free public HTTPS
+source (a Git repository for Codex). pi, OpenCode, and Kilo use npm package
+entries such as `{"plugin": "@example/plugin@1.2.3"}` with no marketplace.
+Exact npm versions are optional; ranges, tags, local paths, arbitrary install
+commands, and credentials in source URLs are rejected.
+
+Installation runs during member runtime initialization, before its resident CLI
+accepts a prompt, using the pinned runtime version and the member's private
+home/configuration. Successful installation is retained across process and
+container restarts; failed installs can retry and never mark the selection
+complete. Errors and timeouts fail startup with a bounded diagnostic. Plugins
+use the group's existing network and unprivileged member identity. Project
+configuration and automatic plugin discovery remain disabled where the runtime
+supports those guards; explicitly selected plugins are loaded through the native
+runtime mechanism, alongside the platform's MCP configuration.
+
 There is one network, the same for every task and every phase, and nothing
 selects it ([design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
 Each sandbox group — setup, the agent and every Fork sibling — gets one

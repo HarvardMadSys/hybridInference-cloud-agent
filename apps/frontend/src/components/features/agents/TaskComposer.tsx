@@ -3,7 +3,12 @@
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
-import type { AgentConfigApi, CreateAgentJobRequest, GoalInputApi } from '@/lib/api/agents';
+import type {
+  AgentConfigApi,
+  AgentPluginInputApi,
+  CreateAgentJobRequest,
+  GoalInputApi,
+} from '@/lib/api/agents';
 import { isComposerSubmit } from './composerKeys';
 import { ConnectSourceControl } from './ConnectSourceControl';
 import { NEW_TASK_PROMPT_ID, useFirstRun } from './firstRun';
@@ -34,6 +39,8 @@ import { useComposerMcp } from './mcp/useComposerMcp';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
+import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { PluginSelectionDialog } from './plugins/PluginSelectionDialog';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -60,6 +67,7 @@ interface NewTaskDraft {
   model: string;
   effort: string;
   branch: string;
+  plugins: AgentPluginInputApi[];
 }
 
 function readNewTaskDraft(value: string): NewTaskDraft | null {
@@ -69,7 +77,9 @@ function readNewTaskDraft(value: string): NewTaskDraft | null {
     const record = saved as Record<string, unknown>;
     const fields = ['task', 'repo', 'runtime', 'model', 'effort', 'branch'] as const;
     if (!fields.every((field) => typeof record[field] === 'string')) return null;
-    return saved as NewTaskDraft;
+    const plugins = readDraftPlugins(record.plugins);
+    if (plugins === null) return null;
+    return { ...(saved as NewTaskDraft), plugins };
   } catch {
     return null;
   }
@@ -91,7 +101,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [draft] = useState(() => {
     const saved = readNewTaskDraft(draftStore.value);
     const returning = peekComposerDraft(userId);
-    return saved ?? (returning ? { ...returning, effort: '', branch: '' } : null);
+    return saved ?? (returning ? { ...returning, effort: '', branch: '', plugins: [] } : null);
   });
   const [task, setTask] = useState(() => draft?.task ?? '');
   const skillLibrary = useSkillLibrary();
@@ -103,6 +113,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // The attach menu's own state. What this message will carry, as opposed to
   // how it runs; an untouched composer sends neither `skill_ids` nor a goal.
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [plugins, setPlugins] = useState<AgentPluginInputApi[]>(() => draft?.plugins ?? []);
+  const [pluginsOpen, setPluginsOpen] = useState(false);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
@@ -148,8 +160,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const savedBranch =
     branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
   useEffect(() => {
-    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch }));
-  }, [saveDraft, task, repo, runtime, model, effort, savedBranch]);
+    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch, plugins }));
+  }, [saveDraft, task, repo, runtime, model, effort, savedBranch, plugins]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -337,6 +349,14 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     runtime && mcpRuntimes && !mcpRuntimes.includes(runtime)
       ? t('attach.mcpUnsupported', { runtime })
       : undefined;
+  const pluginsSupported = config?.plugin_runtimes?.includes(runtime) ?? false;
+  const incompatiblePlugins = plugins.some((plugin) => !validPluginForRuntime(runtime, plugin));
+  const pluginBlockedReason = !pluginsSupported
+    ? t('plugins.unsupported', { runtime })
+    : incompatiblePlugins
+      ? t('plugins.incompatible', { runtime })
+      : undefined;
+  const pluginsBlocked = plugins.length > 0 && (!pluginsSupported || incompatiblePlugins);
 
   const disconnected = config?.github_connected === false;
   // Someone who can go and connect may write the task first: the trip keeps
@@ -356,6 +376,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&
+    !pluginsBlocked &&
     Boolean(repo && runtime && model);
 
   /**
@@ -476,6 +497,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // Omitted gives the task no servers at all, which is the right default:
       // connecting a server and letting a task call it are separate choices.
       ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
+      ...(plugins.length ? { plugins } : {}),
       // The completion condition rides the first message, so the first turn
       // is already working toward it rather than learning about it later.
       ...(goal ? { goal } : {}),
@@ -505,6 +527,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
    * "unlimited" is the absence of a bound and a large number is not.
    */
   async function applyGoalObjective(objective: string): Promise<void> {
+    if (pluginsBlocked) throw new Error(pluginBlockedReason);
     const snapshot = draftStore.capture();
     setGoalHint(null);
     const job = await createAgentJob(requestBody(objective, { objective }));
@@ -755,6 +778,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                 onOpenGoal={insertGoalCommand}
                 mcp={mcp}
                 mcpBlockedReason={mcpBlockedReason}
+                onOpenPlugins={
+                  pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
+                }
+                pluginSummary={String(plugins.length)}
               />
               <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
               <RepositoryPicker
@@ -832,6 +859,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </div>
       </div>
 
+      {pluginsBlocked ? (
+        <p role="alert" className="mt-3 text-center text-sm text-status-error">
+          {pluginBlockedReason}{' '}
+          <button type="button" className="underline" onClick={() => setPluginsOpen(true)}>
+            {t('plugins.manage')}
+          </button>
+        </p>
+      ) : null}
+
       <p
         id={keyboardHintId}
         className="mt-3 text-center text-xs leading-relaxed text-gray-500 dark:text-gray-400"
@@ -839,6 +875,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         {t('composer.keyboardHint')}
       </p>
 
+      {pluginsOpen ? (
+        <PluginSelectionDialog
+          runtime={runtime}
+          selected={plugins}
+          onChange={setPlugins}
+          onClose={() => setPluginsOpen(false)}
+          blockedReason={pluginBlockedReason}
+        />
+      ) : null}
       {skillsOpen ? (
         <SkillSelectionDialog
           limits={config?.skill_limits}

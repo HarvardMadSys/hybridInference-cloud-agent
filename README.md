@@ -24,6 +24,14 @@ preferences can guide later tasks in the same project. You can pause memory or
 clear it so older requests are no longer used. Avatars and memory require no
 additional model calls. See the [avatar and memory guide](docs/user-memory.md).
 
+To install plugins for a new chat, select **+ → Plugins** before sending the
+first task. Claude Code and Codex accept `name@marketplace` with a GitHub
+repository or public HTTPS marketplace source. pi, OpenCode, and Kilo accept
+npm package names, optionally pinned to an exact version such as
+`@example/plugin@1.2.3`. Add up to eight plugins. The sandbox installs them
+before the first prompt; an installation failure stops startup and appears
+as a task error. Selections persist with the chat and are inherited by Fork.
+
 To receive desktop alerts when an agent asks a question or a turn finishes,
 open **Settings → Notifications**, select **Enable notifications**, and allow
 the browser permission prompt. You can toggle question and turn-completion

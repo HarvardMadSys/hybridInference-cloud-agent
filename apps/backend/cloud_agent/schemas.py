@@ -62,6 +62,7 @@ from cloud_agent_shared.host_settings import (
     SettingUnit,
     validate_admin_change,
 )
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import (
     DEFAULT_MAX_ARCHIVE_BYTES,
     DEFAULT_MULTIPART_PART_BYTES,
@@ -188,6 +189,11 @@ class AgentJobCreate(BaseModel):
         None,
         max_length=16,
         description="Owned skills for this chat. Omitted uses library defaults; [] selects none.",
+    )
+    plugins: list[SandboxPlugin] | None = Field(
+        None,
+        max_length=MAX_SANDBOX_PLUGINS,
+        description="Plugins installed for this chat during sandbox initialization.",
     )
     mcp_bindings: list[McpBindingInput] | None = Field(
         None,
@@ -694,6 +700,7 @@ class AgentJobResponse(BaseModel):
     #: are the single copy of the content, so a fork references the same
     #: immutable uploads rather than duplicating them.
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    plugins: list[SandboxPlugin] = Field(default_factory=list)
     mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -1689,6 +1696,7 @@ class WorkerClaimResponse(BaseModel):
     base_sha: str | None = None
     task_prompt: str
     setup_script: str | None = None
+    plugins: list[SandboxPlugin] = Field(default_factory=list)
     runtime: str
     model: str
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
@@ -2282,6 +2290,10 @@ class AgentConfigResponse(BaseModel):
         description="Repositories this deployment is entitled to work on. Empty means none.",
     )
     runtimes: list[str] = Field(default_factory=list, description="Runtime ids that can run here.")
+    plugin_runtimes: list[str] = Field(
+        default_factory=list,
+        description="Runtime ids that support plugins installed at sandbox initialization.",
+    )
     models: list[str] = Field(
         default_factory=list,
         description=(

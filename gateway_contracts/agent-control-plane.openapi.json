@@ -3325,6 +3325,14 @@
             "title": "Models",
             "type": "array"
           },
+          "plugin_runtimes": {
+            "description": "Runtime ids that support plugins installed at sandbox initialization.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Plugin Runtimes",
+            "type": "array"
+          },
           "repos": {
             "description": "Repositories this deployment is entitled to work on. Empty means none.",
             "items": {
@@ -4098,6 +4106,22 @@
             "title": "Model",
             "type": "string"
           },
+          "plugins": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SandboxPlugin"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Plugins installed for this chat during sandbox initialization.",
+            "title": "Plugins"
+          },
           "reasoning_effort": {
             "anyOf": [
               {
@@ -4644,6 +4668,13 @@
               }
             ],
             "title": "Pinned At"
+          },
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxPlugin"
+            },
+            "title": "Plugins",
+            "type": "array"
           },
           "published_commit_sha": {
             "anyOf": [
@@ -12444,6 +12475,36 @@
         "title": "SandboxArchiveSettingsResponse",
         "type": "object"
       },
+      "SandboxPlugin": {
+        "additionalProperties": false,
+        "description": "One native marketplace plugin or npm plugin package for a chat.",
+        "properties": {
+          "marketplace": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "minLength": 3,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Marketplace"
+          },
+          "plugin": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Plugin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plugin"
+        ],
+        "title": "SandboxPlugin",
+        "type": "object"
+      },
       "SandboxResourceSample": {
         "additionalProperties": false,
         "description": "One Docker container reading, with rates over its preceding sample interval.\n\nNull counters mean Docker did not measure them. CPU is expressed in cores,\nso one fully occupied CPU reports ``1.0`` regardless of the host's size.\nNetwork and block I/O byte counters are cumulative Docker counters; their\nrates, and CPU, describe the interval between two usable observations.",
@@ -14913,6 +14974,13 @@
               }
             ],
             "title": "Parent Job Id"
+          },
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxPlugin"
+            },
+            "title": "Plugins",
+            "type": "array"
           },
           "reasoning_effort": {
             "anyOf": [

@@ -334,6 +334,7 @@ async def _reserve_shared_chat(
     store: Storage,
     *,
     metadata: dict | None = None,
+    plugins: list[dict] | None = None,
     task_prompt: str = "fix the flaky test",
     fork_helper_version: str | None = None,
     disk_limit_mib: int = 0,
@@ -351,7 +352,13 @@ async def _reserve_shared_chat(
         sandbox_image_digest="sha256:shared-image",
     )
     assert online is not None and online["status"] == "online"
-    job = await _create_job(store, base_sha="a" * 40, metadata=metadata, task_prompt=task_prompt)
+    job = await _create_job(
+        store,
+        base_sha="a" * 40,
+        metadata=metadata,
+        plugins=plugins,
+        task_prompt=task_prompt,
+    )
     claim = await _claim(
         store,
         worker_id="shared-worker",
@@ -959,8 +966,11 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
 
 
 @pytest.mark.parametrize("next_action", ["follow_up", "fork", "capture", "publish", "base_import"])
+@pytest.mark.parametrize(
+    "claim_coordinator", [False, True], ids=["unclaimed", "expired-coordinator"]
+)
 async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
-    pool, store: Storage, next_action: str
+    pool, store: Storage, next_action: str, claim_coordinator: bool
 ):
     """A failed hidden child remains history but cannot occupy the host manifest."""
     from cloud_agent_host.runner import _shared_group_manifest
@@ -997,6 +1007,19 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         source_job_id=job["id"], user_id=job["user_id"], idempotency_key="stalled-fork"
     )
     assert operation is not None and operation.get("error") is None
+    if claim_coordinator:
+        assert await store.session_fork.claim_session_fork_materialization(
+            operation_id=operation["id"],
+            coordinator_token="stopped-coordinator",
+            lease_seconds=990,
+        )
+        assert await store.session_fork.reap_stalled_session_forks(stall_seconds=0) == []
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_session_forks "
+                "SET coordinator_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+                operation["id"],
+            )
     actions = await store.session_fork.reap_stalled_session_forks(stall_seconds=0)
     assert [action["id"] for action in actions] == [operation["id"]]
     async with pool.acquire() as conn:
@@ -1209,7 +1232,11 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     store: Storage,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
-    job, claim, sandbox = await _reserve_shared_chat(store, disk_limit_mib=16384)
+    saved_plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/repo"}]
+    job, claim, sandbox = await _reserve_shared_chat(
+        store, disk_limit_mib=16384, plugins=saved_plugins
+    )
+    assert job["plugins"] == claim["plugins"] == saved_plugins
     saved_skills = [
         {
             "id": 42,
@@ -1369,8 +1396,9 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert await store.session_fork.claim_session_fork_materialization(
         operation_id=operation["id"],
         coordinator_token=coordinator,
-        lease_seconds=210,
+        lease_seconds=990,
     )
+    assert await store.session_fork.reap_stalled_session_forks(stall_seconds=0) == []
     assert not await store.session_fork.claim_session_fork_materialization(
         operation_id=operation["id"],
         coordinator_token="competing-coordinator",
@@ -1476,11 +1504,20 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
+    assert child["plugins"] == saved_plugins
     assert child["skills"] == [
         {key: value for key, value in skill.items() if key != "instructions"}
         for skill in saved_skills
     ]
     async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval(
+                    "SELECT plugins FROM agent_threads WHERE id = $1", child["thread_id"]
+                )
+            )
+            == saved_plugins
+        )
         assert (
             json.loads(
                 await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", child["id"])
@@ -1568,6 +1605,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert source_follow_up is not None and source_follow_up["state"] == "queued"
     assert source_follow_up["skills"] == child_follow_up["skills"] == saved_skills
     assert child_follow_up is not None and child_follow_up["state"] == "queued"
+    assert source_follow_up["plugins"] == child_follow_up["plugins"] == saved_plugins
     first_claim = await _claim(
         store,
         worker_id="shared-worker-a",
@@ -1585,6 +1623,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         claim_attestation=_shared_claim_attestation(),
     )
     assert first_claim is not None and second_claim is not None
+    assert first_claim["plugins"] == second_claim["plugins"] == saved_plugins
     assert {first_claim["id"], second_claim["id"]} == {
         source_follow_up["id"],
         child_follow_up["id"],
@@ -1719,6 +1758,34 @@ async def test_create_get_list_round_trip(store: Storage):
     listed = await store.conversation_queries.list_jobs(user_id="user-1")
     assert [item["id"] for item in listed] == [job["id"]]
     assert await store.conversation_queries.get_job("ajob_missing") is None
+
+
+@pytest.mark.parametrize(
+    "plugins",
+    [None, [{"plugin": "reviewer@team-tools", "marketplace": "owner/repo"}]],
+)
+async def test_thread_plugins_persist_in_create_and_job_reads(pool, store: Storage, plugins):
+    """Thread plugin selections survive storage and all ordinary job readers."""
+    job = await _create_job(store, plugins=plugins)
+    expected = plugins or []
+    assert job["plugins"] == expected
+    async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval(
+                    "SELECT plugins FROM agent_threads WHERE id = $1", job["thread_id"]
+                )
+            )
+            == expected
+        )
+
+    fetched = await store.conversation_queries.get_job(job["id"])
+    assert fetched is not None and fetched["plugins"] == expected
+    listed = await store.conversation_queries.list_jobs(user_id=job["user_id"])
+    assert len(listed) == 1 and listed[0]["plugins"] == expected
+    conversations = await store.conversation_queries.list_conversations(user_id=job["user_id"])
+    assert len(conversations["conversations"]) == 1
+    assert conversations["conversations"][0]["job"]["plugins"] == expected
 
 
 async def test_execution_profile_persists_and_is_inherited_by_follow_up(pool, store, monkeypatch):

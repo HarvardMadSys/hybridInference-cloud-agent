@@ -25,6 +25,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     claude_member_config_dir,
 )
+from cloud_agent_host.codex_plugins import install_codex_plugins
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -36,8 +37,11 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
+from cloud_agent_host.other_plugins import install_other_runtime_plugins
+from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
+from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -88,6 +92,7 @@ class ResidentLaunch:
     mcp_credential: str = ""
     slot_id: int = 0
     residency_generation: int = 0
+    plugins: tuple[dict[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
@@ -98,6 +103,11 @@ class ResidentLaunch:
             raise ValueError("resident slot id cannot be negative")
         if self.residency_generation < 0:
             raise ValueError("residency generation cannot be negative")
+        object.__setattr__(
+            self,
+            "plugins",
+            tuple(validate_sandbox_plugins(self.runtime_id, self.plugins)),
+        )
 
 
 class ResidentTurn(Generic[_RuntimeT_co]):
@@ -227,6 +237,7 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             and self.launch.runtime_version == launch.runtime_version
             and self.launch.model == launch.model
             and self.launch.reasoning_effort == launch.reasoning_effort
+            and self.launch.plugins == launch.plugins
             and self.launch.gateway_base_url == launch.gateway_base_url
             and same_mcp
             and self.launch.slot_id == launch.slot_id
@@ -272,7 +283,8 @@ class ResidentTransportFactory:
         runtime_id = launch.runtime_id
         driver = get_driver(runtime_id)
         state_dir = self._member_state_dir(launch)
-        if runtime_id == "claude-code":
+        member_processes_reaped = runtime_id == "claude-code" or bool(launch.plugins)
+        if member_processes_reaped:
             # A failed Fork can release a reserved slot. Reap that slot before
             # preparing its next member's launch state, so an old same-UID
             # process cannot race creation of the new private settings.
@@ -282,6 +294,7 @@ class ResidentTransportFactory:
                 user_uid=MEMBER_UID_BASE + launch.slot_id,
                 user_gid=self._manager.backend.gid,
             )
+        if runtime_id == "claude-code":
             self._prepare_claude_member_state(spec, launch)
         elif runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
             self._prepare_member_state(spec, launch, state_dir)
@@ -290,8 +303,37 @@ class ResidentTransportFactory:
             launch,
             credential=launch.credential,
             state_dir=state_dir,
-            member_processes_reaped=runtime_id == "claude-code",
+            member_processes_reaped=member_processes_reaped,
         )
+        if runtime_id == "claude-code" and launch.plugins:
+            install_claude_plugins(
+                self._manager,
+                spec,
+                launch.plugins,
+                config_dir=claude_member_config_dir(launch.slot_id, launch.thread_id),
+                env=context.base_env,
+                slot_id=launch.slot_id,
+            )
+        elif runtime_id == "codex" and launch.plugins:
+            install_codex_plugins(
+                self._manager,
+                spec,
+                launch.plugins,
+                state_dir=state_dir,
+                env=context.base_env,
+                slot_id=launch.slot_id,
+            )
+        elif runtime_id in {"pi", "opencode", "kilo"} and launch.plugins:
+            context.base_env.update(
+                install_other_runtime_plugins(
+                    self._manager,
+                    spec,
+                    runtime_id=runtime_id,
+                    plugins=launch.plugins,
+                    env=context.base_env,
+                    slot_id=launch.slot_id,
+                )
+            )
         if launch.native_session_id:
             opener = getattr(driver, "launch_resident_live", None)
             if opener is None:
@@ -674,6 +716,8 @@ class ResidentTransportFactory:
             raise DriverError("native fork cannot change runtime")
         if source.launch.runtime_version != target_launch.runtime_version:
             raise DriverError("native fork cannot change runtime version")
+        if source.launch.plugins != target_launch.plugins:
+            raise DriverError("native fork cannot change plugins")
         if not target_launch.credential:
             raise DriverError("native fork target needs a residency credential")
 

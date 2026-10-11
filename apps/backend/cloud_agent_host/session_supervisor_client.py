@@ -310,6 +310,8 @@ class SessionSupervisorClient:
             thread_id,
             "resident",
             payload={"token": token, "launch": asdict(launch), "profiling": profiling},
+            # Native package installation runs before the resident is ready.
+            timeout=960.0 if launch.plugins else None,
         )
 
     def capture_initial_archive(
