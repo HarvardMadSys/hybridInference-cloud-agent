@@ -1,6 +1,18 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
+// This page exercises pgAdmin; setup reminders use a configured deployment.
+vi.mock('@/lib/api/adminSettings', () => ({
+  getAgentAdminSettings: async () => ({
+    revision: 1,
+    definitions: [],
+    values: {},
+    secret_configured: {},
+    bootstrap: [],
+    setup: { required: false, groups: [], bootstrap_missing: [] },
+  }),
+}));
+
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentAccessApi } from '@/lib/api/session';

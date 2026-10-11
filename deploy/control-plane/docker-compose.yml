@@ -61,7 +61,7 @@ services:
       # --- The gateway, over HTTP only --------------------------------------
       # Optional after the one-time import: saved Admin settings are authoritative.
       GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-}
-      GATEWAY_JWKS_URL: ${GATEWAY_JWKS_URL:?the gateway origin plus /v1/identity/jwks}
+      GATEWAY_JWKS_URL: ${GATEWAY_JWKS_URL:-}
       # Authorizes this service to mint and revoke inference grants. A service
       # credential: it must never reach a sandbox or a browser.
       GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:-}
@@ -69,7 +69,7 @@ services:
       GATEWAY_GRANT_BINDING_ID: ${GATEWAY_GRANT_BINDING_ID:-}
       # The exact identity authority, independent of the transport URL. Both
       # listeners compare it with the same database binding during startup.
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
       # The consent page a sign-in starts at. Server-side: the whole PKCE round
       # trip is assembled in the control plane now, so the web app no longer
       # needs its own copy of this.
@@ -86,12 +86,12 @@ services:
       AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:-}
 
       # --- This service's own secrets ---------------------------------------
-      # Required, never defaulted. A default here is a deployment that looks
-      # configured and is signing with a value in a public git repository.
-      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
+      # Legacy values are imported once. Missing runtime keys are configured
+      # through administrator setup; no service uses a default signing secret.
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
-      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
-      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
@@ -208,7 +208,7 @@ services:
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' workspace brokers. Per-host
       # broker addresses come from each host's registration row, not from here.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?shared with every enrolled host workspace broker}
+      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:-}
       # Which hosts a registering machine may name as its broker. The token
       # above is shared across the pool, so an address accepted at
       # registration is an address that receives a credential good for every
@@ -258,15 +258,15 @@ services:
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
       # Both listeners decrypt the shared admin settings using the same key.
-      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
-      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       # The relay resolves each owner's stored MCP connection and therefore
       # must decrypt it under the same key/domain as the main control-plane
       # listener. Without this, health stays green but every connected server
       # is reported as unavailable at the first tool call.
-      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32 random bytes, unique per environment}
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:

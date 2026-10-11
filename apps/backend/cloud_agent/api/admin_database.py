@@ -8,7 +8,6 @@ jar so administrators cannot inherit one another's pgAdmin sessions.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING
@@ -26,6 +25,7 @@ from cloud_agent.api.deps import (
     log_admin_action,
     verify_admin_access,
 )
+from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
@@ -79,12 +79,12 @@ class DatabaseTools(BaseModel):
 
 def pgadmin_config() -> PgAdminConfig | None:
     """Refuse malformed configuration without returning its contents."""
-    upstream = (os.environ.get("AGENT_PGADMIN_URL") or "").strip()
+    upstream = (setting_env("AGENT_PGADMIN_URL") or "").strip()
     if not upstream:
         return None
-    public = (os.environ.get("AGENT_PGADMIN_PUBLIC_URL") or "").strip().rstrip("/")
+    public = (setting_env("AGENT_PGADMIN_PUBLIC_URL") or "").strip().rstrip("/")
     if not public:
-        web = (os.environ.get("AGENT_WEB_BASE_URL") or "").strip().rstrip("/")
+        web = (setting_env("AGENT_WEB_BASE_URL") or "").strip().rstrip("/")
         public = f"{web}/api{PGADMIN_PATH}" if web else ""
     try:
         origin = urlsplit(upstream)

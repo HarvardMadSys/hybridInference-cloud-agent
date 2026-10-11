@@ -25,7 +25,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import os
 import secrets
 import time
 from typing import Any
@@ -35,6 +34,7 @@ import jwt
 from jwt import PyJWKClient
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import setting_env
 
 logger = get_logger(__name__)
 
@@ -108,7 +108,7 @@ def _jwks_client() -> PyJWKClient:
     """
     global _jwk_client, _jwk_client_url
 
-    url = (os.environ.get(ENV_JWKS_URL) or "").strip()
+    url = (setting_env(ENV_JWKS_URL) or "").strip()
     if not url:
         raise IdentityNotConfigured(f"{ENV_JWKS_URL} must be set to verify identity tokens")
     if _jwk_client is None or _jwk_client_url != url:
@@ -149,7 +149,7 @@ def reset_jwks_cache() -> None:
 
 def gateway_issuer() -> str:
     """Return the explicitly configured identity issuer, never the transport URL."""
-    issuer = (os.environ.get(ENV_ISSUER) or "").strip()
+    issuer = (setting_env(ENV_ISSUER) or "").strip()
     if not issuer:
         raise IdentityNotConfigured(f"{ENV_ISSUER} must be set to verify Gateway identity")
     return issuer
@@ -214,7 +214,7 @@ def _session_secret() -> str:
             every other's sessions — and refusing beats warning, which is what
             the JWT library does on its own.
     """
-    secret = (os.environ.get(ENV_SESSION_SECRET) or "").strip()
+    secret = (setting_env(ENV_SESSION_SECRET) or "").strip()
     if not secret:
         raise IdentityNotConfigured(f"{ENV_SESSION_SECRET} must be set to issue sessions")
     if len(secret.encode()) < MIN_SESSION_SECRET_BYTES:

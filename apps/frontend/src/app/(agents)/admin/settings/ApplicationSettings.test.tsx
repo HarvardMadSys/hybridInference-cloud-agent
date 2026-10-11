@@ -127,6 +127,72 @@ afterEach(() => {
 });
 
 describe('application settings', () => {
+  it('prompts for missing fields and clears the prompt after they are saved', async () => {
+    const required = {
+      required: true,
+      groups: [
+        {
+          key: 'site',
+          label: 'Site setup',
+          required: true,
+          configured: false,
+          needs_setup: true,
+          missing: [{ key: 'title', label: 'Product name' }],
+        },
+      ],
+      bootstrap_missing: [
+        { key: 'AGENT_SETTINGS_ENCRYPTION_KEY', label: 'Settings encryption root key' },
+      ],
+    };
+    read.mockResolvedValue(snapshot({ setup: required }));
+    write.mockResolvedValue(snapshot({ setup: { ...required, required: false } }));
+    render(<ApplicationSettings />);
+    expect(await screen.findByText('Administrator setup required')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Product name' })).toHaveAttribute(
+      'href',
+      '#application-setting-title',
+    );
+    expect(screen.getByText(/Ask the deployment administrator/)).toHaveTextContent(
+      'Settings encryption root key',
+    );
+    fireEvent.change(screen.getByLabelText('Product name'), { target: { value: 'Configured' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
+    await screen.findByText('Product name saved.');
+    expect(screen.queryByText('Administrator setup required')).not.toBeInTheDocument();
+  });
+
+  it('passes the in-memory recovery credential only to authenticated API calls', async () => {
+    write.mockResolvedValue(snapshot());
+    render(<ApplicationSettings recoveryToken="test-recovery-token" />);
+    fireEvent.change(await screen.findByLabelText('Product name'), {
+      target: { value: 'Configured' },
+    });
+    expect(read).toHaveBeenCalledWith(expect.any(AbortSignal), 'test-recovery-token');
+    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
+    await waitFor(() =>
+      expect(write).toHaveBeenCalledWith(
+        { title: 'Configured' },
+        expect.any(AbortSignal),
+        'test-recovery-token',
+      ),
+    );
+    expect(document.body).not.toHaveTextContent('test-recovery-token');
+  });
+
+  it('prevents editing or resetting a pinned identity or existing credential key', async () => {
+    const current = snapshot();
+    read.mockResolvedValue({
+      ...current,
+      definitions: current.definitions.map((field) => ({ ...field, read_only: true })),
+    });
+    render(<ApplicationSettings />);
+    expect(await screen.findByLabelText('Product name')).toBeDisabled();
+    expect(screen.getByLabelText('Service token')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save Product name' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reset Service token' })).toBeDisabled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('renders typed fields, category descriptions, hidden secret status, and read-only setup', async () => {
     render(<ApplicationSettings />);
     expect(await screen.findByLabelText('Product name')).toHaveValue('Cloud Agent');

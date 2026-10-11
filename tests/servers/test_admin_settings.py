@@ -113,6 +113,55 @@ async def test_settings_read_hides_secrets_and_is_not_cached(settings_api) -> No
     assert audit.calls == []
 
 
+async def test_recovery_access_can_read_missing_setup_before_gateway_sign_in(monkeypatch) -> None:
+    from cloud_agent import settings
+
+    settings.reset_settings()
+    monkeypatch.setenv("ADMIN_TOKEN", "test-settings-admin")
+    for definition in settings.SETTINGS:
+        if definition.env:
+            monkeypatch.delenv(definition.env, raising=False)
+    monkeypatch.delenv("AGENT_SETTINGS_ENCRYPTION_KEY", raising=False)
+    repository = FakeSettings()
+    repository.values = {}
+    app = FastAPI()
+    app.state.storage = SimpleNamespace(settings=repository, audit=FakeAudit())
+    app.include_router(admin_settings.router)
+    install_admin_no_store(app)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get("/admin/agent/settings")).status_code == 401
+            response = await client.get("/admin/agent/settings", headers=ADMIN)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        snapshot = response.json()
+        assert snapshot["setup"]["required"] is True
+        assert snapshot["values"]["session_signing_secret"] is None
+        assert snapshot["secret_configured"]["session_signing_secret"] is False
+        assert snapshot["setup"]["bootstrap_missing"][0]["key"] == "AGENT_SETTINGS_ENCRYPTION_KEY"
+    finally:
+        settings.reset_settings()
+
+
+async def test_identity_conflict_is_a_safe_refusal_without_applying_or_auditing(
+    settings_api, monkeypatch
+) -> None:
+    from cloud_agent.identity_namespace import IdentityNamespaceError
+
+    client, repository, audit, _, applied = settings_api
+
+    async def conflict(changes):
+        raise IdentityNamespaceError("Gateway issuer does not match the database binding.")
+
+    monkeypatch.setattr(repository, "update_settings", conflict)
+    response = await client.put(
+        "/admin/agent/settings", headers=ADMIN, json={"settings": {"limit": 7}}
+    )
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store"
+    assert repository.updates == audit.calls == applied == []
+
+
 async def test_partial_update_preserves_values_applies_locally_and_audits_safely(
     settings_api,
 ) -> None:

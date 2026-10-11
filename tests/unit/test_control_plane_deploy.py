@@ -58,13 +58,24 @@ def control_plane_env(compose: dict) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("variable", REQUIRED_SECRETS)
-def test_a_secret_is_required_rather_than_defaulted(control_plane_env: dict, variable: str) -> None:
-    """`:-` here would be a deployment signing with a public value and no sign
-    that anything is wrong."""
-    assert variable in control_plane_env, f"{variable} is not configured at all"
-    assert ":?" in control_plane_env[variable], (
-        f"{variable} has a default; a secret that can be omitted will be omitted"
-    )
+def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
+    control_plane_env: dict, variable: str, monkeypatch
+) -> None:
+    """Setup can start with empty imports; credential use still fails closed."""
+    from cloud_agent import identity, settings, tokens
+    from cloud_agent.source_control import SourceControlCipher, SourceControlError
+
+    assert control_plane_env[variable] == "${" + variable + ":-}"
+    monkeypatch.delenv(variable, raising=False)
+    settings.reset_settings()
+    operations = {
+        "AGENT_SESSION_SECRET": (identity._session_secret, identity.IdentityNotConfigured),
+        "AGENT_CONTROL_TOKEN_SECRET": (tokens._signing_key, ValueError),
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": (SourceControlCipher, SourceControlError),
+    }
+    operation, error = operations[variable]
+    with pytest.raises(error):
+        operation()
 
 
 async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
@@ -102,9 +113,11 @@ def test_the_database_is_required_and_the_service_owns_it(control_plane_env: dic
     assert ":?" in control_plane_env["AGENT_DATABASE_URL"]
 
 
-def test_both_listeners_receive_the_same_required_identity_issuer(compose: dict) -> None:
-    """The shared lifespan checks the database binding in both processes."""
-    expected = "${GATEWAY_ISSUER:?exact iss from the Gateway identity token}"
+def test_both_listeners_allow_a_one_time_identity_import_from_the_environment(
+    compose: dict,
+) -> None:
+    """The shared lifespan verifies the saved issuer against the database binding."""
+    expected = "${GATEWAY_ISSUER:-}"
     for service in ("control-plane", "mcp-relay"):
         assert compose["services"][service]["environment"]["GATEWAY_ISSUER"] == expected
 

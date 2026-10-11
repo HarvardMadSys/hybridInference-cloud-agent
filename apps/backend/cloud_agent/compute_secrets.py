@@ -10,10 +10,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 from typing import Any, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from cloud_agent.settings import setting_env
 
 ENV_COMPUTE_SECRET_KEY = "AGENT_COMPUTE_SECRET_KEY"
 _DOMAIN = b"cloud-agent/compute-credentials/v1"
@@ -36,17 +37,31 @@ class ComputeSecretStore:
 
     def __init__(self, connections: ComputeConnectionReader, *, key: str | None = None) -> None:
         self._connections = connections
-        material = os.environ.get(ENV_COMPUTE_SECRET_KEY, "") if key is None else key
+        self._key_override = key
+        self._material = ""
         self._cipher: Fernet | None = None
+        self._refresh_cipher()
+
+    def _refresh_cipher(self) -> None:
+        material = (
+            self._key_override
+            if self._key_override is not None
+            else setting_env(ENV_COMPUTE_SECRET_KEY, "") or ""
+        )
+        if material == self._material:
+            return
+        self._cipher = None
         if material:
             if len(material.encode()) < 32:
                 raise ComputeSecretError("compute encryption key must contain at least 32 bytes")
             digest = hashlib.sha256(_DOMAIN + b"\0" + material.encode()).digest()
             self._cipher = Fernet(base64.urlsafe_b64encode(digest))
+        self._material = material
 
     @property
     def configured(self) -> bool:
         """Whether credential writes and resolution can be safely performed."""
+        self._refresh_cipher()
         return self._cipher is not None
 
     def encrypt(self, connection_id: str, provider_id: str, secret: str) -> str:
@@ -88,6 +103,7 @@ class ComputeSecretStore:
         return self.decrypt(connection_id, record["provider_id"], record["secret_ciphertext"])
 
     def _require_cipher(self) -> Fernet:
+        self._refresh_cipher()
         if self._cipher is None:
             raise ComputeSecretError("compute secret storage is not configured")
         return self._cipher

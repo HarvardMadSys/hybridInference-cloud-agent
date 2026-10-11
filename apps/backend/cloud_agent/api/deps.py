@@ -60,7 +60,7 @@ from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.settings import number_setting
+from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import (
     RETRY_INTERVAL_S,
     GitHubAppState,
@@ -493,7 +493,7 @@ def get_client_ip(request: Request) -> str:
     the header unconditionally would let any caller write any address into the
     audit trail, which is worse than recording the proxy's address honestly.
     """
-    if (os.environ.get(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
+    if (setting_env(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
         forwarded = request.headers.get("x-forwarded-for") or ""
         first_hop = forwarded.split(",")[0].strip()
         if first_hop:

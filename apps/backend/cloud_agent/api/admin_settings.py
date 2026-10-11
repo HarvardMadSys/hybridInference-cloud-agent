@@ -15,6 +15,7 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
+from cloud_agent.identity_namespace import IdentityNamespaceError
 from cloud_agent.source_control import SourceControlError
 
 if TYPE_CHECKING:
@@ -75,6 +76,8 @@ async def update_settings(
         revision, encoded, previous = await storage.settings.update_settings(changes)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    except IdentityNamespaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except SourceControlError:
         raise HTTPException(
             status_code=503,

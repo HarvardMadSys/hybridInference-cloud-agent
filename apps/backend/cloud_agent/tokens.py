@@ -45,7 +45,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
 from typing import Any
 
@@ -72,7 +71,9 @@ def _signing_key() -> bytes:
             answer — a default would make every deployment share a signing
             root, which is worse than the coupling this replaced.
     """
-    secret = (os.environ.get(ENV_SIGNING_SECRET) or "").encode()
+    from cloud_agent.settings import setting_env
+
+    secret = (setting_env(ENV_SIGNING_SECRET) or "").encode()
     if not secret:
         raise ValueError(f"{ENV_SIGNING_SECRET} must be set to mint agent worker tokens")
     return hashlib.sha256(_SIGNING_CONTEXT + secret).digest()

@@ -476,12 +476,12 @@ def policy_from_environment() -> EgressPolicy:
     private space is reached through a connector, and plain HTTP would put the
     credential on the wire in the clear.
     """
-    import os
+    from cloud_agent.settings import setting_env
 
     return EgressPolicy(
-        allow_private=os.environ.get("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "").lower()
+        allow_private=(setting_env("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "") or "").lower()
         in ("1", "true", "yes"),
-        allow_plain_http=os.environ.get("AGENT_MCP_ALLOW_PLAIN_HTTP", "").lower()
+        allow_plain_http=(setting_env("AGENT_MCP_ALLOW_PLAIN_HTTP", "") or "").lower()
         in ("1", "true", "yes"),
     )
 

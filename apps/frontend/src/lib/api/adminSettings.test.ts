@@ -53,4 +53,32 @@ describe('admin settings client', () => {
       statusCode: 422,
     });
   });
+
+  it('uses recovery access without cookies, session redirects, caches, or credentials in the URL', async () => {
+    const normal = vi.spyOn(client, 'fetchWithAuth');
+    const recover = vi
+      .spyOn(client, 'safeFetch')
+      .mockImplementation(
+        async () =>
+          new Response('{"revision":1}', { headers: { 'Content-Type': 'application/json' } }),
+      );
+    const token = 'test-administrator-recovery-token';
+    const signal = new AbortController().signal;
+    await getAgentAdminSettings(signal, token);
+    await setAgentAdminSettings({ gateway_issuer: 'https://identity.example' }, signal, token);
+    expect(normal).not.toHaveBeenCalled();
+    expect(recover).toHaveBeenCalledTimes(2);
+    for (const [url, init] of recover.mock.calls) {
+      expect(url).not.toContain(token);
+      expect(init).toMatchObject({
+        credentials: 'omit',
+        cache: 'no-store',
+        signal,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+    expect(recover.mock.calls[1][1]?.body).toBe(
+      JSON.stringify({ settings: { gateway_issuer: 'https://identity.example' } }),
+    );
+  });
 });

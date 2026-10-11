@@ -16,6 +16,7 @@
 // The sign-in authority stays visible before the visitor leaves this app.
 
 import { Suspense } from 'react';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { signInUrl } from '@/lib/auth/signin';
@@ -205,6 +206,13 @@ function LoginContent() {
                 </p>
               </>
             )}
+            <p className="mt-5 text-center text-xs text-gray-500 dark:text-gray-400">
+              Service administrators:{' '}
+              <Link href="/setup" className="underline">
+                configure missing settings
+              </Link>
+              .
+            </p>
             <div className="mt-7 flex items-center gap-2 border-t border-gray-100 pt-5 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
               <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-crimson/60" />
               Your repositories. Your workflow.

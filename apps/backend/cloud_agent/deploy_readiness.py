@@ -313,10 +313,6 @@ async def wait_for_shared_live(
     if not dsn:
         print(f"[deploy-readiness] ERROR: {ENV_DATABASE_URL} is not configured", file=sys.stderr)
         return False
-    broker_token = (os.environ.get(ENV_BROKER_TOKEN) or "").strip()
-    if not broker_token:
-        print(f"[deploy-readiness] ERROR: {ENV_BROKER_TOKEN} is not configured", file=sys.stderr)
-        return False
 
     # Capture before opening the pool so a heartbeat concurrent with startup
     # counts.  The database and this container run on the control-plane host;
@@ -329,9 +325,20 @@ async def wait_for_shared_live(
     # The one assembly, so this entry point names no implementation of its
     # own: it needs the host pool and takes it from the same place the
     # service does.
-    store = Storage(pool).host_pool
+    storage = Storage(pool)
+    store = storage.host_pool
     last_detail = ""
     try:
+        from cloud_agent.settings import initialize_settings, setting_env
+
+        await initialize_settings(storage.settings, seed=False)
+        broker_token = (setting_env(ENV_BROKER_TOKEN) or "").strip()
+        if not broker_token:
+            print(
+                "[deploy-readiness] ERROR: set the workspace broker credential in Admin Settings",
+                file=sys.stderr,
+            )
+            return False
         while True:
             try:
                 verdict = await shared_live_readiness(

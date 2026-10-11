@@ -3,7 +3,8 @@
 The environment is imported once when the settings row is first created.
 After that, the database is authoritative, including resets to registry defaults.
 Secrets are encrypted under a separate domain and never returned to the browser.
-Database, identity, encryption and host isolation configuration remain bootstrap.
+Only database access, the settings root key, recovery access and process
+infrastructure remain bootstrap. Runtime identity and service keys are persisted.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class Setting:
     choices: tuple[str, ...] = ()
     secret: bool = False
     url: bool = False
+    minimum_bytes: int = 0
 
     def validate(self, value: Any) -> SettingValue:
         """Return a checked value, raising a message that contains no supplied data."""
@@ -67,6 +69,10 @@ class Setting:
             valid = isinstance(value, str) and "\x00" not in value
             if valid:
                 valid = len(value) <= (131072 if self.secret else 4096)
+            if valid and value and self.minimum_bytes:
+                valid = len(value.encode()) >= self.minimum_bytes
+            if valid and self.key == "gateway_issuer" and value:
+                valid = value == value.strip() and not any(ord(char) < 32 for char in value)
             if valid and self.choices:
                 valid = value in self.choices
             if valid and self.key == "gateway_grant_base_path":
@@ -127,6 +133,8 @@ class Setting:
             result["maximum"] = self.maximum
         if self.choices:
             result["choices"] = list(self.choices)
+        if self.minimum_bytes:
+            result["minimum_bytes"] = self.minimum_bytes
         return result
 
 
@@ -614,6 +622,143 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric("task_titles.max_attempts", "Maximum title attempts", "Task titles", 5, 1, 5),
     _numeric("task_titles.max_tokens", "Maximum title output tokens", "Task titles", 256, 16, 256),
 )
+MIGRATED_SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        "pgadmin_url",
+        "Private pgAdmin URL",
+        "Database tools",
+        "",
+        env="AGENT_PGADMIN_URL",
+        url=True,
+        description="Optional private pgAdmin origin. Use http://pgadmin:5050 for the bundled service after enabling its deployment profile. Empty disables access.",
+    ),
+    Setting(
+        "pgadmin_public_url",
+        "Public pgAdmin proxy URL",
+        "Database tools",
+        "",
+        env="AGENT_PGADMIN_PUBLIC_URL",
+        url=True,
+        description="Optional public URL ending in /admin/agent/pgadmin. Empty derives it from the saved web base URL and /api/admin/agent/pgadmin.",
+    ),
+    Setting(
+        "gateway_issuer",
+        "Gateway identity issuer",
+        "Sign-in",
+        "",
+        env="GATEWAY_ISSUER",
+        description="Exact issuer signed by the Gateway. Once this database is bound, it cannot be changed here.",
+    ),
+    Setting(
+        "gateway_jwks_url",
+        "Gateway public keys URL",
+        "Sign-in",
+        "",
+        env="GATEWAY_JWKS_URL",
+        url=True,
+    ),
+    Setting(
+        "session_signing_secret",
+        "Session signing key",
+        "Security",
+        "",
+        env="AGENT_SESSION_SECRET",
+        secret=True,
+        minimum_bytes=32,
+        description="A random key of at least 32 bytes. Replacing it signs out existing browser sessions.",
+    ),
+    Setting(
+        "control_signing_secret",
+        "Host and worker signing key",
+        "Security",
+        "",
+        env="AGENT_CONTROL_TOKEN_SECRET",
+        secret=True,
+        description="Use a random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
+    ),
+    Setting(
+        "source_control_encryption_key",
+        "User credential encryption key",
+        "Security",
+        "",
+        env="AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
+        secret=True,
+        description="Use a random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
+    ),
+    Setting(
+        "compute_encryption_key",
+        "Compute credential encryption key",
+        "Security",
+        "",
+        env="AGENT_COMPUTE_SECRET_KEY",
+        secret=True,
+        minimum_bytes=32,
+        description="A random key of at least 32 bytes. Once configured, rotation requires a separate re-encryption procedure.",
+    ),
+    Setting(
+        "workspace_broker_token",
+        "Workspace broker credential",
+        "Execution",
+        "",
+        env="AGENT_WORKSPACE_BROKER_TOKEN",
+        secret=True,
+        description="Must match the credential provisioned on each host's workspace broker. Coordinate changes with those hosts.",
+    ),
+    Setting(
+        "broker_url_allowed_hosts",
+        "Workspace broker host allowlist",
+        "Execution",
+        "",
+        env="AGENT_BROKER_URL_ALLOWED_HOSTS",
+        description="Comma-separated exact hostnames allowed to receive the workspace broker credential. Empty retains unrestricted host selection.",
+    ),
+    Setting(
+        "default_execution_profile",
+        "New session isolation policy",
+        "Execution",
+        "trusted-v1",
+        env="AGENT_DEFAULT_EXECUTION_PROFILE",
+        choices=("trusted-v1", "untrusted-kata-v1"),
+        description="Applies to new root sessions. Public untrusted work requires untrusted-kata-v1 and a qualified Kata host. Existing sessions retain their policy.",
+    ),
+    Setting(
+        "session_cookie_secure",
+        "Require HTTPS session cookies",
+        "Security",
+        True,
+        kind="boolean",
+        env="AGENT_SESSION_COOKIE_SECURE",
+        description="Keep enabled for HTTPS deployments. Disable only for local HTTP development.",
+    ),
+    Setting(
+        "trust_proxy_headers",
+        "Trust forwarded client addresses",
+        "Security",
+        False,
+        kind="boolean",
+        env="AGENT_TRUST_PROXY_HEADERS",
+        description="Enable only when a trusted reverse proxy overwrites forwarded address headers.",
+    ),
+    Setting(
+        "mcp_allow_private_targets",
+        "Allow private MCP targets",
+        "MCP",
+        False,
+        kind="boolean",
+        env="AGENT_MCP_ALLOW_PRIVATE_TARGETS",
+        description="Allow MCP servers on private addresses. Takes effect for new MCP transports after restarting the MCP listener.",
+    ),
+    Setting(
+        "mcp_allow_plain_http",
+        "Allow HTTP MCP targets",
+        "MCP",
+        False,
+        kind="boolean",
+        env="AGENT_MCP_ALLOW_PLAIN_HTTP",
+        description="Allow unencrypted HTTP MCP connections. Takes effect for new MCP transports after restarting the MCP listener.",
+    ),
+)
+SETTINGS += MIGRATED_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 _SETTINGS_BY_ENV = {setting.env: setting for setting in SETTINGS if setting.env}
 
@@ -629,19 +774,9 @@ BOOTSTRAP = (
         "description": "Use a stable encryption key of at least 32 bytes. Existing session secret is used if a dedicated key is absent. Rotate only with data re-encryption.",
     },
     {
-        "key": "AGENT_CONTROL_TOKEN_SECRET / AGENT_SESSION_SECRET / ADMIN_TOKEN",
-        "label": "Authentication and recovery keys",
-        "description": "Signing and administrator recovery credentials remain deployment secrets.",
-    },
-    {
-        "key": "GATEWAY_ISSUER / GATEWAY_JWKS_URL",
-        "label": "Gateway identity",
-        "description": "The identity namespace is pinned to this database and cannot be switched in the settings page.",
-    },
-    {
-        "key": "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY / AGENT_COMPUTE_SECRET_KEY",
-        "label": "Stored credential encryption",
-        "description": "Keys for user-owned and compute credentials must remain stable deployment secrets.",
+        "key": "ADMIN_TOKEN",
+        "label": "Administrator recovery access",
+        "description": "Use this deployment credential on the setup page when Gateway sign-in is not configured. It remains independent of saved settings.",
     },
     {
         "key": "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
@@ -731,12 +866,22 @@ def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
     _decode(encoded)
 
 
-def initial_settings() -> dict[str, Any]:
+def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, Any]) -> None:
+    """Keep stored credential encryption keys stable while validating an atomic update."""
+    before, after = _decode(previous), _decode(encoded)
+    for key in ("source_control_encryption_key", "compute_encryption_key"):
+        if before[key] and before[key] != after[key]:
+            raise ValueError(
+                f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
+            )
+
+
+def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
     """Import only registered environment variables into the initial settings row."""
     result: dict[str, Any] = {}
-    values: dict[str, SettingValue] = {}
+    values: dict[str, SettingValue] = {setting.key: setting.default for setting in SETTINGS}
     imported: dict[str, SettingValue] = {}
-    if os.environ.get("AGENT_COMPUTE_CONFIG"):
+    if keys is None and os.environ.get("AGENT_COMPUTE_CONFIG"):
         from cloud_agent.compute_config import ComputeConfiguration
 
         configuration = ComputeConfiguration.from_env()
@@ -745,6 +890,8 @@ def initial_settings() -> dict[str, Any]:
             "compute.observation_seconds": configuration.observation_seconds,
         }
     for setting in SETTINGS:
+        if keys is not None and setting.key not in keys:
+            continue
         value: Any = imported.get(setting.key, setting.default)
         raw = os.environ.get(setting.env, "") if setting.env else ""
         if raw:
@@ -793,9 +940,16 @@ def apply_settings(revision: int, encoded: Mapping[str, Any]) -> None:
 def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, Any]:
     """Build the editor response with write-only secret status."""
     values = _decode(encoded)
+    locked = {
+        key
+        for key in ("gateway_issuer", "source_control_encryption_key", "compute_encryption_key")
+        if values[key]
+    }
     return {
         "revision": revision,
-        "definitions": [setting.definition() for setting in SETTINGS],
+        "definitions": [
+            {**setting.definition(), "read_only": setting.key in locked} for setting in SETTINGS
+        ],
         "values": {
             setting.key: None if setting.secret else values[setting.key] for setting in SETTINGS
         },
@@ -803,6 +957,99 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
             setting.key: bool(values[setting.key]) for setting in SETTINGS if setting.secret
         },
         "bootstrap": list(BOOTSTRAP),
+        "setup": setup_status(values),
+    }
+
+
+def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
+    """Report incomplete features using field names and status, never saved values."""
+    groups: list[dict[str, Any]] = []
+    configured = dict(values)
+    mounted_key = os.environ.get("AGENT_GITHUB_APP_PRIVATE_KEY_PATH", "")
+    if mounted_key and os.path.isfile(mounted_key) and os.access(mounted_key, os.R_OK):
+        configured["github_app_private_key"] = True
+    for key, label, required, fields in (
+        (
+            "sign_in",
+            "Gateway sign-in",
+            True,
+            (
+                "gateway_base_url",
+                "gateway_dispatch_token",
+                "gateway_issuer",
+                "gateway_jwks_url",
+                "gateway_authorize_url",
+                "session_redirect_uri",
+                "web_base_url",
+                "session_signing_secret",
+            ),
+        ),
+        (
+            "execution",
+            "Agent execution",
+            True,
+            ("control_signing_secret", "workspace_broker_token"),
+        ),
+        ("credentials", "User connections", True, ("source_control_encryption_key",)),
+        (
+            "github",
+            "GitHub account connections",
+            False,
+            (
+                "github_app_id",
+                "github_app_client_id",
+                "github_app_client_secret",
+                "github_app_install_url",
+                "github_app_private_key",
+                "source_control_encryption_key",
+            ),
+        ),
+        (
+            "gitlab",
+            "GitLab account connections",
+            False,
+            (
+                "gitlab_client_id",
+                "gitlab_client_secret",
+                "gitlab_redirect_uri",
+                "source_control_encryption_key",
+            ),
+        ),
+        ("compute", "Compute credential storage", False, ("compute_encryption_key",)),
+    ):
+        missing = [
+            {"key": field, "label": SETTINGS_BY_KEY[field].label}
+            for field in fields
+            if not configured[field]
+        ]
+        # A shared encryption key alone does not mean an optional provider is enabled.
+        started = any(values[field] for field in fields if field != "source_control_encryption_key")
+        if key == "compute":
+            started = started or bool(os.environ.get("AGENT_COMPUTE_CONFIG"))
+        groups.append(
+            {
+                "key": key,
+                "label": label,
+                "required": required,
+                "configured": not missing,
+                "needs_setup": bool(missing) and (required or started),
+                "missing": missing,
+            }
+        )
+    root_key = (
+        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
+        or os.environ.get("AGENT_SESSION_SECRET")
+        or ""
+    )
+    bootstrap_missing = []
+    if len(root_key.encode()) < 32:
+        bootstrap_missing.append(
+            {"key": "AGENT_SETTINGS_ENCRYPTION_KEY", "label": "Settings encryption root key"}
+        )
+    return {
+        "required": bool(bootstrap_missing) or any(group["needs_setup"] for group in groups),
+        "groups": groups,
+        "bootstrap_missing": bootstrap_missing,
     }
 
 
@@ -869,16 +1116,19 @@ def settings_environment() -> dict[str, str]:
 async def initialize_settings(repository: SettingsRepository, *, seed: bool = True) -> None:
     """Seed once, then adopt the database rather than reimporting the environment."""
     revision, encoded = await repository.read_settings()
-    if revision < 0:
+    missing = {setting.key for setting in MIGRATED_SETTINGS} - encoded.keys()
+    if revision < 0 or missing:
         if seed:
-            revision, encoded = await repository.seed_settings(initial_settings())
+            revision, encoded = await repository.seed_settings(
+                initial_settings(keys=missing if revision >= 0 else None)
+            )
         else:
             # Only the main listener has the complete legacy environment.
             # A relay racing it must never seed blank integration credentials.
             for _ in range(300):
                 await asyncio.sleep(0.1)
                 revision, encoded = await repository.read_settings()
-                if revision >= 0:
+                if revision >= 0 and all(setting.key in encoded for setting in MIGRATED_SETTINGS):
                     break
             else:
                 raise RuntimeError(

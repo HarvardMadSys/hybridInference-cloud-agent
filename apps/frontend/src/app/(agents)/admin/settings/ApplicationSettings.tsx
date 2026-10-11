@@ -29,6 +29,13 @@ function parseValue(
     if (definition.choices?.length && !definition.choices.includes(draft)) {
       return { error: 'Choose one of the available values.' };
     }
+    if (
+      draft &&
+      definition.minimum_bytes &&
+      new TextEncoder().encode(draft).length < definition.minimum_bytes
+    ) {
+      return { error: `Enter a value of at least ${definition.minimum_bytes} bytes.` };
+    }
     return { value: draft };
   }
   const value = Number(draft);
@@ -81,7 +88,7 @@ function SettingField({
     id,
     name: definition.key,
     value: draft,
-    disabled: busy,
+    disabled: busy || definition.read_only,
     'aria-invalid': error !== null,
     'aria-describedby': `${helpId}${error ? ` ${errorId}` : ''}`,
     className: INPUT_CLASS,
@@ -100,7 +107,7 @@ function SettingField({
         className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(200px,320px)]"
         onSubmit={(event) => {
           event.preventDefault();
-          if (busy || !dirty) return;
+          if (busy || !dirty || definition.read_only) return;
           const parsed = parseValue(definition, draft);
           if ('error' in parsed) {
             setError(parsed.error);
@@ -162,7 +169,7 @@ function SettingField({
               <input
                 type="checkbox"
                 checked={multiline}
-                disabled={busy}
+                disabled={busy || definition.read_only}
                 onChange={(event) => setMultiline(event.target.checked)}
                 aria-label={`Use multiple lines for ${definition.label}`}
               />
@@ -172,7 +179,7 @@ function SettingField({
           <div className="mt-2 flex justify-end gap-2">
             <button
               type="submit"
-              disabled={busy || !dirty}
+              disabled={busy || !dirty || definition.read_only}
               aria-label={`Save ${definition.label}`}
               className={BUTTON_CLASS}
             >
@@ -180,7 +187,7 @@ function SettingField({
             </button>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || definition.read_only}
               aria-label={`Reset ${definition.label}`}
               onClick={() => onSave(definition.key, null)}
               className={BUTTON_CLASS}
@@ -201,8 +208,10 @@ function SettingField({
 
 export default function ApplicationSettings({
   onAccessDenied,
+  recoveryToken,
 }: {
   onAccessDenied?: (cause: unknown) => void;
+  recoveryToken?: string;
 }) {
   const [snapshot, setSnapshot] = useState<AgentAdminSettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -242,7 +251,9 @@ export default function ApplicationSettings({
     request.current = controller;
     const current = ++sequence.current;
     try {
-      const next = await getAgentAdminSettings(controller.signal);
+      const next = recoveryToken
+        ? await getAgentAdminSettings(controller.signal, recoveryToken)
+        : await getAgentAdminSettings(controller.signal);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
       setSnapshot(next);
       setError(null);
@@ -252,7 +263,7 @@ export default function ApplicationSettings({
     } finally {
       if (mounted.current && current === sequence.current) setLoading(false);
     }
-  }, [fail]);
+  }, [fail, recoveryToken]);
 
   useEffect(() => {
     mounted.current = true;
@@ -278,7 +289,9 @@ export default function ApplicationSettings({
     request.current = controller;
     const current = ++sequence.current;
     try {
-      const next = await setAgentAdminSettings({ [key]: value }, controller.signal);
+      const next = recoveryToken
+        ? await setAgentAdminSettings({ [key]: value }, controller.signal, recoveryToken)
+        : await setAgentAdminSettings({ [key]: value }, controller.signal);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
       setSnapshot(next);
       // Only the saved row resets its draft; unrelated edits stay intact.
@@ -349,6 +362,41 @@ export default function ApplicationSettings({
       {notice && (
         <p role="status" className="mt-4 text-sm text-gray-600 dark:text-gray-300">
           {notice}
+        </p>
+      )}
+      {snapshot?.setup?.required && (
+        <div
+          role="status"
+          className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
+        >
+          <h3 className="font-semibold">Administrator setup required</h3>
+          <p className="mt-1">Complete the missing settings below to enable these features.</p>
+          {snapshot.setup.groups
+            .filter((group) => group.needs_setup)
+            .map((group) => (
+              <div key={group.key} className="mt-3">
+                <p className="font-medium">{group.label}</p>
+                <ul className="mt-1 list-inside list-disc">
+                  {group.missing.map((field) => (
+                    <li key={field.key}>
+                      <a className="underline" href={`#application-setting-${field.key}`}>
+                        {field.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          {snapshot.setup.bootstrap_missing.map((field) => (
+            <p key={field.key} className="mt-3">
+              Ask the deployment administrator to configure {field.label} before saving credentials.
+            </p>
+          ))}
+        </div>
+      )}
+      {recoveryToken && snapshot?.setup && !snapshot.setup.required && (
+        <p role="status" className="mt-5 text-sm text-emerald-700 dark:text-emerald-400">
+          Required setup is complete. You can return to sign-in.
         </p>
       )}
       {[...groups].map(([category, definitions]) => (

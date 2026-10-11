@@ -53,31 +53,56 @@ persisted in the Agent database. The application API is
 such as `{"settings": {"max_attempts": 3}}`; omitted keys retain their values.
 Writes use the existing administrator guard and record changes in the Audit
 log. Credential fields show only whether a value is configured. Enter and save
-a replacement to change one; **Reset** restores its built-in default.
+a replacement to change one; **Reset** restores its built-in default. Missing
+required fields and partially configured optional integrations produce an
+**Administrator setup required** prompt with links to the fields to complete.
 
 For the first deployment of this release, run `alembic upgrade head` through
 `0037_admin_sandbox_stop`, then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once.
 The MCP-only listener waits for initialization and reads the same settings.
+Newly migrated runtime identity, service keys, broker credentials and policy
+fields are imported only when absent, under the same atomic preservation rule.
 Subsequent deployments preserve admin values, and resetting a field never
 restores an old `.env` value. Listeners synchronize saved changes every five
 seconds; web appearance uses the saved public fields on each request. Apply
 changes to subsequent operations according to the description beside each
 setting.
 
-Set `AGENT_SETTINGS_ENCRYPTION_KEY` to a stable key of at least 32 bytes, or use
-the existing `AGENT_SESSION_SECRET` fallback. Both listeners must receive the
+For a new installation, provision the database, a stable
+`AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
+`ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal
+`deploy/control-plane/.env.example`. Bootstrap the setup UI before enrolling
+execution hosts or running the normal deployment readiness gate:
+
+```bash
+AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
+  --env-file .env -f deploy/control-plane/docker-compose.yml \
+  up -d --build control-plane mcp-relay web
+```
+
+Open `<web base path>/setup` and enter the recovery token. This route is outside
+the sign-in guard. It uses the ordinary administrator API and audit trail;
+unauthenticated visitors cannot read or change settings. Reloading or locking
+the page clears its in-memory token. Complete Gateway sign-in, execution and
+user credential fields, then enroll hosts and run the usual deployment command.
+Optional integrations need setup only when their configuration has been started.
+The shared-live deployment gate continues to require qualified host readiness.
+
+Existing installations can retain the environment `AGENT_SESSION_SECRET`
+fallback for the settings root. Before removing that legacy environment entry,
+set `AGENT_SETTINGS_ENCRYPTION_KEY` to the **same original value**. Both listeners must receive the
 same effective key. Back it up with the database. Before changing that key,
 re-encrypt stored settings from the old key to the new one and coordinate the
 listener rollout; replacing the environment value alone makes existing
-ciphertext unreadable. Rotating the session secret has the same effect when it
-is the fallback, including when introducing a dedicated settings key.
-`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` and `AGENT_COMPUTE_SECRET_KEY` continue to
-protect their separate user and compute credential stores.
+ciphertext unreadable. The saved session signing key can be changed separately
+from this stable root. The saved user/compute encryption keys continue to protect
+their separate credential stores; the API rejects replacing or resetting an
+existing encryption key without a separate credential re-encryption procedure.
 
-Database access, identity issuer/JWKS, signing and encryption keys, recovery
-authentication, host/broker credentials, security and isolation policy,
-networking and listeners, build routing, mounted files, and trusted compute
+Database access, the settings encryption root, recovery authentication,
+host provisioning, networking/listeners, actual host isolation,
+build routing, mounted files, and trusted compute
 deployment profiles remain deployment configuration. These bootstrap names
 appear on the page with hidden values. See [the environment inventory](../ENVIRONMENT.md#settings-and-bootstrap-configuration).
 
@@ -94,7 +119,6 @@ Enable the optional service in the control-plane deployment's `.env`:
 
 ```dotenv
 COMPOSE_PROFILES=pgadmin
-AGENT_PGADMIN_URL=http://pgadmin:5050
 AGENT_PGADMIN_EMAIL=database-admin@example.org
 AGENT_PGADMIN_PASSWORD_FILE=/srv/cloud-agent-secrets/pgadmin-password
 ```
@@ -110,9 +134,12 @@ docker compose --env-file .env -f <selected-compose-file> up -d pgadmin control-
 ```
 
 Use the release-generated Compose file for an artifact deployment. Its bundled
-server definitions are resolved from the selected recipe. The default public
-URL is `<AGENT_WEB_BASE_URL>/api/admin/agent/pgadmin/`; set
-`AGENT_PGADMIN_PUBLIC_URL` if the API has a different public prefix.
+server definitions are resolved from the selected recipe. In **Admin → Settings
+→ Database tools**, set **Private pgAdmin URL** to `http://pgadmin:5050` for the
+bundled service. The default public URL is the saved web base URL followed by
+`/api/admin/agent/pgadmin/`; set **Public pgAdmin proxy URL** if the API has a
+different public prefix. Existing `AGENT_PGADMIN_URL` and
+`AGENT_PGADMIN_PUBLIC_URL` values are imported once along with other runtime settings.
 
 Sign in with the configured pgAdmin email and password. The initial server
 definition points to `postgres:5432`, database/user `cloudagent`. Enter the
@@ -129,9 +156,9 @@ If the dashboard reports unavailable, inspect `docker compose logs pgadmin`
 and its health state. Missing account settings, an unreadable password file,
 or unavailable PostgreSQL prevent startup. Opening pgAdmin records
 `agent.database.pgadmin.open` in the Agent audit log; pgAdmin manages SQL
-activity itself. Removing `AGENT_PGADMIN_URL` disables access immediately after
-restarting the control plane; removing the profile and stopping pgAdmin
-preserves its volume.
+activity itself. Resetting **Private pgAdmin URL** in Admin Settings disables
+access after the listeners synchronize; removing the profile and stopping
+pgAdmin preserves its volume.
 
 See [pgAdmin's container documentation](https://www.pgadmin.org/docs/pgadmin4/9.18/container_deployment.html)
 for account and server initialization behavior.

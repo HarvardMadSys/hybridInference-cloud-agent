@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
 
+from cloud_agent.settings import setting_env
 from cloud_agent.workspace_broker_client import (
     WorkspaceBrokerClient,
     WorkspaceBrokerError,
@@ -75,9 +75,7 @@ def validate_broker_url(url: str | None) -> str | None:
         raise BrokerUrlRefused(f"broker_url must be an http(s) URL, got {candidate!r}")
 
     allowed = [
-        entry.strip()
-        for entry in (os.environ.get(ENV_BROKER_HOSTS) or "").split(",")
-        if entry.strip()
+        entry.strip() for entry in (setting_env(ENV_BROKER_HOSTS) or "").split(",") if entry.strip()
     ]
     if allowed and parsed.hostname not in allowed:
         raise BrokerUrlRefused(f"broker_url host {parsed.hostname!r} is not in {ENV_BROKER_HOSTS}")
@@ -172,7 +170,7 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
     url = (host.get("broker_url") or "").strip()
     if not url:
         return None
-    token = (os.environ.get(ENV_BROKER_TOKEN) or "").strip()
+    token = (setting_env(ENV_BROKER_TOKEN) or "").strip()
     if not token:
         return None
     name = str(host.get("host") or "").strip()

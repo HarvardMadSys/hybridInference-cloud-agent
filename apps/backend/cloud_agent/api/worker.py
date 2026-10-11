@@ -583,7 +583,9 @@ async def worker_claim(
     never enters the sandbox; only the returned per-attempt tokens go in.
     """
     job_store = _require_store(store)
-    if not (os.environ.get(ENV_BROKER_TOKEN) or "").strip():
+    from cloud_agent.settings import setting_env
+
+    if not (setting_env(ENV_BROKER_TOKEN) or "").strip():
         raise HTTPException(
             status_code=503,
             detail={

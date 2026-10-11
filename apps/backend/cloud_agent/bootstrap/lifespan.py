@@ -147,11 +147,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # no-op one went with the store, and the DDL and backfills it used to
     # carry have been migrations since 0001.
     try:
-        from cloud_agent.identity import ENV_ISSUER, gateway_issuer
         from cloud_agent.identity_namespace import ensure_gateway_namespace
 
-        configured = bool(setting_env("GATEWAY_BASE_URL") or os.environ.get(ENV_ISSUER))
-        issuer = gateway_issuer() if configured else None
+        # An empty deployment must remain reachable through recovery-token setup.
+        # A recorded foreign namespace still refuses startup before workers run.
+        issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
         app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
     except Exception:
         await pool.close()

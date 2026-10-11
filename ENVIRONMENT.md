@@ -45,12 +45,26 @@ the changed keys from pending imports, preserving unrelated legacy values.
 Global exclusions also apply to newly enrolled hosts. Later environment changes
 are ignored; clearing an override never reactivates an old environment value.
 
-Bootstrap configuration stays in deployment files: database access; identity
-issuer and JWKS; signing, encryption and recovery keys; broker/host credentials;
-security and isolation policy; networking, tunnels and listeners; image/build
-routing; mounted key paths; and trusted compute deployment profiles. These
-values are needed before settings can be read or define the service's security
-boundary. The Settings page lists their names without displaying their values.
+Control-plane runtime identity, signing/encryption keys, broker credentials,
+cookie/proxy policy, MCP target policy and the default execution profile are also
+saved in the database. On an upgrade, the main listener imports only missing
+newly migrated fields; it never overwrites an existing value, including an empty
+reset. The relay waits for that import. The identity issuer stays pinned to this
+database, and existing user/compute encryption keys cannot be replaced or reset
+through the settings editor without a separate re-encryption procedure.
+
+The Settings page reports missing required fields and incomplete optional
+integrations. Administrators can open `<web base path>/setup` with `ADMIN_TOKEN`
+before Gateway sign-in works. Setup uses the same authenticated, audited settings
+API; the recovery token stays in page memory and is never saved in browser storage.
+
+Bootstrap configuration stays in deployment files: database access, the settings
+encryption root (`AGENT_SETTINGS_ENCRYPTION_KEY`, with the legacy environment
+`AGENT_SESSION_SECRET` fallback), administrator recovery access (`ADMIN_TOKEN`),
+host enrollment/broker provisioning, networking, tunnels/listeners, actual host
+isolation, image/build routing, mounted paths and trusted compute deployment
+profiles. These establish access to the database or configure processes outside
+the control plane. Their names appear on the Settings page with hidden values.
 
 ## The one rule
 

@@ -16,7 +16,7 @@ class SettingsRepository(Protocol):
         ...
 
     async def seed_settings(self, values: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
-        """Initialize settings once, preserving every value when the row already exists."""
+        """Initialize or import new fields once, preserving every saved value."""
         ...
 
     async def update_settings(

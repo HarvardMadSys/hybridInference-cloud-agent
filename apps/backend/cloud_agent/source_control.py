@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -59,7 +58,9 @@ class SourceControlCipher:
     """Encrypt provider secrets with a domain-separated server key."""
 
     def __init__(self, secret: str | None = None, *, domain: bytes = SOURCE_CONTROL_DOMAIN) -> None:
-        material = secret if secret is not None else os.getenv(ENV_ENCRYPTION_KEY, "")
+        from cloud_agent.settings import setting_env
+
+        material = secret if secret is not None else setting_env(ENV_ENCRYPTION_KEY, "")
         if not material:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"

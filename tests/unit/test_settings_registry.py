@@ -39,6 +39,11 @@ class Repository:
         self.seeds += 1
         if self.revision < 0:
             self.revision, self.values = 1, dict(values)
+        else:
+            merged = {**values, **self.values}
+            if merged != self.values:
+                self.revision += 1
+                self.values = merged
         return self.revision, self.values
 
 
@@ -163,13 +168,90 @@ async def test_relay_never_seeds_a_partial_environment(monkeypatch):
     async def main_initializes(_delay):
         nonlocal reads
         reads += 1
-        repository.revision, repository.values = 1, {"publish_base_branch": "main-import"}
+        repository.revision, repository.values = (
+            1,
+            {**settings.initial_settings(), "publish_base_branch": "main-import"},
+        )
 
     monkeypatch.setattr(settings.asyncio, "sleep", main_initializes)
     await settings.initialize_settings(repository, seed=False)
     assert repository.seeds == 0
     assert reads == 1
     assert settings.text_setting("publish_base_branch") == "main-import"
+
+
+async def test_upgrade_imports_new_fields_once_without_reimporting_old_settings(monkeypatch):
+    repository = Repository()
+    repository.revision = 4
+    repository.values = {"publish_base_branch": "saved-branch", "max_attempts": 3}
+    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-env-branch")
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://original.example")
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "private-host-signing-key")
+    await settings.initialize_settings(repository)
+    assert repository.revision == 5
+    assert settings.text_setting("publish_base_branch") == "saved-branch"
+    assert settings.text_setting("gateway_issuer") == "https://original.example"
+    assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "private-host-signing-key"
+    assert "private-host-signing-key" not in json.dumps(repository.values)
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://stale-new-env.example")
+    await settings.initialize_settings(repository)
+    assert repository.seeds == 1
+    assert settings.text_setting("gateway_issuer") == "https://original.example"
+
+
+def test_missing_required_setup_is_reported_without_exposing_saved_secrets(monkeypatch):
+    monkeypatch.delenv("AGENT_SESSION_SECRET")
+    encoded = settings.initial_settings()
+    view = settings.settings_response(1, encoded)
+    assert view["setup"]["required"] is True
+    assert view["setup"]["bootstrap_missing"][0]["key"] == "AGENT_SETTINGS_ENCRYPTION_KEY"
+    groups = {group["key"]: group for group in view["setup"]["groups"]}
+    assert groups["sign_in"]["needs_setup"] is True
+    assert groups["github"]["needs_setup"] is False
+    assert {field["key"] for field in groups["sign_in"]["missing"]} >= {
+        "gateway_issuer",
+        "gateway_jwks_url",
+    }
+    monkeypatch.setenv(
+        "AGENT_SETTINGS_ENCRYPTION_KEY", "test-root-key-longer-than-thirty-two-bytes"
+    )
+    encoded.update(settings.encode_changes({"github_app_client_secret": "test-hidden-secret"}))
+    view = settings.settings_response(2, encoded)
+    groups = {group["key"]: group for group in view["setup"]["groups"]}
+    assert groups["github"]["needs_setup"] is True
+    assert "test-hidden-secret" not in json.dumps(view)
+
+
+def test_complete_required_setup_and_unused_optional_features_do_not_prompt():
+    values = settings.initial_settings()
+    values.update(
+        settings.encode_changes(
+            {
+                "gateway_base_url": "https://gateway.example",
+                "gateway_dispatch_token": "test-dispatch-key",
+                "gateway_issuer": "https://identity.example",
+                "gateway_jwks_url": "https://gateway.example/jwks",
+                "gateway_authorize_url": "https://gateway.example/authorize",
+                "session_redirect_uri": "https://agents.example/callback",
+                "web_base_url": "https://agents.example",
+                "control_signing_secret": "test-control-key",
+                "workspace_broker_token": "test-broker-key",
+                "source_control_encryption_key": "test-user-credential-key",
+            }
+        )
+    )
+    assert settings.settings_response(1, values)["setup"]["required"] is False
+
+
+@pytest.mark.parametrize("key", ["source_control_encryption_key", "compute_encryption_key"])
+def test_existing_credential_encryption_keys_cannot_be_reset_or_replaced(key):
+    encoded = settings.encode_changes({key: "test-encryption-key-at-least-thirty-two-bytes"})
+    settings.validate_settings_update({}, encoded)
+    settings.validate_settings_update(encoded, encoded)
+    for change in (None, "test-replacement-key-at-least-thirty-two-bytes"):
+        replacement = {**encoded, **settings.encode_changes({key: change})}
+        with pytest.raises(ValueError, match="re-encrypting stored credentials"):
+            settings.validate_settings_update(encoded, replacement)
 
 
 async def test_public_site_settings_expose_only_display_allowlist():
