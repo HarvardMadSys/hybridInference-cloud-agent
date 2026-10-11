@@ -241,7 +241,7 @@ export function ComposerPlusMenu({
           if (!open) onOpen?.();
           setOpen(true);
         }}
-        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+        className={`ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
           open
             ? 'bg-gray-100 text-gray-900 dark:bg-white/10 dark:text-gray-100'
             : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200'

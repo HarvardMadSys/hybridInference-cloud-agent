@@ -8,7 +8,6 @@ import json
 import os
 import shlex
 import tarfile
-import types
 from pathlib import Path
 
 import pytest
@@ -81,6 +80,56 @@ def test_archive_metadata_does_not_depend_on_the_builder(source_tree: Path) -> N
             assert member.mode in {0o644, 0o755}
 
 
+def test_default_root_builds_the_current_checkout() -> None:
+    """Keep the repository-local entry point usable without an explicit root."""
+    assert hb.build() == hb.build(REPO_ROOT)
+
+
+@pytest.mark.parametrize("commit", [COMMIT, "unknown"])
+def test_relocated_builder_accepts_an_explicit_source_root(
+    source_tree: Path, tmp_path: Path, commit: str
+) -> None:
+    """A shallow Docker copy must reach argument parsing and build the supplied tree."""
+    script = Path(hb.__file__).read_text()
+    relocated_path = str(Path(tmp_path.anchor) / "builder" / "build_host_bundle.py")
+    namespace: dict[str, object] = {
+        "__file__": relocated_path,
+        "__name__": "relocated_host_bundle",
+    }
+    exec(compile(script, relocated_path, "exec"), namespace)
+    output = tmp_path / "relocated-release"
+    main = namespace["main"]
+    assert callable(main)
+    assert (
+        main(
+            [
+                "--root",
+                str(source_tree),
+                "--output",
+                str(output),
+                "--source-commit",
+                commit,
+                "--allow-unknown",
+            ]
+        )
+        == 0
+    )
+    if commit == "unknown":
+        assert output.is_dir()
+        assert not (output / "release.json").exists()
+        assert not (output / "source.tar.gz").exists()
+        return
+    bundle = hb.build(source_tree)
+    assert (output / "source.tar.gz").read_bytes() == bundle
+    manifest = json.loads((output / "release.json").read_text())
+    assert manifest == {
+        "format_version": 1,
+        "source_commit": commit,
+        "source_sha256": hashlib.sha256(bundle).hexdigest(),
+        "bundle": "source.tar.gz",
+    }
+
+
 def test_untracked_deployment_secrets_and_caches_do_not_enter_the_archive(
     source_tree: Path,
 ) -> None:
@@ -131,39 +180,6 @@ def test_release_manifest_binds_the_exact_archive_and_source_revision(
         "source_sha256": hashlib.sha256((output / "source.tar.gz").read_bytes()).hexdigest(),
         "bundle": "source.tar.gz",
     }
-
-
-@pytest.mark.parametrize("commit", [COMMIT, "unknown"])
-def test_standalone_docker_builder_uses_the_explicit_source_root(
-    source_tree: Path, tmp_path: Path, commit: str
-) -> None:
-    """Docker's shallow script path must not fail before parsing --root."""
-    script = REPO_ROOT / "deploy/release/build_host_bundle.py"
-    deployed = types.ModuleType("standalone_host_bundle")
-    deployed.__file__ = "/builder/build_host_bundle.py"
-    exec(compile(script.read_text(), deployed.__file__, "exec"), deployed.__dict__)
-    output = tmp_path / "standalone-release"
-    assert (
-        deployed.main(
-            [
-                "--root",
-                str(source_tree),
-                "--output",
-                str(output),
-                "--source-commit",
-                commit,
-                "--allow-unknown",
-            ]
-        )
-        == 0
-    )
-    if commit == "unknown":
-        assert output.is_dir()
-        assert not (output / "release.json").exists()
-    else:
-        manifest = json.loads((output / "release.json").read_text())
-        assert manifest["source_commit"] == commit
-        assert (output / "source.tar.gz").read_bytes() == hb.build(source_tree)
 
 
 @pytest.mark.parametrize("commit", ["unknown", "a" * 39, "A" * 40, "a" * 41, "main"])

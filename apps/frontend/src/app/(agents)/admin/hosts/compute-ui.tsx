@@ -5,11 +5,9 @@ import { useEffect, useId, useRef, type ReactNode, type Ref } from 'react';
 import type { BlockedReason, ComputeField, ComputeOperation } from '@/lib/api/compute';
 
 export const inputClass =
-  'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/20 dark:bg-gray-900 dark:text-gray-100';
-const buttonBase =
-  'rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/20';
-export const buttonClass = `${buttonBase} hover:bg-gray-100 dark:hover:bg-white/10`;
-export const primaryClass = `${buttonBase} bg-crimson text-white hover:bg-crimson/90 dark:hover:bg-crimson/90`;
+  'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
+export const buttonClass = 'ui-button ui-button-secondary min-h-11';
+export const primaryClass = 'ui-button ui-button-primary min-h-11';
 
 export function Panel({
   title,
@@ -39,27 +37,31 @@ export function Panel({
       ref={dialog}
       aria-label={title}
       onCancel={onClose}
-      className="m-auto max-h-[calc(100dvh-2rem)] w-[min(42rem,calc(100vw-2rem))] max-w-none overflow-y-auto rounded-2xl border border-gray-200 bg-white p-6 text-gray-900 shadow-xl backdrop:bg-black/30 dark:backdrop:bg-black/60 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+      className="ui-card m-auto max-h-[calc(100dvh-1rem)] w-[min(42rem,calc(100vw-1rem))] max-w-none overflow-y-auto p-0 shadow-xl backdrop:bg-black/40 dark:backdrop:bg-black/60 sm:max-h-[calc(100dvh-2rem)] sm:w-[min(42rem,calc(100vw-2rem))]"
     >
-      <div className="mb-5 flex items-center justify-between gap-4">
-        <div>
+      <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-border bg-surface-raised px-4 py-4 sm:px-6">
+        <div className="min-w-0">
           {onBack && (
             <button
               type="button"
-              className="mb-2 block text-sm text-gray-500 hover:underline dark:text-gray-400"
+              className="ui-button ui-button-ghost mb-2 min-h-11 -ml-3"
               onClick={onBack}
             >
               ← Back
             </button>
           )}
-          <h2 ref={titleRef} tabIndex={titleRef ? -1 : undefined} className="text-lg font-semibold">
+          <h2
+            ref={titleRef}
+            tabIndex={titleRef ? -1 : undefined}
+            className="ui-focus-ring break-words rounded text-lg font-semibold tracking-tight leading-8"
+          >
             {title}
           </h2>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {actions}
           <button
-            className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-white/5"
+            className="ui-icon-button ui-button-ghost h-11 w-11"
             type="button"
             onClick={onClose}
             aria-label="Close panel"
@@ -67,7 +69,7 @@ export function Panel({
             <svg
               aria-hidden="true"
               viewBox="0 0 20 20"
-              className="h-4 w-4"
+              className="h-5 w-5"
               fill="none"
               stroke="currentColor"
               strokeWidth="1.5"
@@ -77,7 +79,7 @@ export function Panel({
           </button>
         </div>
       </div>
-      {children}
+      <div className="p-4 sm:p-6">{children}</div>
     </dialog>
   );
 }
@@ -85,7 +87,7 @@ export function Panel({
 export function Reasons({ reasons }: { reasons: BlockedReason[] }) {
   if (!reasons.length) return null;
   return (
-    <ul className="mt-2 space-y-1 text-sm text-amber-800 dark:text-amber-300">
+    <ul className="mt-3 space-y-2 rounded-xl border border-status-warning/20 bg-status-warning/5 p-4 text-sm leading-6 text-status-warning">
       {reasons.map((reason, index) => (
         <li key={`${reason.code}-${index}`}>{reason.message}</li>
       ))}
@@ -95,7 +97,10 @@ export function Reasons({ reasons }: { reasons: BlockedReason[] }) {
 
 export function ErrorNotice({ error }: { error: string | null }) {
   return error ? (
-    <p role="alert" className="my-3 text-sm text-red-700 dark:text-red-300">
+    <p
+      role="alert"
+      className="my-3 rounded-xl border border-status-error/20 bg-status-error/5 p-4 text-sm leading-6 text-status-error"
+    >
       {error}
     </p>
   ) : null;
@@ -103,7 +108,7 @@ export function ErrorNotice({ error }: { error: string | null }) {
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="block space-y-1 text-sm">
+    <label className="block space-y-2 text-sm text-foreground">
       <span className="font-medium">{label}</span>
       {children}
     </label>
@@ -218,7 +223,7 @@ export function ProviderFields({
             {field.description && (
               <span
                 id={`${id}-${field.key}-help`}
-                className="block text-xs text-gray-500 dark:text-gray-400"
+                className="mt-1.5 block text-xs leading-5 text-muted"
               >
                 {field.description}
               </span>
@@ -227,7 +232,7 @@ export function ProviderFields({
               <span
                 id={`${id}-${field.key}-error`}
                 role="alert"
-                className="block text-xs text-red-700 dark:text-red-300"
+                className="mt-1.5 block text-xs leading-5 text-status-error"
               >
                 {errors[field.key]}
               </span>
@@ -255,8 +260,8 @@ export function remainingTime(value: string): string {
 
 export function OperationDetails({ operation }: { operation: ComputeOperation }) {
   return (
-    <div className="space-y-2 text-sm" aria-live="polite">
-      <p className="font-medium">
+    <div className="space-y-3 break-words text-sm leading-6" aria-live="polite">
+      <p className="rounded-lg border border-border bg-surface-muted px-3 py-2 font-semibold text-foreground">
         {operation.kind}: {operation.state}
       </p>
       <p>Current step: {operation.step}</p>
@@ -279,10 +284,8 @@ export function OperationDetails({ operation }: { operation: ComputeOperation })
         </ul>
       )}
       <Reasons reasons={operation.blocked_reasons} />
-      <p className="text-xs text-gray-500 dark:text-gray-400">
-        Last update: {absoluteTime(operation.updated_at)}
-      </p>
-      <p className="text-xs text-gray-500 dark:text-gray-400">
+      <p className="text-xs text-muted">Last update: {absoluteTime(operation.updated_at)}</p>
+      <p className="border-t border-border pt-3 text-xs text-muted">
         You can close this panel. The operation will continue.
       </p>
     </div>

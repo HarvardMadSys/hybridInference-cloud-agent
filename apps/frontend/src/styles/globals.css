@@ -68,6 +68,16 @@
   html {
     @apply min-h-full;
   }
+
+  ::selection {
+    background: rgb(var(--ui-accent) / 0.18);
+  }
+
+  /* A fallback for controls that have not yet adopted the shared UI classes. */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid rgb(var(--ui-focus));
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
@@ -87,11 +97,11 @@
   }
 
   .ui-button {
-    @apply px-3 py-2;
+    @apply min-h-10 px-3 py-2;
   }
 
   .ui-icon-button {
-    @apply p-2;
+    @apply min-h-10 min-w-10 p-2;
   }
 
   .ui-button:disabled,
@@ -126,7 +136,7 @@
   }
 
   .ui-tab {
-    @apply border-b-2 border-transparent text-muted transition-colors duration-150;
+    @apply min-h-10 border-b-2 border-transparent text-muted transition-colors duration-150;
   }
 
   .ui-tab:hover {
@@ -151,11 +161,32 @@
   }
 
   .ui-input {
-    @apply rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-foreground;
+    @apply min-h-10 rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-foreground placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .ui-input:focus-visible {
     @apply border-accent;
+  }
+
+  @media (pointer: coarse) {
+    .ui-button,
+    .ui-icon-button,
+    .ui-tab,
+    .ui-tool-row,
+    .ui-input {
+      min-height: 44px;
+    }
+
+    .ui-icon-button {
+      min-width: 44px;
+    }
+  }
+
+  /* Keep mobile Safari from zooming the viewport when a field is focused. */
+  @media (pointer: coarse) and (max-width: 767px) {
+    .ui-input {
+      font-size: 16px;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {

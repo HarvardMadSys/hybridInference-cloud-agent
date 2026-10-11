@@ -38,13 +38,11 @@ export interface NamedHost {
 }
 
 const INPUT_CLASS =
-  'w-20 shrink-0 rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-xs tabular-nums text-gray-700 shadow-sm disabled:opacity-40 aria-[invalid=true]:border-red-400 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200';
+  'ui-input min-h-11 w-24 shrink-0 px-2 tabular-nums disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const UNIT_CLASS =
-  'w-16 shrink-0 rounded-md border border-gray-200 bg-white px-1 py-0.5 text-xs text-gray-700 shadow-sm disabled:opacity-40 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200';
-const BUTTON_CLASS =
-  'rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 dark:border-white/10 dark:bg-transparent dark:text-gray-200 dark:hover:bg-white/5';
-const CLEAR_CLASS =
-  'rounded-md px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200';
+  'ui-input min-h-11 w-20 shrink-0 px-2 disabled:cursor-not-allowed disabled:opacity-50';
+const BUTTON_CLASS = 'ui-button ui-button-primary min-h-11 min-w-16';
+const CLEAR_CLASS = 'ui-button ui-button-ghost min-h-11 text-xs';
 
 /**
  * One value's amount, unit, Save and clear.
@@ -92,7 +90,7 @@ function SettingForm({
     <div>
       <form
         noValidate
-        className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap"
+        className="flex flex-wrap items-center gap-2 sm:justify-end"
         onSubmit={(event) => {
           event.preventDefault();
           const parsed = parseSettingInput(definition, amount, unit);
@@ -143,7 +141,7 @@ function SettingForm({
             ))}
           </select>
         ) : (
-          <span aria-hidden className="w-16 shrink-0" />
+          <span aria-hidden className="hidden w-20 shrink-0 sm:block" />
         )}
         <button type="submit" disabled={busy || disabled || !dirty} className={BUTTON_CLASS}>
           Save
@@ -157,7 +155,7 @@ function SettingForm({
             setError(null);
             onChange(definition.key, null);
           }}
-          className={`${CLEAR_CLASS} ${saved === null ? 'hidden sm:block sm:invisible' : ''}`}
+          className={`${CLEAR_CLASS} ${saved === null ? 'hidden sm:inline-flex sm:invisible' : ''}`}
         >
           {clearLabel}
         </button>
@@ -166,13 +164,13 @@ function SettingForm({
         <p
           id={errorId}
           role="alert"
-          className="mt-1 text-right text-[11px] text-red-600 dark:text-red-400"
+          className="mt-2 text-xs leading-5 text-status-error sm:text-right"
         >
           {error}
         </p>
       ) : (
         effect !== null && (
-          <p className="mt-1 text-right text-[11px] text-amber-700 dark:text-amber-300">{effect}</p>
+          <p className="mt-2 text-xs leading-5 text-status-warning sm:text-right">{effect}</p>
         )
       )}
     </div>
@@ -199,35 +197,36 @@ export function GlobalSettingsCard({
   const names = new Map(servers.map(({ name, host }) => [host.host, name] as const));
   const nameOf = (host: AgentRunnerHost) => names.get(host.host) ?? host.host;
   return (
-    <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-gray-900">
-      <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">{title}</h2>
-      <div className="mt-2">
+    <div className="ui-card mt-6 p-4 sm:p-6">
+      <h2 className="text-lg font-semibold tracking-tight text-foreground">{title}</h2>
+      <p className="mt-2 text-sm leading-6 text-muted">
+        Defaults for every server. Individual servers can override these values.
+      </p>
+      <div className="mt-4">
         {definitions.map((definition, index) => {
           const saved = values[definition.key] ?? null;
           return (
             <div
               key={definition.key}
-              className={`flex flex-col gap-3 py-3 sm:flex-row sm:items-start ${
-                index > 0 ? 'border-t border-gray-100 dark:border-white/5' : ''
+              className={`grid gap-4 py-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start xl:gap-8 ${
+                index > 0 ? 'border-t border-border' : ''
               }`}
             >
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                <p className="text-sm font-medium text-foreground">
                   {definition.label}
                   {saved !== null && (
-                    <span className="ml-2 font-normal tabular-nums text-gray-500 dark:text-gray-400">
+                    <span className="ml-2 inline-flex rounded-md bg-surface-muted px-2 py-0.5 text-xs font-normal tabular-nums text-muted">
                       {formatSettingValue(definition, saved)}
                     </span>
                   )}
                 </p>
-                <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                  {definition.description}
-                </p>
-                <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                <p className="mt-1.5 text-sm leading-6 text-muted">{definition.description}</p>
+                <p className="mt-2 text-xs leading-5 text-muted">
                   {rolloutText(definition, values, hosts, nameOf)}
                 </p>
               </div>
-              <div className="shrink-0">
+              <div className="min-w-0">
                 <SettingForm
                   key={`${definition.key}:${saved ?? 'unset'}`}
                   definition={definition}
@@ -265,80 +264,88 @@ export function ServerSettingsPanel({
 }) {
   const supported = supportsSettings(host);
   return (
-    <section aria-label={`Sandbox settings for ${name}`} className="mt-6">
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Sandbox</h3>
-      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+    <section aria-label={`Sandbox settings for ${name}`} className="mt-6 min-w-0">
+      <h3 className="text-base font-semibold text-foreground">Sandbox</h3>
+      <p className="mt-2 text-sm leading-6 text-muted">
         Values set here override the global defaults in{' '}
         <Link
           href="/admin/settings"
-          className="underline hover:text-gray-700 dark:hover:text-gray-200"
+          className="ui-focus-ring rounded text-accent underline underline-offset-4 hover:text-accent-hover"
         >
           Settings
         </Link>
         .
       </p>
       {!supported && (
-        <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+        <p className="mt-3 rounded-xl border border-status-warning/20 bg-status-warning/5 p-3 text-sm leading-6 text-status-warning">
           This server&apos;s runner predates settings from this page and keeps its .env values.
           Redeploy it to manage them here.
         </p>
       )}
-      <table className="mt-2 w-full text-left text-sm">
-        <thead className="text-xs text-gray-500 dark:text-gray-400">
-          <tr>
-            <th className="py-1.5 pr-3 font-medium">Setting</th>
-            <th className="py-1.5 pr-3 font-medium">In use</th>
-            <th className="py-1.5 text-right font-medium">This server only</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-          {definitions.map((definition) => {
-            const fact = settingFact(definition, globalValues, host);
-            const override = host.settings_desired?.[definition.key] ?? null;
-            return (
-              <tr key={definition.key}>
-                <th
-                  scope="row"
-                  className="py-2 pr-3 align-top font-normal text-gray-800 dark:text-gray-200"
-                >
-                  {definition.label}
-                </th>
-                <td className="py-2 pr-3 align-top">
-                  <span className="block whitespace-nowrap tabular-nums text-gray-800 dark:text-gray-200">
-                    {fact.inUse === null ? '—' : formatSettingValue(definition, fact.inUse)}
-                  </span>
-                  {/* A runner that cannot apply settings says so once, above
-                      the table, rather than on every row. */}
-                  {supported && (
-                    <span
-                      className={`block text-[11px] ${
-                        fact.state === 'applied'
-                          ? 'text-gray-500 dark:text-gray-400'
-                          : 'text-amber-700 dark:text-amber-300'
-                      }`}
-                    >
-                      {factNote(fact)}
+      <div
+        className="ui-focus-ring mt-4 overflow-x-auto rounded-xl border border-border"
+        tabIndex={0}
+        role="region"
+        aria-label={`Sandbox settings table for ${name}`}
+      >
+        <table className="w-full min-w-[36rem] text-left text-sm">
+          <thead className="border-b border-border bg-surface-muted text-xs text-muted">
+            <tr>
+              <th scope="col" className="px-4 py-3 font-medium">
+                Setting
+              </th>
+              <th scope="col" className="px-4 py-3 font-medium">
+                In use
+              </th>
+              <th scope="col" className="px-4 py-3 text-right font-medium">
+                This server only
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {definitions.map((definition) => {
+              const fact = settingFact(definition, globalValues, host);
+              const override = host.settings_desired?.[definition.key] ?? null;
+              return (
+                <tr key={definition.key}>
+                  <th scope="row" className="px-4 py-4 align-top font-medium text-foreground">
+                    {definition.label}
+                  </th>
+                  <td className="px-4 py-4 align-top">
+                    <span className="block whitespace-nowrap tabular-nums text-foreground">
+                      {fact.inUse === null ? '—' : formatSettingValue(definition, fact.inUse)}
                     </span>
-                  )}
-                </td>
-                <td className="py-2 align-top">
-                  <SettingForm
-                    key={`${definition.key}:${override ?? 'unset'}`}
-                    definition={definition}
-                    saved={override}
-                    placeholder={fact.admin ?? definition.default}
-                    label={`${definition.label} for ${name}`}
-                    clearLabel="Use default"
-                    busy={busy}
-                    disabled={!supported}
-                    onChange={onChange}
-                  />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                    {/* A runner that cannot apply settings says so once, above
+                      the table, rather than on every row. */}
+                    {supported && (
+                      <span
+                        className={`mt-1 block text-xs leading-5 ${
+                          fact.state === 'applied' ? 'text-muted' : 'text-status-warning'
+                        }`}
+                      >
+                        {factNote(fact)}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-4 align-top">
+                    <SettingForm
+                      key={`${definition.key}:${override ?? 'unset'}`}
+                      definition={definition}
+                      saved={override}
+                      placeholder={fact.admin ?? definition.default}
+                      label={`${definition.label} for ${name}`}
+                      clearLabel="Use default"
+                      busy={busy}
+                      disabled={!supported}
+                      onChange={onChange}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

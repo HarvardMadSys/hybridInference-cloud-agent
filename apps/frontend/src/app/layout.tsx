@@ -52,7 +52,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             deployment configuration is interpolated into it. */}
         <script dangerouslySetInnerHTML={{ __html: themeBootScript() }} />
       </head>
-      <body className="flex min-h-screen flex-col bg-gray-50 text-black antialiased dark:bg-gray-950 dark:text-gray-100">
+      <body className="flex min-h-screen flex-col bg-surface-muted font-sans text-foreground antialiased">
         <Providers siteConfig={site}>{children}</Providers>
       </body>
     </html>

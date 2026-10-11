@@ -25,6 +25,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import {
   accessDenied,
   AdminRequired,
@@ -197,11 +198,12 @@ function MeasurementsView() {
   const runKnown = selection.run !== null || records || runs.data !== null || runs.error !== null;
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Measurements"
+          description="Explore operation timings and investigate slow sandbox interactions."
+        />
         <AdminNavigation current="measurements" />
 
         <div className="mt-8 flex flex-wrap items-end justify-between gap-4">
@@ -1109,8 +1111,8 @@ function RowsSkeleton({ rows }: { rows: number }) {
 
 function MeasurementsSkeleton() {
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
         <div className={`${CARD} mt-6 h-14 animate-pulse`} />
         <div className={`${CARD} mt-8 h-32 animate-pulse`} />
         <div className={`${CARD} mt-8 h-64 animate-pulse`} />

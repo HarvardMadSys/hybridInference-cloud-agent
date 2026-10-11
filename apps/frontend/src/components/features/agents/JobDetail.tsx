@@ -1795,7 +1795,7 @@ export function JobDetail({
   const panelOpen = workspaceOpen || inspector !== null;
   const content = (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
-      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-4 sm:px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
         {isArchived ? (
           <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
             <Link
@@ -1808,8 +1808,8 @@ export function JobDetail({
             <span>{t('sessionArchive.badge')}</span>
           </div>
         ) : null}
-        <div className="agent-conversation-toolbar flex w-full items-center gap-3 py-3.5 pr-14">
-          <div className="agent-conversation-context flex min-w-0 flex-1 items-center gap-2">
+        <div className="agent-conversation-toolbar flex flex-col">
+          <div className="agent-conversation-context flex min-w-0 items-center gap-3 pb-2 pt-3">
             <div className="min-w-0 flex-1">
               <h1
                 title={title}
@@ -1844,10 +1844,10 @@ export function JobDetail({
               onRename={setTitle}
             />
           </div>
-          <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-2">
+          <div className="agent-conversation-controls flex flex-wrap items-center gap-x-3 gap-y-2 pb-3">
             <nav
               aria-label="Run views"
-              className="mr-3 flex shrink-0 items-center gap-1 text-[13px]"
+              className="flex shrink-0 items-center gap-1 rounded-xl border border-gray-200/70 bg-gray-50 p-1 text-[13px] dark:border-white/10 dark:bg-white/[0.03]"
             >
               {(['chat', 'trajectory'] as const).map((view) => (
                 <button
@@ -1855,10 +1855,10 @@ export function JobDetail({
                   type="button"
                   onClick={() => setTab(view)}
                   aria-current={tab === view ? 'page' : undefined}
-                  className={`ui-focus-ring min-h-9 rounded-lg px-2.5 py-1 capitalize transition-colors ${
+                  className={`ui-focus-ring min-h-9 rounded-lg px-3 py-1.5 capitalize transition-colors [@media(pointer:coarse)]:min-h-11 ${
                     tab === view
-                      ? 'bg-gray-100 dark:bg-white/5 font-medium text-gray-900 dark:text-gray-50'
-                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                      ? 'bg-white font-semibold text-crimson-dark shadow-sm ring-1 ring-gray-200/80 dark:bg-gray-800 dark:text-crimson-light dark:ring-white/10'
+                      : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
                   }`}
                 >
                   {view}
@@ -1874,87 +1874,89 @@ export function JobDetail({
                 }}
               />
             ) : null}
-            {hasActivity ? (
+            <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
+              {hasActivity ? (
+                <button
+                  ref={activityToggleRef}
+                  type="button"
+                  onClick={toggleActivity}
+                  aria-label={
+                    activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'
+                  }
+                  aria-expanded={activityVisible}
+                  aria-controls="job-activity-window"
+                  title="Tasks and subagents"
+                  className={`ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
+                    activityVisible
+                      ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
+                      : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
+                  }`}
+                >
+                  <ActivityIcon />
+                </button>
+              ) : null}
+              {job.diffFiles.length ? (
+                <button
+                  type="button"
+                  onClick={() => openWorkspace('git')}
+                  className="ui-focus-ring hidden min-h-9 items-center rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 sm:inline-flex [@media(pointer:coarse)]:min-h-11"
+                >
+                  Changes
+                  <span className="ml-1 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[11px]">
+                    {job.diffFiles.length}
+                  </span>
+                </button>
+              ) : null}
+              {isActive ? (
+                <button
+                  type="button"
+                  onClick={() => void stop()}
+                  disabled={stopping}
+                  aria-label="Stop"
+                  title="Stop run (Esc)"
+                  className="ui-focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 transition-colors hover:bg-gray-800 dark:hover:bg-white disabled:opacity-60 [@media(pointer:coarse)]:min-h-11"
+                >
+                  <span className="h-2.5 w-2.5 rounded-sm bg-white dark:bg-gray-900" />
+                  {stopping ? 'Stopping…' : 'Stop'}
+                  {!stopping ? (
+                    <kbd
+                      aria-hidden="true"
+                      className="rounded bg-white/15 px-1 text-[10px] dark:bg-gray-900/15"
+                    >
+                      Esc
+                    </kbd>
+                  ) : null}
+                </button>
+              ) : null}
               <button
-                ref={activityToggleRef}
                 type="button"
-                onClick={toggleActivity}
-                aria-label={
-                  activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'
-                }
-                aria-expanded={activityVisible}
-                aria-controls="job-activity-window"
-                title="Tasks and subagents"
-                className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-crimson ${
-                  activityVisible
-                    ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
-                    : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
+                onClick={toggleWorkspace}
+                aria-label={workspaceOpen ? 'Close workspace' : 'Open workspace'}
+                aria-expanded={workspaceOpen}
+                aria-controls="job-workspace-pane"
+                aria-keyshortcuts="Meta+J Control+J"
+                title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'} (⌘J / Ctrl+J)`}
+                className={`ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
+                  workspaceOpen
+                    ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'
+                    : 'border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
               >
-                <ActivityIcon />
+                <svg
+                  aria-hidden="true"
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.8}
+                >
+                  <rect x="3.5" y="4" width="17" height="16" rx="2" />
+                  <path d="M14.5 4v16" />
+                </svg>
               </button>
-            ) : null}
-            {job.diffFiles.length ? (
-              <button
-                type="button"
-                onClick={() => openWorkspace('git')}
-                className="ui-focus-ring hidden min-h-9 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 sm:block"
-              >
-                Changes
-                <span className="ml-1 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[11px]">
-                  {job.diffFiles.length}
-                </span>
-              </button>
-            ) : null}
-            {isActive ? (
-              <button
-                type="button"
-                onClick={() => void stop()}
-                disabled={stopping}
-                aria-label="Stop"
-                title="Stop run (Esc)"
-                className="inline-flex items-center gap-1.5 rounded-md bg-gray-900 dark:bg-gray-100 px-2.5 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 transition-colors hover:bg-gray-800 dark:hover:bg-white disabled:opacity-60"
-              >
-                <span className="h-2.5 w-2.5 rounded-sm bg-white dark:bg-gray-900" />
-                {stopping ? 'Stopping…' : 'Stop'}
-                {!stopping ? (
-                  <kbd
-                    aria-hidden="true"
-                    className="rounded bg-white/15 px-1 text-[10px] dark:bg-gray-900/15"
-                  >
-                    Esc
-                  </kbd>
-                ) : null}
-              </button>
-            ) : null}
+            </div>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={toggleWorkspace}
-          aria-label={workspaceOpen ? 'Close workspace' : 'Open workspace'}
-          aria-expanded={workspaceOpen}
-          aria-controls="job-workspace-pane"
-          aria-keyshortcuts="Meta+J Control+J"
-          title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'} (⌘J / Ctrl+J)`}
-          className={`ui-focus-ring absolute right-6 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md border transition-colors ${
-            workspaceOpen
-              ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'
-              : 'border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100'
-          }`}
-        >
-          <svg
-            aria-hidden="true"
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={1.8}
-          >
-            <rect x="3.5" y="4" width="17" height="16" rx="2" />
-            <path d="M14.5 4v16" />
-          </svg>
-        </button>
       </header>
 
       <div
@@ -2238,7 +2240,7 @@ export function JobDetail({
               {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
               <div
                 ref={scroll.composerRef}
-                className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gray-50 px-2 pb-2 pt-8 dark:bg-gray-950"
+                className="sticky bottom-0 z-10 -mx-2 mt-8 bg-gray-50 px-2 pb-2 pt-5 dark:bg-gray-950"
               >
                 <LiveAgentStatus job={job} />
                 {/* `/goal` on its own is not an objective. It is consumed
@@ -2405,7 +2407,7 @@ export function JobDetail({
                             : 'Message or run a task, / commands, @ files or sessions'
                         }
                         aria-label="Add a follow-up"
-                        className="w-full resize-none rounded-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                        className="max-h-[30vh] min-h-[76px] w-full resize-y rounded-xl border-0 bg-transparent px-4 pb-3 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
                       />
                       <AttachmentStrip
                         entries={attachments.entries}
@@ -2447,13 +2449,6 @@ export function JobDetail({
                           again. A model change restarts this member's CLI and
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
-                            <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                              {contextLost
-                                ? 'Start a new chat ·'
-                                : job.state === 'cancelled'
-                                  ? `Restores any saved changes · ${job.runtime} ·`
-                                  : `Inherits ${job.runtime} ·`}
-                            </span>
                             <Picker
                               label="Model for this turn"
                               value={model}
@@ -2466,24 +2461,8 @@ export function JobDetail({
                               options={efforts}
                               onChange={setEffort}
                             />
-                            {isActive ? (
-                              <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                                · {t('queue.afterThisTurn')}
-                                {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
-                              </span>
-                            ) : null}
                           </>
-                        ) : (
-                          <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                            {contextLost
-                              ? `Start a new chat · ${job.runtime} · ${job.model}`
-                              : job.state === 'cancelled'
-                                ? `Restores any saved changes · ${job.runtime} · ${job.model}`
-                                : `Inherits ${job.runtime} · ${job.model}`}
-                            {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
-                            {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
-                          </span>
-                        )}
+                        ) : null}
                         <ComposerMessageActions
                           label={t(isActive ? 'composer.queue' : 'composer.send')}
                           title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
@@ -2507,6 +2486,16 @@ export function JobDetail({
                           busy={submitting || goalCommand.busy}
                         />
                       </div>
+                      <p className="px-4 pb-3 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+                        {contextLost
+                          ? `Start a new chat · ${job.runtime}`
+                          : job.state === 'cancelled'
+                            ? `Restores any saved changes · ${job.runtime}`
+                            : `Inherits ${job.runtime}`}
+                        {modelOptions.length === 0 ? ` · ${job.model}` : ''}
+                        {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
+                        {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
+                      </p>
                     </form>
                   )}
                 </div>

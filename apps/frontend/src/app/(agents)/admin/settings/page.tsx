@@ -20,6 +20,7 @@ import ApplicationSettings from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
 
@@ -177,11 +178,12 @@ function SettingsView() {
   const showHostStatus = selectedTab === 'versions' || selectedTab === 'sandbox';
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-12 lg:px-12 lg:py-16">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Settings"
+          description="Configure application defaults, agent versions, and sandbox behavior."
+        />
         <AdminNavigation current="settings" />
         <div className="max-w-4xl">
           <p className="mt-6 text-sm text-gray-500 dark:text-gray-400">
@@ -198,7 +200,7 @@ function SettingsView() {
           <div
             role="tablist"
             aria-label="Settings sections"
-            className="mt-6 flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 dark:bg-white/5"
+            className="mt-6 flex gap-1 overflow-x-auto rounded-xl border border-border bg-surface-muted p-1"
           >
             {SETTINGS_TABS.map(({ id, label }, index) => (
               <button
@@ -226,10 +228,10 @@ function SettingsView() {
                   selectTab(SETTINGS_TABS[nextIndex].id);
                   tabButtons.current[nextIndex]?.focus();
                 }}
-                className={`shrink-0 rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:focus-visible:ring-crimson-light ${
+                className={`min-h-11 shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:focus-visible:ring-crimson-light ${
                   selectedTab === id
-                    ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-50'
-                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+                    ? 'bg-surface text-foreground shadow-subtle'
+                    : 'text-muted hover:bg-surface-hover hover:text-foreground'
                 }`}
               >
                 {label}

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { DatabaseExplorer } from './DatabaseExplorer';
 import { PgAdminTools } from './PgAdminTools';
 
@@ -44,10 +45,11 @@ function DatabaseView() {
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-12 lg:px-12 lg:py-16">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Database"
+          description="Inspect stored records and manage database administration tools."
+        />
         <AdminNavigation current="database" />
         <DatabaseExplorer trackRequest={trackRequest} onDenied={onDenied} />
         <PgAdminTools trackRequest={trackRequest} onDenied={onDenied} />

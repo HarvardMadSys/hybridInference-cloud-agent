@@ -3980,16 +3980,18 @@ describe('JobDetail', () => {
     const task = screen.getByRole('region', { name: 'Task progress' });
     const workspaceButton = screen.getByRole('button', { name: 'Open workspace' });
     const headerLayout = workspaceButton.parentElement;
-    const headerClassName = headerLayout?.className;
-    expect(headerLayout).toHaveClass('relative');
-    expect(headerLayout).not.toHaveClass('max-w-4xl');
-    expect(workspaceButton).toHaveClass('absolute', 'right-6');
+    const header = workspaceButton.closest('header')!;
+    const runViews = within(header).getByRole('navigation', { name: 'Run views' });
+    expect(within(header).getByRole('heading', { level: 1 })).toHaveTextContent(makeJob().title);
+    expect(within(runViews).getByRole('button', { name: 'chat' })).toBeVisible();
+    expect(within(runViews).getByRole('button', { name: 'trajectory' })).toBeVisible();
     fireEvent.click(workspaceButton);
 
     const closeButton = screen.getByRole('button', { name: 'Close workspace' });
     expect(closeButton).toBe(workspaceButton);
     expect(closeButton.parentElement).toBe(headerLayout);
-    expect(closeButton.parentElement?.className).toBe(headerClassName);
+    expect(closeButton.closest('header')).toBe(header);
+    expect(within(header).getByRole('navigation', { name: 'Run views' })).toBe(runViews);
     expect(closeButton).toHaveTextContent('');
     expect(closeButton).toHaveAttribute('aria-expanded', 'true');
     expect(closeButton).toHaveAttribute('aria-controls', 'job-workspace-pane');
@@ -4013,7 +4015,8 @@ describe('JobDetail', () => {
     const reopenButton = screen.getByRole('button', { name: 'Open workspace' });
     expect(reopenButton).toBe(workspaceButton);
     expect(reopenButton.parentElement).toBe(headerLayout);
-    expect(reopenButton.parentElement?.className).toBe(headerClassName);
+    expect(reopenButton.closest('header')).toBe(header);
+    expect(within(header).getByRole('navigation', { name: 'Run views' })).toBe(runViews);
     expect(reopenButton).toHaveTextContent('');
     expect(reopenButton).toHaveAttribute('aria-expanded', 'false');
     expect(workspacePane).toHaveClass('hidden');

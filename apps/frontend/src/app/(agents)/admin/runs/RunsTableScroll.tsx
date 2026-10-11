@@ -50,7 +50,7 @@ export function RunsTableScroll({ children }: { children: ReactNode }) {
   return (
     <div className="relative isolate mt-4">
       {overflowing && (
-        <div className="sticky top-0 z-20 bg-gray-50 py-1.5 dark:bg-gray-950">
+        <div className="sticky top-0 z-20 bg-surface-muted py-1.5">
           <div
             ref={scrollbar}
             role="scrollbar"
@@ -96,7 +96,7 @@ export function RunsTableScroll({ children }: { children: ReactNode }) {
         aria-label="Turns table"
         tabIndex={0}
         onScroll={measure}
-        className="relative overflow-x-auto rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson dark:focus-visible:ring-crimson-light"
+        className="ui-card relative overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
       >
         {children}
       </div>

@@ -11,10 +11,8 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 import { accessDenied, trackedRequest, type DatabaseAccessProps } from './requests';
 
-const INPUT =
-  'min-h-10 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-crimson disabled:opacity-50 dark:border-white/10 dark:bg-gray-950 dark:text-gray-100';
-const BUTTON =
-  'min-h-10 rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-gray-800';
+const INPUT = 'ui-input min-h-11 disabled:opacity-50';
+const BUTTON = 'ui-button ui-button-secondary min-h-11';
 const MAX_OFFSET = 100_000;
 const MAX_FILTERS = 12;
 const OPERATORS: [DatabaseFilterOperator, string][] = [
@@ -186,7 +184,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
   }
 
   return (
-    <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-6 dark:border-white/10 dark:bg-gray-900">
+    <div className="ui-card mt-6 rounded-2xl p-4 sm:p-6">
       <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Database explorer</h2>
       <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
         Browse reviewed metadata columns and query rows with read-only filters. Sensitive content
@@ -239,7 +237,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
             </select>
           </label>
           <details className="mt-4 text-sm text-gray-700 dark:text-gray-300">
-            <summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson">
+            <summary className="ui-focus-ring cursor-pointer rounded py-3 font-medium">
               Columns and types ({table.columns.length})
             </summary>
             <div className="mt-3 overflow-x-auto">
@@ -292,7 +290,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
                 const hint = valueHint(column?.data_type);
                 return (
                   <div key={index} className="mt-3 flex flex-wrap items-end gap-3">
-                    <label className="flex flex-col gap-1 text-xs text-gray-600 dark:text-gray-400">
+                    <label className="flex flex-col gap-2 text-xs text-muted">
                       Column {index + 1}
                       <select
                         className={INPUT}
@@ -306,7 +304,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
                         ))}
                       </select>
                     </label>
-                    <label className="flex flex-col gap-1 text-xs text-gray-600 dark:text-gray-400">
+                    <label className="flex flex-col gap-2 text-xs text-muted">
                       Operator {index + 1}
                       <select
                         className={INPUT}
@@ -375,7 +373,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
               </button>
             </fieldset>
             <div className="mt-5 flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1 text-xs text-gray-600 dark:text-gray-400">
+              <label className="flex flex-col gap-2 text-xs text-muted">
                 Sort by
                 <select
                   className={INPUT}
@@ -393,7 +391,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
                   ))}
                 </select>
               </label>
-              <label className="flex flex-col gap-1 text-xs text-gray-600 dark:text-gray-400">
+              <label className="flex flex-col gap-2 text-xs text-muted">
                 Sort direction
                 <select
                   className={INPUT}
@@ -408,7 +406,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
                   <option value="desc">Descending</option>
                 </select>
               </label>
-              <label className="flex flex-col gap-1 text-xs text-gray-600 dark:text-gray-400">
+              <label className="flex flex-col gap-2 text-xs text-muted">
                 Rows per page
                 <select
                   className={INPUT}
@@ -428,7 +426,7 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
               <button
                 type="submit"
                 disabled={querying}
-                className="min-h-10 rounded-lg bg-crimson px-4 py-2 text-sm font-semibold text-white hover:bg-crimson/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus-visible:ring-offset-gray-900"
+                className="ui-button ui-button-primary min-h-11 px-5"
               >
                 Run query
               </button>
@@ -530,10 +528,15 @@ function QueryResults({
         Text cells are limited to {result.text_limit} characters; shortened values end with ….
       </p>
       {result.rows.length > 0 && (
-        <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200 dark:border-white/10">
+        <div
+          role="region"
+          aria-label="Database query results"
+          tabIndex={0}
+          className="ui-focus-ring mt-4 overflow-x-auto rounded-xl border border-border"
+        >
           <table className="w-full text-left text-sm text-gray-700 dark:text-gray-300">
             <caption className="sr-only">Query results for {result.table}</caption>
-            <thead className="bg-gray-50 dark:bg-gray-950">
+            <thead className="bg-surface-muted text-muted">
               <tr>
                 {result.columns.map((column) => (
                   <th
@@ -546,7 +549,7 @@ function QueryResults({
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+            <tbody className="divide-y divide-border">
               {result.rows.map((row, index) => (
                 <tr key={index}>
                   {row.map((value, column) => (
