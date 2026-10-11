@@ -28,7 +28,8 @@ export const PENDING_QUEUE_POLL_MS = 2000;
  * How often a page with a live turn and nothing waiting reads it.
  *
  * Only another tab can add a message then, so it is read less often; a
- * conversation with nothing running and nothing waiting is not read at all.
+ * conversation with nothing running and nothing waiting stops polling once
+ * its first read succeeds.
  */
 export const IDLE_QUEUE_POLL_MS = 5000;
 
@@ -220,7 +221,7 @@ export function usePendingMessages({
   const pushLive = useAgentPushLive();
   const interval = !threadId
     ? null
-    : waiting || active
+    : waiting || active || !loaded
       ? pushLive
         ? PUSH_FALLBACK_POLL_MS
         : waiting

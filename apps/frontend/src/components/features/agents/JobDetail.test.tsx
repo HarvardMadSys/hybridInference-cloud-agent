@@ -83,6 +83,7 @@ import { FirstRunProvider } from './firstRun';
 import { receiveHint } from './agentPush';
 import { sideChatKeys } from './sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
+import { IDLE_QUEUE_POLL_MS } from './usePendingMessages';
 import { watchPullRequestPrompt } from './watchPullRequest';
 import type { AgentJob } from './types';
 
@@ -926,6 +927,47 @@ describe('JobDetail', () => {
     expect(submitThreadMessage).not.toHaveBeenCalled();
     await act(async () => finishRead(emptyQueue('original-thread')));
     await waitFor(() => expect(watch).toBeEnabled());
+  });
+
+  it('retries an idle conversation queue after initial read failures before enabling PR watching', async () => {
+    vi.useFakeTimers();
+    try {
+      let recovered = false;
+      vi.mocked(getThreadQueue).mockImplementation(async (threadId) => {
+        if (!recovered) throw new Error('Temporary queue outage');
+        return emptyQueue(threadId);
+      });
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            conversationState: 'idle',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+          })}
+          userId="alice"
+        />,
+      );
+      await act(async () => undefined);
+
+      const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+      const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
+      expect(initialReads).toBeGreaterThan(0);
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+
+      recovered = true;
+      await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(initialReads);
+      expect(watch).toBeEnabled();
+      const verifiedReads = vi.mocked(getThreadQueue).mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(IDLE_QUEUE_POLL_MS));
+      expect(getThreadQueue).toHaveBeenCalledTimes(verifiedReads);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 
   it.each(['queued', 'held'] as const)(
