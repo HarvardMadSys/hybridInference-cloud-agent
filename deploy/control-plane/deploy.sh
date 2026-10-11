@@ -42,6 +42,8 @@
 #   DEPLOY_ROOT   where the deployed checkout lives (default /srv/freeinference-cloud-agent)
 #   COMPOSE_PROJECT  compose project name (default cloudagent)
 #   ALLOW_DIRTY=1 deploy over local modifications instead of refusing
+#   AGENT_DEPLOY_DRAINING_HOST  optional exact host that must stay idle and
+#                              draining through the compatibility fence
 #   AGENT_DEPLOY_MODE=artifacts uses AGENT_RELEASE_MANIFEST and the packaged
 #   recipe; DEPLOY_ROOT remains the persistent deployment/configuration root.
 set -euo pipefail
@@ -473,10 +475,15 @@ READINESS_ARGS=()
 if [[ -n "${DEPLOY_PEER_JOB:-}" ]]; then
   READINESS_ARGS=(--name "$READINESS_CONTAINER")
 fi
+READINESS_MODE_ARGS=()
+if [[ -n "${AGENT_DEPLOY_DRAINING_HOST:-}" ]]; then
+  READINESS_MODE_ARGS=(--draining-host "${AGENT_DEPLOY_DRAINING_HOST}")
+fi
 WATCH_READINESS=1 compose run --rm --no-deps ${READINESS_ARGS[@]+"${READINESS_ARGS[@]}"} control-plane \
   python -m cloud_agent.deploy_readiness \
     --timeout-seconds "${SHARED_READY_TIMEOUT}" \
-    --expected-deployment-sha "${SHA}"
+    --expected-deployment-sha "${SHA}" \
+    ${READINESS_MODE_ARGS[@]+"${READINESS_MODE_ARGS[@]}"}
 
 # The compatibility gate passed, so any bootstrap peers are now part of the
 # desired target stack rather than temporary readiness aids. A later full-stack

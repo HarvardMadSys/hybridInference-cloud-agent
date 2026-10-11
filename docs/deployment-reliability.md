@@ -14,6 +14,31 @@ readiness fence continues; activation still requires success. The watcher never
 interrupts migrations or service replacement. Deployments outside Actions use
 the bounded check directly.
 
+## Drain through both activations
+
+A single-host rollout that must not interrupt work uses one explicit host as a
+database-backed admission fence. The orchestrator runs on the control-plane
+machine, outside the pool it is draining, and serializes releases for the
+environment. It applies Drain first, then waits until that exact host still
+reports `draining` and `slots_used=0`. A claim that committed just before Drain
+is allowed to finish; no later claim can commit while the status remains
+draining.
+
+The host is activated while that fence stays in place. Control-plane activation
+sets `AGENT_DEPLOY_DRAINING_HOST` to the exact enrollment name, which authorizes
+the deployment readiness check to accept only that named draining host. The
+check requires zero occupied slots, the target deployment capability, a fresh
+heartbeat and a successful reverse broker probe, then rereads the same
+conditions after the network await. Ordinary readiness remains online-only.
+
+Only after the target control plane is healthy may the rollout that created the
+Drain put the host online. A rollout that found the host already draining must
+leave it that way. The current status API has no owner token, so deployments
+must remain serialized and operators must not change that host during this
+window. On cancellation or an uncertain result, fail closed: leave it draining
+and retry the same verified target. Queued work waits; an in-flight turn is
+never killed or replayed.
+
 ## Before stopping a serving runner
 
 Source and artifact deployments resolve the candidate runner image through
@@ -23,6 +48,12 @@ or live stack mounts other than the Docker socket. It creates and removes its
 own temporary guest on network `none`, verifies kernel isolation and the guest
 observer, and compares the **built image's** runtime/helper labels with the
 candidate's pins.
+
+The stop signal drains the host service itself: it stops claiming and waits for
+every tracked turn child to exit without forwarding SIGTERM to those children.
+Each child owns exactly one turn and exits naturally when that turn settles.
+Turn children also install their drain handler before preflight as protection
+against an out-of-band signal, but deployment does not rely on that fallback.
 
 If that check fails, the old readiness marker and runners remain in place. The
 replacement runners, relays and broker must still pass their live checks before
@@ -170,8 +201,9 @@ migrations in place; there is no automatic database downgrade.
 
 A hard-cancelled host activation may leave the readiness marker pending while
 Docker Engine continues the unbounded graceful runner stop. Running turns still
-finish; after the runner exits, the host remains unavailable until activation
-is rerun for the same verified target. Do not publish readiness by hand.
+finish naturally without a deployment signal reaching their child processes;
+after the runner exits, the host remains unavailable until activation is rerun
+for the same verified target. Do not publish readiness by hand.
 
 If the host succeeds before the control plane fails, the exact-SHA gate can keep
 new work queued until the retry succeeds. The queue monitor detects this state.

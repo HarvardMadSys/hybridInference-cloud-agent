@@ -110,6 +110,175 @@ async def _async_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_idle_draining_host_can_satisfy_the_deploy_barrier() -> None:
+    started = datetime.now(UTC)
+    calls: list[tuple[str, str, bool]] = []
+
+    async def probe(host: str, url: str, *, force: bool = False) -> None:
+        calls.append((host, url, force))
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    status="draining",
+                    slots_used=0,
+                )
+            ]
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-a",
+        broker_probe=probe,
+    )
+
+    assert verdict.ready is True
+    assert calls == [("runner-a", "http://broker-a:8092", True)]
+
+
+@pytest.mark.asyncio
+async def test_draining_host_is_still_rejected_without_the_explicit_mode() -> None:
+    started = datetime.now(UTC)
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    status="draining",
+                    slots_used=0,
+                )
+            ]
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+    )
+
+    assert verdict.ready is False
+    assert "status is draining" in verdict.detail
+
+
+@pytest.mark.asyncio
+async def test_explicit_draining_host_must_be_idle() -> None:
+    started = datetime.now(UTC)
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    status="draining",
+                    slots_used=1,
+                )
+            ]
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-a",
+    )
+
+    assert verdict.ready is False
+    assert "slots_used is 1" in verdict.detail
+
+
+@pytest.mark.asyncio
+async def test_explicit_draining_mode_never_accepts_a_different_host() -> None:
+    started = datetime.now(UTC)
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    host="runner-b",
+                    status="draining",
+                    slots_used=0,
+                )
+            ]
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-a",
+    )
+
+    assert verdict.ready is False
+    assert "draining host 'runner-a' is not registered" in verdict.detail
+
+
+@pytest.mark.asyncio
+async def test_explicit_draining_host_must_not_transition_online() -> None:
+    started = datetime.now(UTC)
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    status="online",
+                    slots_used=0,
+                )
+            ]
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-a",
+    )
+
+    assert verdict.ready is False
+    assert "status is online" in verdict.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed", "message"),
+    [
+        ({"status": "online"}, "status is online"),
+        ({"slots_used": 1}, "slots_used is 1"),
+    ],
+)
+async def test_explicit_draining_host_is_rechecked_after_the_broker_probe(
+    changed: dict[str, Any],
+    message: str,
+) -> None:
+    started = datetime.now(UTC)
+    draining = _host(
+        started + timedelta(seconds=1),
+        status="draining",
+        slots_used=0,
+    )
+    changed_row = {**draining, **changed}
+
+    class ChangingStore(_Store):
+        def __init__(self) -> None:
+            super().__init__([draining])
+            self.calls = 0
+
+        async def deployment_runner_pool(self):
+            self.calls += 1
+            rows = [draining] if self.calls == 1 else [changed_row]
+            return rows, None, {}, set()
+
+    verdict = await shared_live_readiness(
+        ChangingStore(),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-a",
+        broker_probe=lambda *_args, **_kwargs: _async_none(),
+    )
+
+    assert verdict.ready is False
+    assert "changed while its broker was probed" in verdict.detail
+    assert message in verdict.detail
+
+
+@pytest.mark.asyncio
 async def test_a_stale_capability_row_cannot_release_the_deploy_barrier() -> None:
     started = datetime.now(UTC)
     probed = False

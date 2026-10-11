@@ -1754,10 +1754,12 @@ in parallel under the exact-SHA readiness fence described here. See
 The host prepares the replacement sandbox/runner artifacts and proves Kata
 before invalidating its ready marker. It resolves the old runner's exact
 Compose container IDs, then asks Docker Engine for an unbounded graceful stop.
-The runner stops claiming and waits for every admitted turn; the broker and
-tunnels remain available until those turns settle. Only then does activation
-replace the broker and runner. After the isolation, tunnel, runtime and
-retained Docker-root checks pass, it records `.deployed-sha` and only then
+The runner stops claiming and waits for every admitted turn. Graceful shutdown
+does not signal its turn children: each child finishes its one turn and exits
+naturally, including a child whose acceptance handover is still uncertain. The
+broker and tunnels remain available until those turns settle. Only then does
+activation replace the broker and runner. After the isolation, tunnel, runtime
+and retained Docker-root checks pass, it records `.deployed-sha` and only then
 publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
 the control-plane
 deployment prepares its artifacts and migrates, then waits for a heartbeat newer than the start of that

@@ -354,7 +354,20 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert readiness < replace
         assert "--expected-deployment-sha" in calls[readiness]["args"]
         assert COMMIT in calls[readiness]["args"]
+        assert "--draining-host" not in calls[readiness]["args"]
         assert "/agents" in Path(env["TEST_CURL_LOG"]).read_text()
+
+
+def test_control_readiness_accepts_the_exact_draining_host(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    env["AGENT_DEPLOY_DRAINING_HOST"] = "runner-draining"
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    readiness = next(call for call in calls if "cloud_agent.deploy_readiness" in call["args"])
+    index = readiness["args"].index("--draining-host")
+    assert readiness["args"][index + 1] == "runner-draining"
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
