@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -231,6 +232,12 @@ def test_sandbox_disk_cleanup_keeps_loaded_images_and_other_builder_caches(tmp_p
     df = bin_dir / "df"
     df.write_text("#!/bin/sh\nexit 0\n")
     df.chmod(0o755)
+    # Define recorders inside Bash so managed shell startup cannot reorder PATH
+    # and expose the host's real sudo, Docker, or df commands.
+    recorders = "\n".join(
+        f'{tool}() {{ {shlex.quote(str(bin_dir / tool))} "$@"; }}'
+        for tool in ("sudo", "docker", "df")
+    )
     env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -240,7 +247,12 @@ def test_sandbox_disk_cleanup_keeps_loaded_images_and_other_builder_caches(tmp_p
     }
     for step in (sdks, cache):
         subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
-        subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, env=env, check=True)
+        subprocess.run(
+            ["bash", "-c", f"{recorders}\n{step['run']}"],
+            cwd=tmp_path,
+            env=env,
+            check=True,
+        )
     assert commands.read_text().splitlines() == [
         "sudo",
         "rm",
