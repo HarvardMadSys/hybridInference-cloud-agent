@@ -1511,10 +1511,15 @@ static uint32_t handle_window_request(struct observer *observer,
         struct window_census census = {0};
         struct fi_window_sample sample = {0};
         int status = run_census(observer, request->uid, &census, &sample);
+        bool pss_complete = census.pss_complete;
 
         if (status != FI_WINDOW_OK)
             return (uint32_t)status;
-        return census.pss_complete ? FI_WINDOW_OK : FI_WINDOW_ERR_IDENTITY;
+        /* A successful census leaves its task array to the caller, here as
+         * in every cycle: this loader is long-lived, and a probe that kept
+         * it would grow the guest for as long as probes arrive. */
+        free_census(&census);
+        return pss_complete ? FI_WINDOW_OK : FI_WINDOW_ERR_INCOMPLETE;
     }
     memcpy(identifier, request->measurement_id, sizeof(identifier));
     identifier[sizeof(identifier) - 1] = '\0';

@@ -98,6 +98,8 @@ static const char *status_text(uint32_t status)
         return "measurement does not belong to this member";
     case FI_WINDOW_ERR_JOURNAL:
         return "journal write failed";
+    case FI_WINDOW_ERR_INCOMPLETE:
+        return "census could not read every address space";
     default:
         return "unknown status";
     }

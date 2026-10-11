@@ -162,6 +162,8 @@ enum fi_window_status {
     FI_WINDOW_ERR_LIMIT = 4,
     FI_WINDOW_ERR_IDENTITY = 5,
     FI_WINDOW_ERR_JOURNAL = 6,
+    /* The census ran but could not read every address space it found. */
+    FI_WINDOW_ERR_INCOMPLETE = 7,
 };
 
 struct fi_window_request {
