@@ -240,7 +240,9 @@ def test_retry_preserves_stored_custom_github_app(managed_app, monkeypatch):
     cipher = mcp_cipher(_ENCRYPTION_KEY)
     client_cipher = oauth_cipher(_ENCRYPTION_KEY)
     store.connections[connection_id]["auth_config"] = {"client_id": "own-client"}
-    store.connections[connection_id]["client_secret_ciphertext"] = client_cipher.encrypt("own-secret")
+    store.connections[connection_id]["client_secret_ciphertext"] = client_cipher.encrypt(
+        "own-secret"
+    )
     exchange = AsyncMock(return_value={"access_token": "own-app-token", "refresh_token": "refresh"})
     monkeypatch.setattr(mcp_connections, "_post_form", exchange)
     with _client(store) as client:
