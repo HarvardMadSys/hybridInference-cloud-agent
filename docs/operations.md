@@ -29,7 +29,7 @@ Start with the task you need:
 | Add a host on another machine | [Tunnels and broker routing](#running-runners-on-another-machine) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
 | Preserve an old database or apply a maintenance migration | [Old-chain conversion](#preserving-an-old-chain-database), [database rebuild](#rebuilding-the-agent-database), [maintenance migrations](#applying-migrations-that-are-not-backwards-compatible) |
-| Protect workspaces and monitor disk use | [Retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
+| Protect workspaces and monitor disk use | [Sandbox archives](#sandbox-archives), [retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
 | Diagnose connectivity | [The sandbox network](#the-sandbox-network), [refusal messages](#when-something-is-refused) |
 | Configure or troubleshoot tools and repository access | [MCP servers](#mcp-servers), [repository entitlements](#who-may-run-a-job-against-which-repository) |
 | Answer a waiting agent question | [Native agent questions](#native-agent-questions) |
@@ -48,7 +48,7 @@ with deployment values before running commands.
 
 Open **Admin → Settings** to manage application and integration configuration,
 publication, web appearance, operational intervals, upload and skill limits,
-task-title generation, and sandbox/workspace limits. Application settings are
+task-title generation, sandbox/workspace limits, and sandbox archives. Application settings are
 persisted in the Agent database. The application API is
 `GET /admin/agent/settings` and `PUT /admin/agent/settings` with a partial body
 such as `{"settings": {"max_attempts": 3}}`; omitted keys retain their values.
@@ -59,7 +59,7 @@ required fields and partially configured optional integrations produce an
 **Administrator setup required** prompt with links to the fields to complete.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0040_pr_merge_archive`, then start the main control-plane listener with its
+`0042_sandbox_archive_settings`, then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once.
 The MCP-only listener waits for initialization and reads the same settings.
 Newly migrated runtime identity, service keys, broker credentials and policy
@@ -1406,6 +1406,92 @@ requires `overlay2` on XFS mounted with project quotas (`pquota` or
 `prjquota`); Docker rejects creation on an unsupported host. Existing groups
 keep their original limits through follow-ups, restarts, snapshots and Fork.
 See `ENVIRONMENT.md` for bootstrap variables and storage requirements.
+
+#### Sandbox archives
+
+Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to store
+the deployment-wide archive policy in the Agent database. The destination is
+fixed at `s3://freeinference/cloud-agent/sandbox`; it is displayed read-only and
+is never accepted from the browser. An administrator atomically saves the
+enabled state, AWS region, customer-managed KMS key ARN, expected 12-digit
+bucket owner, maximum compressed archive size, multipart threshold, and part
+size. Updates use the revision returned by the last read, so two administrators
+cannot silently overwrite each other. Every change is recorded in the Audit
+log.
+
+The dashboard uses admin-only `GET` and `PUT`
+`/admin/agent/sandbox-archive-settings`. To inspect the same policy and host
+rollout directly in Postgres, use read-only queries such as:
+
+```sql
+SELECT sandbox_archive_settings,
+       sandbox_archive_revision,
+       sandbox_archive_updated_at
+FROM agent_runner_policy
+WHERE id IS TRUE;
+
+SELECT host,
+       sandbox_archive_settings_applied_revision
+FROM agent_runner_hosts
+ORDER BY host;
+```
+
+Do not put AWS access keys, archive policy, or the destination in `.env`. The
+workspace broker uses the host's AWS workload identity and the ordinary SDK
+credential chain. That identity needs the narrow S3 multipart/write and exact
+object-metadata permissions for the fixed prefix, plus encrypt access to the
+configured KMS key. The bucket must have versioning enabled. Configure lifecycle
+retention and access logging on the bucket itself; neither the runner nor a
+sandbox receives AWS credentials.
+
+Concretely, grant the broker role `s3:GetBucketVersioning` on
+`arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
+`cloud-agent/sandbox/*` prefix (so an exact-key `HeadObject` can distinguish a
+missing immutable initial object from an authorization failure); and
+`s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
+`arn:aws:s3:::freeinference/cloud-agent/sandbox/*`. The configured KMS key
+policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
+multipart uploads. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
+rule as defense in depth for a host that disappears before its bounded abort
+request completes.
+
+Enabling archives requires migration `0042_sandbox_archive_settings` and a
+runner/workspace broker advertising `sandbox-archive-settings-v1`. The settings
+card distinguishes the saved database revision from the revision each broker
+has confirmed applying. While archives are enabled, new claims fail closed on
+hosts or exact runner replicas that have not applied that revision; disabling
+the policy preserves compatibility with older hosts.
+
+This is a lifecycle archive, not a per-turn transcript log:
+
+- the initial object captures `/workspace` once after source/setup and before
+  the first Agent process receives a prompt;
+- each broker-managed clean stop flushes native Agent state and stores a final
+  object containing `/workspace`, `/agent-state`, and the optional
+  `/home/agent/.freeinference-platform` state;
+- repeated turns while the sandbox remains live do not create objects. A later
+  wake followed by another clean stop replaces the deterministic final key;
+  S3 bucket versioning retains its earlier object versions according to the
+  bucket's lifecycle policy.
+
+Policy changes are forward-only. Enabling archives cannot reconstruct the true
+pre-prompt baseline of a sandbox that already ran while the policy was
+disabled, so such a sandbox can have a final object without an initial object.
+Disabling prevents new archive preparations and can leave an earlier initial
+object without a later final. It does not abandon durable work that was already
+prepared while enabled: an initial baseline whose upload result is unresolved,
+or a clean stop already fenced for final capture, remains pinned to its original
+revision and finishes under that revision. For paired before/after archives,
+enable the policy and wait for the settings page to show the revision applied on
+every compatible server before admitting new work; stop or drain those
+sandboxes before disabling it.
+
+The initial object is immutable and retry-safe. Final capture is synchronous
+with the stop hook, bounded by the configured size and operation deadline, and
+an exhausted upload is reported as a failed clean stop instead of being called
+successful. Archives are an export/forensics boundary only: this release does
+not list, download, replay, or restore a sandbox from S3. The retained Docker
+writable layer remains authoritative for normal stop/start continuity.
 
 #### Launch failures and queue order
 

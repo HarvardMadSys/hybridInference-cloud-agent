@@ -162,19 +162,63 @@ class _SharedSupervisor:
     def set_idle_timeout_s(self, idle_timeout_s: float) -> None:
         self.idle_timeout_s = idle_timeout_s
 
-    def __init__(self) -> None:
+    def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
         self.imports = self.workspace_backend.imports
         self.started = False
         self.closed = False
+        self.quiesced = False
+        self.shutdown_stopped = False
+        self.shutdown_include_running: bool | None = None
+        self.shutdown_error: Exception | None = None
+        self.pending_archive_work = False
+        self.events = events if events is not None else []
+        self.archive_hook = None
+        self.archive_prepare_hook = None
+        self.archive_invalidate_hook = None
+        self.archive_prepare_start_hook = None
+        self.archive_complete_start_hook = None
         self.threads = {"athr_source", "athr_child"}
 
     def start(self):
         self.started = True
+        self.events.append("supervisor.start")
+
+    def quiesce(self):
+        self.quiesced = True
+        self.events.append("supervisor.quiesce")
+
+    def stop_all_for_shutdown(self, *, include_running: bool = True):
+        self.shutdown_stopped = True
+        self.shutdown_include_running = include_running
+        self.events.append("supervisor.stop_all")
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+    def has_pending_archive_work(self) -> bool:
+        return self.pending_archive_work
 
     def close(self):
         self.closed = True
+        self.events.append("supervisor.close")
+
+    def configure_stopped_archive_hook(self, hook):
+        self.archive_hook = hook
+
+    def configure_stopped_archive_prepare_hook(self, hook):
+        self.archive_prepare_hook = hook
+
+    def configure_archive_transition_hooks(
+        self,
+        *,
+        invalidate_final,
+        prepare_start,
+        complete_start,
+    ):
+        self.archive_invalidate_hook = invalidate_final
+        self.archive_prepare_start_hook = prepare_start
+        self.archive_complete_start_hook = complete_start
 
     def owns(self, thread_id: str) -> bool:
         return thread_id in self.threads
@@ -331,6 +375,52 @@ def test_broker_requires_a_container_backend_without_an_injected_supervisor():
         create_app(backend=ProcessBackend(acknowledged_unsafe=True), token="x")
 
 
+class _ArchiveService:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def start(self) -> None:
+        self.events.append("archive.start")
+
+    def close(self) -> None:
+        self.events.append("archive.close")
+
+    def queue_final(self, *_args, **_kwargs) -> None:
+        self.events.append("archive.final")
+
+
+class _ArchiveController(_ArchiveService):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.enabled = False
+        self.revision: int | None = None
+
+    def apply(self, settings):
+        self.enabled = bool(settings["enabled"])
+        self.revision = int(settings["revision"])
+        return self.status()
+
+    def status(self):
+        return {
+            "configured": self.revision is not None,
+            "enabled": self.enabled,
+            "running": True,
+            "applied_revision": self.revision,
+        }
+
+    def prepare_final(self, *_args, **_kwargs) -> None:
+        return
+
+    def invalidate_final(self, *_args, **_kwargs) -> None:
+        return
+
+    def prepare_start(self, *_args, **_kwargs) -> None:
+        return
+
+    def complete_start(self, *_args, **_kwargs) -> None:
+        return
+
+
 @pytest.mark.asyncio
 async def test_broker_lifespan_preflights_without_a_host_worktree():
     supervisor = _SharedSupervisor()
@@ -352,6 +442,92 @@ async def test_broker_lifespan_preflights_without_a_host_worktree():
     finally:
         monkeypatch.undo()
     assert supervisor.closed is True
+    assert supervisor.shutdown_stopped is False
+
+
+@pytest.mark.asyncio
+async def test_archive_shutdown_quiesces_then_strictly_stops_before_cleanup() -> None:
+    events: list[str] = []
+    supervisor = _SharedSupervisor(events=events)
+    archive = _ArchiveService(events)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_service=archive,  # type: ignore[arg-type]
+    )
+
+    async with app.router.lifespan_context(app):
+        assert supervisor.started is True
+
+    assert events == [
+        "archive.start",
+        "supervisor.start",
+        "supervisor.quiesce",
+        "supervisor.stop_all",
+        "supervisor.close",
+        "archive.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_archive_shutdown_surfaces_strict_stop_failure_before_closing_service() -> None:
+    events: list[str] = []
+    supervisor = _SharedSupervisor(events=events)
+    supervisor.shutdown_error = RuntimeError("native flush failed")
+    archive = _ArchiveService(events)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_service=archive,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="shutdown cleanup failed"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert events[-4:] == [
+        "supervisor.quiesce",
+        "supervisor.stop_all",
+        "supervisor.close",
+        "archive.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_broker_shutdown() -> None:
+    events: list[str] = []
+    supervisor = _SharedSupervisor(events=events)
+    controller = _ArchiveController(events)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_controller=controller,  # type: ignore[arg-type]
+    )
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://broker",
+        ) as client:
+            response = await client.post(
+                "/sandbox-archive-settings",
+                headers={"X-Agent-Workspace-Token": "broker-secret"},
+                json={"settings": {"enabled": False, "revision": 7}},
+            )
+        assert response.status_code == 200
+        assert supervisor.started is True
+
+    assert supervisor.shutdown_stopped is True
+    assert supervisor.shutdown_include_running is True
+    assert events[-4:] == [
+        "supervisor.quiesce",
+        "supervisor.stop_all",
+        "supervisor.close",
+        "archive.close",
+    ]
 
 
 @pytest.mark.asyncio

@@ -38,7 +38,12 @@ async def reset_agent_tables(conn: Any) -> None:
     await conn.execute(
         "INSERT INTO agent_runner_policy (id, active_host, runtime_versions) "
         "VALUES (TRUE, NULL, NULL) ON CONFLICT (id) DO UPDATE "
-        "SET active_host = NULL, runtime_versions = NULL"
+        "SET active_host = NULL, runtime_versions = NULL, "
+        "sandbox_archive_settings = "
+        '\'{"enabled":false,"region":"","kms_key_arn":"",'
+        '"expected_bucket_owner":"","max_archive_bytes":2147483648,'
+        '"multipart_threshold_bytes":8388608,"multipart_part_bytes":8388608}\'::jsonb, '
+        "sandbox_archive_revision = 0, sandbox_archive_updated_at = NOW()"
     )
     # The profiling control row is seeded by its migration for the same reason:
     # every Start, Stop and policy read takes it, so a truncate that left it out

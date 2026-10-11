@@ -27,6 +27,7 @@ from cloud_agent_host.host_runtime import (
     LaunchResult,
 )
 from cloud_agent_host.sandbox import ProcessBackend
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 from cloud_agent_shared.shared_protocol import HOST_SETTINGS_CAPABILITY
 
 if TYPE_CHECKING:
@@ -83,9 +84,20 @@ class FakeHeartbeat:
     def start(self) -> None:
         self.started = True
         # A real host beats at once, and that first answer carries the runtime
-        # settings; a fake that never answered would hold every claim back.
-        if FakeHeartbeat.answers_on_start and self.kwargs.get("on_settings") is not None:
-            self.kwargs["on_settings"](dict(self.identity.settings))
+        # settings and archive policy; a fake that never answered holds every
+        # claim back because the archive boundary has no environment fallback.
+        if FakeHeartbeat.answers_on_start:
+            if self.kwargs.get("on_settings") is not None:
+                self.kwargs["on_settings"](dict(self.identity.settings))
+            if self.kwargs.get("on_sandbox_archive_settings") is not None:
+                settings = self.identity.sandbox_archive_settings
+                self.kwargs["on_sandbox_archive_settings"](
+                    None if settings is None else dict(settings)
+                )
+            # These callbacks model the first answer itself. A wake raised
+            # while applying that same answer cannot make it arrive sooner;
+            # keep later assertions scoped to post-start state changes.
+            self.wakes = 0
 
     def stop(self) -> None:
         self.stopped = True
@@ -98,15 +110,34 @@ def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")
 
 
+class _SettingsBroker:
+    """Acknowledge the two DB-owned settings contracts used by this suite."""
+
+    def apply_host_settings(self, settings: dict[str, int]) -> dict[str, object]:
+        return {"applied": dict(settings), "local": {}}
+
+    def apply_sandbox_archive_settings(self, settings: dict[str, Any]) -> dict[str, int]:
+        return {"applied_revision": int(settings["revision"])}
+
+    def close(self) -> None:
+        return None
+
+
 @pytest.fixture
 def service(monkeypatch):
     """``run_forever`` with its enrollment, heartbeat and attestation stubbed."""
     runner_mod._STOPPING.clear()
     monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "sha")
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
-    identity = HostIdentity(host="host-a", credential="host-cred", status="online")
+    identity = HostIdentity(
+        host="host-a",
+        credential="host-cred",
+        status="online",
+        sandbox_archive_settings=SandboxArchivePolicy().as_dict(),
+    )
     monkeypatch.setattr(runner_mod, "ensure_enrolled", lambda **_kw: identity)
     monkeypatch.setattr(runner_mod, "HostHeartbeat", FakeHeartbeat)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", _SettingsBroker)
     monkeypatch.setattr(runner_mod, "_start_host_capacity_collector", lambda _b: None)
     monkeypatch.setattr(
         runner_mod,
@@ -634,12 +665,19 @@ def test_a_restarted_host_waits_for_its_first_answer_before_claiming(service, mo
     assert launched == [], "no answer within the wait, and the wait has not run out"
 
 
-def test_a_host_whose_heartbeat_fails_still_claims_once_the_wait_runs_out(service, monkeypatch):
-    """Claiming never comes to depend on the heartbeat: the wait is bounded."""
+def test_a_host_without_an_archive_policy_answer_never_claims(service, monkeypatch):
+    """The bounded settings fallback cannot bypass the archive safety boundary."""
     _identity, backend, _released = service
     monkeypatch.setattr(FakeHeartbeat, "answers_on_start", False)
     monkeypatch.setattr(runner_mod, "FIRST_SETTINGS_WAIT_S", 0.0)
-    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_job(0)]))
+    claims: list[dict[str, Any]] = []
+
+    def claim(**_kwargs: Any) -> dict[str, Any]:
+        payload = _job(0)
+        claims.append(payload)
+        return payload
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
     launched: list[dict] = []
 
     def launch(payload: dict) -> LaunchResult:
@@ -650,8 +688,8 @@ def test_a_host_whose_heartbeat_fails_still_claims_once_the_wait_runs_out(servic
 
     _serve(backend, launch=launch)
 
-    assert len(launched) == 1
-    assert launched[0]["_host_settings"]["agent_timeout_s"] == runner_mod.DEFAULT_AGENT_TIMEOUT_S
+    assert claims == []
+    assert launched == []
 
 
 def test_a_lowered_limit_stops_claiming_without_touching_a_running_turn(service, monkeypatch):

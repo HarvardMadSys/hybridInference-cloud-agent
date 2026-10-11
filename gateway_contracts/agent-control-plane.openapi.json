@@ -5482,6 +5482,19 @@
             "description": "Every CLI version this host's image holds, keyed by runtime id, default first. The menu an admin may select from; the control plane cannot serve a version absent from it.",
             "title": "Runtime Versions Available"
           },
+          "sandbox_archive_settings_applied_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Archive-policy revision this host's broker confirmed applying. Null means the host predates database-backed archive settings or has not synchronized yet.",
+            "title": "Sandbox Archive Settings Applied Revision"
+          },
           "sandbox_image_digest": {
             "anyOf": [
               {
@@ -9862,6 +9875,19 @@
             "description": "Every CLI version this image holds, keyed by runtime id, default first — the menu an admin may select from. Null means not reported and leaves the control plane's last knowledge in place.",
             "title": "Runtime Versions Available"
           },
+          "sandbox_archive_settings_applied_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The archive-policy revision the authenticated workspace broker confirmed. Explicit null clears a stale confirmation after restart; omitting the field keeps the last observation for compatibility with older runners.",
+            "title": "Sandbox Archive Settings Applied Revision"
+          },
           "sandbox_image_digest": {
             "anyOf": [
               {
@@ -9991,6 +10017,9 @@
             "title": "Retained Sandboxes Stop",
             "type": "array"
           },
+          "sandbox_archive_settings": {
+            "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+          },
           "settings": {
             "additionalProperties": {
               "type": "integer"
@@ -10035,6 +10064,7 @@
         "required": [
           "host",
           "status",
+          "sandbox_archive_settings",
           "heartbeat_interval_seconds"
         ],
         "title": "HostHeartbeatResponse",
@@ -12057,6 +12087,72 @@
         "title": "RuntimeUsage",
         "type": "object"
       },
+      "SandboxArchiveSettingsResponse": {
+        "description": "The revisioned archive policy stored for every sandbox host.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_bucket_owner": {
+            "default": "",
+            "title": "Expected Bucket Owner",
+            "type": "string"
+          },
+          "kms_key_arn": {
+            "default": "",
+            "title": "Kms Key Arn",
+            "type": "string"
+          },
+          "max_archive_bytes": {
+            "default": 2147483648,
+            "title": "Max Archive Bytes",
+            "type": "integer"
+          },
+          "multipart_part_bytes": {
+            "default": 8388608,
+            "title": "Multipart Part Bytes",
+            "type": "integer"
+          },
+          "multipart_threshold_bytes": {
+            "default": 8388608,
+            "title": "Multipart Threshold Bytes",
+            "type": "integer"
+          },
+          "region": {
+            "default": "",
+            "title": "Region",
+            "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "s3_uri": {
+            "const": "s3://freeinference/cloud-agent/sandbox",
+            "default": "s3://freeinference/cloud-agent/sandbox",
+            "title": "S3 Uri",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "title": "SandboxArchiveSettingsResponse",
+        "type": "object"
+      },
       "SandboxResourceSample": {
         "additionalProperties": false,
         "description": "One Docker container reading, with rates over its preceding sample interval.\n\nNull counters mean Docker did not measure them. CPU is expressed in cores,\nso one fully occupied CPU reports ``1.0`` regardless of the host's size.\nNetwork and block I/O byte counters are cumulative Docker counters; their\nrates, and CPU, describe the interval between two usable observations.",
@@ -12509,6 +12605,67 @@
           "runtime"
         ],
         "title": "SetRuntimeVersionRequest",
+        "type": "object"
+      },
+      "SetSandboxArchiveSettingsRequest": {
+        "additionalProperties": false,
+        "description": "Replace the whole archive policy if the displayed revision is current.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_bucket_owner": {
+            "default": "",
+            "maxLength": 12,
+            "title": "Expected Bucket Owner",
+            "type": "string"
+          },
+          "kms_key_arn": {
+            "default": "",
+            "maxLength": 2048,
+            "title": "Kms Key Arn",
+            "type": "string"
+          },
+          "max_archive_bytes": {
+            "default": 2147483648,
+            "maximum": 4294967296.0,
+            "minimum": 1.0,
+            "title": "Max Archive Bytes",
+            "type": "integer"
+          },
+          "multipart_part_bytes": {
+            "default": 8388608,
+            "maximum": 67108864.0,
+            "minimum": 5242880.0,
+            "title": "Multipart Part Bytes",
+            "type": "integer"
+          },
+          "multipart_threshold_bytes": {
+            "default": 8388608,
+            "maximum": 67108864.0,
+            "minimum": 1.0,
+            "title": "Multipart Threshold Bytes",
+            "type": "integer"
+          },
+          "region": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Region",
+            "type": "string"
+          },
+          "revision": {
+            "description": "Revision returned by the last GET.",
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "revision"
+        ],
+        "title": "SetSandboxArchiveSettingsRequest",
         "type": "object"
       },
       "SkillImportPreview": {
@@ -14043,6 +14200,18 @@
             "maxProperties": 64,
             "title": "Runtime Versions Available",
             "type": "object"
+          },
+          "sandbox_archive_settings_applied_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Archive Settings Applied Revision"
           },
           "sandbox_image_digest": {
             "anyOf": [
@@ -20048,6 +20217,108 @@
           }
         },
         "summary": "Set Agent Runtime Version"
+      }
+    },
+    "/admin/agent/sandbox-archive-settings": {
+      "get": {
+        "description": "Read the one database-backed archive policy shared by every host.",
+        "operationId": "get_sandbox_archive_settings_admin_agent_sandbox_archive_settings_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Sandbox Archive Settings"
+      },
+      "put": {
+        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code and credentials are intentionally\nabsent. Brokers authenticate to AWS with their workload identity; this\nroute stores only the non-secret region, KMS key identity, owner fence and\nbounded transfer limits.",
+        "operationId": "set_sandbox_archive_settings_admin_agent_sandbox_archive_settings_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSandboxArchiveSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxArchiveSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Sandbox Archive Settings"
       }
     },
     "/admin/agent/sandboxes": {

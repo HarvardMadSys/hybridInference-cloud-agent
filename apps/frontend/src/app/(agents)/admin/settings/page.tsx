@@ -8,11 +8,17 @@ import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
+import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
+import {
+  getSandboxArchiveSettings,
+  updateSandboxArchiveSettings,
+} from '@/lib/api/adminArchiveSettings';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
 import ApplicationSettings from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
+import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { AdminNavigation } from '../AdminNavigation';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
@@ -58,6 +64,8 @@ function SettingsView() {
   const [cloudLabVisited, setCloudLabVisited] = useState(selectedTab === 'cloudlab');
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const [pool, setPool] = useState<AgentRunnerHostPool | null>(null);
+  const [archiveSettings, setArchiveSettings] = useState<SandboxArchiveSettings | null>(null);
+  const [archiveEditorReset, setArchiveEditorReset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [denied, setDenied] = useState(false);
@@ -88,6 +96,7 @@ function SettingsView() {
       request.current?.abort();
       sequence.current += 1;
       setPool(null);
+      setArchiveSettings(null);
       setNotice(null);
       setError(null);
       setDenied(true);
@@ -103,9 +112,13 @@ function SettingsView() {
     request.current = controller;
     const current = ++sequence.current;
     try {
-      const next = await getAgentRunnerHosts(controller.signal);
+      const [nextPool, nextArchiveSettings] = await Promise.all([
+        getAgentRunnerHosts(controller.signal),
+        getSandboxArchiveSettings(controller.signal),
+      ]);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
-      setPool(next);
+      setPool(nextPool);
+      setArchiveSettings(nextArchiveSettings);
       setError(null);
     } catch (cause) {
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
@@ -128,7 +141,11 @@ function SettingsView() {
     };
   }, [load]);
 
-  const save = async (action: () => Promise<AgentRunnerHostPool>, message: string | null) => {
+  const save = async <Result,>(
+    action: () => Promise<Result>,
+    apply: (next: Result) => void,
+    message: string | null,
+  ) => {
     if (writing.current || revoked.current) return;
     writing.current = true;
     setBusy(true);
@@ -140,7 +157,7 @@ function SettingsView() {
     try {
       const next = await action();
       if (!mounted.current) return;
-      setPool(next);
+      apply(next);
       setNotice(message);
     } catch (cause) {
       if (mounted.current) fail(cause);
@@ -271,6 +288,7 @@ function SettingsView() {
                 onChange={(runtime, version) =>
                   void save(
                     () => setAgentRuntimeVersion(runtime, version || null),
+                    setPool,
                     version
                       ? `New ${agentName(runtime)} sandboxes use ${version}. Existing sessions keep their version.`
                       : `New ${agentName(runtime)} sandboxes use each server's default version.`,
@@ -297,7 +315,7 @@ function SettingsView() {
                   // No notice: each setting's own line says how far a saved
                   // value has reached, and keeps saying it as servers take it up.
                   onChange={(key, value) =>
-                    void save(() => setAgentHostSettings({ [key]: value }), null)
+                    void save(() => setAgentHostSettings({ [key]: value }), setPool, null)
                   }
                 />
               ) : (
@@ -305,6 +323,31 @@ function SettingsView() {
                   No sandbox settings are available.
                 </p>
               ))}
+            {archiveSettings && (
+              <SandboxArchiveSettingsCard
+                key={archiveEditorReset}
+                settings={archiveSettings}
+                hosts={servers.map(({ host }) => host)}
+                busy={busy}
+                onSave={(update) =>
+                  void save(
+                    () => updateSandboxArchiveSettings(update),
+                    (next) => {
+                      setArchiveSettings(next);
+                      // A successful idempotent retry may keep the same DB
+                      // revision. Reset the editor explicitly instead of
+                      // relying on a revision-key remount.
+                      setArchiveEditorReset((current) => current + 1);
+                    },
+                    update.enabled !== archiveSettings.enabled
+                      ? update.enabled
+                        ? 'Sandbox archives enabled.'
+                        : 'Sandbox archives disabled.'
+                      : 'Sandbox archive settings saved.',
+                  )
+                }
+              />
+            )}
           </div>
           <div
             role="tabpanel"

@@ -16,6 +16,10 @@ What the host reports back is what it applies, not what it was sent: the
 runner's share as resolved, and the broker's as the broker confirmed it. A
 broker that did not answer leaves its settings out of the report, so the admin
 page shows them as not yet applied rather than assuming.
+
+Sandbox archive policy is deliberately stricter than those tuning values. It
+has no environment fallback: the runner must deliver one complete DB revision
+to the broker, and claims remain blocked while that confirmation is unknown.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from cloud_agent_shared.host_settings import (
     reported_values,
     resolve,
 )
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -42,6 +47,7 @@ logger = logging.getLogger(__name__)
 #: Sends the broker its admin values and returns its answer:
 #: ``{"applied": {...}, "local": {...}}``.
 BrokerPush = Callable[[dict[str, int]], dict[str, Any]]
+ArchiveBrokerPush = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 class RuntimeSettings:
@@ -150,4 +156,64 @@ class RuntimeSettings:
         return reported_values(applied) or {}, reported_values(local) or {}
 
 
-__all__ = ["BrokerPush", "RuntimeSettings"]
+class SandboxArchiveRuntimeSettings:
+    """Relay the desired DB archive policy and report exact broker confirmation.
+
+    The full policy is deliberately re-offered after every answered heartbeat,
+    even when its revision did not change. The broker keeps policy in memory;
+    re-offering is how a broker restart is repaired without a host restart.
+    """
+
+    def __init__(self, broker: ArchiveBrokerPush | None) -> None:
+        self._broker = broker
+        self._lock = threading.Lock()
+        self._applied_revision: int | None = None
+        self._ready = threading.Event()
+
+    @property
+    def ready(self) -> bool:
+        """Whether this broker confirmed the first complete desired policy."""
+        return self._ready.is_set()
+
+    def apply(self, settings: Mapping[str, Any]) -> bool:
+        """Offer a complete policy to the broker and verify its exact revision."""
+        policy = SandboxArchivePolicy.from_mapping(settings)
+        before = self.invalidate()
+        if self._broker is None:
+            raise RuntimeError("workspace broker is unavailable for sandbox archive policy")
+        answer = self._broker(policy.as_dict())
+        applied = answer.get("applied_revision")
+        if isinstance(applied, bool) or not isinstance(applied, int):
+            raise RuntimeError("workspace broker returned no sandbox archive policy revision")
+        if applied != policy.revision:
+            raise RuntimeError(
+                "workspace broker applied a different sandbox archive policy revision"
+            )
+        with self._lock:
+            self._applied_revision = applied
+            self._ready.set()
+        return before != applied
+
+    def invalidate(self) -> int | None:
+        """Forget confirmation when a beat omits policy or a re-offer begins."""
+        with self._lock:
+            before = self._applied_revision
+            # Re-offering is also the broker liveness check. A confirmation
+            # from a broker process that has since restarted is no longer a
+            # confirmation, even when the desired revision did not change.
+            self._applied_revision = None
+            self._ready.clear()
+            return before
+
+    def report(self) -> int | None:
+        """Return the last exact revision confirmed by the broker."""
+        with self._lock:
+            return self._applied_revision
+
+
+__all__ = [
+    "ArchiveBrokerPush",
+    "BrokerPush",
+    "RuntimeSettings",
+    "SandboxArchiveRuntimeSettings",
+]

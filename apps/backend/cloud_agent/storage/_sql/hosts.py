@@ -41,6 +41,7 @@ HOST_COLUMN_NAMES = (
     "settings_desired",
     "settings_applied",
     "settings_local",
+    "sandbox_archive_settings_applied_revision",
 )
 
 

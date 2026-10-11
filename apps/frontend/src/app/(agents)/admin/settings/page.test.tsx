@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
 
 import type { AgentRunnerHost, AgentRunnerHostPool, HostSettingDefinition } from '@/lib/api/admin';
+import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
@@ -51,8 +52,17 @@ vi.mock('@/lib/api/compute', () => ({
   getCloudLabDefaults: vi.fn(),
   saveCloudLabDefaults: vi.fn(),
 }));
+vi.mock('@/lib/api/adminArchiveSettings', () => ({
+  getSandboxArchiveSettings: vi.fn(),
+  updateSandboxArchiveSettings: vi.fn(),
+  SANDBOX_ARCHIVE_SETTINGS_CAPABILITY: 'sandbox-archive-settings-v1',
+}));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
+import {
+  getSandboxArchiveSettings,
+  updateSandboxArchiveSettings,
+} from '@/lib/api/adminArchiveSettings';
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
@@ -67,6 +77,22 @@ const cloudLabDefaults = {
   profile_project: 'cloud-agent',
   profile_name: 'kata-node',
   ssh_username: 'researcher',
+};
+
+const getArchiveSettings = vi.mocked(getSandboxArchiveSettings);
+const updateArchiveSettings = vi.mocked(updateSandboxArchiveSettings);
+
+const archiveSettings: SandboxArchiveSettings = {
+  enabled: false,
+  s3_uri: 's3://freeinference/cloud-agent/sandbox',
+  region: 'us-east-1',
+  kms_key_arn: 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000',
+  expected_bucket_owner: '123456789012',
+  max_archive_bytes: 2_147_483_648,
+  multipart_threshold_bytes: 8_388_608,
+  multipart_part_bytes: 8_388_608,
+  revision: 1,
+  updated_at: null,
 };
 
 const definitions: HostSettingDefinition[] = [
@@ -193,12 +219,13 @@ function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
     active: false,
     sandbox_runtime: 'io.containerd.kata.v2',
     labels: {},
-    capabilities: ['host-settings-v1'],
+    capabilities: ['host-settings-v1', 'sandbox-archive-settings-v1'],
     runtime_versions: { 'claude-code': '2.1.220' },
     runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'] },
     settings_desired: {},
     settings_applied: { agent_timeout_s: 3600, terminal_max_sessions: 64 },
     settings_local: { agent_timeout_s: 3600, terminal_max_sessions: 64 },
+    sandbox_archive_settings_applied_revision: 1,
     ...over,
   } as AgentRunnerHost;
 }
@@ -248,6 +275,8 @@ beforeEach(() => {
   setVersion.mockReset();
   vi.mocked(getCloudLabDefaults).mockReset().mockResolvedValue({ defaults: cloudLabDefaults });
   vi.mocked(saveCloudLabDefaults).mockReset();
+  getArchiveSettings.mockReset().mockResolvedValue(archiveSettings);
+  updateArchiveSettings.mockReset();
   vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
     revision: 1,
     definitions: [],
@@ -270,6 +299,7 @@ describe('admin Settings', () => {
     render(<AdminSettingsPage />);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(list).not.toHaveBeenCalled();
+    expect(getArchiveSettings).not.toHaveBeenCalled();
     expect(getAgentAdminSettings).not.toHaveBeenCalled();
     expect(getCloudLabDefaults).not.toHaveBeenCalled();
   });
@@ -292,6 +322,7 @@ describe('admin Settings', () => {
     expect(screen.queryByText(/EXTRA_VERSIONS/)).not.toBeInTheDocument();
     selectSettingsTab('Sandbox');
     expect(screen.getByRole('heading', { name: 'Sandbox' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Sandbox archives' })).toBeVisible();
   });
 
   it('exposes one selected tab and its related panel at a time', async () => {
@@ -687,7 +718,8 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     await screen.findByLabelText('Turn time limit for all servers');
-    expect(screen.getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
+    const sandboxCard = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
+    expect(within(sandboxCard).getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
 
   it('retains a draft after a rejected save so it can be retried', async () => {
@@ -732,6 +764,71 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
+  });
+
+  it('saves archive policy atomically and waits for broker rollout', async () => {
+    updateArchiveSettings.mockResolvedValue({ ...archiveSettings, enabled: true, revision: 2 });
+    renderSettings('Sandbox');
+
+    fireEvent.click(await screen.findByLabelText('Enable sandbox archives'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    await waitFor(() =>
+      expect(updateArchiveSettings).toHaveBeenCalledWith({
+        enabled: true,
+        region: archiveSettings.region,
+        kms_key_arn: archiveSettings.kms_key_arn,
+        expected_bucket_owner: archiveSettings.expected_bucket_owner,
+        max_archive_bytes: archiveSettings.max_archive_bytes,
+        multipart_threshold_bytes: archiveSettings.multipart_threshold_bytes,
+        multipart_part_bytes: archiveSettings.multipart_part_bytes,
+        revision: 1,
+      }),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent('Sandbox archives enabled.');
+    expect(screen.getByLabelText('Enable sandbox archives')).toBeChecked();
+    expect(screen.getByText(/Waiting for runner-a/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save archive settings' })).toBeDisabled();
+  });
+
+  it('retains the archive draft after a rejected save', async () => {
+    updateArchiveSettings.mockRejectedValue(new Error('Archive settings conflict'));
+    renderSettings('Sandbox');
+
+    fireEvent.click(await screen.findByLabelText('Enable sandbox archives'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Archive settings conflict');
+    expect(screen.getByLabelText('Enable sandbox archives')).toBeChecked();
+  });
+
+  it('labels a configuration-only archive save without claiming enablement changed', async () => {
+    updateArchiveSettings.mockResolvedValue({
+      ...archiveSettings,
+      max_archive_bytes: 1_073_741_824,
+      revision: 2,
+    });
+    renderSettings('Sandbox');
+
+    fireEvent.change(await screen.findByLabelText('Maximum archive bytes'), {
+      target: { value: '1073741824' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Sandbox archive settings saved.');
+  });
+
+  it('resets a normalized draft after an idempotent save keeps the same revision', async () => {
+    updateArchiveSettings.mockResolvedValue(archiveSettings);
+    renderSettings('Sandbox');
+
+    const maximum = await screen.findByLabelText('Maximum archive bytes');
+    fireEvent.change(maximum, { target: { value: '02147483648' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    await waitFor(() => expect(updateArchiveSettings).toHaveBeenCalledTimes(1));
+    expect(screen.getByLabelText('Maximum archive bytes')).toHaveValue(2_147_483_648);
+    expect(screen.getByRole('button', { name: 'Save archive settings' })).toBeDisabled();
   });
 });
 

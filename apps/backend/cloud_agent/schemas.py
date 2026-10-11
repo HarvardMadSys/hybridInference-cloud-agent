@@ -12,7 +12,15 @@ import binascii
 from datetime import datetime  # noqa: TC003
 from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from cloud_agent.agent_access import AgentAccess  # noqa: TC001 — Pydantic resolves this at runtime.
 from cloud_agent.attachments.models import AttachmentLimits, AttachmentRef, AttachmentView
@@ -53,6 +61,18 @@ from cloud_agent_shared.host_settings import (
     SettingScope,
     SettingUnit,
     validate_admin_change,
+)
+from cloud_agent_shared.sandbox_archive_settings import (
+    DEFAULT_MAX_ARCHIVE_BYTES,
+    DEFAULT_MULTIPART_PART_BYTES,
+    DEFAULT_MULTIPART_THRESHOLD_BYTES,
+    MAX_ARCHIVE_BYTES,
+    MAX_MULTIPART_PART_BYTES,
+    MAX_SINGLE_UPLOAD_BYTES,
+    MIN_MULTIPART_PART_BYTES,
+    SANDBOX_ARCHIVE_S3_URI,
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
 )
 from cloud_agent_shared.sandbox_resources import (
     SandboxResourceSample,
@@ -1477,6 +1497,7 @@ class WorkerClaimAttestation(BaseModel):
     #: the API cannot silently discard evidence used by capability gating.
     helper_versions: dict[str, str] = Field(default_factory=dict, max_length=64)
     runner_capabilities: list[str] = Field(default_factory=list, max_length=64)
+    sandbox_archive_settings_applied_revision: StrictInt | None = Field(None, ge=0)
     host_kernel: str | None = Field(None, max_length=256)
     guest_kernel: str | None = Field(None, max_length=256)
 
@@ -2552,6 +2573,14 @@ class AgentRunnerHost(BaseModel):
             "value or built-in default."
         ),
     )
+    sandbox_archive_settings_applied_revision: StrictInt | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Archive-policy revision this host's broker confirmed applying. Null means "
+            "the host predates database-backed archive settings or has not synchronized yet."
+        ),
+    )
 
 
 class HostSettingDefinition(BaseModel):
@@ -2738,6 +2767,74 @@ class SetHostSettingsRequest(BaseModel):
     @classmethod
     def _known_and_in_bounds(cls, value: dict[str, int | None]) -> dict[str, int | None]:
         return validate_admin_change(value)
+
+
+class SandboxArchiveSettingsResponse(BaseModel):
+    """The revisioned archive policy stored for every sandbox host."""
+
+    enabled: bool = False
+    s3_uri: Literal["s3://freeinference/cloud-agent/sandbox"] = SANDBOX_ARCHIVE_S3_URI
+    region: str = ""
+    kms_key_arn: str = ""
+    expected_bucket_owner: str = ""
+    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
+    multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
+    multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
+    revision: int = Field(0, ge=0)
+    updated_at: datetime | None = None
+
+
+class SetSandboxArchiveSettingsRequest(BaseModel):
+    """Replace the whole archive policy if the displayed revision is current."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+    region: str = Field("", max_length=128)
+    kms_key_arn: str = Field("", max_length=2048)
+    expected_bucket_owner: str = Field("", max_length=12)
+    max_archive_bytes: StrictInt = Field(DEFAULT_MAX_ARCHIVE_BYTES, ge=1, le=MAX_ARCHIVE_BYTES)
+    multipart_threshold_bytes: StrictInt = Field(
+        DEFAULT_MULTIPART_THRESHOLD_BYTES, ge=1, le=MAX_SINGLE_UPLOAD_BYTES
+    )
+    multipart_part_bytes: StrictInt = Field(
+        DEFAULT_MULTIPART_PART_BYTES,
+        ge=MIN_MULTIPART_PART_BYTES,
+        le=MAX_MULTIPART_PART_BYTES,
+    )
+    revision: StrictInt = Field(..., ge=0, description="Revision returned by the last GET.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_optional_limits(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        for key, default in (
+            ("max_archive_bytes", DEFAULT_MAX_ARCHIVE_BYTES),
+            ("multipart_threshold_bytes", DEFAULT_MULTIPART_THRESHOLD_BYTES),
+            ("multipart_part_bytes", DEFAULT_MULTIPART_PART_BYTES),
+        ):
+            if values.get(key) is None:
+                values[key] = default
+        return values
+
+    @model_validator(mode="after")
+    def _safe_archive_policy(self) -> SetSandboxArchiveSettingsRequest:
+        try:
+            SandboxArchivePolicy(
+                enabled=self.enabled,
+                region=self.region,
+                kms_key_arn=self.kms_key_arn,
+                expected_bucket_owner=self.expected_bucket_owner,
+                max_archive_bytes=self.max_archive_bytes,
+                multipart_threshold_bytes=self.multipart_threshold_bytes,
+                multipart_part_bytes=self.multipart_part_bytes,
+                revision=self.revision,
+            )
+        except SandboxArchivePolicyError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 # ── Host pool: enrollment and heartbeat ────────────────────────────────
@@ -3053,6 +3150,15 @@ class HostHeartbeatRequest(BaseModel):
             "and one-time migration. Null means not reported and keeps what is stored."
         ),
     )
+    sandbox_archive_settings_applied_revision: StrictInt | None = Field(
+        None,
+        ge=0,
+        description=(
+            "The archive-policy revision the authenticated workspace broker confirmed. "
+            "Explicit null clears a stale confirmation after restart; omitting the field "
+            "keeps the last observation for compatibility with older runners."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -3109,6 +3215,7 @@ class HostHeartbeatResponse(BaseModel):
             "override returns the next level's value, never a legacy environment value."
         ),
     )
+    sandbox_archive_settings: SandboxArchiveSettingsResponse
     residencies_lost: list[ResidencyBeat] = Field(
         default_factory=list,
         description=(

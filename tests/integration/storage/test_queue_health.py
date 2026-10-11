@@ -12,6 +12,7 @@ from tests.integration.storage.test_agent_job_store import (
 )
 
 from cloud_agent_host.sandbox import KATA_RUNTIME
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -63,6 +64,64 @@ async def test_missing_stale_wrong_generation_and_wrong_pin_are_not_serving(pool
     ] == 1
     await store.host_pool.register_host(host="other", credential_hash="other-test", slots_total=3)
     await pool.execute("UPDATE agent_runner_policy SET active_host = 'other' WHERE id")
+    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
+        "unavailable"
+    ] == 1
+
+
+async def test_archive_policy_revision_is_part_of_queue_health_serving_capacity(pool, store):
+    await _create_job(store)
+    await _age(pool)
+    await _host(store)
+    policy = {
+        "enabled": True,
+        "region": "us-east-1",
+        "kms_key_arn": (
+            "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+        ),
+        "expected_bucket_owner": "123456789012",
+        "max_archive_bytes": 2 * 1024**3,
+        "multipart_threshold_bytes": 8 * 1024**2,
+        "multipart_part_bytes": 8 * 1024**2,
+    }
+    first = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings=policy,
+    )
+    assert first is not None and first["revision"] == 1
+    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
+        "unavailable"
+    ] == 1
+
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="test",
+        capabilities=[*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY],
+        sandbox_archive_settings_applied_revision=1,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
+        "unavailable"
+    ] == 0
+
+    second = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=1,
+        settings={**policy, "max_archive_bytes": 1024**3},
+    )
+    assert second is not None and second["revision"] == 2
+    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
+        "unavailable"
+    ] == 1
+
+    await pool.execute(
+        "UPDATE agent_runner_policy SET sandbox_archive_settings = '{\"enabled\": true}'::jsonb"
+    )
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="test",
+        sandbox_archive_settings_applied_revision=2,
+        sandbox_archive_settings_revision_reported=True,
+    )
     assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
         "unavailable"
     ] == 1

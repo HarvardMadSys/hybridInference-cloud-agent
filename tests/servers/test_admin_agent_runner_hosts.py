@@ -55,6 +55,18 @@ class FakeHostStore(AllCapabilities):
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
         self.global_settings: dict[str, Any] = {}
+        self.archive_settings: dict[str, Any] = {
+            "enabled": False,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+            "region": "",
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+            "revision": 0,
+            "updated_at": datetime.now(timezone.utc),
+        }
         self.audit = _AuditTrail()
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
@@ -130,6 +142,27 @@ class FakeHostStore(AllCapabilities):
         previous = dict(self.global_settings)
         self.global_settings = _changed(previous, changes)
         return previous
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        return dict(self.archive_settings)
+
+    async def set_sandbox_archive_settings(
+        self, *, expected_revision: int, settings: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if expected_revision > self.archive_settings["revision"]:
+            return None
+        same = all(self.archive_settings.get(key) == value for key, value in settings.items())
+        if same:
+            return {**self.archive_settings, "_changed": False}
+        if expected_revision != self.archive_settings["revision"]:
+            return None
+        self.archive_settings = {
+            **settings,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+            "revision": expected_revision + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        return {**self.archive_settings, "_changed": True}
 
     async def set_runner_host_settings(
         self, *, host: str, changes: dict[str, int | None]
@@ -625,6 +658,178 @@ async def test_a_global_setting_is_saved_changed_and_cleared_one_key_at_a_time(a
     )
     assert response.json()["host_settings"] == {"terminal_max_sessions": 32}
     assert store.global_settings == {"terminal_max_sessions": 32}
+
+
+def _archive_policy(*, revision: int = 0, **changes: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "enabled": True,
+        "region": "us-east-1",
+        "kms_key_arn": (
+            "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+        ),
+        "expected_bucket_owner": "123456789012",
+        "max_archive_bytes": 2 * 1024**3,
+        "multipart_threshold_bytes": 8 * 1024**2,
+        "multipart_part_bytes": 8 * 1024**2,
+        "revision": revision,
+    }
+    values.update(changes)
+    return values
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client):
+    client, store = admin_client
+
+    before = await client.get("/admin/agent/sandbox-archive-settings", headers=ADMIN)
+    assert before.status_code == 200
+    assert before.json()["enabled"] is False
+    assert before.json()["s3_uri"] == "s3://freeinference/cloud-agent/sandbox"
+
+    response = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(),
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 200
+    assert response.json() | {"updated_at": None} == {
+        **_archive_policy(revision=1),
+        "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+        "updated_at": None,
+    }
+    assert store.audit[-1]["action"] == "agent.sandbox_archive_settings.set"
+    assert store.audit[-1]["details"] == {
+        "old_revision": 0,
+        "new_revision": 1,
+        "old_settings": {
+            "enabled": False,
+            "region": "",
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+        },
+        "new_settings": {
+            key: value for key, value in _archive_policy().items() if key != "revision"
+        },
+    }
+
+    no_op = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=1),
+        headers=ADMIN,
+    )
+    retry = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=0),
+        headers=ADMIN,
+    )
+    future = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=99),
+        headers=ADMIN,
+    )
+    assert no_op.status_code == retry.status_code == 200
+    assert no_op.json()["revision"] == retry.json()["revision"] == 1
+    assert future.status_code == 409
+    assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_missing_singleton_timestamp_is_still_readable(admin_client):
+    client, store = admin_client
+    store.archive_settings["updated_at"] = None
+
+    response = await client.get("/admin/agent/sandbox-archive-settings", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert response.json()["updated_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_rejects_stale_or_unsafe_writes(admin_client):
+    client, store = admin_client
+    first = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(),
+        headers=ADMIN,
+    )
+    assert first.status_code == 200
+
+    stale = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(region="us-west-2"),
+        headers=ADMIN,
+    )
+    assert stale.status_code == 422  # KMS region mismatch is rejected before the CAS.
+
+    stale = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(expected_bucket_owner="999999999999"),
+        headers=ADMIN,
+    )
+    assert stale.status_code == 422
+
+    stale = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(enabled=False, region=""),
+        headers=ADMIN,
+    )
+    assert stale.status_code == 409
+    assert store.archive_settings["revision"] == 1
+
+    injected = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=1), "aws_access_key_id": "must-not-be-stored"},
+        headers=ADMIN,
+    )
+    assert injected.status_code == 422
+    redirected = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=1), "s3_uri": "s3://attacker-bucket/elsewhere"},
+        headers=ADMIN,
+    )
+    assert redirected.status_code == 422
+    bool_enabled = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=1), "enabled": 1},
+        headers=ADMIN,
+    )
+    assert bool_enabled.status_code == 422
+    assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_null_optional_limits_restore_safe_defaults(admin_client):
+    client, _ = admin_client
+
+    response = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={
+            **_archive_policy(),
+            "max_archive_bytes": None,
+            "multipart_threshold_bytes": None,
+            "multipart_part_bytes": None,
+        },
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["max_archive_bytes"] == 2 * 1024**3
+    assert response.json()["multipart_threshold_bytes"] == 8 * 1024**2
+    assert response.json()["multipart_part_bytes"] == 8 * 1024**2
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_routes_require_admin_access(admin_client):
+    client, _ = admin_client
+
+    assert (await client.get("/admin/agent/sandbox-archive-settings")).status_code in (401, 403)
+    assert (
+        await client.put("/admin/agent/sandbox-archive-settings", json=_archive_policy())
+    ).status_code in (401, 403)
 
 
 @pytest.mark.asyncio

@@ -201,6 +201,34 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(502, "workspace broker returned invalid data")
         return body
 
+    def apply_sandbox_archive_settings(
+        self, settings: dict[str, Any], *, timeout: float = 5.0
+    ) -> dict[str, Any]:
+        """Relay one complete DB archive policy and read its applied revision.
+
+        AWS credentials are intentionally absent: only the non-secret storage
+        policy crosses this channel, and the broker uses its own workload
+        identity. Re-sending an equal revision is idempotent and repairs a
+        broker that restarted since the previous heartbeat.
+        """
+        try:
+            response = self._client.post(
+                f"{self._base_url}/sandbox-archive-settings",
+                json={"settings": settings},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
+        if response.is_error:
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(response, "workspace broker rejected sandbox archive settings"),
+            )
+        body = response.json()
+        if not isinstance(body, dict):
+            raise SessionSupervisorError(502, "workspace broker returned invalid data")
+        return body
+
     def list(self) -> builtins.list[dict[str, Any]]:
         """Observe every retained container owned by this host's broker."""
         try:
@@ -272,6 +300,76 @@ class SessionSupervisorClient:
             thread_id,
             "resident",
             payload={"token": token, "launch": asdict(launch), "profiling": profiling},
+        )
+
+    def capture_initial_archive(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        token: str,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str,
+        preparation_id: str,
+        base_sha: str,
+    ) -> dict[str, Any]:
+        """Persist the prepared pre-prompt workspace exactly once."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "archive-initial",
+            timeout=900.0,
+            payload={
+                "sandbox_id": spec.sandbox_id,
+                "generation": spec.generation,
+                "origin_thread_id": spec.thread_id,
+                "runtime_id": spec.runtime_id,
+                "runtime_version": spec.runtime_version,
+                "sandbox_image_digest": spec.sandbox_image_digest,
+                "expected_container_id": expected_container_id,
+                "resident_slot_capacity": spec.resident_slot_capacity,
+                "memory_limit": spec.memory_limit,
+                "cpu_limit": spec.cpu_limit,
+                "stop_timeout_s": spec.stop_timeout_s,
+                "members": members,
+                "token": token,
+                "preparation_id": preparation_id,
+                "base_sha": base_sha,
+            },
+        )
+
+    def initial_archive_status(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        token: str,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str,
+        preparation_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a crash-committed baseline before any workspace reset."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "archive-initial/status",
+            timeout=900.0,
+            payload={
+                "sandbox_id": spec.sandbox_id,
+                "generation": spec.generation,
+                "origin_thread_id": spec.thread_id,
+                "runtime_id": spec.runtime_id,
+                "runtime_version": spec.runtime_version,
+                "sandbox_image_digest": spec.sandbox_image_digest,
+                "expected_container_id": expected_container_id,
+                "resident_slot_capacity": spec.resident_slot_capacity,
+                "memory_limit": spec.memory_limit,
+                "cpu_limit": spec.cpu_limit,
+                "stop_timeout_s": spec.stop_timeout_s,
+                "members": members,
+                "token": token,
+                "preparation_id": preparation_id,
+            },
         )
 
     def start_shared_turn(
@@ -366,19 +464,30 @@ class SessionSupervisorClient:
         thread_id: str,
         *,
         generation: int,
+        activation_generation: int,
         reason: str = "idle",
         member_activation_generations: dict[str, int] | None = None,
     ) -> dict[str, Any]:
-        """Apply a group-fenced shared idle stop."""
+        """Apply a group- and activation-fenced shared idle stop."""
         return self._shared_request(
             "POST",
             thread_id,
             "stop-idle",
+            # A configured archive makes the clean stop synchronous: Docker
+            # exports bounded final roots and completes bounded S3 retries
+            # before this call can report success.
+            timeout=1800.0,
             payload={
                 "generation": generation,
-                "activation_generation": 0,
+                "activation_generation": activation_generation,
                 "reason": reason,
-                "member_activation_generations": member_activation_generations,
+                **(
+                    {}
+                    if member_activation_generations is None
+                    else {
+                        "member_activation_generations": member_activation_generations,
+                    }
+                ),
             },
         )
 

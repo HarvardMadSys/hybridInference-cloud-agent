@@ -27,7 +27,7 @@ settings live in the Agent database and are authoritative across restarts.
 The inventory below records defaults and the environment names used for an
 initial import; registered settings are no longer continuously read from `.env`.
 
-Run `alembic upgrade head` (through `0037_admin_sandbox_stop`) before starting
+Run `alembic upgrade head` (through `0042_sandbox_archive_settings`) before starting
 this release. The main control-plane listener initializes the settings document
 once from its existing environment. The MCP-only listener waits for that document and uses the same
 saved values. Later environment edits do not overwrite it. **Reset** restores
@@ -44,6 +44,16 @@ heartbeats, including the broker's report. Admin edits and resets exclude only
 the changed keys from pending imports, preserving unrelated legacy values.
 Global exclusions also apply to newly enrolled hosts. Later environment changes
 are ignored; clearing an override never reactivates an old environment value.
+
+Sandbox archives are configured only in **Admin → Settings → Sandbox** and are
+stored as one revisioned policy in the Agent database. There is deliberately no
+`AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
+`s3://freeinference/cloud-agent/sandbox`; the saved policy contains enablement,
+region, KMS key ARN, expected bucket owner, and bounded upload sizes, but no AWS
+credential. Workspace brokers authenticate with their deployment workload
+identity through the standard AWS SDK credential chain. See
+[Sandbox archives](docs/operations.md#sandbox-archives) for IAM, bucket
+versioning, rollout, and lifecycle semantics.
 
 Control-plane runtime identity, signing/encryption keys, broker credentials,
 cookie/proxy policy, MCP target policy and the default execution profile are also

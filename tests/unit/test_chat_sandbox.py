@@ -36,6 +36,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatBackend,
+    RetainedChatLost,
     SandboxActionFacts,
     _RetainedTerminalProcess,
     claude_member_config_dir,
@@ -84,11 +85,17 @@ def _plain_group_network(monkeypatch):
         lambda self, spec, _current, *_snapshot: self._require(spec),
     )
     monkeypatch.setattr(ChatSandboxManager, "_sync_kata_guest_network", lambda *_args: None)
-    monkeypatch.setattr(ChatSandboxManager, "_verify_guest_network", lambda *_args: None)
+    monkeypatch.setattr(
+        ChatSandboxManager,
+        "_verify_guest_network",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         ChatSandboxManager,
         "_release_sandbox_networks",
-        lambda self, spec, _current: self._require(spec),
+        lambda self, spec, _current, *, expected_container_id: self._require_exact(
+            spec, expected_container_id
+        ),
     )
 
 
@@ -751,6 +758,52 @@ def test_create_start_stop_retains_the_same_container(monkeypatch):
     assert not any(argv[1:3] in (["rm", "--force"], ["container", "rm"]) for argv in calls)
 
 
+@pytest.mark.parametrize("operation", ["start", "stop"])
+def test_lifecycle_command_never_adopts_a_same_name_post_command_replacement(
+    monkeypatch,
+    operation,
+):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    command_completed = False
+
+    def inspection(container_id: str, *, running: bool) -> str:
+        payload = json.loads(
+            _inspect_payload(
+                spec,
+                status="running" if running else "exited",
+                running=running,
+            )
+        )
+        payload[0]["Id"] = container_id
+        return json.dumps(payload)
+
+    def fake_run(argv, **_kwargs):
+        nonlocal command_completed
+        if argv[1:3] == ["container", "inspect"]:
+            if command_completed:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=inspection("sha256:replacement", running=operation == "stop"),
+                    stderr="",
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=inspection("sha256:container-one", running=operation == "stop"),
+                stderr="",
+            )
+        if argv[1] == operation:
+            assert argv[-1] == "sha256:container-one"
+            command_completed = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+
+    with pytest.raises(RetainedChatLost, match="identity changed during"):
+        getattr(manager, operation)(spec)
+
+
 def test_an_existing_name_with_other_ownership_is_never_adopted(monkeypatch):
     spec = _spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
@@ -805,7 +858,7 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
     exec_command = calls[-1]
     assert exec_command[:2] == ["docker", "exec"]
     assert exec_command[exec_command.index("--workdir") + 1] == CHAT_WORKDIR
-    assert exec_command[-4:] == [spec.container_name, "git", "status", "--short"]
+    assert exec_command[-4:] == ["sha256:container-one", "git", "status", "--short"]
 
 
 def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
@@ -1081,6 +1134,58 @@ def test_shared_writer_freeze_runs_as_each_owner_without_cap_kill(monkeypatch):
     assert '[ "$pid" != "$$" ]' in census_script
     assert "kill -STOP" in census_script
     assert "kill -CONT" in census_script
+
+
+def test_shared_writer_freeze_replacement_runs_exact_id_cleanup(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    exact_id = "sha256:original"
+    exact_checks = 0
+    calls: list[tuple[list[str], dict]] = []
+
+    def require_exact(_spec, container_id):
+        nonlocal exact_checks
+        assert container_id == exact_id
+        exact_checks += 1
+        if exact_checks == 2:
+            raise RetainedChatLost("same-name replacement")
+        return SimpleNamespace(container_id=exact_id, running=True)
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if kwargs.get("input_bytes") is not None:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if 'expected_uid="$1"; committed=0' in argv[2]:
+            uid = kwargs["user_uid"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{31 if uid == manager.backend.uid else 41} {uid} 300\n".encode(),
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "_require_exact", require_exact)
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    with pytest.raises(RetainedChatLost, match="replacement"):
+        manager.freeze_shared_writers(
+            spec,
+            slot_ids=[0],
+            token="c" * 32,
+            expected_container_id=exact_id,
+        )
+
+    assert exact_checks == 2
+    assert all(call[1]["expected_container_id"] == exact_id for call in calls)
+    assert len(calls) == 5
+    assert all("kill -CONT" in call[0][2] for call in calls[-2:])
 
 
 def test_shared_writer_thaw_reads_manifest_and_resumes_as_each_owner(monkeypatch):
@@ -1388,6 +1493,58 @@ def test_shared_writer_freeze_failure_resumes_live_threads_behind_a_zombie_leade
         manager.freeze_shared_writers(_spec(), slot_ids=[], token="2" * 32)
 
     _wait_for_shared_writer_growth(writes_path, writes_path.stat().st_size)
+
+
+def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    exact_id = "sha256:original"
+    exact_checks = 0
+    calls: list[tuple[list[str], dict]] = []
+    manifest = f"{ACTIVATION_TMPFS}/snapshot-{'d' * 32}.pids"
+
+    def require_exact(_spec, container_id):
+        nonlocal exact_checks
+        assert container_id == exact_id
+        exact_checks += 1
+        if exact_checks == 2:
+            raise RetainedChatLost("same-name replacement")
+        return SimpleNamespace(container_id=exact_id, running=True)
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[2] == 'cat -- "$1"':
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"31 10001 300\n41 11001 400\n",
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "_require_exact", require_exact)
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    with pytest.raises(RetainedChatLost, match="replacement"):
+        manager.thaw_shared_writers(
+            spec,
+            slot_ids=[0],
+            manifest=manifest,
+            expected_container_id=exact_id,
+        )
+
+    assert exact_checks == 2
+    assert all(call[1]["expected_container_id"] == exact_id for call in calls)
+    assert len(calls) == 4
+    assert "kill -CONT" in calls[1][0][2]
+    assert "kill -CONT" in calls[2][0][2]
+    assert calls[-1][0][2] == 'rm -f -- "$1"'
 
 
 @pytest.mark.parametrize(

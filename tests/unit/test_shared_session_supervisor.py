@@ -19,6 +19,8 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
+    RetainedChatFailStopped,
+    RetainedChatLost,
     claude_member_config_dir,
 )
 from cloud_agent_host.drivers import InputOutcome
@@ -33,15 +35,19 @@ from cloud_agent_host.resident_transport import (
     ResidentTransportFactory,
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError
+from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
+    SharedSessionDescriptor,
     SharedSessionLease,
 )
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.errors import SandboxArchiveBlocked
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 
 class _Manager:
@@ -106,16 +112,45 @@ class _Manager:
     def list(self) -> list[ChatSandboxInspection]:
         return list(self.items.values())
 
+    def network_for(self, _spec: ChatSandboxSpec) -> str:
+        return "agent-net"
+
+    def read_stopped_final_archive_marker_optional(
+        self,
+        _spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        del expected_container_id
+        return None
+
+    def read_running_final_archive_marker(
+        self,
+        _spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        del expected_container_id
+        return None
+
     def start(
         self,
         spec: ChatSandboxSpec,
         *,
         facts: Any = None,
         observer: Any = None,
+        expected_container_id: str | None = None,
+        defer_network_release_on_fail_stop: bool = False,
+        before_stopped_start=None,
     ) -> ChatSandboxInspection:
+        del defer_network_release_on_fail_stop
         self.starts.append(spec.container_name)
         current = self.items[spec.container_name]
+        if expected_container_id is not None:
+            assert current.container_id == expected_container_id
         if not current.running:
+            if before_stopped_start is not None:
+                before_stopped_start(current)
             with operation_profiling.substage(observer, "container_start"):
                 current = replace(
                     current,
@@ -130,14 +165,35 @@ class _Manager:
                 facts.note("reuse")
         return current
 
-    def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+    def stop(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str | None = None,
+        release_networks: bool = True,
+    ) -> ChatSandboxInspection:
         self.stop_count += 1
+        if expected_container_id is not None:
+            assert self.items[spec.container_name].container_id == expected_container_id
         current = replace(
             self.items[spec.container_name],
             running=False,
             status=ChatSandboxStatus.STOPPED,
-            networks=(),
+            networks=() if release_networks else self.items[spec.container_name].networks,
         )
+        self.items[spec.container_name] = current
+        return current
+
+    def release_stopped_networks(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> ChatSandboxInspection:
+        current = self.items[spec.container_name]
+        assert current.container_id == expected_container_id
+        assert current.running is False
+        current = replace(current, networks=())
         self.items[spec.container_name] = current
         return current
 
@@ -151,14 +207,28 @@ class _Manager:
             raise SandboxError("inet cloud_agent_x is missing chain 'from_group'")
 
     def freeze_shared_writers(
-        self, spec: ChatSandboxSpec, *, slot_ids: list[int], token: str
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_ids: list[int],
+        token: str,
+        expected_container_id: str | None = None,
     ) -> str:
+        if expected_container_id is not None:
+            assert self.items[spec.container_name].container_id == expected_container_id
         self.events.append(("freeze", tuple(sorted(slot_ids))))
         return f"/run/agent-activation/snapshot-{token}.pids"
 
     def thaw_shared_writers(
-        self, spec: ChatSandboxSpec, *, slot_ids: list[int], manifest: str
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_ids: list[int],
+        manifest: str,
+        expected_container_id: str | None = None,
     ) -> None:
+        if expected_container_id is not None:
+            assert self.items[spec.container_name].container_id == expected_container_id
         self.events.append(("thaw", tuple(sorted(slot_ids)), manifest))
 
     def capture_member_processes(self, spec: ChatSandboxSpec, **kwargs):
@@ -495,18 +565,428 @@ def test_native_answer_delivery_holds_the_owner_fence_against_expiry(monkeypatch
 
 
 @pytest.mark.parametrize("disk_limit_mib", [0, 16384])
-def test_broker_reconcile_stops_orphan_processes_before_accepting_requests(disk_limit_mib):
+def test_broker_reconcile_blocks_an_unmarked_running_orphan_before_accepting_requests(
+    disk_limit_mib,
+):
     manager = _Manager()
     spec = replace(_spec(), disk_limit_mib=disk_limit_mib)
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
-    supervisor = SharedChatSessionSupervisor(manager)
+    archived: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
+
+    descriptors = supervisor.reconcile()
+    supervisor.reconcile()
+
+    assert manager.stop_count == 1
+    assert archived == []
+    assert manager.items[spec.container_name].running is False
+    assert manager.items[spec.container_name].networks == ("agent-net",)
+    assert manager.pruned_specs == [spec]
+    assert descriptors[0].running is False
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened(spec.thread_id)
+
+
+def test_reconcile_does_not_finalize_a_registered_never_started_container() -> None:
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = replace(
+        manager._inspection(spec, running=False),
+        status=ChatSandboxStatus.CREATED,
+    )
+    archive_calls: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archive_calls.append(args),
+    )
+    supervisor.register_manifest(spec, _members())
+
+    supervisor.reconcile()
+    lease = supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+
+    assert lease.token
+    assert archive_calls == []
+    assert manager.stop_count == 0
+    assert manager.items[spec.container_name].running is True
+
+
+def test_unreadable_orphan_marker_isolated_while_healthy_groups_reconcile() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_bad_marker = True
+
+        def read_running_final_archive_marker(self, spec, **_kwargs):
+            if spec.sandbox_id == "asbx_bad" and self.fail_bad_marker:
+                raise SandboxError("marker read failed")
+            return None
+
+    manager = MarkerManager()
+    bad = replace(_spec(), thread_id="athr_bad", sandbox_id="asbx_bad")
+    good = replace(_spec(), thread_id="athr_good", sandbox_id="asbx_good")
+    manager.items[bad.container_name] = manager._inspection(bad, running=True)
+    manager.items[good.container_name] = replace(
+        manager._inspection(good, running=False),
+        status=ChatSandboxStatus.CREATED,
+    )
+    archived: list[str] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+    )
 
     descriptors = supervisor.reconcile()
 
+    assert {item.thread_id for item in descriptors} == {"athr_bad", "athr_good"}
+    assert manager.items[bad.container_name].running is False
+    assert manager.items[bad.container_name].networks == ("agent-net",)
+    with pytest.raises(SessionBusy, match="orphan finalization"):
+        supervisor.operation_opened("athr_bad")
+
+    manager.fail_bad_marker = False
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+    descriptors = supervisor.reconcile()
+
+    assert archived == []
+    assert {item.thread_id for item in descriptors} == {"athr_bad", "athr_good"}
+    assert manager.items[bad.container_name].running is False
+    assert manager.items[bad.container_name].networks == ("agent-net",)
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened("athr_bad")
+
+
+def test_unreadable_running_orphan_stop_failure_cannot_become_a_clean_archive() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_marker_once = True
+            self.fail_stop_once = True
+
+        def read_running_final_archive_marker(self, _spec, **_kwargs):
+            if self.fail_marker_once:
+                self.fail_marker_once = False
+                raise SandboxError("marker read failed")
+            return None
+
+        def stop(self, spec, **kwargs):
+            if self.fail_stop_once:
+                self.fail_stop_once = False
+                raise SandboxError("docker stop failed")
+            return super().stop(spec, **kwargs)
+
+    manager = MarkerManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    prepared: list[str] = []
+    archived: list[str] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda spec, _inspection: prepared.append(spec.sandbox_id),
+        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+    )
+
+    descriptors = supervisor.reconcile()
+
+    assert [item.thread_id for item in descriptors] == [spec.thread_id]
+    assert manager.items[spec.container_name].running is True
+    assert prepared == []
+    assert archived == []
+
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+
+    current = manager.items[spec.container_name]
+    assert current.running is False
+    assert current.networks == ("agent-net",)
+    assert prepared == []
+    assert archived == []
+
+    with pytest.raises(SandboxError, match="blocked by native flush failure"):
+        supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    assert prepared == []
+    assert archived == []
+
+
+def test_malformed_orphan_marker_isolated_while_healthy_groups_reconcile() -> None:
+    class MarkerManager(_Manager):
+        def read_stopped_final_archive_marker_optional(self, spec, **_kwargs):
+            return b"{malformed" if spec.sandbox_id == "asbx_bad" else None
+
+        def read_running_final_archive_marker(self, spec, **_kwargs):
+            return b"{malformed" if spec.sandbox_id == "asbx_bad" else None
+
+    manager = MarkerManager()
+    bad = replace(_spec(), thread_id="athr_bad", sandbox_id="asbx_bad")
+    good = replace(_spec(), thread_id="athr_good", sandbox_id="asbx_good")
+    manager.items[bad.container_name] = manager._inspection(bad, running=True)
+    manager.items[good.container_name] = replace(
+        manager._inspection(good, running=False),
+        status=ChatSandboxStatus.CREATED,
+    )
+    prepare_attempts: list[str] = []
+    archive_attempts: list[str] = []
+
+    def prepare(spec, _inspection) -> None:
+        prepare_attempts.append(spec.sandbox_id)
+        raise SandboxError("invalid sandbox final archive marker")
+
+    def archive(spec, _inspection, _members) -> None:
+        archive_attempts.append(spec.sandbox_id)
+        raise SandboxError("invalid sandbox final archive marker")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_hook=archive,
+    )
+
+    descriptors = supervisor.reconcile()
+    retried = supervisor.reconcile()
+
+    assert {item.thread_id for item in descriptors} == {"athr_bad", "athr_good"}
+    assert {item.thread_id for item in retried} == {"athr_bad", "athr_good"}
+    assert prepare_attempts == ["asbx_bad"]
+    assert archive_attempts == ["asbx_bad"]
+    assert manager.items[bad.container_name].running is False
+    assert manager.items[bad.container_name].networks == ("agent-net",)
+    with pytest.raises(SessionBusy, match="final archive"):
+        supervisor.operation_opened("athr_bad")
+
+
+def test_durably_blocked_orphan_stop_failure_isolated_from_healthy_groups() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_bad_stop_once = True
+
+        def read_running_final_archive_marker(self, spec, **_kwargs):
+            return b"durable-blocked-marker" if spec.sandbox_id == "asbx_bad" else None
+
+        def stop(self, spec, **kwargs):
+            if spec.sandbox_id == "asbx_bad" and self.fail_bad_stop_once:
+                self.fail_bad_stop_once = False
+                raise SandboxError("docker stop failed")
+            return super().stop(spec, **kwargs)
+
+    manager = MarkerManager()
+    bad = replace(_spec(), thread_id="athr_bad", sandbox_id="asbx_bad")
+    good = replace(_spec(), thread_id="athr_good", sandbox_id="asbx_good")
+    manager.items[bad.container_name] = manager._inspection(bad, running=True)
+    manager.items[good.container_name] = replace(
+        manager._inspection(good, running=False),
+        status=ChatSandboxStatus.CREATED,
+    )
+    archived: list[str] = []
+
+    def prepare(spec, _inspection) -> None:
+        if spec.sandbox_id == bad.sandbox_id:
+            raise SandboxArchiveBlocked("durable marker forbids final archive")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+    )
+
+    descriptors = supervisor.reconcile()
+
+    assert {item.thread_id for item in descriptors} == {"athr_bad", "athr_good"}
+    assert manager.items[bad.container_name].running is True
+    assert archived == []
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened("athr_bad")
+
+    retried = supervisor.reconcile()
+
+    assert {item.thread_id for item in retried} == {"athr_bad", "athr_good"}
+    assert manager.items[bad.container_name].running is False
+    assert manager.items[bad.container_name].networks == ("agent-net",)
+    assert archived == []
+
+
+def test_committed_retry_clears_a_transient_unreadable_marker_fence() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_marker = True
+            self.marker: bytes | None = b"durable-pending-marker"
+
+        def read_stopped_final_archive_marker_optional(self, _spec, **_kwargs):
+            if self.fail_marker:
+                raise SandboxError("marker read failed")
+            return self.marker
+
+        def read_running_final_archive_marker(self, _spec, **_kwargs):
+            return self.marker
+
+    manager = MarkerManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+
+    def archive(*_args) -> None:
+        manager.marker = None
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor.reconcile()
+    manager.fail_marker = False
+
+    supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    token, _ = supervisor.operation_opened(spec.thread_id)
+    supervisor.reconcile()
+
+    assert manager.items[spec.container_name].running is True
+    supervisor.operation_closed(spec.thread_id, token)
+
+
+def test_created_cleanup_clears_a_transient_unreadable_marker_fence() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_marker = True
+
+        def read_stopped_final_archive_marker_optional(self, _spec, **_kwargs):
+            if self.fail_marker:
+                raise SandboxError("marker read failed")
+            return None
+
+    manager = MarkerManager()
+    spec = _spec()
+    manager.items[spec.container_name] = replace(
+        manager._inspection(spec, running=False),
+        status=ChatSandboxStatus.CREATED,
+    )
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *_args: pytest.fail("CREATED sandbox must not upload"),
+    )
+    supervisor.register_manifest(
+        spec,
+        _members(),
+        expected_container_id="container-shared",
+    )
+    with pytest.raises(SandboxError, match="marker read failed"):
+        supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    manager.fail_marker = False
+
+    stopped = supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    token, _ = supervisor.operation_opened(spec.thread_id)
+
+    assert stopped.running is False
+    assert manager.items[spec.container_name].running is True
+    supervisor.operation_closed(spec.thread_id, token)
+
+
+def test_explicit_stop_cleans_up_a_registered_never_started_container_without_archive() -> None:
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = replace(
+        manager._inspection(spec, running=False),
+        status=ChatSandboxStatus.CREATED,
+    )
+    archive_calls: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archive_calls.append(args),
+    )
+    supervisor.register_manifest(spec, _members())
+
+    descriptor = supervisor.stop_if_idle(
+        spec.thread_id,
+        generation=spec.generation,
+        reason="orphaned_attempt",
+    )
+
+    assert descriptor.running is False
+    assert archive_calls == []
     assert manager.stop_count == 1
-    assert manager.items[spec.container_name].running is False
-    assert manager.pruned_specs == [spec]
+    assert manager.items[spec.container_name].networks == ()
+
+
+@pytest.mark.parametrize("released_networks", [(), ("none",)])
+def test_restart_reconcile_does_not_rearchive_an_already_released_stopped_group(
+    released_networks,
+):
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = replace(
+        manager._inspection(spec, running=False),
+        networks=released_networks,
+    )
+    archived: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
+
+    descriptors = supervisor.reconcile()
+
+    assert manager.stop_count == 0
+    assert archived == []
+    assert len(descriptors) == 1
     assert descriptors[0].running is False
+
+
+def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_status():
+    manager = _Manager()
+    archived_entered = threading.Event()
+    allow_archive = threading.Event()
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+
+    def archive(spec, _inspection, _members):
+        if spec.sandbox_id == other.sandbox_id:
+            archived_entered.set()
+            assert allow_archive.wait(timeout=2)
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor.register_manifest(_spec(), _members())
+    manager.items[other.container_name] = manager._inspection(other, running=True)
+    manager.read_running_final_archive_marker = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: b"durable-pending-marker"
+    )
+    errors: list[BaseException] = []
+
+    def reconcile() -> None:
+        try:
+            supervisor.reconcile()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    reconcile_thread = threading.Thread(target=reconcile)
+    reconcile_thread.start()
+    assert archived_entered.wait(timeout=1)
+
+    status_done = threading.Event()
+
+    def read_other_group() -> None:
+        try:
+            supervisor.status("athr_source")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            status_done.set()
+
+    status_thread = threading.Thread(target=read_other_group)
+    status_thread.start()
+    assert status_done.wait(timeout=0.5), "archive I/O held the supervisor-wide lock"
+    allow_archive.set()
+    reconcile_thread.join(timeout=2)
+    status_thread.join(timeout=2)
+
+    assert not reconcile_thread.is_alive()
+    assert not status_thread.is_alive()
+    assert errors == []
 
 
 def test_status_listing_never_stops_a_managed_running_group():
@@ -536,11 +1016,61 @@ def test_status_listing_never_stops_a_managed_running_group():
     assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
 
 
-def test_status_retries_network_cleanup_for_an_externally_stopped_group():
+def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        container_id="container-replacement",
+    )
+
+    with pytest.raises(RetainedChatLost, match="identity changed"):
+        supervisor.status("athr_source")
+
+    group = supervisor._members["athr_source"]
+    assert group.inspection.container_id == "container-shared"
+    assert group.container_lost is True
+    assert {member.context_status for member in group.members.values()} == {"lost"}
+    assert manager.stop_count == 0
+
+
+def test_reconcile_refuses_an_externally_stopped_replacement_without_archiving_it():
+    manager = _Manager()
+    archived: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        container_id="container-replacement",
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+
+    with pytest.raises(RetainedChatLost, match="identity changed"):
+        supervisor.list()
+
+    group = supervisor._members["athr_source"]
+    assert group.inspection.container_id == "container-shared"
+    assert group.container_lost is True
+    assert manager.stop_count == 0
+    assert archived == []
+
+
+def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
     manager = _Manager()
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
-    supervisor = SharedChatSessionSupervisor(manager)
+    archived: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
     supervisor.register_manifest(
         spec,
         _members(),
@@ -550,9 +1080,12 @@ def test_status_retries_network_cleanup_for_an_externally_stopped_group():
 
     descriptors = supervisor.list()
 
-    assert manager.stop_count == 1
-    assert manager.items[spec.container_name].networks == ()
+    assert manager.stop_count == 0
+    assert archived == []
+    assert manager.items[spec.container_name].networks == ("agent-net",)
     assert all(item.running is False for item in descriptors)
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened("athr_source")
 
 
 def test_acquire_starts_a_settled_context_on_its_group():
@@ -601,9 +1134,12 @@ def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():
     assert repeat.network_verified is False
 
 
-def _running_group() -> tuple[_Manager, SharedChatSessionSupervisor]:
+def _running_group(*, stopped_archive_hook=None) -> tuple[_Manager, SharedChatSessionSupervisor]:
     manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=stopped_archive_hook,
+    )
     supervisor.register_manifest(_spec(), _members())
     supervisor.acquire(
         _spec(),
@@ -619,17 +1155,63 @@ def _running_group() -> tuple[_Manager, SharedChatSessionSupervisor]:
 
 def test_a_host_that_cannot_show_its_rules_stops_every_running_group():
     """Fail closed: a group may not go on without the boundary it started behind."""
-    manager, supervisor = _running_group()
+    archived: list[tuple] = []
+    manager, supervisor = _running_group(stopped_archive_hook=lambda *args: archived.append(args))
     manager.host_rule_failures = 2
 
     stopped = supervisor.guard_network()
 
     assert manager.host_rule_checks == 2
-    assert manager.stop_count == 1
+    assert manager.stop_count == 2
+    assert len(archived) == 1
     assert manager.items[_spec().container_name].running is False
     # Stopped, not lost: the native session wakes once the rules are back.
     assert [descriptor.resident_state for descriptor in stopped] == ["stopped"]
     assert supervisor.status("athr_source").context_status != "lost"
+
+
+def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing():
+    class FailStoppedStartManager(_Manager):
+        def start(
+            self,
+            spec,
+            *,
+            facts=None,
+            observer=None,
+            expected_container_id=None,
+            defer_network_release_on_fail_stop=False,
+        ):
+            stopped = self.stop(
+                spec,
+                expected_container_id=expected_container_id,
+                release_networks=not defer_network_release_on_fail_stop,
+            )
+            raise RetainedChatFailStopped("guest network proof failed", stopped)
+
+    manager = FailStoppedStartManager()
+    archived: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
+    supervisor.register_manifest(_spec(), _members())
+
+    with pytest.raises(RetainedChatFailStopped, match="guest network proof failed"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+
+    assert manager.stop_count == 2
+    assert len(archived) == 1
+    assert archived[0][1].running is False
+    supervisor.list()
+    assert len(archived) == 1
 
 
 def test_one_failed_check_is_retried_before_anything_is_stopped():
@@ -1739,6 +2321,993 @@ def test_idle_stop_releases_networks_after_docker_already_stopped_the_container(
     assert manager.items[spec.container_name].networks == ()
 
 
+def _archive_shutdown_group(
+    *,
+    events: list[str],
+    fail_transport_close: bool = False,
+    fail_invalidate: bool = False,
+) -> tuple[_Manager, SharedChatSessionSupervisor]:
+    manager = _Manager()
+    factory = _TransportFactory()
+    original_stop = manager.stop
+
+    def stop(
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str | None = None,
+        release_networks: bool = True,
+    ) -> ChatSandboxInspection:
+        events.append("stop:release" if release_networks else "stop:retain")
+        return original_stop(
+            spec,
+            expected_container_id=expected_container_id,
+            release_networks=release_networks,
+        )
+
+    manager.stop = stop  # type: ignore[method-assign]
+
+    def prepare(_spec, inspection) -> None:
+        assert inspection.running is True
+        events.append("prepare")
+
+    def invalidate(_spec, inspection) -> None:
+        assert inspection.running is True
+        events.append("invalidate")
+        if fail_invalidate:
+            raise RuntimeError("blocked marker write failed")
+
+    def archive(_spec, inspection, _members) -> None:
+        assert inspection.running is False
+        assert manager.network_for(_spec) in inspection.networks
+        events.append("archive")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=factory,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_invalidate_hook=invalidate,
+        stopped_archive_hook=archive,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+    peer_lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_peer",
+        owner="attempt:2",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    supervisor.ensure_resident(
+        "athr_peer",
+        peer_lease.token,
+        _launch("athr_peer", native_session_id="native-peer", slot=1),
+    )
+    supervisor.settle(
+        "athr_peer",
+        peer_lease.token,
+        job_id="ajob_peer",
+        context_status="live",
+    )
+    for index, transport in enumerate(factory.transports):
+
+        def close_transport(
+            *,
+            _index: int = index,
+            _transport: _Transport = transport,
+        ) -> None:
+            events.append(f"transport.close:{_index}")
+            if fail_transport_close and _index == 0:
+                raise RuntimeError("native flush failed")
+            _transport.alive = False
+
+        transport.close = close_transport  # type: ignore[method-assign]
+    return manager, supervisor
+
+
+def test_shutdown_flushes_then_prepares_stops_archives_and_releases_bridge() -> None:
+    events: list[str] = []
+    manager, supervisor = _archive_shutdown_group(events=events)
+
+    supervisor.quiesce()
+    supervisor.stop_all_for_shutdown()
+
+    assert events == [
+        "transport.close:0",
+        "transport.close:1",
+        "prepare",
+        "stop:retain",
+        "archive",
+        "stop:release",
+    ]
+    assert manager.items[_spec().container_name].networks == ()
+
+
+def test_shutdown_flush_failure_stops_with_bridge_but_never_prepares_archives_or_releases() -> None:
+    events: list[str] = []
+    manager, supervisor = _archive_shutdown_group(
+        events=events,
+        fail_transport_close=True,
+    )
+
+    supervisor.quiesce()
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+
+    assert events == [
+        "transport.close:0",
+        "transport.close:1",
+        "invalidate",
+        "stop:retain",
+    ]
+    assert manager.stop_count == 1
+    current = manager.items[_spec().container_name]
+    assert current.running is False
+    assert manager.network_for(_spec()) in current.networks
+    with pytest.raises(SandboxError, match="blocked by native flush failure"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+    with pytest.raises(SessionBusy, match="final archive"):
+        supervisor.operation_opened("athr_source")
+    with pytest.raises(SessionBusy, match="final archive"):
+        supervisor.terminal_opened("athr_source")
+
+
+def test_flush_failure_blocks_mutations_even_when_docker_stop_raises() -> None:
+    events: list[str] = []
+    manager, supervisor = _archive_shutdown_group(
+        events=events,
+        fail_transport_close=True,
+    )
+
+    original_stop = manager.stop
+
+    def fail_stop(*_args, **_kwargs):
+        events.append("stop:failed")
+        raise SandboxError("docker stop failed")
+
+    manager.stop = fail_stop  # type: ignore[method-assign]
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+
+    assert events[-2:] == ["invalidate", "stop:failed"]
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened("athr_source")
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.terminal_opened("athr_source")
+    captured = False
+
+    def capture(_backend):
+        nonlocal captured
+        captured = True
+        return {"patch": ""}
+
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.capture_snapshot("athr_source", capture=capture)
+    assert captured is False
+
+    manager.stop = original_stop  # type: ignore[method-assign]
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+    assert manager.items[_spec().container_name].running is False
+    assert manager.items[_spec().container_name].networks == ("agent-net",)
+
+
+def test_network_guard_exact_stops_a_running_native_flush_blocked_group() -> None:
+    events: list[str] = []
+    manager, supervisor = _archive_shutdown_group(
+        events=events,
+        fail_transport_close=True,
+    )
+    original_stop = manager.stop
+
+    def fail_stop(*_args, **_kwargs):
+        raise SandboxError("docker stop failed")
+
+    manager.stop = fail_stop  # type: ignore[method-assign]
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+    assert manager.items[_spec().container_name].running is True
+
+    manager.stop = original_stop  # type: ignore[method-assign]
+    manager.host_rule_failures = 2
+    assert supervisor.guard_network() == []
+
+    current = manager.items[_spec().container_name]
+    assert current.running is False
+    assert current.networks == ("agent-net",)
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened("athr_source")
+
+
+def test_network_guard_stops_every_group_before_the_first_final_upload_completes() -> None:
+    manager = _Manager()
+    first = _spec()
+    second = replace(first, thread_id="athr_other", sandbox_id="asbx_other")
+    manager.items[first.container_name] = manager._inspection(first, running=True)
+    manager.items[second.container_name] = manager._inspection(second, running=True)
+    first_upload_entered = threading.Event()
+    release_first_upload = threading.Event()
+    archived: list[str] = []
+
+    def archive(spec, _inspection, _members) -> None:
+        if spec.sandbox_id == first.sandbox_id:
+            first_upload_entered.set()
+            assert release_first_upload.wait(timeout=2)
+        archived.append(spec.sandbox_id)
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor.register_manifest(
+        first,
+        _members(),
+        expected_container_id="container-shared",
+    )
+    supervisor.register_manifest(
+        second,
+        [
+            replace(
+                _members()[0],
+                thread_id="athr_other",
+                resident_slot_id=0,
+            )
+        ],
+        expected_container_id="container-shared",
+    )
+    manager.host_rule_failures = 2
+    stopped: list[SharedSessionDescriptor] = []
+    errors: list[BaseException] = []
+
+    def guard() -> None:
+        try:
+            stopped.extend(supervisor.guard_network())
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    guarding = threading.Thread(target=guard)
+    guarding.start()
+    assert first_upload_entered.wait(timeout=1)
+    try:
+        assert manager.items[first.container_name].running is False
+        assert manager.items[second.container_name].running is False
+        assert manager.items[first.container_name].networks == ("agent-net",)
+        assert manager.items[second.container_name].networks == ("agent-net",)
+    finally:
+        release_first_upload.set()
+        guarding.join(timeout=2)
+
+    assert not guarding.is_alive()
+    assert errors == []
+    assert {item.sandbox_id for item in stopped} == {"asbx_shared", "asbx_other"}
+    assert archived == ["asbx_shared", "asbx_other"]
+    assert manager.items[first.container_name].networks == ()
+    assert manager.items[second.container_name].networks == ()
+
+
+def test_network_guard_stages_a_running_pending_group_before_its_upload() -> None:
+    manager = _Manager()
+    first = _spec()
+    second = replace(first, thread_id="athr_other", sandbox_id="asbx_other")
+    manager.items[first.container_name] = manager._inspection(first, running=True)
+    manager.items[second.container_name] = manager._inspection(second, running=True)
+    first_upload_entered = threading.Event()
+    release_first_upload = threading.Event()
+    archived: list[str] = []
+
+    def archive(spec, _inspection, _members) -> None:
+        if spec.sandbox_id == first.sandbox_id:
+            first_upload_entered.set()
+            assert release_first_upload.wait(timeout=2)
+        archived.append(spec.sandbox_id)
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda *_args: None,
+        stopped_archive_hook=archive,
+    )
+    supervisor.register_manifest(
+        first,
+        _members(),
+        expected_container_id="container-shared",
+    )
+    supervisor.register_manifest(
+        second,
+        [replace(_members()[0], thread_id="athr_other", resident_slot_id=0)],
+        expected_container_id="container-shared",
+    )
+    original_stop = manager.stop
+    fail_first_stop = True
+
+    def stop(spec, **kwargs):
+        nonlocal fail_first_stop
+        if spec.sandbox_id == first.sandbox_id and fail_first_stop:
+            fail_first_stop = False
+            raise SandboxError("docker stop response lost")
+        return original_stop(spec, **kwargs)
+
+    manager.stop = stop  # type: ignore[method-assign]
+    with pytest.raises(SandboxError, match="docker stop response lost"):
+        supervisor.stop_if_idle(first.thread_id, generation=first.generation)
+    assert manager.items[first.container_name].running is True
+
+    manager.host_rule_failures = 2
+    stopped: list[SharedSessionDescriptor] = []
+    errors: list[BaseException] = []
+
+    def guard() -> None:
+        try:
+            stopped.extend(supervisor.guard_network())
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    guarding = threading.Thread(target=guard)
+    guarding.start()
+    assert first_upload_entered.wait(timeout=1)
+    try:
+        assert manager.items[first.container_name].running is False
+        assert manager.items[second.container_name].running is False
+        assert manager.items[first.container_name].networks == ("agent-net",)
+        assert manager.items[second.container_name].networks == ("agent-net",)
+    finally:
+        release_first_upload.set()
+        guarding.join(timeout=2)
+
+    assert not guarding.is_alive()
+    assert errors == []
+    assert {item.sandbox_id for item in stopped} == {"asbx_shared", "asbx_other"}
+    assert archived == ["asbx_shared", "asbx_other"]
+    assert manager.items[first.container_name].networks == ()
+    assert manager.items[second.container_name].networks == ()
+
+
+def test_network_guard_prepare_failure_exact_stops_and_blocks_without_upload() -> None:
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    events: list[str] = []
+
+    def prepare(_spec, inspection) -> None:
+        assert inspection.running is True
+        events.append("prepare")
+        raise SandboxError("marker preparation failed")
+
+    def invalidate(_spec, inspection) -> None:
+        events.append("invalidate:running" if inspection.running else "invalidate:stopped")
+
+    def archive(*_args) -> None:
+        events.append("archive")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_invalidate_hook=invalidate,
+        stopped_archive_hook=archive,
+    )
+    supervisor.register_manifest(
+        spec,
+        _members(),
+        expected_container_id="container-shared",
+    )
+    manager.host_rule_failures = 2
+
+    assert supervisor.guard_network() == []
+
+    current = manager.items[spec.container_name]
+    assert current.running is False
+    assert current.networks == ("agent-net",)
+    assert events == ["prepare", "invalidate:running"]
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened(spec.thread_id)
+
+
+def test_flush_block_persistence_failure_still_stops_and_fences_admission() -> None:
+    events: list[str] = []
+    manager, supervisor = _archive_shutdown_group(
+        events=events,
+        fail_transport_close=True,
+        fail_invalidate=True,
+    )
+
+    with pytest.raises(SandboxError, match="shutdown stop/archive"):
+        supervisor.stop_all_for_shutdown()
+
+    assert events[-2:] == ["invalidate", "stop:retain"]
+    current = manager.items[_spec().container_name]
+    assert current.running is False
+    assert current.networks == ("agent-net",)
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened("athr_source")
+    with pytest.raises(SessionBusy, match="final archive"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:3",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+
+
+def test_restart_reconcile_stops_a_blocked_running_orphan_without_archiving() -> None:
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    archive_calls: list[object] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda *_args: (_ for _ in ()).throw(
+            SandboxArchiveBlocked("native flush failure")
+        ),
+        stopped_archive_hook=lambda *args: archive_calls.append(args),
+    )
+
+    descriptors = supervisor.reconcile()
+
+    assert manager.stop_count == 1
+    assert archive_calls == []
+    assert manager.items[spec.container_name].running is False
+    assert manager.items[spec.container_name].networks == ("agent-net",)
+    assert descriptors[0].running is False
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened(spec.thread_id)
+
+
+def test_durable_flush_block_survives_stop_failure_and_replacement_controller() -> None:
+    class DurableManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.final_marker: bytes | None = None
+            self.fail_stops = 1
+
+        def write_final_archive_marker(self, _spec, payload, **_kwargs) -> None:
+            self.final_marker = payload
+
+        def read_running_final_archive_marker(self, _spec, **_kwargs):
+            return self.final_marker
+
+        def read_stopped_final_archive_marker_optional(self, _spec, **_kwargs):
+            return self.final_marker
+
+        def read_final_archive_marker(self, _spec, **_kwargs):
+            if self.final_marker is None:
+                raise SandboxError("final archive marker is missing")
+            return self.final_marker
+
+        def write_stopped_final_archive_marker(self, _spec, payload, **_kwargs) -> None:
+            self.final_marker = payload
+
+        def clear_final_archive_marker(self, _spec, **_kwargs) -> None:
+            self.final_marker = None
+
+        def stop(self, spec, **kwargs):
+            if self.fail_stops:
+                self.fail_stops -= 1
+                self.stop_count += 1
+                raise SandboxError("docker stop response lost")
+            return super().stop(spec, **kwargs)
+
+    class Service:
+        def __init__(self, config) -> None:
+            self.config = config
+            self.final_calls = 0
+
+        def start(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def status(self):
+            return {"enabled": True, "running": True}
+
+        def probe_initial(self, *_args, **_kwargs):
+            raise AssertionError("initial capture was not expected")
+
+        def capture_initial(self, *_args, **_kwargs):
+            raise AssertionError("initial capture was not expected")
+
+        def queue_final(self, *_args, **_kwargs):
+            self.final_calls += 1
+            raise AssertionError("blocked native history must never upload")
+
+    manager = DurableManager()
+    services: list[Service] = []
+
+    def controller() -> SandboxArchiveController:
+        return SandboxArchiveController(
+            manager,  # type: ignore[arg-type]
+            namespace="pool-east",
+            service_factory=lambda config: services.append(Service(config)) or services[-1],
+        )
+
+    policy = SandboxArchivePolicy(
+        enabled=True,
+        region="us-east-1",
+        kms_key_arn=("arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789abc"),
+        expected_bucket_owner="123456789012",
+        revision=1,
+    ).as_dict()
+    first_controller = controller()
+    first_controller.start()
+    first_controller.apply(policy)
+    factory = _TransportFactory()
+    first = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=factory,
+        stopped_archive_prepare_hook=first_controller.prepare_final,
+        stopped_archive_invalidate_hook=first_controller.invalidate_final,
+        stopped_archive_hook=first_controller.queue_final,
+    )
+    first.register_manifest(_spec(), _members())
+    lease = first.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    first.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    first.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+    factory.transports[0].close = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("native flush failed")
+    )
+
+    with pytest.raises(SandboxError, match="docker stop response lost"):
+        first.stop_if_idle("athr_source", generation=1)
+    assert manager.final_marker is not None
+    assert b'"state":"blocked"' in manager.final_marker
+    assert manager.items[_spec().container_name].running is True
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        first.operation_opened("athr_source")
+    first_controller.close()
+
+    replacement_controller = controller()
+    replacement_controller.start()
+    replacement_controller.apply(policy)
+    replacement = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=replacement_controller.prepare_final,
+        stopped_archive_invalidate_hook=replacement_controller.invalidate_final,
+        stopped_archive_hook=replacement_controller.queue_final,
+    )
+
+    descriptors = replacement.reconcile()
+
+    assert descriptors[0].running is False
+    assert manager.stop_count == 2
+    assert manager.items[_spec().container_name].networks == ("agent-net",)
+    assert all(service.final_calls == 0 for service in services)
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        replacement.operation_opened(_spec().thread_id)
+    replacement_controller.close()
+
+
+def test_archive_start_fence_runs_only_for_a_stopped_to_running_transition() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.marker: bytes | None = None
+            self.stopped_reads = 0
+            self.marker_writes = 0
+            self.marker_clears = 0
+
+        def read_stopped_final_archive_marker_optional(self, spec, *, expected_container_id):
+            current = self.items[spec.container_name]
+            assert current.container_id == expected_container_id
+            assert current.running is False
+            self.stopped_reads += 1
+            return self.marker
+
+        def write_stopped_final_archive_marker(
+            self, spec, payload, *, expected_container_id
+        ) -> None:
+            current = self.items[spec.container_name]
+            assert current.container_id == expected_container_id
+            assert current.running is False
+            self.marker = payload
+            self.marker_writes += 1
+
+        def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
+            assert self.items[spec.container_name].container_id == expected_container_id
+            self.marker = None
+            self.marker_clears += 1
+
+    manager = MarkerManager()
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace="pool-east",
+    )
+    controller.start()
+    controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        starting_archive_prepare_hook=controller.prepare_start,
+        started_archive_hook=controller.complete_start,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    manager.stop(_spec(), release_networks=False)
+
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    supervisor.abandon("athr_source", first.token, lost=False)
+    second = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+
+    assert second.token
+    assert manager.items[_spec().container_name].running is True
+    assert manager.stopped_reads == 1
+    assert manager.marker_writes == 1
+    assert manager.marker_clears == 1
+    controller.close()
+
+
+def test_failed_start_marker_completion_is_retried_in_place_before_snapshot() -> None:
+    manager = _Manager()
+    completions = 0
+    preparations = 0
+
+    def prepare(_spec, inspection) -> None:
+        nonlocal preparations
+        assert inspection.running is False
+        preparations += 1
+
+    def complete(_spec, inspection) -> None:
+        nonlocal completions
+        assert inspection.running is True
+        completions += 1
+        if completions == 1:
+            raise RuntimeError("marker clear failed")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        starting_archive_prepare_hook=prepare,
+        started_archive_hook=complete,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    manager.stop(_spec(), release_networks=False)
+
+    with pytest.raises(RuntimeError, match="marker clear failed"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    assert lease.token
+    supervisor.abandon("athr_source", lease.token, lost=False)
+
+    captured = False
+
+    def capture(_backend):
+        nonlocal captured
+        captured = True
+        return {"patch": ""}
+
+    snapshot = supervisor.capture_snapshot("athr_source", capture=capture)
+
+    assert snapshot == {"patch": ""}
+    assert captured is True
+    assert preparations == 1
+    assert completions == 2
+    assert manager.stop_count == 1
+
+
+def test_initial_archive_is_fenced_while_a_group_start_is_in_progress() -> None:
+    class BlockingStartManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block_start = False
+            self.start_entered = threading.Event()
+            self.start_release = threading.Event()
+
+        def start(self, spec, **kwargs):
+            current = self.items[spec.container_name]
+            if self.block_start and not current.running:
+                self.start_entered.set()
+                assert self.start_release.wait(timeout=2)
+            return super().start(spec, **kwargs)
+
+    manager = BlockingStartManager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    manager.stop(_spec(), release_networks=False)
+    manager.block_start = True
+    opened: list[tuple[str, SharedSessionDescriptor]] = []
+    errors: list[BaseException] = []
+
+    def open_operation() -> None:
+        try:
+            opened.append(supervisor.operation_opened("athr_peer"))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    opening = threading.Thread(target=open_operation)
+    opening.start()
+    assert manager.start_entered.wait(timeout=1)
+    captured = False
+
+    def capture(*_args):
+        nonlocal captured
+        captured = True
+        return {"enabled": True, "stored": True}
+
+    try:
+        with pytest.raises(SessionBusy, match="start is in progress"):
+            supervisor.capture_initial_archive(
+                "athr_source",
+                lease.token,
+                capture=capture,
+            )
+    finally:
+        manager.start_release.set()
+        opening.join(timeout=2)
+
+    assert not opening.is_alive()
+    assert errors == []
+    assert captured is False
+    token, _ = opened[0]
+    supervisor.operation_closed("athr_peer", token)
+
+
+@pytest.mark.parametrize("entrypoint", ["operation", "terminal"])
+def test_failed_start_marker_completion_is_retried_by_same_mutation_entrypoint(
+    entrypoint: str,
+) -> None:
+    manager = _Manager()
+    completions = 0
+
+    def complete(_spec, inspection) -> None:
+        nonlocal completions
+        assert inspection.running is True
+        completions += 1
+        if completions == 1:
+            raise RuntimeError("marker clear failed")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        starting_archive_prepare_hook=lambda _spec, inspection: (
+            None if not inspection.running else pytest.fail("start fence requires stopped state")
+        ),
+        started_archive_hook=complete,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    manager.stop(_spec(), release_networks=False)
+    opened = (
+        supervisor.operation_opened if entrypoint == "operation" else supervisor.terminal_opened
+    )
+
+    with pytest.raises(RuntimeError, match="marker clear failed"):
+        opened("athr_source")
+
+    token, descriptor = opened("athr_source")
+
+    assert token
+    assert descriptor.running is True
+    assert completions == 2
+    assert manager.stop_count == 1
+    if entrypoint == "operation":
+        supervisor.operation_closed("athr_source", token)
+    else:
+        supervisor.terminal_closed("athr_source", token)
+
+
+def test_pending_final_archive_retries_after_external_bridge_removal() -> None:
+    manager = _Manager()
+    archive_calls = 0
+
+    def archive(_spec, _inspection, _members) -> None:
+        nonlocal archive_calls
+        archive_calls += 1
+        if archive_calls == 1:
+            raise RuntimeError("upload response lost")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=lambda *_args: None,
+        stopped_archive_hook=archive,
+    )
+    supervisor.register_manifest(_spec(), _members())
+
+    with pytest.raises(RuntimeError, match="upload response lost"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+    stopped = manager.items[_spec().container_name]
+    assert stopped.running is False
+    assert stopped.networks == ("agent-net",)
+    manager.items[_spec().container_name] = replace(stopped, networks=())
+
+    descriptor = supervisor.stop_if_idle("athr_source", generation=1)
+
+    assert descriptor.running is False
+    assert archive_calls == 2
+    assert manager.items[_spec().container_name].networks == ()
+
+
+def test_direct_orphan_archive_retry_clears_the_admission_fence() -> None:
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    manager.read_running_final_archive_marker = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: b"durable-pending-marker"
+    )
+    archive_calls = 0
+
+    def archive(_spec, _inspection, _members) -> None:
+        nonlocal archive_calls
+        archive_calls += 1
+        if archive_calls == 1:
+            raise RuntimeError("upload failed")
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+
+    descriptors = supervisor.reconcile()
+
+    assert [item.thread_id for item in descriptors] == [spec.thread_id]
+    assert archive_calls == 1
+    with pytest.raises(SessionBusy, match="final archive"):
+        supervisor.operation_opened(spec.thread_id)
+
+    stopped = supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    token, _ = supervisor.operation_opened(spec.thread_id)
+
+    assert stopped.running is False
+    assert archive_calls == 2
+    supervisor.operation_closed(spec.thread_id, token)
+
+
+def test_ambiguous_post_start_failure_remains_pending_until_exact_stop_retry() -> None:
+    class UncertainStartManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_start_once = True
+            self.fail_stop_once = True
+
+        def start(self, spec, **kwargs):
+            if self.fail_start_once:
+                self.fail_start_once = False
+                current = self.items[spec.container_name]
+                callback = kwargs.get("before_stopped_start")
+                assert callback is not None and current.running is False
+                callback(current)
+                self.items[spec.container_name] = replace(
+                    current,
+                    running=True,
+                    status=ChatSandboxStatus.RUNNING,
+                )
+                raise SandboxError("guest network proof failed")
+            return super().start(spec, **kwargs)
+
+        def stop(self, spec, **kwargs):
+            if self.fail_stop_once:
+                self.fail_stop_once = False
+                raise SandboxError("fail-stop response lost")
+            return super().stop(spec, **kwargs)
+
+    manager = UncertainStartManager()
+    archived: list[tuple] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        starting_archive_prepare_hook=lambda *_args: None,
+        started_archive_hook=lambda *_args: None,
+        stopped_archive_prepare_hook=lambda *_args: None,
+        stopped_archive_hook=lambda *args: archived.append(args),
+    )
+    supervisor.register_manifest(_spec(), _members())
+    manager.items[_spec().container_name] = manager._inspection(_spec(), running=False)
+
+    with pytest.raises(SandboxError, match="fail-stop response lost"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+    with pytest.raises(SessionBusy, match="final archive retry"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+
+    supervisor.reconcile()
+
+    assert len(archived) == 1
+    current = manager.items[_spec().container_name]
+    assert current.running is False
+    assert current.networks == ()
+
+
+def test_external_stopped_group_with_missing_final_marker_keeps_its_bridge() -> None:
+    manager = _Manager()
+    spec = _spec()
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda *_args: (_ for _ in ()).throw(
+            SandboxError("final archive marker is missing")
+        ),
+    )
+    supervisor.register_manifest(spec, _members())
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+
+    descriptors = supervisor.list()
+
+    assert all(item.running is False for item in descriptors)
+    assert manager.items[spec.container_name].networks == ("agent-net",)
+    assert manager.stop_count == 0
+    with pytest.raises(SessionBusy, match="native flush failure"):
+        supervisor.operation_opened(spec.thread_id)
+
+
 @pytest.mark.parametrize("generations", [{"athr_source": 0}, {"athr_source": 1, "athr_peer": 0}])
 def test_delayed_admin_stop_cannot_stop_changed_members(generations):
     manager = _Manager()
@@ -1768,10 +3337,20 @@ def test_new_activation_waits_for_an_inflight_idle_stop_then_restarts_exact_cont
             self.stop_entered = threading.Event()
             self.allow_stop = threading.Event()
 
-        def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        def stop(
+            self,
+            spec: ChatSandboxSpec,
+            *,
+            expected_container_id: str | None = None,
+            release_networks: bool = True,
+        ) -> ChatSandboxInspection:
             self.stop_entered.set()
             assert self.allow_stop.wait(timeout=2)
-            return super().stop(spec)
+            return super().stop(
+                spec,
+                expected_container_id=expected_container_id,
+                release_networks=release_networks,
+            )
 
     manager = BlockingStopManager()
     factory = _TransportFactory()
