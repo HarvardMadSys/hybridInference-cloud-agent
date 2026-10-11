@@ -128,7 +128,7 @@ class PostgresSessionForkRepository:
                        g.container_id, g.container_name, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
                        g.execution_profile, g.state AS sandbox_state,
-                       g.resident_slot_capacity, g.memory_limit, g.cpu_limit,
+                       g.resident_slot_capacity, g.memory_limit, g.cpu_limit, g.disk_limit_mib,
                        g.stop_timeout_seconds,
                        {NATIVE_FORK_CAPABLE} AS native_fork_capable
                 FROM agent_thread_sandbox_memberships m

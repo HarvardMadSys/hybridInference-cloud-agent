@@ -569,10 +569,30 @@ describe('running sandbox inventory', () => {
     expect(statValue('Terminals', stats)).toHaveTextContent('0');
     expect(statValue('Active operations', stats)).toHaveTextContent('0');
     expect(statValue('Snapshot', stats)).toHaveTextContent('ready');
+    expect(statValue('Configured limits', stats)).toHaveTextContent(
+      '2 CPU · 4g memory · No disk quota',
+    );
     fireEvent.click(button);
     expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
     expect(button).toHaveAttribute('aria-expanded', 'false');
   });
+
+  it.each([
+    [20480, '20 GiB disk'],
+    [1500, '1500 MiB disk'],
+    [0, 'No disk quota'],
+  ] as const)(
+    'shows a retained disk limit of %s MiB in configured limits',
+    async (quota, label) => {
+      vi.mocked(getAdminSandboxes).mockResolvedValue(page([sandbox({ disk_limit_mib: quota })]));
+      render(<AdminSandboxesPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Show details for Fix login' }));
+      const stats = screen.getByLabelText('Stats for Fix login');
+      expect(statValue('Configured limits', stats)).toHaveTextContent(
+        `2 CPU · 4g memory · ${label}`,
+      );
+    },
+  );
 
   it('shows fleet resource totals only for fresh measurements and states their coverage', async () => {
     vi.mocked(getAdminSandboxes).mockResolvedValue(

@@ -2092,6 +2092,21 @@ def _run_shared_live_attempt(
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
         return 2
+    if existing:
+        # Resource limits belong to the retained group. A settings edit must
+        # not change its reservation or a fork's shared container. Legacy
+        # groups have no disk quota, including when a new default is set.
+        memory_limit = str(existing.get("memory_limit") or "4g")
+        cpu_limit = str(existing.get("cpu_limit") or "2")
+        disk_limit_mib = int(existing.get("disk_limit_mib") or 0)
+    else:
+        try:
+            memory_limit = f"{_sandbox_resource_setting('sandbox_memory_mib', settings)}m"
+            cpu_limit = f"{_sandbox_resource_setting('sandbox_cpu_millicores', settings) / 1000:g}"
+            disk_limit_mib = _sandbox_resource_setting("sandbox_disk_mib", settings)
+        except ValueError as exc:
+            finish_attempt("failed", str(exc))
+            return 2
     sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
     origin_thread_id = str(existing.get("origin_thread_id") or job.thread_id)
     seed_spec = ChatSandboxSpec(
@@ -2107,6 +2122,10 @@ def _run_shared_live_attempt(
         ),
         shared_live=True,
         resident_slot_capacity=capacity,
+        memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        disk_limit_mib=disk_limit_mib,
+        stop_timeout_s=int(existing.get("stop_timeout_seconds") or 10),
     )
     if existing:
         if existing.get("host") != host:
@@ -2131,6 +2150,7 @@ def _run_shared_live_attempt(
                 "resident_slot_capacity": capacity,
                 "memory_limit": seed_spec.memory_limit,
                 "cpu_limit": seed_spec.cpu_limit,
+                "disk_limit_mib": seed_spec.disk_limit_mib,
                 "stop_timeout_seconds": seed_spec.stop_timeout_s,
                 # What the image a new container is created from declares, so
                 # Fork can ask it of this group after the host moves on to a
@@ -2146,6 +2166,18 @@ def _run_shared_live_attempt(
         finish_attempt("failed", f"could not reserve shared chat sandbox: {exc}")
         return 2
 
+    if (
+        reservation.get("memory_limit") != seed_spec.memory_limit
+        or reservation.get("cpu_limit") != seed_spec.cpu_limit
+        or reservation.get("disk_limit_mib", 0) != seed_spec.disk_limit_mib
+    ):
+        finish_attempt(
+            "failed",
+            "Site misconfigured: the control plane did not confirm the reserved "
+            "container CPU, memory and disk limits. Update the control plane and host together.",
+        )
+        return 2
+
     spec = ChatSandboxSpec(
         thread_id=str(reservation.get("origin_thread_id") or origin_thread_id),
         sandbox_id=str(reservation["sandbox_id"]),
@@ -2157,6 +2189,7 @@ def _run_shared_live_attempt(
         resident_slot_capacity=int(reservation.get("resident_slot_capacity") or capacity),
         memory_limit=str(reservation.get("memory_limit") or seed_spec.memory_limit),
         cpu_limit=str(reservation.get("cpu_limit") or seed_spec.cpu_limit),
+        disk_limit_mib=int(reservation.get("disk_limit_mib", seed_spec.disk_limit_mib)),
         stop_timeout_s=int(reservation.get("stop_timeout_seconds") or seed_spec.stop_timeout_s),
     )
     activation_generation = int(reservation["activation_generation"])
@@ -3247,13 +3280,14 @@ def _turn_host_settings(raw: Any) -> dict[str, float]:
     """The runner's share of the runtime settings a turn was handed, checked again.
 
     The parent already resolved them, so this only drops what no turn should
-    act on: a key the runner does not apply, or a value that is not a positive
-    finite number. A setting dropped here is read from the environment instead.
+    act on: a key the runner does not apply, or a value that is not a usable
+    finite number. Zero is valid for the optional disk quota. A setting
+    dropped here is read from the environment instead.
     """
     return {
         key: float(value)
         for key, value in (reported_values(raw) or {}).items()
-        if key in RUNNER_SETTING_KEYS and value > 0
+        if key in RUNNER_SETTING_KEYS and (value > 0 or key == "sandbox_disk_mib")
     }
 
 
@@ -4262,7 +4296,33 @@ def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
             os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
             or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
         ),
+        **{
+            key: _sandbox_resource_setting(key, {})
+            for key in ("sandbox_cpu_millicores", "sandbox_memory_mib", "sandbox_disk_mib")
+        },
     }
+
+
+def _sandbox_resource_setting(key: str, settings: Mapping[str, float]) -> int:
+    """Read a bounded whole-number resource policy, preserving a zero disk quota."""
+    setting = HOST_SETTINGS_BY_KEY[key]
+    value = settings.get(key)
+    if value is None:
+        raw = os.environ.get(setting.env)
+        try:
+            value = int(raw) if raw else setting.default
+        except ValueError as exc:
+            raise ValueError(f"{setting.label} must be a whole number") from exc
+    try:
+        checked = int(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"{setting.label} must be a whole number") from exc
+    if isinstance(value, bool) or value != checked or not setting.accepts(checked):
+        raise ValueError(
+            f"{setting.label} must be a whole number from "
+            f"{setting.minimum} through {setting.maximum} {setting.unit}"
+        )
+    return checked
 
 
 def default_worker_id() -> str:

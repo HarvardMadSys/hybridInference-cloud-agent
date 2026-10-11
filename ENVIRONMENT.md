@@ -240,6 +240,7 @@ relay reachability and connection target policy.
 Host settings can be set from the admin pages instead of in each host's
 `.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
 `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_SHARED_RESIDENT_CAPACITY`,
+`AGENT_SANDBOX_CPU_MILLICORES`, `AGENT_SANDBOX_MEMORY_MIB`, `AGENT_SANDBOX_DISK_MIB`,
 `AGENT_TERMINAL_IDLE_TTL_SECONDS`, `AGENT_TERMINAL_HARD_TTL_SECONDS` and
 `AGENT_TERMINAL_MAX_SESSIONS`. The **Settings** page sets a value for every
 server (`PUT /admin/agent/host-settings`), and a server's details on the
@@ -257,6 +258,24 @@ and remain visible as diagnostic local values. Clearing a per-server value
 uses the global value or built-in default; clearing a global value uses the
 built-in default. The bounds an admin may set are in
 `cloud_agent_shared/host_settings.py` and are typo guards, not capacity statements.
+
+Container CPU, memory, and disk settings apply to new sandbox groups. Resuming a
+chat or forking it preserves the group's original limits; all members share
+those resources. CPU is entered as vCPU in the admin pages and stored in
+millicores (1 vCPU = 1000 millicores). Memory and disk accept MiB or GiB.
+Defaults are 2 vCPU, 4096 MiB memory, and no per-container disk quota. Initial
+environment values are `AGENT_SANDBOX_CPU_MILLICORES=2000`,
+`AGENT_SANDBOX_MEMORY_MIB=4096`, and `AGENT_SANDBOX_DISK_MIB=0`.
+
+A positive disk limit sets Docker's `--storage-opt size=<MiB>M` on the writable
+layer, including the workspace, caches, and installed files. It excludes the
+read-only image and memory-backed temporary files. This requires Docker
+`overlay2` on an XFS backing filesystem mounted with project quotas (`pquota`
+or `prjquota`). Docker refuses container creation when the storage backend does
+not support the requested quota. Set the disk value to 0 to create groups with
+no disk quota; resetting an override inherits the global value or default.
+The runner's existing storage attestation continues to measure the host
+filesystem rather than each sandbox's quota.
 
 The same cards also manage workspace and terminal resource limits. These
 additional environment names supply initial local values only:
@@ -277,7 +296,7 @@ additional environment names supply initial local values only:
 The values ride the heartbeat answer, so a host applies a change within one
 heartbeat (about 30 seconds) with no redeploy. Nothing running is interrupted:
 a turn keeps the time limit it started with, an existing sandbox keeps the
-session capacity it was created with, and the broker's terminal limits apply from its
+session capacity and CPU, memory, and disk limits it was created with, and the broker's terminal limits apply from its
 next sweep. Each host reports what it applies and what its own `.env` gives,
 and the page shows a value as *applying* until the host confirms it. A runner
 that predates this (it does not advertise `host-settings-v1`) keeps its `.env`

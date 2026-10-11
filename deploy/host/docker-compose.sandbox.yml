@@ -327,6 +327,10 @@ services:
       # Largest first-turn checkout, in MiB, counting its Git objects as well
       # as its files. Spooled through this container's disk, not its memory.
       AGENT_SOURCE_IMPORT_MAX_MIB: ${AGENT_SOURCE_IMPORT_MAX_MIB:-1024}
+      # Container sizes are bootstrap values; admin settings take over on heartbeat.
+      AGENT_SANDBOX_CPU_MILLICORES: ${AGENT_SANDBOX_CPU_MILLICORES:-2000}
+      AGENT_SANDBOX_MEMORY_MIB: ${AGENT_SANDBOX_MEMORY_MIB:-4096}
+      AGENT_SANDBOX_DISK_MIB: ${AGENT_SANDBOX_DISK_MIB:-0}
 
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}

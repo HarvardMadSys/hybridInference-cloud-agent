@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CPU_LIMIT_LABEL,
+    CHAT_DISK_LIMIT_LABEL,
     CHAT_GENERATION_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
     CHAT_MEMORY_LIMIT_LABEL,
@@ -2548,6 +2549,7 @@ class SharedChatSessionSupervisor:
                 sandbox_image_digest=labels.get(CHAT_IMAGE_DIGEST_LABEL) or None,
                 memory_limit=labels[CHAT_MEMORY_LIMIT_LABEL],
                 cpu_limit=labels[CHAT_CPU_LIMIT_LABEL],
+                disk_limit_mib=int(labels.get(CHAT_DISK_LIMIT_LABEL, "0")),
                 stop_timeout_s=int(labels[CHAT_STOP_TIMEOUT_LABEL]),
                 shared_live=True,
                 resident_slot_capacity=int(labels[CHAT_RESIDENT_CAPACITY_LABEL]),

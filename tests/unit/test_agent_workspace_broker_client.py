@@ -24,6 +24,7 @@ def _shared_snapshot() -> dict:
         "resident_slot_capacity": 8,
         "memory_limit": "4g",
         "cpu_limit": "2",
+        "disk_limit_mib": 16384,
         "stop_timeout_seconds": 10,
         "workspace_epoch": 4,
         "base_sha": "a" * 40,
@@ -153,10 +154,12 @@ async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkey
     assert capture[3]["workspace_epoch"] == 4
     assert capture[3]["base_sha"] == "a" * 40
     assert capture[3]["expected_container_id"] == "container-shared"
+    assert capture[3]["disk_limit_mib"] == 16384
     assert "user_id" not in capture[3] and "repo" not in capture[3]
     imported = calls[1]
     assert imported[:3] == ("POST", "athr_origin", "import-base")
     assert imported[3]["commit_sha"] == "b" * 40
+    assert imported[3]["disk_limit_mib"] == 16384
     assert imported[3]["bundle_b64"] == base64.b64encode(b"bundle").decode()
 
 
@@ -183,6 +186,7 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
         resident_slot_capacity=8,
         memory_limit="4g",
         cpu_limit="2",
+        disk_limit_mib=16384,
         stop_timeout_s=10,
         members=[],
         operation_id="asfo_test",
@@ -199,6 +203,7 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
     assert call[:3] == ("POST", "athr_source", "fork")
     assert call[3]["origin_thread_id"] == "athr_origin"
     assert call[3]["source_native_turn_no"] == 2
+    assert call[3]["disk_limit_mib"] == 16384
     assert call[4] == 180
 
 
@@ -230,6 +235,7 @@ async def test_shared_registration_projects_db_manifest_before_broker_recovery(m
     assert call[:3] == ("POST", "athr_origin", "register")
     assert call[3]["expected_container_id"] == "container-shared"
     assert call[3]["members"] == snapshot["members"]
+    assert call[3]["disk_limit_mib"] == 16384
     assert call[4] is None
 
 

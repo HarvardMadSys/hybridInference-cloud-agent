@@ -56,7 +56,7 @@ THREAD_SANDBOX_SOURCE = f"""
         m.thread_id, g.id AS sandbox_id, g.generation, g.host, g.container_id,
         g.container_name, g.runtime_id, g.runtime_version,
         g.sandbox_image_digest, g.execution_profile, g.state,
-        g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+        g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
         m.context_status, m.activation_generation, m.process_generation,
         m.active_attempt_id, m.admitted_job_id, m.admitted_at,
         m.last_settled_job_id, m.native_session_id, g.idle_deadline,

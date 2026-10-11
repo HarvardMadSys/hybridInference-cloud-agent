@@ -510,6 +510,9 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
     assert body["host_settings"] == {}
     definitions = {item["key"]: item for item in body["host_setting_definitions"]}
     assert set(definitions) == {
+        "sandbox_cpu_millicores",
+        "sandbox_memory_mib",
+        "sandbox_disk_mib",
         "agent_timeout_s",
         "chat_idle_timeout_s",
         "source_import_max_mib",
@@ -540,6 +543,66 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "maximum": 65536,
         "scope": "runner",
     }
+
+
+@pytest.mark.asyncio
+async def test_container_sizes_can_be_set_globally_overridden_and_reset(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    sizes = {
+        "sandbox_cpu_millicores": 1250,
+        "sandbox_memory_mib": 8192,
+        "sandbox_disk_mib": 20480,
+    }
+    response = await client.put(
+        "/admin/agent/host-settings", json={"settings": sizes}, headers=ADMIN
+    )
+    assert response.status_code == 200
+    assert response.json()["host_settings"] == sizes
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/settings",
+        json={"settings": {"sandbox_cpu_millicores": 500, "sandbox_disk_mib": 0}},
+        headers=ADMIN,
+    )
+    assert response.status_code == 200
+    assert response.json()["hosts"][0]["settings_desired"] == {
+        "sandbox_cpu_millicores": 500,
+        "sandbox_disk_mib": 0,
+    }
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/settings",
+        json={"settings": {"sandbox_cpu_millicores": None, "sandbox_disk_mib": None}},
+        headers=ADMIN,
+    )
+    assert response.status_code == 200
+    assert response.json()["hosts"][0]["settings_desired"] == {}
+    assert response.json()["host_settings"] == sizes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sandbox_cpu_millicores": 99},
+        {"sandbox_cpu_millicores": 256001},
+        {"sandbox_cpu_millicores": 1250.5},
+        {"sandbox_memory_mib": 127},
+        {"sandbox_memory_mib": 1048577},
+        {"sandbox_disk_mib": -1},
+        {"sandbox_disk_mib": 16777217},
+        {"sandbox_disk_mib": True},
+    ],
+)
+async def test_invalid_container_sizes_are_refused_without_saving(admin_client, change):
+    client, store = admin_client
+    response = await client.put(
+        "/admin/agent/host-settings", json={"settings": change}, headers=ADMIN
+    )
+    assert response.status_code == 422
+    assert store.global_settings == {}
+    assert len(store.audit) == 0
 
 
 @pytest.mark.asyncio

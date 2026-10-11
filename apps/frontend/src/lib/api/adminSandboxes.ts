@@ -42,6 +42,8 @@ export interface AdminSandbox {
   stop_requested_at?: string | null;
   memory_limit: string;
   cpu_limit: string;
+  /** Retained writable-layer quota; zero or absent on older responses means no quota. */
+  disk_limit_mib?: number;
   member_count: number;
   active_attempt_count: number;
   resource_usage?: AdminSandboxResourceUsage | null;

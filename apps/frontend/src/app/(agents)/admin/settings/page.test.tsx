@@ -149,6 +149,42 @@ const definitions: HostSettingDefinition[] = [
   },
 ];
 
+const resourceDefinitions: HostSettingDefinition[] = [
+  {
+    key: 'sandbox_cpu_millicores',
+    env: 'AGENT_SANDBOX_CPU_MILLICORES',
+    label: 'Container CPU',
+    description: 'CPU limit for new sandboxes. Existing sandboxes keep their limit.',
+    unit: 'millicores',
+    default: 2000,
+    minimum: 100,
+    maximum: 256000,
+    scope: 'runner',
+  },
+  {
+    key: 'sandbox_memory_mib',
+    env: 'AGENT_SANDBOX_MEMORY_MIB',
+    label: 'Container memory',
+    description: 'Memory limit for new sandboxes. Existing sandboxes keep their limit.',
+    unit: 'MiB',
+    default: 4096,
+    minimum: 128,
+    maximum: 1048576,
+    scope: 'runner',
+  },
+  {
+    key: 'sandbox_disk_mib',
+    env: 'AGENT_SANDBOX_DISK_MIB',
+    label: 'Container disk',
+    description: 'Disk quota for new sandboxes. Zero disables the per-container quota.',
+    unit: 'MiB',
+    default: 0,
+    minimum: 0,
+    maximum: 16777216,
+    scope: 'runner',
+  },
+];
+
 function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
     host: 'runner-a',
@@ -557,6 +593,54 @@ describe('agent versions', () => {
 });
 
 describe('global limits', () => {
+  it.each([
+    ['Container CPU', 'sandbox_cpu_millicores', 'vCPU', '1.25', 1250],
+    ['Container memory', 'sandbox_memory_mib', 'GiB', '8', 8192],
+    ['Container disk', 'sandbox_disk_mib', 'GiB', '20', 20480],
+  ] as const)(
+    'saves %s in the API unit and tracks application separately',
+    async (label, key, unit, amount, value) => {
+      const defaults = Object.fromEntries(
+        resourceDefinitions.map((definition) => [definition.key, definition.default]),
+      );
+      const resourcePool = pool({
+        host_setting_definitions: resourceDefinitions,
+        hosts: [host({ settings_applied: defaults })],
+      });
+      list.mockResolvedValue(resourcePool);
+      setLimit.mockResolvedValue({ ...resourcePool, host_settings: { [key]: value } });
+      renderSettings('Sandbox');
+
+      const input = await screen.findByLabelText(`${label} for all servers`);
+      fireEvent.change(screen.getByLabelText(`${label} for all servers unit`), {
+        target: { value: unit },
+      });
+      fireEvent.change(input, { target: { value: amount } });
+      submit(input);
+
+      await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ [key]: value }));
+      expect(await screen.findByText('Applied on 0 of 1 server')).toBeInTheDocument();
+    },
+  );
+
+  it('saves zero disk quota as a value and clears it separately', async () => {
+    const resourcePool = pool({
+      host_setting_definitions: resourceDefinitions,
+      host_settings: { sandbox_disk_mib: 20480 },
+    });
+    list.mockResolvedValue(resourcePool);
+    setLimit.mockResolvedValueOnce({ ...resourcePool, host_settings: { sandbox_disk_mib: 0 } });
+    setLimit.mockResolvedValueOnce({ ...resourcePool, host_settings: {} });
+    renderSettings('Sandbox');
+
+    const input = await screen.findByLabelText('Container disk for all servers');
+    fireEvent.change(input, { target: { value: '0' } });
+    submit(input);
+    await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ sandbox_disk_mib: 0 }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
+    await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ sandbox_disk_mib: null }));
+  });
+
   it('does not offer controls when no limits were reported', async () => {
     list.mockResolvedValue(pool({ host_setting_definitions: undefined }));
     renderSettings('Sandbox');

@@ -28,6 +28,13 @@ export function formatCpu(value: number | null | undefined): string {
   return amount === null ? 'Unavailable' : `${amount.toFixed(2)} cores`;
 }
 
+export function formatDiskLimit(value: number | undefined): string {
+  if (value === undefined || value === 0) return 'No disk quota';
+  const amount = finiteMetric(value);
+  if (amount === null) return 'Unavailable disk quota';
+  return amount % 1024 === 0 ? `${amount / 1024} GiB disk` : `${amount} MiB disk`;
+}
+
 export function formatRate(value: number | null | undefined): string {
   return finiteMetric(value) === null ? 'Unavailable' : `${formatBytes(value)}/s`;
 }

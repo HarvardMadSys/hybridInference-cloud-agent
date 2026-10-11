@@ -49,7 +49,7 @@ class PostgresSnapshotRepository:
                        s.anchor_job_id, s.base_sha, g.generation,
                        g.origin_thread_id, g.container_id, g.container_name,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
-                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
                        g.resident_slot_capacity,
                        COALESCE((
                            SELECT jsonb_agg(
@@ -435,7 +435,7 @@ class PostgresSnapshotRepository:
                        g.origin_thread_id,
                        g.generation, g.container_id, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
-                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
                        g.resident_slot_capacity,
                        COALESCE((
                            SELECT jsonb_agg(
@@ -531,6 +531,7 @@ class PostgresSnapshotRepository:
                     "sandbox_image_digest": snapshot["sandbox_image_digest"],
                     "memory_limit": snapshot["memory_limit"],
                     "cpu_limit": snapshot["cpu_limit"],
+                    "disk_limit_mib": snapshot["disk_limit_mib"],
                     "stop_timeout_seconds": int(snapshot["stop_timeout_seconds"]),
                     "resident_slot_capacity": int(snapshot["resident_slot_capacity"]),
                     "members": load_json(snapshot["members"]) or [],
@@ -686,7 +687,7 @@ class PostgresSnapshotRepository:
                        latest.anchor_job_id, latest.published_commit_sha,
                        g.origin_thread_id, g.generation, g.container_id,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
-                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
                        g.resident_slot_capacity, t.repo, j.user_id,
                        COALESCE((
                            SELECT jsonb_agg(

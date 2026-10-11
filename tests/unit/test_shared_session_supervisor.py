@@ -494,9 +494,10 @@ def test_native_answer_delivery_holds_the_owner_fence_against_expiry(monkeypatch
     ) == InputOutcome(False, "turn_ended")
 
 
-def test_broker_reconcile_stops_orphan_processes_before_accepting_requests():
+@pytest.mark.parametrize("disk_limit_mib", [0, 16384])
+def test_broker_reconcile_stops_orphan_processes_before_accepting_requests(disk_limit_mib):
     manager = _Manager()
-    spec = _spec()
+    spec = replace(_spec(), disk_limit_mib=disk_limit_mib)
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -1400,8 +1401,10 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_registered", [False, True])
+@pytest.mark.parametrize("disk_limit_mib", [0, 16384])
 async def test_broker_fork_materializes_reserved_target_and_replays_stale_manifest(
     already_registered,
+    disk_limit_mib,
 ):
     """A durable child reservation must neither block Fork nor erase its retry."""
     manager = _Manager()
@@ -1415,7 +1418,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
     supervisor = SharedChatSessionSupervisor(
         manager, transport_factory=factory, native_forker=native_forker
     )
-    spec = _spec()
+    spec = replace(_spec(), disk_limit_mib=disk_limit_mib)
     reserved = SharedMemberManifest(thread_id="athr_child", resident_slot_id=2)
     members = [*_members(), reserved]
     supervisor.register_manifest(spec, members if already_registered else _members())
@@ -1435,6 +1438,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         "resident_slot_capacity": spec.resident_slot_capacity,
         "memory_limit": spec.memory_limit,
         "cpu_limit": spec.cpu_limit,
+        "disk_limit_mib": spec.disk_limit_mib,
         "stop_timeout_s": spec.stop_timeout_s,
         "members": [asdict(member) for member in members],
         "operation_id": "fork-reserved-target",

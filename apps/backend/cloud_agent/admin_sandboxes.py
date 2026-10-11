@@ -95,6 +95,7 @@ class AdminSandbox(BaseModel):
     stop_requested_at: datetime | None = None
     memory_limit: str
     cpu_limit: str
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     member_count: int = Field(ge=0)
     active_attempt_count: int = Field(ge=0)
     resident_slot_capacity: int = Field(8, ge=1)

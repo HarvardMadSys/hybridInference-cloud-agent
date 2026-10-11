@@ -15,6 +15,7 @@ import {
   finiteMetric,
   formatBytes,
   formatCpu,
+  formatDiskLimit,
   formatDuration,
   formatRate,
   sampleFreshness,
@@ -613,7 +614,10 @@ function SandboxDetails({
     ['Idle timeout', dateTime(sandbox.idle_deadline)],
     ['Last activity', dateTime(sandbox.last_activity_at)],
     ['Execution profile', sandbox.execution_profile],
-    ['Configured limits', `${sandbox.cpu_limit} CPU · ${sandbox.memory_limit} memory`],
+    [
+      'Configured limits',
+      `${sandbox.cpu_limit} CPU · ${sandbox.memory_limit} memory · ${formatDiskLimit(sandbox.disk_limit_mib)}`,
+    ],
     ['Reported memory limit', formatBytes(usage?.memory_limit_bytes)],
     ['Container ID', sandbox.container_id ?? 'Unavailable'],
   ];

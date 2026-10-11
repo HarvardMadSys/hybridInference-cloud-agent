@@ -81,6 +81,7 @@ CHAT_RUNTIME_VERSION_LABEL = "org.freeinference.chat-runtime-version"
 CHAT_IMAGE_DIGEST_LABEL = "org.freeinference.chat-image-digest"
 CHAT_MEMORY_LIMIT_LABEL = "org.freeinference.chat-memory-limit"
 CHAT_CPU_LIMIT_LABEL = "org.freeinference.chat-cpu-limit"
+CHAT_DISK_LIMIT_LABEL = "org.freeinference.chat-disk-limit-mib"
 CHAT_STOP_TIMEOUT_LABEL = "org.freeinference.chat-stop-timeout-seconds"
 CHAT_SHARED_LABEL = "org.freeinference.chat-shared-live"
 CHAT_RESIDENT_CAPACITY_LABEL = "org.freeinference.chat-resident-slot-capacity"
@@ -296,6 +297,7 @@ class ChatSandboxSpec:
     sandbox_image_digest: str | None = None
     memory_limit: str = "4g"
     cpu_limit: str = "2"
+    disk_limit_mib: int = 0
     stop_timeout_s: int = 10
     shared_live: Literal[True] = True
     resident_slot_capacity: int = 8
@@ -327,6 +329,12 @@ class ChatSandboxSpec:
             raise ValueError("generation must be positive")
         if not 1 <= self.stop_timeout_s <= 300:
             raise ValueError("stop_timeout_s must be between 1 and 300")
+        if (
+            not isinstance(self.disk_limit_mib, int)
+            or isinstance(self.disk_limit_mib, bool)
+            or not 0 <= self.disk_limit_mib <= 16777216
+        ):
+            raise ValueError("disk_limit_mib must be a whole number between 0 and 16777216")
         if not 2 <= self.resident_slot_capacity <= MEMBER_UID_LIMIT:
             raise ValueError(f"resident_slot_capacity must be between 2 and {MEMBER_UID_LIMIT}")
         reserved = {
@@ -340,6 +348,7 @@ class ChatSandboxSpec:
             CHAT_IMAGE_DIGEST_LABEL,
             CHAT_MEMORY_LIMIT_LABEL,
             CHAT_CPU_LIMIT_LABEL,
+            CHAT_DISK_LIMIT_LABEL,
             CHAT_STOP_TIMEOUT_LABEL,
             CHAT_SHARED_LABEL,
             CHAT_RESIDENT_CAPACITY_LABEL,
@@ -370,6 +379,8 @@ class ChatSandboxSpec:
             labels[CHAT_RUNTIME_VERSION_LABEL] = self.runtime_version
         if self.sandbox_image_digest:
             labels[CHAT_IMAGE_DIGEST_LABEL] = self.sandbox_image_digest
+        if self.disk_limit_mib:
+            labels[CHAT_DISK_LIMIT_LABEL] = str(self.disk_limit_mib)
         labels[CHAT_SHARED_LABEL] = "true"
         labels[CHAT_RESIDENT_CAPACITY_LABEL] = str(self.resident_slot_capacity)
         labels.update(self.labels)
@@ -1710,6 +1721,11 @@ class ChatSandboxManager:
                 f"uid={self.backend.uid},gid={self.backend.gid}"
             ),
         ]
+        if spec.disk_limit_mib:
+            # Docker enforces this against the writable layer. Unsupported
+            # drivers/backing filesystems reject creation; never retry without
+            # the requested quota or pretend it was applied.
+            argv += ["--storage-opt", f"size={spec.disk_limit_mib}M"]
         for slot_id in range(spec.resident_slot_capacity):
             uid = MEMBER_UID_BASE + slot_id
             argv += [
@@ -3817,6 +3833,11 @@ class ChatSandboxManager:
             for key, value in expected.items()
             if inspection.labels.get(key) != value
         }
+        # Groups created before disk limits have no label and no quota. An
+        # unexpected positive quota is still an immutable policy mismatch.
+        disk_limit = inspection.labels.get(CHAT_DISK_LIMIT_LABEL, "0")
+        if disk_limit != str(spec.disk_limit_mib):
+            mismatched[CHAT_DISK_LIMIT_LABEL] = (disk_limit, str(spec.disk_limit_mib))
         namespace = inspection.labels.get(CHAT_NAMESPACE_LABEL)
         if namespace is not None and namespace != self.backend.sandbox_namespace:
             mismatched[CHAT_NAMESPACE_LABEL] = (
@@ -3855,10 +3876,23 @@ class ChatSandboxManager:
             "--pid",
             "--ipc",
             "--uts",
+            "--memory",
+            "-m",
+            "--memory-swap",
+            "--memory-reservation",
+            "--cpus",
+            "--cpu-period",
+            "--cpu-quota",
+            "--cpu-shares",
+            "-c",
+            "--storage-opt",
         }
         for token in self.backend.extra_args:
             option = token.split("=", 1)[0]
-            if option in refused:
+            short_override = not token.startswith("--") and any(
+                token.startswith(short) for short in ("-m", "-c", "-e", "-v")
+            )
+            if option in refused or short_override:
                 raise SandboxError(
                     f"AGENT_SANDBOX_EXTRA_ARGS option {option!r} is unsafe for retained chats"
                 )

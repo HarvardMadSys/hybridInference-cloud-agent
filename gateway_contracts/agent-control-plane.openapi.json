@@ -1619,6 +1619,13 @@
             "title": "Created At",
             "type": "string"
           },
+          "disk_limit_mib": {
+            "default": 0,
+            "maximum": 16777216.0,
+            "minimum": 0.0,
+            "title": "Disk Limit Mib",
+            "type": "integer"
+          },
           "execution_profile": {
             "title": "Execution Profile",
             "type": "string"
@@ -10208,7 +10215,8 @@
               "seconds",
               "MiB",
               "KiB",
-              "count"
+              "count",
+              "millicores"
             ],
             "title": "Unit",
             "type": "string"
@@ -15169,6 +15177,13 @@
             "title": "Cpu Limit",
             "type": "string"
           },
+          "disk_limit_mib": {
+            "default": 0,
+            "maximum": 16777216.0,
+            "minimum": 0.0,
+            "title": "Disk Limit Mib",
+            "type": "integer"
+          },
           "execution_profile": {
             "$ref": "#/components/schemas/ExecutionProfile"
           },
@@ -15488,6 +15503,13 @@
             "default": "2",
             "title": "Cpu Limit",
             "type": "string"
+          },
+          "disk_limit_mib": {
+            "default": 0,
+            "maximum": 16777216.0,
+            "minimum": 0.0,
+            "title": "Disk Limit Mib",
+            "type": "integer"
           },
           "execution_profile": {
             "title": "Execution Profile",

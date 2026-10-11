@@ -1111,6 +1111,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "resident_slot_capacity": sandbox.get("resident_slot_capacity", 8),
             "memory_limit": sandbox.get("memory_limit", "4g"),
             "cpu_limit": sandbox.get("cpu_limit", "2"),
+            "disk_limit_mib": sandbox.get("disk_limit_mib", 0),
             "stop_timeout_seconds": sandbox.get("stop_timeout_seconds", 10),
             "source_thread_id": source["thread_id"],
             "origin_thread_id": sandbox.get("origin_thread_id", source["thread_id"]),
@@ -2976,6 +2977,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
             self.calls.append((source_thread_id, kwargs))
             assert kwargs["expected_container_id"] == "container-shared"
+            assert kwargs["disk_limit_mib"] == 16384
             assert kwargs["origin_thread_id"] == source_thread_id
             assert kwargs["source_native_session_id"] == "native-session-source"
             assert kwargs["source_native_turn_no"] == 1
@@ -3021,6 +3023,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             "shared_live": True,
             "resident_slot_id": 0,
             "resident_slot_capacity": 8,
+            "disk_limit_mib": 16384,
             "group_members": [],
         }
 

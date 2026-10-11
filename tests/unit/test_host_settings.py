@@ -54,6 +54,10 @@ def test_an_admin_change_accepts_whole_numbers_in_bounds_and_none_to_clear():
         ({"source_import_max_mib": 1.5}, "whole number"),
         ({"source_import_max_mib": True}, "whole number"),
         ({"source_import_max_mib": "4096"}, "whole number"),
+        ({"sandbox_cpu_millicores": 99}, "from 100 through 256000 millicores"),
+        ({"sandbox_cpu_millicores": 1250.5}, "whole number"),
+        ({"sandbox_memory_mib": 127}, "from 128 through 1048576 MiB"),
+        ({"sandbox_disk_mib": -1}, "from 0 through 16777216 MiB"),
     ],
 )
 def test_an_admin_change_is_refused_with_the_setting_and_its_bounds(change, message):
@@ -72,6 +76,14 @@ def test_stored_values_that_can_no_longer_apply_are_dropped_not_clamped():
     assert admin_values(stored) == {"agent_timeout_s": 7200}
     assert admin_values(None) == {}
     assert admin_values(stored, keys={"terminal_max_sessions"}) == {}
+
+
+def test_disabling_a_server_disk_quota_overrides_a_global_quota():
+    assert validate_admin_change({"sandbox_disk_mib": 0}) == {"sandbox_disk_mib": 0}
+    values = merge_admin_values({"sandbox_disk_mib": 20480}, {"sandbox_disk_mib": 0})
+    assert values["sandbox_disk_mib"] == 0
+    assert values["sandbox_cpu_millicores"] == 2000
+    assert values["sandbox_memory_mib"] == 4096
 
 
 def test_a_server_value_beats_the_global_one_and_resolves_over_the_host_default():

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
     CHAT_BOOTSTRAP_NETWORK,
+    CHAT_DISK_LIMIT_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
     CHAT_NAMESPACE_LABEL,
     CHAT_OFFLINE_DNS,
@@ -172,6 +174,61 @@ def test_create_command_has_stable_identity_and_no_chat_state_mount_or_secret():
     assert "--security-opt no-new-privileges" in joined
     assert "--pids-limit 512" in joined
     assert "sleep 2147483647 & child=$!" in command[-1]
+    assert "--storage-opt" not in command
+    assert CHAT_DISK_LIMIT_LABEL not in spec.docker_labels()
+
+
+def test_a_requested_disk_quota_is_not_dropped_when_docker_refuses_it(monkeypatch):
+    spec = replace(_spec(), disk_limit_mib=20480)
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(manager, "inspect", lambda _name: None)
+    creates = []
+
+    def run(argv, **_kwargs):
+        creates.append(argv)
+        return SimpleNamespace(
+            returncode=125,
+            stdout="",
+            stderr="--storage-opt is supported only for overlay over xfs with pquota",
+        )
+
+    monkeypatch.setattr(manager, "_run", run)
+
+    with pytest.raises(SandboxError, match="xfs with pquota"):
+        manager.create(spec)
+
+    assert len(creates) == 1
+    assert creates[0][creates[0].index("--storage-opt") + 1] == "size=20480M"
+    assert spec.docker_labels()[CHAT_DISK_LIMIT_LABEL] == "20480"
+
+
+@pytest.mark.parametrize("persisted_disk", [None, "0", "8192"])
+@pytest.mark.parametrize("requested_disk", [0, 8192])
+def test_retained_disk_policy_must_match_even_when_a_legacy_label_is_absent(
+    persisted_disk, requested_disk
+):
+    spec = replace(_spec(), disk_limit_mib=requested_disk)
+    labels = spec.docker_labels()
+    labels.pop(CHAT_DISK_LIMIT_LABEL, None)
+    if persisted_disk is not None:
+        labels[CHAT_DISK_LIMIT_LABEL] = persisted_disk
+    inspection = ChatSandboxInspection(
+        container_id="container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.STOPPED,
+        running=False,
+        image=spec.sandbox_image_digest or "sha256:image-pinned",
+        labels=labels,
+        mounts=(),
+        networks=(),
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+
+    if int(persisted_disk or 0) == requested_disk:
+        manager._verify_identity(inspection, spec)
+    else:
+        with pytest.raises(SandboxError, match="outside this chat/generation"):
+            manager._verify_identity(inspection, spec)
 
 
 def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
@@ -578,6 +635,28 @@ def test_unsafe_legacy_extra_args_cannot_add_a_host_mount():
             extra_args=["--mount=type=bind,source=/host,target=/workspace"],
         )
     )
+
+    with pytest.raises(SandboxError, match="unsafe for retained chats"):
+        manager.build_create_command(_spec())
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--cpus", "16"],
+        ["--cpu-quota=-1"],
+        ["--memory=32g"],
+        ["-m", "32g"],
+        ["-m32g"],
+        ["-c1024"],
+        ["--memory-swap=-1"],
+        ["--storage-opt", "size=100G"],
+        ["-eTOKEN=secret"],
+        ["-v/host:/workspace"],
+    ],
+)
+def test_extra_args_cannot_override_the_configured_resource_limits(args):
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=args))
 
     with pytest.raises(SandboxError, match="unsafe for retained chats"):
         manager.build_create_command(_spec())
@@ -1638,6 +1717,10 @@ def test_a_failed_check_is_no_proof(monkeypatch):
         ("sandbox_id", "", "sandbox_id"),
         ("generation", 0, "generation"),
         ("stop_timeout_s", 0, "stop_timeout_s"),
+        ("disk_limit_mib", -1, "disk_limit_mib"),
+        ("disk_limit_mib", 16777217, "disk_limit_mib"),
+        ("disk_limit_mib", True, "disk_limit_mib"),
+        ("disk_limit_mib", 1.5, "disk_limit_mib"),
     ],
 )
 def test_spec_rejects_invalid_identity_or_stop_budget(field, value, message):

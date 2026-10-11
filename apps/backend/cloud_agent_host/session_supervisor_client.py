@@ -248,6 +248,7 @@ class SessionSupervisorClient:
                 "resident_slot_capacity": spec.resident_slot_capacity,
                 "memory_limit": spec.memory_limit,
                 "cpu_limit": spec.cpu_limit,
+                "disk_limit_mib": spec.disk_limit_mib,
                 "stop_timeout_s": spec.stop_timeout_s,
                 "members": members,
                 "owner": owner,

@@ -1361,7 +1361,8 @@ machine, and only _Host default_ returns it to the environment.
 #### Sandbox settings
 
 Use the admin settings pages for sandbox and workspace limits. The turn time
-limit, repository size limit, sandbox idle timeout, sessions per sandbox,
+limit, repository size limit, container CPU, memory and disk limits, sandbox
+idle timeout, sessions per sandbox,
 workspace command/file limits and terminal resource limits sit in the
 _Sandbox_ card on the _Settings_ page, once
 for every server, and in the _Sandbox_ table of each server's details on the
@@ -1383,10 +1384,20 @@ saving is not applying. Each host reports what it applies, the runner's share
 as it hands each turn over and the workspace broker's as the broker confirms
 it, and the page shows _applying_ until the report matches. Nothing running is
 cut short: a turn keeps the time limit it started with, an existing sandbox
-keeps the chat capacity built into it, and a shortened terminal lifetime
+keeps its CPU, memory, disk quota and chat capacity, and a shortened terminal lifetime
 closes terminals already past it on the broker's next sweep. A runner that
 does not advertise `host-settings-v1` keeps its `.env` values until it is
 redeployed.
+
+The container size controls apply to each new sandbox group, shared by its
+conversation and forks. Defaults are 2 vCPU, 4 GiB memory, and disk 0 (no
+per-container quota). CPU accepts fractional vCPU; memory and disk accept MiB
+or GiB. A positive disk limit bounds the writable layer, including the
+workspace and installed files, using Docker's `--storage-opt size=`. It
+requires `overlay2` on XFS mounted with project quotas (`pquota` or
+`prjquota`); Docker rejects creation on an unsupported host. Existing groups
+keep their original limits through follow-ups, restarts, snapshots and Fork.
+See `ENVIRONMENT.md` for bootstrap variables and storage requirements.
 
 #### Launch failures and queue order
 

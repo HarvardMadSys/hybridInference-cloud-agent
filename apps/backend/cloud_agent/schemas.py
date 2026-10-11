@@ -1570,6 +1570,7 @@ class WorkerThreadSandbox(BaseModel):
     execution_profile: str
     memory_limit: str = "4g"
     cpu_limit: str = "2"
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     stop_timeout_seconds: int = 10
     state: Literal[
         "provisioning",
@@ -1786,6 +1787,7 @@ class WorkerSandboxReserveRequest(BaseModel):
     resident_slot_capacity: int = Field(8, ge=2, le=128)
     memory_limit: str = Field("4g", min_length=1, max_length=32)
     cpu_limit: str = Field("2", min_length=1, max_length=32)
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     stop_timeout_seconds: int = Field(10, ge=1, le=300)
     #: The image's claude-session-fork helper version, sent by the runner that
     #: is about to create the container from it. Native Fork asks it of the

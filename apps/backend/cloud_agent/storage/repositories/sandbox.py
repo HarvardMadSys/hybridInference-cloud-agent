@@ -243,6 +243,7 @@ class PostgresSandboxRepository:
         resident_slot_capacity: int = 8,
         memory_limit: str = "4g",
         cpu_limit: str = "2",
+        disk_limit_mib: int = 0,
         stop_timeout_seconds: int = 10,
         fork_helper_version: str | None = None,
     ) -> dict[str, Any] | None:
@@ -293,6 +294,7 @@ class PostgresSandboxRepository:
                 resident_slot_capacity=resident_slot_capacity,
                 memory_limit=memory_limit,
                 cpu_limit=cpu_limit,
+                disk_limit_mib=disk_limit_mib,
                 stop_timeout_seconds=stop_timeout_seconds,
                 fork_helper_version=fork_helper_version,
                 user_id=str(earns["user_id"]),
@@ -958,12 +960,15 @@ class PostgresSandboxRepository:
         resident_slot_capacity: int,
         memory_limit: str,
         cpu_limit: str,
+        disk_limit_mib: int,
         stop_timeout_seconds: int,
         fork_helper_version: str | None,
         user_id: str,
         job_id: str,
     ) -> dict[str, Any] | None:
         """Reserve one independently fenced member in a shared-live group."""
+        if type(disk_limit_mib) is not int or not 0 <= disk_limit_mib <= 16777216:
+            raise ValueError("sandbox disk limit must be an integer between 0 and 16777216 MiB")
         if not 2 <= resident_slot_capacity <= 128:
             raise ValueError("shared sandbox resident slot capacity must be between 2 and 128")
         # Lock membership first everywhere; Docker reconciliation uses the
@@ -1004,9 +1009,9 @@ class PostgresSandboxRepository:
                     id, origin_thread_id, user_id, host, container_name,
                     runtime_id, runtime_version, sandbox_image_digest,
                     execution_profile, resident_slot_capacity, memory_limit,
-                    cpu_limit, stop_timeout_seconds, fork_helper_version
+                    cpu_limit, stop_timeout_seconds, fork_helper_version, disk_limit_mib
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
                 sandbox_id,
                 thread_id,
@@ -1023,6 +1028,7 @@ class PostgresSandboxRepository:
                 stop_timeout_seconds,
                 # An image without the label says nothing, not "".
                 fork_helper_version or None,
+                disk_limit_mib,
             )
             await conn.execute(
                 """
@@ -1065,6 +1071,7 @@ class PostgresSandboxRepository:
             "execution_profile": execution_profile,
             "memory_limit": memory_limit,
             "cpu_limit": cpu_limit,
+            "disk_limit_mib": disk_limit_mib,
             "stop_timeout_seconds": stop_timeout_seconds,
         }
         if any(group[key] != value for key, value in immutable.items()):

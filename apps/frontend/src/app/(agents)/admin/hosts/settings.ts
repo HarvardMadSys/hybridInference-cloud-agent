@@ -112,11 +112,12 @@ export function formatSettingValue(definition: HostSettingDefinition, value: num
       : `${value} MiB`;
   }
   if (definition.unit === 'KiB') return `${value} KiB`;
+  if (definition.unit === 'millicores') return `${value / 1000} vCPU`;
   return String(value);
 }
 
-/** A unit a value can be typed in. The API always takes seconds or MiB. */
-export type InputUnit = 's' | 'min' | 'h' | 'd' | 'MiB' | 'GiB' | 'KiB';
+/** A unit a value can be typed in; the API takes the definition's own unit. */
+export type InputUnit = 's' | 'min' | 'h' | 'd' | 'MiB' | 'GiB' | 'KiB' | 'vCPU';
 
 const UNIT_SIZE: Record<InputUnit, number> = {
   s: 1,
@@ -126,6 +127,7 @@ const UNIT_SIZE: Record<InputUnit, number> = {
   MiB: 1,
   GiB: 1024,
   KiB: 1,
+  vCPU: 1000,
 };
 
 /**
@@ -141,6 +143,7 @@ export function inputUnits(definition: HostSettingDefinition): InputUnit[] {
   }
   if (definition.unit === 'MiB') return ['MiB', 'GiB'];
   if (definition.unit === 'KiB') return ['KiB'];
+  if (definition.unit === 'millicores') return ['vCPU'];
   return [];
 }
 
@@ -160,7 +163,8 @@ export function amountIn(value: number, unit: InputUnit | null): string {
 /**
  * Read a typed amount in a unit: a whole number of the setting's own unit
  * inside its bounds, or why not. A decimal amount is fine when it lands on a
- * whole second or MiB, so 1.5 h is 5400 s.
+ * whole second, MiB or millicore, so 1.5 h is 5400 s and 1.25 vCPU is 1250
+ * millicores.
  */
 export function parseSettingInput(
   definition: HostSettingDefinition,
@@ -171,7 +175,7 @@ export function parseSettingInput(
   const amount = Number(text);
   const value = unit === null ? amount : amount * UNIT_SIZE[unit];
   // Multiplying a decimal amount can leave float noise (1.1 h); a real
-  // fraction of a second or MiB is still refused.
+  // fraction of the setting's own unit is still refused.
   const whole = Math.round(value);
   if (
     text === '' ||

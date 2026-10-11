@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from cloud_agent_host import runner as runner_mod
+from cloud_agent_host.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, encode_turn
 from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.runtimes import get_runtime
@@ -128,6 +129,15 @@ def test_a_turn_runs_with_the_settings_it_was_handed(monkeypatch):
     assert kwargs["host_settings"] == {"agent_timeout_s": 900.0, "source_import_max_mib": 4096.0}
 
 
+def test_a_zero_disk_quota_survives_the_turn_handover(monkeypatch):
+    """Turning a quota off cannot fall back to a positive bootstrap quota."""
+    monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", "32768")
+
+    kwargs = _serve(monkeypatch, {**_PAYLOAD, "_host_settings": {"sandbox_disk_mib": 0}})
+
+    assert kwargs["host_settings"] == {"sandbox_disk_mib": 0}
+
+
 def test_a_turn_handed_no_settings_runs_with_the_hosts_own(monkeypatch):
     kwargs = _serve(monkeypatch, dict(_PAYLOAD))
 
@@ -147,7 +157,12 @@ def _stamp() -> dict[str, Any]:
 
 
 def _run_new_chat(
-    monkeypatch, host_settings: dict[str, float] | None, job: ClaimedJob = _JOB
+    monkeypatch,
+    host_settings: dict[str, float] | None,
+    job: ClaimedJob = _JOB,
+    *,
+    reservation_change: dict[str, Any] | None = None,
+    reservation_omits_disk: bool = False,
 ) -> SimpleNamespace:
     """Drive a first turn of a new chat to its settlement, with collaborators mocked."""
     backend = ContainerBackend(image="img")
@@ -168,13 +183,21 @@ def _run_new_chat(
     )
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
-    control.reserve_chat_sandbox.side_effect = lambda seed: {
-        **seed,
-        "thread_id": _JOB.thread_id,
-        "generation": 1,
-        "activation_generation": 3,
-        "resident_slot_id": 0,
-    }
+
+    def reserve(seed):
+        response = {
+            **seed,
+            "thread_id": _JOB.thread_id,
+            "generation": 1,
+            "activation_generation": 3,
+            "resident_slot_id": 0,
+            **(reservation_change or {}),
+        }
+        if reservation_omits_disk:
+            response.pop("disk_limit_mib", None)
+        return response
+
+    control.reserve_chat_sandbox.side_effect = reserve
     supervisor = Mock()
     supervisor.acquire_shared.return_value = {
         "token": "lease",
@@ -208,13 +231,97 @@ def _run_new_chat(
         finish_attempt=finish,
         host_settings=host_settings,
     )
-    assert control.settle_chat_sandbox.called, finish.call_args
     reserved = control.reserve_chat_sandbox.call_args.args[0]
+    if result != 0:
+        assert not supervisor.acquire_shared.called
+        assert not control.settle_chat_sandbox.called
+        return SimpleNamespace(result=result, reserved=reserved, failure=finish.call_args.args[1])
+    assert control.settle_chat_sandbox.called, finish.call_args
     settled = control.settle_chat_sandbox.call_args.kwargs
     launches = [call.kwargs["launch"] for call in supervisor.ensure_shared_resident.call_args_list]
     return SimpleNamespace(
-        result=result, reserved=reserved, settled=settled, checkouts=checkouts, launches=launches
+        result=result,
+        reserved=reserved,
+        settled=settled,
+        checkouts=checkouts,
+        launches=launches,
+        spec=supervisor.acquire_shared.call_args.args[0],
     )
+
+
+def test_new_sandbox_resource_settings_reach_the_docker_limits(monkeypatch):
+    run = _run_new_chat(
+        monkeypatch,
+        {"sandbox_cpu_millicores": 750, "sandbox_memory_mib": 8192, "sandbox_disk_mib": 20480},
+    )
+
+    assert run.result == 0
+    assert run.reserved["cpu_limit"] == "0.75"
+    assert run.reserved["memory_limit"] == "8192m"
+    assert run.reserved["disk_limit_mib"] == 20480
+    command = ChatSandboxManager(ContainerBackend(image="img")).build_create_command(run.spec)
+    assert command[command.index("--cpus") + 1] == "0.75"
+    assert command[command.index("--memory") + 1] == "8192m"
+    assert command[command.index("--storage-opt") + 1] == "size=20480M"
+
+
+def test_a_disabled_disk_quota_takes_precedence_over_the_bootstrap_value(monkeypatch):
+    monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", "32768")
+
+    run = _run_new_chat(monkeypatch, {"sandbox_disk_mib": 0})
+
+    assert run.reserved["disk_limit_mib"] == 0
+    command = ChatSandboxManager(ContainerBackend(image="img")).build_create_command(run.spec)
+    assert "--storage-opt" not in command
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"disk_limit_mib": 0},
+        {"disk_limit_mib": None},
+        {"memory_limit": "4g"},
+        {"cpu_limit": "2"},
+    ],
+)
+def test_a_reservation_cannot_drop_or_change_the_requested_resource_limits(monkeypatch, change):
+    run = _run_new_chat(
+        monkeypatch,
+        {"sandbox_cpu_millicores": 750, "sandbox_memory_mib": 8192, "sandbox_disk_mib": 20480},
+        reservation_change=change,
+    )
+
+    assert run.result == 2
+    assert "did not confirm" in run.failure
+
+
+@pytest.mark.parametrize("disk_limit_mib", [0, 20480])
+def test_a_response_omitting_disk_only_confirms_an_unbounded_disk(monkeypatch, disk_limit_mib):
+    run = _run_new_chat(
+        monkeypatch,
+        {"sandbox_disk_mib": disk_limit_mib},
+        reservation_omits_disk=True,
+    )
+
+    assert run.result == (2 if disk_limit_mib else 0)
+    if disk_limit_mib:
+        assert "did not confirm" in run.failure
+
+
+def test_container_resources_bootstrap_from_the_hosts_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_SANDBOX_CPU_MILLICORES", "3500")
+    monkeypatch.setenv("AGENT_SANDBOX_MEMORY_MIB", "12288")
+    monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", "40960")
+
+    local = runner_mod._runner_local_settings(3600)
+    run = _run_new_chat(monkeypatch, None)
+
+    assert local["sandbox_cpu_millicores"] == 3500
+    assert local["sandbox_memory_mib"] == 12288
+    assert local["sandbox_disk_mib"] == 40960
+    assert run.reserved["cpu_limit"] == "3.5"
+    assert run.reserved["memory_limit"] == "12288m"
+    assert run.reserved["disk_limit_mib"] == 40960
 
 
 def test_a_new_chat_takes_its_capacity_import_limit_and_idle_timeout_from_the_settings(
@@ -241,9 +348,17 @@ def test_with_no_settings_a_new_chat_reads_the_environment_as_before(monkeypatch
 
 
 @pytest.mark.parametrize("capacity", [16, None])
-def test_an_existing_sandbox_keeps_the_capacity_it_was_created_with(monkeypatch, capacity):
-    """Member slots are built into the container, so a setting cannot resize one."""
-    settings = {} if capacity is None else {"shared_resident_capacity": capacity}
+@pytest.mark.parametrize("disk_limit_mib", [None, 0, 16384])
+def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_with(
+    monkeypatch, capacity, disk_limit_mib
+):
+    """Settings changes preserve the retained group, including an unbounded legacy disk."""
+    settings = {
+        "sandbox_cpu_millicores": 4000,
+        "sandbox_memory_mib": 8192,
+        "sandbox_disk_mib": 32768,
+        **({} if capacity is None else {"shared_resident_capacity": capacity}),
+    }
     existing = {
         "shared_live": True,
         "runtime_id": "claude-code",
@@ -251,7 +366,11 @@ def test_an_existing_sandbox_keeps_the_capacity_it_was_created_with(monkeypatch,
         "resident_slot_capacity": 4,
         "sandbox_id": "asbx_existing",
         "host": "host-a",
+        "memory_limit": "6g",
+        "cpu_limit": "3.5",
     }
+    if disk_limit_mib is not None:
+        existing["disk_limit_mib"] = disk_limit_mib
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
     control = Mock()
@@ -282,7 +401,11 @@ def test_an_existing_sandbox_keeps_the_capacity_it_was_created_with(monkeypatch,
         host_settings=settings,
     )
 
-    assert control.reserve_chat_sandbox.call_args.args[0]["resident_slot_capacity"] == 4
+    reserved = control.reserve_chat_sandbox.call_args.args[0]
+    assert reserved["resident_slot_capacity"] == 4
+    assert reserved["memory_limit"] == "6g"
+    assert reserved["cpu_limit"] == "3.5"
+    assert reserved["disk_limit_mib"] == (disk_limit_mib or 0)
 
 
 def test_a_turn_with_tools_reaches_them_through_this_hosts_own_mcp_relay(monkeypatch):

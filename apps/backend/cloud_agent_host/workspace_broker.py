@@ -262,6 +262,7 @@ class SharedSandboxIdentityRequest(BaseModel):
     resident_slot_capacity: int = Field(8, ge=2, le=128)
     memory_limit: str = Field("4g", min_length=1, max_length=32)
     cpu_limit: str = Field("2", min_length=1, max_length=32)
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     stop_timeout_s: int = Field(10, ge=1, le=300)
     members: list[SharedSandboxMemberRequest] = Field(..., min_length=1, max_length=128)
 
@@ -1776,6 +1777,7 @@ def create_app(
             sandbox_image_digest=body.sandbox_image_digest,
             memory_limit=body.memory_limit,
             cpu_limit=body.cpu_limit,
+            disk_limit_mib=body.disk_limit_mib,
             stop_timeout_s=body.stop_timeout_s,
             shared_live=True,
             resident_slot_capacity=body.resident_slot_capacity,
