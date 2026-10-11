@@ -176,7 +176,10 @@ const DELEGATION_TITLES: Record<string, string> = {
 export function parseToolActivity(toolName: string, value: unknown): ToolActivity | null {
   const key = toolKey(toolName);
   const input = record(value);
-  if (toolName.startsWith('mcp__') && ['tasks', 'plan', 'wait', 'send_message'].includes(key))
+  if (
+    toolName.startsWith('mcp__') &&
+    (['tasks', 'plan'].includes(key) || Object.hasOwn(DELEGATION_TITLES, key))
+  )
     return null;
   if (['tasks', 'plan'].includes(key) && !Array.isArray(input.tasks ?? input.plan ?? input.todos))
     return null;

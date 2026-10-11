@@ -150,6 +150,31 @@ describe('delegation tool arguments', () => {
     }
   });
 
+  it.each([
+    'task',
+    'agent',
+    'spawn_agent',
+    'send_message',
+    'send_input',
+    'wait',
+    'close_agent',
+    'resume_agent',
+    'followup_task',
+    'interrupt_agent',
+    'list_agents',
+  ])('never treats an MCP tool ending in %s as native delegation', (suffix) => {
+    expect(
+      parseToolActivity(`mcp__review__${suffix}`, {
+        id: 'worker_1',
+        target: 'worker_1',
+        agent_id: 'worker_1',
+        receiver_thread_ids: ['worker_1'],
+        description: 'Review this change.',
+        message: 'Review this change.',
+      }),
+    ).toBeNull();
+  });
+
   it('reads explicit native agent state maps and retains unfamiliar recorded statuses', () => {
     expect(
       recordedAgentStates({
