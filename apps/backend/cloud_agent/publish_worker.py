@@ -37,6 +37,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -78,7 +79,6 @@ class PublishStorage(Protocol):
 logger = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
-_GIT_BASE = "https://github.com"
 POLL_INTERVAL_S = 15.0
 #: The longest an idle publisher that is told about new work sleeps. It wakes
 #: sooner for a notification or the earliest base import retry.
@@ -137,9 +137,24 @@ class GitHubCredential:
     token: str
     api_base: str = field(default_factory=lambda: setting_env("AGENT_GITHUB_API") or GITHUB_API)
 
+    @property
+    def git_base(self) -> str:
+        """The Git host paired with ``api_base``, which minted the token.
+
+        ``api.github.com`` serves github.com's repositories; any other API URL
+        is answered for by its own host. The token goes back to that host
+        alone: pushing to github.com regardless sent a token another host
+        minted to github.com.
+        """
+        parts = urlsplit(self.api_base)
+        netloc = parts.netloc.rpartition("@")[2]
+        if parts.hostname == "api.github.com":
+            netloc = "github.com"
+        return f"{parts.scheme or 'https'}://{netloc}"
+
     def clone_url(self, repo: str) -> str:
         """Return the credential-free clone URL for ``owner/name``."""
-        return f"{_GIT_BASE}/{repo}.git"
+        return f"{self.git_base}/{repo}.git"
 
     def git_auth_env(self) -> dict[str, str]:
         """Carry the token in git's environment, never in its arguments or config.
@@ -151,7 +166,7 @@ class GitHubCredential:
         basic = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
         return {
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": f"http.{_GIT_BASE}/.extraHeader",
+            "GIT_CONFIG_KEY_0": f"http.{self.git_base}/.extraHeader",
             "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         }
 

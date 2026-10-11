@@ -674,6 +674,22 @@ async def test_the_git_credential_is_a_header_only_for_the_git_host(tmp_path):
     assert header_for("https://elsewhere.example/o/n.git") == ""
 
 
+@pytest.mark.parametrize(
+    ("api_base", "git_base"),
+    [
+        ("https://api.github.com", "https://github.com"),
+        ("https://ghe.example.com/api/v3", "https://ghe.example.com"),
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+    ],
+)
+async def test_a_token_goes_back_only_to_the_host_that_minted_it(api_base, git_base):
+    """Pushing to github.com whatever the API URL sent another host's token there."""
+    credential = GitHubCredential("t", api_base=api_base)
+
+    assert credential.clone_url("o/n") == f"{git_base}/o/n.git"
+    assert credential.git_auth_env()["GIT_CONFIG_KEY_0"] == f"http.{git_base}/.extraHeader"
+
+
 async def test_app_only_deployment_actually_publishes(monkeypatch):
     """An App-configured deployment with no static token must still publish.
 
