@@ -1261,8 +1261,8 @@ verify_storage_probe() {
 
 probe_sandbox_relay() {
   local network="$1" url="$2" label="$3" deadline="$4" diagnostic="$5"
-  local relay_service="$6" relay_id relay_ip relay_host
-  local backend code="" first_failure=1
+  local relay_service="$6" relay_id relay_ip relay_host relay_error=""
+  local backend code="" first_failure=1 relay_ready
   local runtime_args=()
   backend="$(env_or_dotenv AGENT_SANDBOX_BACKEND)"
   backend="${backend:-kata}"
@@ -1271,21 +1271,32 @@ probe_sandbox_relay() {
   fi
 
   while true; do
+    relay_ready=1
     if [[ "$backend" == "kata" ]]; then
       # Docker's embedded resolver is not inside the Kata VM. Resolve only
       # this compose-owned relay's endpoint on the exact probe bridge.
-      relay_id="$(compose ps -q "$relay_service")"
-      relay_ip="$(docker inspect "$relay_id" | python3 -c \
-        'import json, sys; print(json.load(sys.stdin)[0]["NetworkSettings"]["Networks"][sys.argv[1]]["IPAddress"])' "$network")"
-      [[ -n "$relay_ip" ]] || die "${label} has no address on ${network}"
-      relay_host="${url#*://}"
-      relay_host="${relay_host%%:*}"
-      runtime_args=(--runtime "$KATA_RUNTIME" --add-host "${relay_host}=${relay_ip}")
+      relay_id="$(compose ps -q "$relay_service" 2>/dev/null || true)"
+      relay_ip=""
+      relay_error="compose service has no container ID"
+      if [[ -n "$relay_id" ]]; then
+        relay_ip="$(docker inspect "$relay_id" 2>/dev/null | python3 -c \
+          'import json, sys; print(json.load(sys.stdin)[0]["NetworkSettings"]["Networks"][sys.argv[1]]["IPAddress"])' "$network" 2>/dev/null || true)"
+        relay_error="container has no address on ${network}"
+      fi
+      if [[ -n "$relay_ip" ]]; then
+        relay_error=""
+        relay_host="${url#*://}"
+        relay_host="${relay_host%%:*}"
+        runtime_args=(--runtime "$KATA_RUNTIME" --add-host "${relay_host}=${relay_ip}")
+      else
+        relay_ready=0
+        code=""
+      fi
     fi
     # Pass the URL as an argv value rather than interpolating operator config
     # into shell source. `-f` matters: a tunnel that reaches a 503 is reachable
     # but not ready, and must not publish the exact-SHA capability.
-    if code="$(docker run --rm --network "$network" \
+    if [[ "$relay_ready" == "1" ]] && code="$(docker run --rm --network "$network" \
          ${runtime_args[@]+"${runtime_args[@]}"} \
          --entrypoint /bin/sh "$SANDBOX_IMAGE" \
          -c 'curl -fsS -o /dev/null -w "%{http_code}" --max-time 15 "$1"' \
@@ -1294,6 +1305,9 @@ probe_sandbox_relay() {
       return 0
     fi
     if (( SECONDS >= deadline )); then
+      if [[ -n "$relay_error" ]]; then
+        die "${label} is not available on ${network} (${relay_error}). ${diagnostic}"
+      fi
       die "a sandbox on ${network} cannot reach a healthy ${url} (last HTTP status: ${code:-none}). ${diagnostic}"
     fi
     if [[ "$first_failure" == "1" ]]; then
