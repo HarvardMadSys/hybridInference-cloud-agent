@@ -75,7 +75,7 @@ import {
   type RunTab,
   type StepTab,
 } from './trajectoryInspectorTabs';
-import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
+import { buildTrajectorySteps, toolStepKey, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { notDeliveredText, PendingMessageQueue } from './PendingMessageQueue';
 import { isSteerChord } from './composerKeys';
@@ -90,7 +90,7 @@ import {
 import { useComposerDraft } from './useComposerDraft';
 import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
 import { TurnDeliverables } from './TurnDeliverables';
-import { recordedTurnOutputs, type RecordedFileSelection } from './turnDeliverables';
+import { createRecordedOutputsSelector, type RecordedFileSelection } from './turnDeliverables';
 import {
   hasLostContext,
   isActiveConversationState,
@@ -149,6 +149,10 @@ const RecordedDiffPanel = dynamic(
 const SideChat = dynamic(() => import('./SideChat').then((module) => module.SideChat), {
   loading: () => <PanelLoading>Loading side chat…</PanelLoading>,
 });
+
+const EMPTY_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
+const EMPTY_THREAD_JOBS: AgentJobApi[] = [];
+const EMPTY_TRAJECTORY_STEPS: ReturnType<typeof buildTrajectorySteps> = [];
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -760,8 +764,8 @@ function GitPanel({
 export function JobDetail({
   job,
   userId,
-  events = [],
-  threadJobs = [],
+  events = EMPTY_STORED_EVENTS,
+  threadJobs = EMPTY_THREAD_JOBS,
   onReload,
 }: {
   job: AgentJob;
@@ -848,7 +852,7 @@ export function JobDetail({
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
-  const trajectorySteps = useMemo(() => {
+  const trajectoryContext = useMemo(() => {
     const context = turnContextFromJobs(threadJobs);
     if (
       !context.inputs?.some((input) => input.jobId === job.id) &&
@@ -864,8 +868,19 @@ export function JobDetail({
         },
       ];
     }
-    return buildTrajectorySteps(events, context);
-  }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
+    return context;
+  }, [threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
+  // The diagnostic projection can be large. Keep a getter for transcript
+  // clicks, and construct it only while a reader uses the trajectory/details.
+  const getTrajectorySteps = useMemo(() => {
+    let steps: ReturnType<typeof buildTrajectorySteps> | undefined;
+    return () => {
+      steps ??= buildTrajectorySteps(events, trajectoryContext);
+      return steps;
+    };
+  }, [events, trajectoryContext]);
+  const trajectorySteps =
+    tab === 'trajectory' || inspector !== null ? getTrajectorySteps() : EMPTY_TRAJECTORY_STEPS;
   const draft = useComposerDraft({ userId, threadId });
   const { value: followUp, setValue: setFollowUp } = draft;
   const currentDraftScope = useRef(draft.capture().scope);
@@ -889,9 +904,10 @@ export function JobDetail({
   } | null>(null);
   const recordedFile =
     recordedSelection?.scope === workspaceScope ? recordedSelection.selection : null;
+  const recordedOutputsSelector = useMemo(() => createRecordedOutputsSelector(), []);
   const recordedOutputs = useMemo(
-    () => new Map(threadJobs.map((turn) => [turn.id, recordedTurnOutputs(turn, events)])),
-    [threadJobs, events],
+    () => recordedOutputsSelector.select(threadJobs, events),
+    [recordedOutputsSelector, threadJobs, events],
   );
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
@@ -1192,7 +1208,7 @@ export function JobDetail({
 
   const selectStep = useCallback(
     (stepKey: string) => {
-      const step = trajectorySteps.find((candidate) => candidate.key === stepKey);
+      const step = getTrajectorySteps().find((candidate) => candidate.key === stepKey);
       rememberInspectorTrigger();
       setWorkspaceOpen(false);
       setInspector((current) => {
@@ -1201,12 +1217,12 @@ export function JobDetail({
         return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step, tab) : 'summary' };
       });
     },
-    [rememberInspectorTrigger, setWorkspaceOpen, trajectorySteps],
+    [rememberInspectorTrigger, setWorkspaceOpen, getTrajectorySteps],
   );
 
   const inspectTranscriptEvent = useCallback(
     (event: AgentEvent, eventJobId: string) => {
-      const step = trajectorySteps.find(
+      const step = getTrajectorySteps().find(
         (candidate) =>
           candidate.jobId === eventJobId &&
           (candidate.sourceEvents.some((source) => source.id === event.sourceEventId) ||
@@ -1218,7 +1234,7 @@ export function JobDetail({
       );
       if (step) selectStep(step.key);
     },
-    [selectStep, trajectorySteps, threadJobs],
+    [selectStep, getTrajectorySteps, threadJobs],
   );
 
   const openRun = useCallback(
@@ -1523,14 +1539,18 @@ export function JobDetail({
     <LedgerUsage job={job} usage={usage} />
   ) : undefined;
 
-  // Turns the transcript renders, described once. The Chat below and the rail
-  // beside it read the same description, so a mark cannot address a turn the
-  // body does not draw. The stored turns are memoized because they are
-  // immutable; the newest one is rebuilt every commit because its rows are what
-  // the transcript is drawing right now.
+  // The transcript and rail share descriptions. Composer edits cannot change
+  // them; streaming updates rebuild only the description whose source changed.
   const currentAttemptNo = job.currentAttemptNo;
-  const historyTurns = describeHistoryTurns(job);
-  const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
+  const historicalRows = job.historyTurns;
+  const historyTurns = useMemo(
+    () => describeHistoryTurns({ historyTurns: historicalRows }),
+    [historicalRows],
+  );
+  const currentTurn = useMemo(
+    () => describeCurrentTurn(job, { attemptNo, currentAttemptNo }),
+    [job, attemptNo, currentAttemptNo],
+  );
   const threadMessages = currentTurn.messages;
   const visibleEvents = currentTurn.events;
   const activityOverview = useMemo(() => buildActivityOverview(visibleEvents), [visibleEvents]);
@@ -1550,16 +1570,34 @@ export function JobDetail({
     setFocusJobId(null);
     setActivityOpen(true);
   }, [activityVisible, closeActivity, setWorkspaceOpen]);
+  const activitySources = useMemo(() => {
+    const wanted = new Set(
+      activityOverview.subagents.map((agent) => agent.sourceEvent.sourceEventId),
+    );
+    const sources = new Map<number, AgentJobEventApi | AgentThreadEventApi>();
+    if (!wanted.size) return sources;
+    for (const source of events) {
+      if (wanted.has(source.id)) sources.set(source.id, source);
+    }
+    return sources;
+  }, [activityOverview, events]);
   const activityStepKey = useCallback(
-    (event: Extract<AgentEvent, { kind: 'tool_use' }>) =>
-      trajectorySteps.find(
-        (step) =>
-          step.kind === 'tool' &&
-          step.jobId === job.id &&
-          event.sourceEventId !== undefined &&
-          step.sourceEvents.some((source) => source.id === event.sourceEventId),
-      )?.key,
-    [job.id, trajectorySteps],
+    (event: Extract<AgentEvent, { kind: 'tool_use' }>) => {
+      const source =
+        event.sourceEventId === undefined ? undefined : activitySources.get(event.sourceEventId);
+      if (!source) return undefined;
+      const sourceJobId =
+        'job_id' in source
+          ? source.job_id
+          : trajectoryContext.inputs?.length === 1
+            ? trajectoryContext.inputs[0].jobId
+            : undefined;
+      if (sourceJobId !== job.id) return undefined;
+      // The adapted tool row already identifies its source call. Computing its
+      // stable key does not need the full diagnostic projection during render.
+      return toolStepKey({ ...source, job_id: sourceJobId }, event.id);
+    },
+    [activitySources, job.id, trajectoryContext],
   );
   useEffect(() => {
     if (!activityVisible) return;

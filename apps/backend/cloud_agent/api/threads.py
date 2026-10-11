@@ -289,10 +289,12 @@ async def stream_agent_job_events(
                         yield ": keepalive\n\n"
                         last_frame = clock()
 
-                    job = await job_store.conversation_queries.get_job(job_id)
-                    if job is None:
+                    stream_state = await job_store.conversation_queries.get_job_stream_state(
+                        job_id=job_id, user_id=user["user_id"]
+                    )
+                    if stream_state is None:
                         return
-                    if job["state"] in TERMINAL_STATES:
+                    if stream_state.state in TERMINAL_STATES:
                         # Drain to exhaustion before announcing the end. A
                         # single extra page is not enough: a client attaching
                         # to a finished job with more than two pages of backlog
@@ -308,8 +310,8 @@ async def stream_agent_job_events(
                                 yield _sse_frame(event)
                         final = json.dumps(
                             {
-                                "state": job["state"],
-                                "published_pr_url": job["published_pr_url"],
+                                "state": stream_state.state,
+                                "published_pr_url": stream_state.published_pr_url,
                                 "last_event_id": cursor,
                             },
                             separators=(",", ":"),

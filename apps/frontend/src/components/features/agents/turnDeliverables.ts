@@ -23,6 +23,19 @@ export interface RecordedFileSelection {
   file: RecordedTurnFile;
 }
 
+type RecordedTurnJob = Pick<
+  AgentJobApi,
+  'id' | 'state' | 'published_pr_url' | 'current_attempt_id'
+>;
+type RecordedTurnEvent = AgentJobEventApi | AgentThreadEventApi;
+
+export interface RecordedOutputsSelector {
+  select(
+    jobs: readonly RecordedTurnJob[],
+    events: readonly RecordedTurnEvent[],
+  ): Map<string, RecordedTurnOutputs | null>;
+}
+
 export function hasSettledTurn(state: AgentJobState | AgentJobApi['state'] | undefined): boolean {
   return (
     state === 'done' ||
@@ -130,6 +143,113 @@ function recordedFiles(payload: AgentJobEventApi['payload']): RecordedTurnFile[]
   });
 }
 
+function outputsWithFiles(
+  job: RecordedTurnJob,
+  files: RecordedTurnFile[],
+): RecordedTurnOutputs | null {
+  const prUrl = recordedResultUrl(job.published_pr_url);
+  return files.length || prUrl ? { jobId: job.id, files, ...(prUrl ? { prUrl } : {}) } : null;
+}
+
+interface IndexedDiff {
+  event: RecordedTurnEvent;
+  seq: number;
+  order: number;
+}
+
+function latestDiff(
+  a: IndexedDiff | undefined,
+  b: IndexedDiff | undefined,
+): IndexedDiff | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return b.seq > a.seq || (b.seq === a.seq && b.order < a.order) ? b : a;
+}
+
+interface CachedOutputs {
+  attemptId: RecordedTurnJob['current_attempt_id'];
+  state: RecordedTurnJob['state'];
+  prUrl: RecordedTurnJob['published_pr_url'];
+  latest: RecordedTurnEvent | undefined;
+  outputs: RecordedTurnOutputs | null;
+}
+
+/**
+ * One selector belongs to one mounted conversation. Index the event log once
+ * per selection, then reuse historical results while unrelated events stream.
+ * Event objects are immutable snapshots: replacing an event, even with the
+ * same stored id, invalidates its parsed diff. Removed jobs leave the cache.
+ */
+export function createRecordedOutputsSelector(): RecordedOutputsSelector {
+  let cachedOutputs = new Map<string, CachedOutputs>();
+  const parsedFiles = new WeakMap<RecordedTurnEvent, RecordedTurnFile[]>();
+
+  return {
+    select(jobs, events) {
+      const labelled = new Map<string, Map<number, IndexedDiff>>();
+      const unlabelled = new Map<number, IndexedDiff>();
+      for (let order = 0; order < events.length; order += 1) {
+        const event = events[order];
+        if (event.event_type !== 'diff') continue;
+        let attempts = unlabelled;
+        if ('job_id' in event) {
+          const existing = labelled.get(event.job_id);
+          attempts = existing ?? new Map<number, IndexedDiff>();
+          if (!existing) labelled.set(event.job_id, attempts);
+        }
+        const diff = { event, seq: event.seq, order };
+        const previous = attempts.get(event.attempt_id);
+        // Equal stored sequences retain the first event in the input log.
+        if (!previous || diff.seq > previous.seq) attempts.set(event.attempt_id, diff);
+      }
+
+      const results = new Map<string, RecordedTurnOutputs | null>();
+      const nextCache = new Map<string, CachedOutputs>();
+      for (const job of jobs) {
+        const settled = hasSettledTurn(job.state);
+        const attemptId = job.current_attempt_id;
+        const latest =
+          settled && attemptId !== null
+            ? latestDiff(labelled.get(job.id)?.get(attemptId), unlabelled.get(attemptId))?.event
+            : undefined;
+        const cached = cachedOutputs.get(job.id);
+        if (
+          cached &&
+          cached.attemptId === attemptId &&
+          cached.state === job.state &&
+          cached.prUrl === job.published_pr_url &&
+          cached.latest === latest
+        ) {
+          nextCache.set(job.id, cached);
+          results.set(job.id, cached.outputs);
+          continue;
+        }
+
+        let outputs: RecordedTurnOutputs | null = null;
+        if (settled) {
+          let files: RecordedTurnFile[] = [];
+          if (latest) {
+            const cachedFiles = parsedFiles.get(latest);
+            files = cachedFiles ?? recordedFiles(latest.payload);
+            if (!cachedFiles) parsedFiles.set(latest, files);
+          }
+          outputs = outputsWithFiles(job, files);
+        }
+        nextCache.set(job.id, {
+          attemptId,
+          state: job.state,
+          prUrl: job.published_pr_url,
+          latest,
+          outputs,
+        });
+        results.set(job.id, outputs);
+      }
+      cachedOutputs = nextCache;
+      return results;
+    },
+  };
+}
+
 /**
  * Read only this turn's own output evidence. Native diffs are recorded
  * snapshots, not a promise that every workspace edit was captured. In
@@ -137,8 +257,8 @@ function recordedFiles(payload: AgentJobEventApi['payload']): RecordedTurnFile[]
  * Input attachments have no generated-artifact contract and are not results.
  */
 export function recordedTurnOutputs(
-  job: Pick<AgentJobApi, 'id' | 'state' | 'published_pr_url' | 'current_attempt_id'>,
-  events: readonly (AgentJobEventApi | AgentThreadEventApi)[],
+  job: RecordedTurnJob,
+  events: readonly RecordedTurnEvent[],
 ): RecordedTurnOutputs | null {
   if (!hasSettledTurn(job.state)) return null;
   const diffs = events.filter(
@@ -153,6 +273,5 @@ export function recordedTurnOutputs(
     undefined,
   );
   const files = latest ? recordedFiles(latest.payload) : [];
-  const prUrl = recordedResultUrl(job.published_pr_url);
-  return files.length || prUrl ? { jobId: job.id, files, ...(prUrl ? { prUrl } : {}) } : null;
+  return outputsWithFiles(job, files);
 }

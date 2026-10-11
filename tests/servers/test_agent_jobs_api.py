@@ -44,6 +44,7 @@ from cloud_agent.api import routes as agent_jobs_router, worker, workspace as ag
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
@@ -1372,6 +1373,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             # builder both look for it.
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
+
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        job = self.jobs.get(job_id)
+        if job is None or job["user_id"] != user_id:
+            return None
+        return JobStreamState(job["state"], job.get("published_pr_url"))
 
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
