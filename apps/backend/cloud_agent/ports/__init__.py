@@ -39,6 +39,7 @@ from cloud_agent.ports.settings import SettingsRepository
 from cloud_agent.ports.skills import SkillRepository
 from cloud_agent.ports.snapshot import SnapshotRepository
 from cloud_agent.ports.source_control import SourceControlRepository
+from cloud_agent.ports.user_memory import UserMemoryRepository
 
 __all__ = [
     "AttachmentRepository",
@@ -70,4 +71,5 @@ __all__ = [
     "SkillRepository",
     "SnapshotRepository",
     "SourceControlRepository",
+    "UserMemoryRepository",
 ]

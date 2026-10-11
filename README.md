@@ -17,6 +17,13 @@ stays in the editor, where you can review and edit it before sending. Canceling
 the rewrite, or an unsuccessful rewrite, leaves the original draft unchanged.
 Rewrites use the account's normal model permissions and inference quota.
 
+Open **Setting → Avatar & memory** to see your automatically generated
+illustrated avatar, saved preferences, recent work, and suggestions for making
+future requests clearer. Memory updates from your latest 50 requests; explicit
+preferences can guide later tasks in the same project. You can pause memory or
+clear it so older requests are no longer used. Avatars and memory require no
+additional model calls. See the [avatar and memory guide](docs/user-memory.md).
+
 To receive desktop alerts when an agent asks a question or a turn finishes,
 open **Settings → Notifications**, select **Enable notifications**, and allow
 the browser permission prompt. You can toggle question and turn-completion

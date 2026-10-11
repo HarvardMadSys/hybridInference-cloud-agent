@@ -14,6 +14,7 @@ router's own, so a prefix here would double it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import os
@@ -105,6 +106,7 @@ from cloud_agent.tokens import (
     parse_host_token,
     parse_worker_token,
 )
+from cloud_agent.user_memory import prompt_with_user_memory
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent.workspace_errors import _workspace_broker_http_error
@@ -130,12 +132,16 @@ if TYPE_CHECKING:
         SandboxRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
+        UserMemoryRepository,
     )
     from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 
 #: Check the raw report before FastAPI parses JSON or validates its model.
 MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
+
+# Personalization must leave ample time inside the host's claim deadline.
+_USER_MEMORY_TIMEOUT_SECONDS = 2.0
 
 
 class _BoundedTurnResourcesRoute(APIRoute):
@@ -236,6 +242,7 @@ class _WorkerStorage(Protocol):
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
+    user_memory: UserMemoryRepository
 
 
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
@@ -851,6 +858,14 @@ async def worker_claim(
     thread_attachment_count = await job_store.attachments.count_thread_attachments(
         thread_id=str(claim["thread_id"])
     )
+    memory = None
+    try:
+        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
+            memory = await job_store.user_memory.refresh(user_id=claim["user_id"])
+    except Exception:
+        # A temporary personalization failure must not strand a claimed job.
+        # This fixed log message contains neither saved memory nor credentials.
+        logger.warning("agent_claim_user_memory_unavailable")
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
         turn_attachment_count=len(claim.get("attachments") or []),
@@ -869,7 +884,11 @@ async def worker_claim(
         # set the objective is the first one that should be working toward it.
         task_prompt=prompt_with_goal(
             prompt_with_skills(
-                prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                prompt_with_user_memory(
+                    prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                    memory,
+                    repo=claim["repo"],
+                ),
                 claim.get("skills"),
             ),
             # The goal preamble is the same for every runtime and every turn.

@@ -29,7 +29,7 @@ async def test_claim_retry_upgrade_preserves_existing_jobs_and_round_trips(store
             async with pool.acquire() as conn:
                 assert (
                     await conn.fetchval("SELECT version_num FROM alembic_version")
-                    == "0046_job_claim_retry"
+                    == "0047_user_memory"
                 )
                 current = dict(
                     await conn.fetchrow(f"SELECT {columns} FROM agent_jobs WHERE id=$1", job["id"])

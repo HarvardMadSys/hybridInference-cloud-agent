@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
+import { UserMemorySettings } from '@/components/features/settings/UserMemorySettings';
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
@@ -435,6 +436,7 @@ export function IntegrationsView({
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
       <SkillsSection />
+      <UserMemorySettings />
       <NotificationSettings />
       <GettingStartedSettings />
     </section>

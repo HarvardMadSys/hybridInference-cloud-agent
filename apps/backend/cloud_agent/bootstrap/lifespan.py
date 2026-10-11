@@ -25,6 +25,7 @@ from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
+from cloud_agent.workers.user_memory import refresh_user_memories
 from cloud_agent.workers.work_signal import WorkSignal
 
 if TYPE_CHECKING:
@@ -256,21 +257,25 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # bounds the table, in its own task, so a slow delete cannot delay a
         # heartbeat or the reaper.
         capacity_history = asyncio.create_task(prune_host_capacity_history(storage.host_capacity))
+        user_memories = asyncio.create_task(refresh_user_memories(storage.user_memory))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(sandbox_deletions)
         _BACKGROUND_TASKS.add(ledger_collector)
         _BACKGROUND_TASKS.add(capacity_history)
+        _BACKGROUND_TASKS.add(user_memories)
         reaper.add_done_callback(_BACKGROUND_TASKS.discard)
         snapshot_coordinator.add_done_callback(_BACKGROUND_TASKS.discard)
         sandbox_deletions.add_done_callback(_BACKGROUND_TASKS.discard)
         ledger_collector.add_done_callback(_BACKGROUND_TASKS.discard)
         capacity_history.add_done_callback(_BACKGROUND_TASKS.discard)
+        user_memories.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.reaper_task = reaper
         app.state.snapshot_task = snapshot_coordinator
         app.state.sandbox_deletion_task = sandbox_deletions
         app.state.ledger_task = ledger_collector
         app.state.capacity_task = capacity_history
+        app.state.user_memory_task = user_memories
         # The profiling policy loop runs in every control-plane process, not
         # only the one that owns the reaper: each process roots its own file and
         # terminal requests, so each one has to know what it is allowed to
@@ -328,6 +333,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.sandbox_deletion_task = None
         app.state.ledger_task = None
         app.state.capacity_task = None
+        app.state.user_memory_task = None
         app.state.queue_monitor_task = None
         app.state.publish_task = None
         app.state.pr_archive_task = None
@@ -378,6 +384,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.sandbox_deletion_task,
             app.state.ledger_task,
             app.state.capacity_task,
+            app.state.user_memory_task,
             app.state.queue_monitor_task,
             app.state.publish_task,
             app.state.pr_archive_task,

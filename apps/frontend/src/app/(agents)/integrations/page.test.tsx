@@ -4,6 +4,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import IntegrationsPage from './page';
 import type { McpConnectionApi } from '@/lib/api/mcp';
+import { getUserMemory } from '@/lib/api/userMemory';
 
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
@@ -19,6 +20,11 @@ vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/agents', () => ({
   getAgentIntegrations: vi.fn(),
   disconnectAgentIntegration: vi.fn(),
+}));
+vi.mock('@/lib/api/userMemory', () => ({
+  getUserMemory: vi.fn(),
+  updateUserMemory: vi.fn(),
+  clearUserMemory: vi.fn(),
 }));
 vi.mock('@/lib/api/mcp', () => ({
   listMcpConnections: vi.fn(),
@@ -66,6 +72,21 @@ beforeEach(() => {
   navigation.search = '';
   vi.mocked(getAgentIntegrations).mockResolvedValue({ providers: [] });
   vi.mocked(listMcpConnections).mockResolvedValue({ connections: [connection], templates: [] });
+  vi.mocked(getUserMemory).mockResolvedValue({
+    enabled: true,
+    revision: 1,
+    updated_at: null,
+    avatar: { data_url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', style: 'illustrated' },
+    portrait: {
+      summary: '',
+      projects: [],
+      focus_areas: [],
+      preferred_runtime: null,
+      preferred_model: null,
+    },
+    memories: [],
+    suggestions: [],
+  });
 });
 afterEach(() => {
   cleanup();

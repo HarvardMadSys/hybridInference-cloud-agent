@@ -233,7 +233,46 @@ export const en = {
 
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': 'Setting',
-  'settings.description': 'Manage your connections, skills, and notifications.',
+  'settings.description': 'Manage your connections, skills, memory, and notifications.',
+  'settings.memory.title': 'Avatar & memory',
+  'settings.memory.description':
+    'Your account gets an illustrated avatar automatically. Memory uses up to your 50 latest requests to suggest improvements. Explicit preferences can guide future tasks in the same project.',
+  'settings.memory.avatar': 'Your avatar',
+  'settings.memory.avatarAlt': 'Your automatically generated illustrated avatar',
+  'settings.memory.avatarDescription':
+    'A unique illustration for your account that stays the same when memory is cleared.',
+  'settings.memory.automatic': 'Automatically build memory',
+  'settings.memory.enabled': 'Memory and suggestions update automatically from your requests.',
+  'settings.memory.disabled': 'Automatic memory updates and personalization are paused.',
+  'settings.memory.loading': 'Loading your avatar and memory…',
+  'settings.memory.error': 'Could not load or update your memory. Please try again.',
+  'settings.memory.retry': 'Retry',
+  'settings.memory.signIn': 'Sign in to see your avatar and memory.',
+  'settings.memory.updated': 'Memory updated {date}',
+  'settings.memory.refresh': 'Refresh',
+  'settings.memory.refreshing': 'Refreshing…',
+  'settings.memory.clear': 'Clear memory',
+  'settings.memory.confirmTitle': 'Clear saved memory and suggestions?',
+  'settings.memory.confirmDescription':
+    'Your avatar stays the same. Old requests won’t be used again. Future requests can build new memory when enabled.',
+  'settings.memory.confirmClear': 'Confirm clear memory',
+  'settings.memory.clearing': 'Clearing…',
+  'settings.memory.cancel': 'Cancel',
+  'settings.memory.portrait': 'Recent work',
+  'settings.memory.projects': 'Projects',
+  'settings.memory.focusAreas': 'Focus areas',
+  'settings.memory.runtime': 'Preferred runtime',
+  'settings.memory.model': 'Preferred model',
+  'settings.memory.emptyPortrait':
+    'Recent work will appear after you send requests with memory enabled.',
+  'settings.memory.memories': 'Saved memory',
+  'settings.memory.preference': 'Preference',
+  'settings.memory.task': 'Task context',
+  'settings.memory.source': 'View source task',
+  'settings.memory.emptyMemory': 'No saved memory yet.',
+  'settings.memory.suggestions': 'Suggestions for future tasks',
+  'settings.memory.emptySuggestions':
+    'Suggestions will appear when your activity provides enough context.',
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',

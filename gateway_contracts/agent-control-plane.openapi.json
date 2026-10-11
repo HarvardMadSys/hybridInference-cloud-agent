@@ -14269,6 +14269,21 @@
         "title": "UpdateConnectorRequest",
         "type": "object"
       },
+      "UpdateMemorySettings": {
+        "additionalProperties": false,
+        "description": "Enable or pause automatic memory creation and use.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "UpdateMemorySettings",
+        "type": "object"
+      },
       "UpdateSettingsRequest": {
         "additionalProperties": false,
         "description": "A partial settings update; omitted keys retain their existing values.",
@@ -14349,6 +14364,215 @@
           "revision"
         ],
         "title": "UpdateSkill",
+        "type": "object"
+      },
+      "UserAvatar": {
+        "description": "An illustrated portrait that can be displayed directly by an image element.",
+        "properties": {
+          "data_url": {
+            "title": "Data Url",
+            "type": "string"
+          },
+          "style": {
+            "const": "illustrated",
+            "default": "illustrated",
+            "title": "Style",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_url"
+        ],
+        "title": "UserAvatar",
+        "type": "object"
+      },
+      "UserMemory": {
+        "description": "A compact preference or task with its original job reference.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "preference",
+              "task"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "source_job_id": {
+            "title": "Source Job Id",
+            "type": "string"
+          },
+          "source_repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Repo"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "content",
+          "source_job_id"
+        ],
+        "title": "UserMemory",
+        "type": "object"
+      },
+      "UserMemoryView": {
+        "description": "Public view of a user's bounded recent work profile and memory.",
+        "properties": {
+          "avatar": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserAvatar"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/UserMemory"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "portrait": {
+            "$ref": "#/components/schemas/UserPortrait"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "suggestions": {
+            "items": {
+              "$ref": "#/components/schemas/UserSuggestion"
+            },
+            "title": "Suggestions",
+            "type": "array"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "title": "UserMemoryView",
+        "type": "object"
+      },
+      "UserPortrait": {
+        "description": "Observed work areas and commonly used agent settings.",
+        "properties": {
+          "focus_areas": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Focus Areas",
+            "type": "array"
+          },
+          "preferred_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Model"
+          },
+          "preferred_runtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Runtime"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "summary": {
+            "default": "No recent work recorded yet.",
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "title": "UserPortrait",
+        "type": "object"
+      },
+      "UserSuggestion": {
+        "description": "An actionable improvement supported by recent requests.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "reason",
+          "action"
+        ],
+        "title": "UserSuggestion",
         "type": "object"
       },
       "ValidationError": {
@@ -28493,6 +28717,162 @@
         "summary": "Delete Upload",
         "tags": [
           "agent-uploads"
+        ]
+      }
+    },
+    "/v1/agent/user-memory": {
+      "delete": {
+        "description": "Forget historical memory; only newer requests can build it again.",
+        "operationId": "clear_user_memory_v1_agent_user_memory_delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear User Memory",
+        "tags": [
+          "user-memory"
+        ]
+      },
+      "get": {
+        "description": "Automatically create the owner's avatar and refresh their recent memory.",
+        "operationId": "read_user_memory_v1_agent_user_memory_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read User Memory",
+        "tags": [
+          "user-memory"
+        ]
+      },
+      "patch": {
+        "description": "Pause generation and prompt personalization, or resume future updates.",
+        "operationId": "update_user_memory_v1_agent_user_memory_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemorySettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update User Memory",
+        "tags": [
+          "user-memory"
         ]
       }
     },

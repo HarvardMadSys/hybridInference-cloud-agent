@@ -63,7 +63,7 @@ field is missing or an optional integration is only partly configured, the
 attention.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0046_job_claim_retry`. Then start the main control-plane listener with its
+`0047_user_memory`. Then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
 settings. Newly migrated runtime identity, service keys, broker credentials,
