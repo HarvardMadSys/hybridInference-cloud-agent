@@ -15,6 +15,28 @@ function view(tool: string, input: unknown, output?: string, isError?: boolean) 
 }
 
 describe('ToolActivityDetails', () => {
+  it.each([
+    { tool: 'spawn_agent', input: { prompt: 'Review' }, title: 'Start subagent' },
+    { tool: 'wait', input: { ids: ['a'] }, title: 'Wait for subagents' },
+    { tool: 'list_agents', input: {}, title: 'List subagents' },
+    {
+      tool: 'send_message',
+      input: { target: 'a', message: 'Review' },
+      title: 'Message subagent',
+    },
+    {
+      tool: 'Task',
+      input: { description: 'Delegate task', prompt: 'Review' },
+      title: 'Delegate task',
+    },
+  ])(
+    'renders the $tool heading once when there is no distinct description',
+    ({ tool, input, title }) => {
+      render(view(tool, input));
+      expect(screen.getByRole('heading', { level: 3, name: title })).toBeInTheDocument();
+    },
+  );
+
   it('shows unfamiliar status strings literally and returned agent identities without inventing a state', () => {
     const rendered = render(
       view('TodoWrite', { todos: [{ content: 'Review', status: 'constructor' }] }),
@@ -87,6 +109,9 @@ describe('ToolActivityDetails', () => {
       ),
     );
     expect(screen.getByText('Review API')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 3, name: 'Review API Delegate task' }),
+    ).toBeInTheDocument();
     expect(screen.getByText('Explore')).toBeInTheDocument();
     expect(screen.getByText('sonnet')).toBeInTheDocument();
     expect(screen.getByText('Background requested')).toBeInTheDocument();

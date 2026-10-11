@@ -164,9 +164,14 @@ export function ToolActivityDetails({
     <section aria-label={activity.title} className="min-w-0 space-y-1.5">
       <h3 className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs font-medium text-gray-700 dark:text-gray-200">
         {activity.description ?? activity.title}
-        <span className="min-w-0 font-normal text-gray-400 dark:text-gray-500">
-          {activity.title}
-        </span>
+        {activity.description && activity.description !== activity.title ? (
+          <>
+            {' '}
+            <span className="min-w-0 font-normal text-gray-400 dark:text-gray-500">
+              {activity.title}
+            </span>
+          </>
+        ) : null}
       </h3>
       {meta.length ? (
         <p className="flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500 dark:text-gray-400">
