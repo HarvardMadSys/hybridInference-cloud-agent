@@ -225,7 +225,7 @@ class SandboxProcess(ABC):
     def lines(self) -> Iterator[str]:
         """Yield the agent's stdout, line by line, as it is produced."""
 
-    def chunks(self) -> Iterator[bytes]:
+    def byte_chunks(self) -> Iterator[bytes]:
         """Yield stdout as raw bytes, a bounded read at a time, as it is produced.
 
         This is for a bounded command's output, not an agent's event stream.
@@ -457,7 +457,7 @@ class _PopenProcess(SandboxProcess):
         assert self._process.stdout is not None
         yield from self._process.stdout
 
-    def chunks(self) -> Iterator[bytes]:
+    def byte_chunks(self) -> Iterator[bytes]:
         """Yield the child's stdout bytes, read straight from the pipe."""
         assert self._process.stdout is not None
         yield from read_pipe_chunks(self._process.stdout.fileno())

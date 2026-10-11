@@ -5071,7 +5071,7 @@ class _RetainedExecProcess(SandboxProcess):
         assert self._process.stdout is not None
         yield from self._process.stdout
 
-    def chunks(self) -> Iterator[bytes]:
+    def byte_chunks(self) -> Iterator[bytes]:
         assert self._process.stdout is not None
         yield from read_pipe_chunks(self._process.stdout.fileno())
 

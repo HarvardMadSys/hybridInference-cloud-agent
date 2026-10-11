@@ -137,7 +137,7 @@ class _WorkspaceBackend(RetainedChatBackend):
     def spawn(self, spec):
         self.spawned.append(spec)
         return SimpleNamespace(
-            chunks=lambda: iter(()),
+            byte_chunks=lambda: iter(()),
             kill=lambda: None,
             wait=lambda: 0,
             stderr_text=lambda: "",
@@ -1459,7 +1459,7 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
 
     def spawn(_spec):
         return SimpleNamespace(
-            chunks=lambda: iter([b"x" * (1024 * 1024 + 1)]),
+            byte_chunks=lambda: iter([b"x" * (1024 * 1024 + 1)]),
             kill=lambda: killed.append(True),
             wait=lambda: 0,
             stderr_text=lambda: "",
@@ -1502,7 +1502,7 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
     def spawn(_spec):
         release.wait(10)
         return SimpleNamespace(
-            chunks=lambda: iter(()), kill=lambda: None, wait=lambda: 0, stderr_text=lambda: ""
+            byte_chunks=lambda: iter(()), kill=lambda: None, wait=lambda: 0, stderr_text=lambda: ""
         )
 
     monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)

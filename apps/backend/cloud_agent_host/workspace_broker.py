@@ -1437,7 +1437,7 @@ def _run_sandbox(
     def pump() -> None:
         size = 0
         try:
-            for chunk in process.chunks():
+            for chunk in process.byte_chunks():
                 events.put(chunk)
                 size += len(chunk)
                 if size > max_output_bytes:
