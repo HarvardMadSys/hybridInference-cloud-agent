@@ -59,9 +59,15 @@ The next turn resumes that same session in the same container. Successful turns
 without a retry keep the live process. This does not repair transcripts already
 damaged by the older behavior.
 
-The sandbox's `http-agent-live-bridge=3` helper pin is required by host
-attestation. Deploy the broker/runner and sandbox image together; an older helper
-image must not advertise readiness for the new host.
+The sandbox's `http-agent-live-bridge=4` helper pin is required by host
+attestation. Version 4 gates every turn on the current live SSE subscription,
+and aborts an active native turn if that non-replayable stream is lost. It also
+extends autonomous permission replies for both OpenCode and Kilo to the Task
+child sessions the root turn explicitly reports, retries a failed one-shot
+permission reply, and aborts instead of leaving that request pending. Version 3
+added correlated native question replies. Deploy the broker/runner and sandbox
+image together;
+an older helper image must not advertise readiness for the new host.
 
 ## Release scope and remaining findings
 
