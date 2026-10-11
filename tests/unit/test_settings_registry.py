@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -111,6 +113,132 @@ def test_merged_validation_refuses_inconsistent_limits():
     )
     with pytest.raises(ValueError, match="cannot exceed"):
         settings.validate_stored_settings(values)
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == settings.__name__ and record.levelno == logging.WARNING
+    ]
+
+
+async def test_a_stored_value_this_release_refuses_does_not_stop_startup(caplog):
+    """A narrower bound in a later release must not lock every listener out.
+
+    The value falls back to its default, and the key — never the value — is
+    logged once for the revision that carries it, not on every synchronization.
+    """
+    repository = Repository()
+    repository.revision = 3
+    repository.values = {**settings.initial_settings(), "task_titles.max_chars": 48}
+    caplog.set_level(logging.WARNING, logger=settings.__name__)
+
+    await settings.initialize_settings(repository)
+
+    assert settings.integer_setting("task_titles.max_chars") == 36
+    view = settings.settings_response(3, repository.values)
+    assert view["values"]["task_titles.max_chars"] == 36
+    logged = _warnings(caplog)
+    assert len(logged) == 1
+    assert "task_titles.max_chars" in logged[0]
+    assert "48" not in logged[0]
+    settings.apply_settings(3, repository.values)
+    assert len(_warnings(caplog)) == 1
+
+
+def test_one_key_at_a_time_repairs_every_stored_value_this_release_refuses():
+    """The editor saves one key per request; neither bad key may block the other."""
+    stored = {
+        **settings.initial_settings(),
+        "task_titles.max_chars": 48,
+        "max_attempts": 50,
+    }
+    for key in ("task_titles.max_chars", "max_attempts"):
+        update = {**stored, **settings.encode_changes({key: None})}
+        settings.validate_settings_update(stored, update)
+        stored = update
+    unrelated = {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+    settings.validate_settings_update(stored, unrelated)
+
+
+def test_a_stored_pair_out_of_order_falls_back_to_both_defaults():
+    stored = {
+        **settings.initial_settings(),
+        "task_titles.timeout_seconds": 100.0,
+        "task_titles.total_timeout_seconds": 50.0,
+    }
+    settings.apply_settings(1, stored)
+    assert settings.number_setting("task_titles.timeout_seconds") == 10.0
+    assert settings.number_setting("task_titles.total_timeout_seconds") == 120.0
+    # A pair the update does not touch does not block it either.
+    settings.validate_settings_update(
+        stored, {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+    )
+
+
+def test_a_stored_key_shorter_than_its_minimum_is_kept_and_reported(caplog):
+    """The default is no key at all, which would orphan everything it signed."""
+    definition = settings.SETTINGS_BY_KEY["session_signing_secret"]
+    stored = {
+        **settings.initial_settings(),
+        "session_signing_secret": settings._encode(definition, "a-short-saved-key"),
+    }
+    caplog.set_level(logging.WARNING, logger=settings.__name__)
+
+    settings.apply_settings(1, stored)
+
+    assert settings.setting_env("AGENT_SESSION_SECRET") == "a-short-saved-key"
+    logged = _warnings(caplog)
+    assert len(logged) == 1
+    assert "session_signing_secret" in logged[0]
+    assert "a-short-saved-key" not in logged[0]
+    settings.validate_settings_update(
+        stored, {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+    )
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        settings.encode_changes({"session_signing_secret": "another-short-key"})
+
+
+def test_an_update_still_cannot_save_an_ordering_it_breaks():
+    stored = settings.initial_settings()
+    with pytest.raises(ValueError, match="cannot exceed"):
+        settings.validate_settings_update(
+            stored, {**stored, **settings.encode_changes({"goals.arm_after_seconds": 1000})}
+        )
+
+
+def test_an_undecryptable_stored_secret_still_fails_closed(monkeypatch):
+    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "test-dispatch-secret-unique-value")
+    encoded = settings.initial_settings()
+    moved = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
+    with pytest.raises(SourceControlError):
+        settings.apply_settings(1, moved)
+    with pytest.raises(ValueError, match="Unencrypted stored secret"):
+        settings.apply_settings(1, {**encoded, "oncall_dispatch_token": "plaintext"})
+
+
+async def test_a_failed_synchronization_names_the_setting_in_its_log(monkeypatch, caplog):
+    """The message names a setting and never its value, so it is safe to log."""
+    repository = Repository()
+    repository.revision = 2
+    repository.values = {**settings.initial_settings(), "oncall_dispatch_token": "plaintext"}
+    ticks = 0
+
+    async def tick(_delay):
+        nonlocal ticks
+        ticks += 1
+        if ticks > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(settings.asyncio, "sleep", tick)
+    caplog.set_level(logging.WARNING, logger=settings.__name__)
+    with pytest.raises(asyncio.CancelledError):
+        await settings.synchronize_settings(repository)
+    assert _warnings(caplog) == [
+        "settings synchronization failed "
+        "(ValueError: Unencrypted stored secret for On-call dispatch token)"
+    ]
 
 
 @pytest.mark.parametrize(
