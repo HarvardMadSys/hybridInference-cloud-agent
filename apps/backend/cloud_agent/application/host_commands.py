@@ -121,12 +121,14 @@ class HostCommands:
         *,
         host: str,
         expected_fence_token: UUID | None,
+        expected_fence_epoch: UUID,
         fence_token: UUID,
-    ) -> str:
+    ) -> tuple[str, UUID]:
         """Acquire or idempotently confirm one deployment-owned drain."""
-        outcome, status_before = await self.repository.acquire_host_drain_fence(
+        outcome, status_before, drain_fence_epoch = await self.repository.acquire_host_drain_fence(
             host=host,
             expected_fence_token=expected_fence_token,
+            expected_fence_epoch=expected_fence_epoch,
             fence_token=fence_token,
         )
         if outcome == "unknown":
@@ -146,11 +148,15 @@ class HostCommands:
             )
         if status_before not in ("online", "draining"):
             raise HostCommandError(409, f"The deployment drain receipt for {host!r} is invalid.")
-        return status_before
+        if drain_fence_epoch is None:
+            raise HostCommandError(409, f"The deployment drain epoch for {host!r} is invalid.")
+        return status_before, drain_fence_epoch
 
-    async def release_drain_fence(self, *, host: str, fence_token: UUID) -> None:
+    async def release_drain_fence(self, *, host: str, fence_token: UUID) -> UUID:
         """Release or idempotently confirm the exact deployment-owned drain."""
-        outcome = await self.repository.release_host_drain_fence(host=host, fence_token=fence_token)
+        outcome, drain_fence_epoch = await self.repository.release_host_drain_fence(
+            host=host, fence_token=fence_token
+        )
         if outcome == "unknown":
             raise HostCommandError(404, f"Unknown runner host: {host}")
         if outcome == "stale":
@@ -161,6 +167,9 @@ class HostCommands:
                 409,
                 f"{host!r} is {current['status'] if current else 'unknown'!r} and cannot be released.",
             )
+        if drain_fence_epoch is None:
+            raise HostCommandError(409, f"The deployment drain epoch for {host!r} is invalid.")
+        return drain_fence_epoch
 
     async def remove(self, *, host: str, force: bool = False) -> None:
         """Revoke Host access without releasing any underlying machine."""

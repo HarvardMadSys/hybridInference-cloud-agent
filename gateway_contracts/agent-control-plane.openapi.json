@@ -4,6 +4,12 @@
       "AcquireHostDrainFenceRequest": {
         "description": "Atomically replace the expected drain owner with a new opaque owner.",
         "properties": {
+          "expected_fence_epoch": {
+            "description": "Canonical UUID copied from the latest host snapshot; the acquire is stale if drain-relevant host state changed afterward.",
+            "format": "uuid",
+            "title": "Expected Fence Epoch",
+            "type": "string"
+          },
           "expected_fence_token": {
             "anyOf": [
               {
@@ -24,6 +30,7 @@
         },
         "required": [
           "expected_fence_token",
+          "expected_fence_epoch",
           "fence_token"
         ],
         "title": "AcquireHostDrainFenceRequest",
@@ -5551,7 +5558,7 @@
         "type": "object"
       },
       "AgentRunnerHost": {
-        "description": "One machine in the agent runner pool.\n\nEverything below ``seconds_since_seen`` arrived with the dynamic pool\n(phase G) and every one of those fields has a default. A host that joined\nby polling — the only way in before enrollment existed — has none of them\nset, and it must still render on the admin page rather than 500 it.",
+        "description": "One machine in the agent runner pool.\n\nMost fields below ``seconds_since_seen`` arrived with the dynamic pool\n(phase G) and retain defaults for hosts that joined by polling. The drain\nfence epoch is different: its migration backfills every host and the API\nrequires it so an automation client never mistakes a partial fence\ncontract for a safe compare-and-swap base.",
         "properties": {
           "active": {
             "title": "Active",
@@ -5605,6 +5612,12 @@
             "description": "True only while the recorded deployment fence owns a draining host; false for an absent fence or released receipt.",
             "title": "Drain Fence Active",
             "type": "boolean"
+          },
+          "drain_fence_epoch": {
+            "description": "Opaque compare-and-swap generation for deployment drain state. It rotates whenever host lifecycle, credential, placement, or drain ownership changes.",
+            "format": "uuid",
+            "title": "Drain Fence Epoch",
+            "type": "string"
           },
           "drain_fence_status_before": {
             "anyOf": [
@@ -5876,7 +5889,8 @@
           "last_worker_id",
           "first_seen_at",
           "last_seen_at",
-          "seconds_since_seen"
+          "seconds_since_seen",
+          "drain_fence_epoch"
         ],
         "title": "AgentRunnerHost",
         "type": "object"

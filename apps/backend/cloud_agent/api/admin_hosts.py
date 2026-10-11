@@ -158,6 +158,10 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         drain_fence_token=row.get("drain_fence_token"),
         drain_fence_status_before=row.get("drain_fence_status_before"),
         drain_fence_active=bool(row.get("drain_fence_active")),
+        # Unlike the phase-G display fields above, this is a required protocol
+        # generation. The migration backfills it before this API may start;
+        # silently defaulting it would make a partial CAS contract look usable.
+        drain_fence_epoch=row["drain_fence_epoch"],
         sandbox_runtime=row.get("sandbox_runtime"),
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
@@ -582,6 +586,7 @@ async def drain_agent_runner_host(
             HostCommands(job_store.host_pool).acquire_drain_fence(
                 host=host,
                 expected_fence_token=payload.expected_fence_token,
+                expected_fence_epoch=payload.expected_fence_epoch,
                 fence_token=payload.fence_token,
             )
         )

@@ -63,9 +63,10 @@ field is missing or an optional integration is only partly configured, the
 attention.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0049_host_drain_fence`. Existing hosts begin without a deployment drain owner
-or release receipt. Rebuild the sandbox image for explicit plugin loading. Then
-start the main control-plane listener with its existing complete environment. It
+`0050_host_drain_fence_epoch`. Existing hosts begin without a deployment drain
+owner or release receipt, and 0050 backfills each one with a non-null fence
+epoch. Rebuild the sandbox image for explicit plugin loading. Then start the
+main control-plane listener with its existing complete environment. It
 imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
 settings. Newly migrated runtime identity, service keys, broker credentials,
@@ -1818,36 +1819,53 @@ comes from that repository's default branch. Synchronize orchestrator changes
 there before relying on a new rollback fence, and do not dispatch an older
 default-branch workflow against an environment during that rollout window.
 
-Migration `0049_host_drain_fence` establishes a second permanent compatibility
-floor. After a fence-capable control plane has been activated, the deployment
-orchestrator must reject every candidate whose control-plane recipe lacks
-`AGENT_DEPLOY_DRAIN_FENCE_V1` before migration, drain, or activation. Do not
-downgrade the application or schema below that release. A released fence keeps
-its token as an idempotency receipt, and an older writer cannot change the
-host status without violating the database constraint. That failure is
-deliberately fail-closed, but an old control plane is not operationally
-compatible with the receipt.
+Migration `0049_host_drain_fence` introduced durable drain ownership and its V1
+recipe marker. Additive migration `0050_host_drain_fence_epoch` establishes the
+current permanent compatibility floor. Before activating the V2 control plane,
+the deployment orchestrator must reject every candidate whose control-plane
+recipe lacks `AGENT_DEPLOY_DRAIN_FENCE_V2`; after activation, do not downgrade
+the application or schema below that release. The recipe retains
+`AGENT_DEPLOY_DRAIN_FENCE_V1` only so an older orchestrator can perform the
+bridge upgrade. V1 alone is not a valid rollback target once V2 has run.
+
+Every host now has a non-null `drain_fence_epoch`. The API returns its canonical
+UUID spelling and requires the same value, together with the expected owner
+token, when acquiring or transferring a fence. A successful state change
+rotates the epoch. An exact requested-token retry is checked first, so a lost
+success response remains idempotent even though that success changed the epoch;
+a different token carrying the old epoch is stale.
+
+The database enforces the generation outside the API as well. Its `BEFORE
+UPDATE` trigger rotates the epoch when `status`, `credential_hash`,
+`drain_fence_token`, `drain_fence_status_before`, `drain_fence_active`, or
+`compute_node_id` changes, and ignores an attempt to assign the epoch directly.
+Its `BEFORE DELETE` guard rejects deletion while a drain fence is active. This
+means an operator, reaper, old writer, or placement change invalidates every
+previous snapshot rather than recreating a token-only ABA state. An older V1
+control plane does not compare the epoch and is therefore not operationally
+compatible, even though its writes still cause rotation.
 
 Inspect fence state before rollback or recovery:
 
 ```sql
 SELECT host, status, slots_used, drain_fence_token,
-       drain_fence_status_before, drain_fence_active
+       drain_fence_status_before, drain_fence_active, drain_fence_epoch
 FROM agent_runner_hosts
 WHERE drain_fence_token IS NOT NULL;
 ```
 
 The compatibility floor remains even when this query is empty: the current
 control plane may create a receipt on its next automated deployment. If an
-active fence is abandoned, redeploy the fence-capable release and use its
+active fence is abandoned, redeploy the V2 fence-capable release and use its
 token-conditional release (or the audited force override). If that is
-impossible, stop the old control plane and every deployment workflow, begin a
-transaction, lock exactly one host row, and verify the expected token plus
-`slots_used = 0`. Only then may an operator clear that one active fence:
+impossible, stop the control plane and every deployment workflow, begin a
+transaction, lock exactly one host row, and verify the expected token, epoch,
+and `slots_used = 0`. Only then may an operator clear that one active fence:
 
 ```sql
 BEGIN;
-SELECT host, status, slots_used, drain_fence_token, drain_fence_active
+SELECT host, status, slots_used, drain_fence_token, drain_fence_active,
+       drain_fence_epoch
 FROM agent_runner_hosts
 WHERE host = '<exact-host>'
 FOR UPDATE;
@@ -1860,17 +1878,19 @@ SET status = 'online',
 WHERE host = '<exact-host>'
   AND status = 'draining'
   AND slots_used = 0
-  AND drain_fence_token = '<expected-uuid>'::uuid
+  AND drain_fence_token = '<expected-token>'::uuid
+  AND drain_fence_epoch = '<expected-epoch>'::uuid
   AND drain_fence_active
-RETURNING host;
+RETURNING host, drain_fence_epoch;
 COMMIT;
 ```
 
-Require exactly one returned row. To clear only an inactive receipt, use the
-same exact host and token predicates with `status = 'online'` and
-`NOT drain_fence_active`; do not change status. Never bulk-clear fence fields.
-If the owner or token is uncertain, leave the host draining and restore the
-fence-capable control plane.
+Require exactly one returned row. The returned epoch is the newly rotated
+value; do not try to assign it yourself. To clear only an inactive receipt, use
+the same exact host, token, and epoch predicates with `NOT drain_fence_active`;
+change status only when the separately verified recovery requires it. Never
+bulk-clear fence fields. If the owner, token, or epoch is uncertain, leave the
+host draining and restore the V2 fence-capable control plane.
 
 #### Cold starts and failed deployments
 

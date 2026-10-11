@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -76,6 +77,7 @@ class FakeHostStore(AllCapabilities):
             "last_worker_id": f"w-{host}",
             "first_seen_at": seen,
             "last_seen_at": seen,
+            "drain_fence_epoch": uuid4(),
             "runtime_versions": {"claude-code": "2.1.220"},
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.235"]},
         }

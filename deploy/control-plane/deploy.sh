@@ -79,6 +79,7 @@ SHARED_READY_TIMEOUT="${SHARED_READY_TIMEOUT:-900}"
 DEPLOY_PROTOCOL="shared-live-exact-sha-v4"
 # Candidate recipe capability consumed by downstream deployment orchestration.
 # AGENT_DEPLOY_DRAIN_FENCE_V1
+# AGENT_DEPLOY_DRAIN_FENCE_V2
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }

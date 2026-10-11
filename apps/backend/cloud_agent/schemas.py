@@ -11,7 +11,7 @@ import binascii
 # silently unbuilt and raises at the first request instead of at import.
 from datetime import datetime  # noqa: TC003
 from typing import Annotated, Any, Final, Literal
-from uuid import UUID  # noqa: TC003 -- Pydantic resolves this at runtime.
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -2479,10 +2479,11 @@ class RepoBranchesResponse(BaseModel):
 class AgentRunnerHost(BaseModel):
     """One machine in the agent runner pool.
 
-    Everything below ``seconds_since_seen`` arrived with the dynamic pool
-    (phase G) and every one of those fields has a default. A host that joined
-    by polling — the only way in before enrollment existed — has none of them
-    set, and it must still render on the admin page rather than 500 it.
+    Most fields below ``seconds_since_seen`` arrived with the dynamic pool
+    (phase G) and retain defaults for hosts that joined by polling. The drain
+    fence epoch is different: its migration backfills every host and the API
+    requires it so an automation client never mistakes a partial fence
+    contract for a safe compare-and-swap base.
     """
 
     host: str
@@ -2563,6 +2564,13 @@ class AgentRunnerHost(BaseModel):
         description=(
             "True only while the recorded deployment fence owns a draining host; "
             "false for an absent fence or released receipt."
+        ),
+    )
+    drain_fence_epoch: UUID = Field(
+        ...,
+        description=(
+            "Opaque compare-and-swap generation for deployment drain state. It rotates "
+            "whenever host lifecycle, credential, placement, or drain ownership changes."
         ),
     )
     sandbox_runtime: str | None = Field(
@@ -2647,7 +2655,29 @@ class AcquireHostDrainFenceRequest(BaseModel):
     """Atomically replace the expected drain owner with a new opaque owner."""
 
     expected_fence_token: UUID | None = Field(..., repr=False)
+    expected_fence_epoch: UUID = Field(
+        ...,
+        repr=False,
+        description=(
+            "Canonical UUID copied from the latest host snapshot; the acquire is stale if "
+            "drain-relevant host state changed afterward."
+        ),
+    )
     fence_token: UUID = Field(..., repr=False)
+
+    @field_validator("expected_fence_epoch", mode="before")
+    @classmethod
+    def expected_epoch_is_canonical(cls, value: object) -> object:
+        """Reject alternate UUID spellings so persisted CAS intent is byte-stable."""
+        if isinstance(value, UUID) or not isinstance(value, str):
+            return value
+        try:
+            parsed = UUID(value)
+        except ValueError:
+            return value  # Let Pydantic produce its ordinary UUID error.
+        if str(parsed) != value:
+            raise ValueError("expected_fence_epoch must be a canonical UUID")
+        return parsed
 
 
 class ReleaseHostDrainFenceRequest(BaseModel):

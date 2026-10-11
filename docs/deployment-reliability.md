@@ -18,26 +18,37 @@ the bounded check directly.
 
 A single-host rollout that must not interrupt work uses one explicit host as a
 database-backed admission fence. The orchestrator runs on the control-plane
-machine, outside the pool it is draining, and serializes releases for the
-environment. It applies Drain first, then waits until that exact host still
-reports `draining` and `slots_used=0`. A claim that committed just before Drain
-is allowed to finish; no later claim can commit while the status remains
-draining.
+machine, outside the pool it is draining. It first reads the host's current
+owner token and canonical `drain_fence_epoch`, then asks the API to replace that
+exact pair with a fresh opaque owner token. The database accepts the change only
+if both observations are still current and rotates the epoch as it commits.
 
-The host is activated while that fence stays in place. Control-plane activation
-sets `AGENT_DEPLOY_DRAINING_HOST` to the exact enrollment name, which authorizes
-the deployment readiness check to accept only that named draining host. The
-check requires zero occupied slots, the target deployment capability, a fresh
+The orchestrator then waits until that exact host still reports `draining` and
+`slots_used=0`. A claim that committed just before Drain is allowed to finish;
+no later claim can commit while the status remains draining. The host is
+activated while the fence stays in place. Control-plane activation sets
+`AGENT_DEPLOY_DRAINING_HOST` to the exact enrollment name, which authorizes the
+deployment readiness check to accept only that named draining host. The check
+requires zero occupied slots, the target deployment capability, a fresh
 heartbeat and a successful reverse broker probe, then rereads the same
 conditions after the network await. Ordinary readiness remains online-only.
 
-Only after the target control plane is healthy may the rollout that created the
-Drain put the host online. A rollout that found the host already draining must
-leave it that way. The current status API has no owner token, so deployments
-must remain serialized and operators must not change that host during this
-window. On cancellation or an uncertain result, fail closed: leave it draining
-and retry the same verified target. Queued work waits; an in-flight turn is
-never killed or replayed.
+Only a normal fenced release holding the exact active owner token may put the host online.
+An identical acquire or release retry is idempotent, including after a lost
+success response. A successor may transfer ownership only from the exact token
+and epoch it observed; an operator action, lifecycle or credential change,
+placement change, or competing rollout rotates the epoch and makes the stale
+request fail. The database also refuses deletion of a host while its fence is
+active. Deployment remains serialized for the rest of the activation protocol,
+but drain safety no longer depends on that serialization or on operators
+leaving the row untouched.
+
+On cancellation or an uncertain result, fail closed: leave the host draining
+and retry with the same verified owner. Queued work waits; an in-flight turn is
+never killed or replayed. Migration `0050_host_drain_fence_epoch` and the
+`AGENT_DEPLOY_DRAIN_FENCE_V2` recipe marker are the rollback floor after V2
+activation. The V1 marker remains only for an older orchestrator performing the
+bridge upgrade.
 
 ## Before stopping a serving runner
 

@@ -185,6 +185,8 @@ export interface AgentRunnerHost {
   drain_fence_status_before?: 'online' | 'draining' | null;
   /** True while the automated owner keeps this host draining. */
   drain_fence_active?: boolean;
+  /** Required V2 CAS generation, rotated whenever drain-relevant host state changes. */
+  drain_fence_epoch: string;
   /**
    * True when the host redeemed an enrollment token, which is the difference
    * between a name that is a scheduling label and a name that is an identity.
