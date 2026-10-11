@@ -36,7 +36,14 @@ export interface AgentAttempt {
  */
 export type AgentEvent =
   | { kind: 'lifecycle'; text: string; attemptNo?: number; sourceEventId?: number }
-  | { kind: 'thinking'; text: string; attemptNo?: number; sourceEventId?: number }
+  | {
+      kind: 'thinking';
+      text: string;
+      /** Native reasoning can record both a summary and detailed text. */
+      reasoningBlocks?: { text: string; channel?: string }[];
+      attemptNo?: number;
+      sourceEventId?: number;
+    }
   | {
       kind: 'message';
       text: string;

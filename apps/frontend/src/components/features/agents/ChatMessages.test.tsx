@@ -24,6 +24,82 @@ function round(goalTurn: GoalTurn) {
 
 afterEach(cleanup);
 
+describe('reasoning in the transcript', () => {
+  it('starts collapsed, renders Markdown, and keeps reply actions on the answer', () => {
+    const onFork = vi.fn();
+    render(
+      <>
+        <EventRow
+          event={{ kind: 'thinking', text: 'Inspect **the parser** first.', sourceEventId: 1 }}
+          blockKey="ajob_1:event:1"
+          onFork={onFork}
+        />
+        <EventRow event={{ kind: 'message', text: 'The parser is fixed.' }} onFork={onFork} />
+      </>,
+    );
+
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).toHaveAttribute('data-block-key', 'ajob_1:event:1');
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('the parser').tagName).toBe('STRONG');
+    expect(within(reasoning).getByText('the parser')).not.toBeVisible();
+    expect(within(reasoning).queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.getByText('The parser is fixed.')).toBeVisible();
+    expect(screen.getAllByRole('button', { name: 'Copy message' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
+    expect(onFork).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps streamed reasoning open as its content completes', () => {
+    const view = render(
+      <EventRow
+        event={{ kind: 'thinking', text: 'Inspect the parser', sourceEventId: 1 }}
+        blockKey="ajob_1:event:1"
+      />,
+    );
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    reasoning.open = true;
+    expect(screen.getByText('Inspect the parser')).toBeVisible();
+
+    view.rerender(
+      <EventRow
+        event={{ kind: 'thinking', text: 'Inspect the parser first.', sourceEventId: 1 }}
+        blockKey="ajob_1:event:1"
+      />,
+    );
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    expect(screen.getByText('Inspect the parser first.')).toBeVisible();
+  });
+
+  it('separates a recorded summary from detailed reasoning', () => {
+    render(
+      <EventRow
+        event={{
+          kind: 'thinking',
+          text: 'Inspect the parser.',
+          reasoningBlocks: [
+            { channel: 'summary', text: 'Inspect the parser.' },
+            { channel: 'reasoning', text: 'Compare the token boundaries.' },
+          ],
+        }}
+      />,
+    );
+    const reasoning = within(screen.getByLabelText('Agent reasoning'));
+    expect(reasoning.getByText('Summary')).toBeInTheDocument();
+    expect(reasoning.getByText('Detailed reasoning')).toBeInTheDocument();
+    expect(reasoning.getAllByText('Inspect the parser.')).toHaveLength(1);
+    expect(reasoning.getByText('Compare the token boundaries.')).toBeInTheDocument();
+  });
+
+  it('uses a compact status when no reasoning text is available', () => {
+    render(<EventRow event={{ kind: 'thinking', text: '   ' }} />);
+    expect(screen.getByLabelText('Agent reasoning')).toHaveTextContent('Agent is reasoning');
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+});
+
 describe('an automatic round', () => {
   it('is a system marker, not a message somebody sent', () => {
     round({ source: 'goal', round: 3 });

@@ -1580,17 +1580,37 @@ describe('JobDetail', () => {
     expect(history.getByText('Agent finished')).toBeInTheDocument();
   });
 
-  it('shows reasoning as a status without rendering raw thinking text', () => {
+  it('shows reasoning as a status when no reasoning content was recorded', () => {
     render(
       <JobDetail
         job={makeJob({
-          events: [{ kind: 'thinking', text: 'private chain of thought', attemptNo: 1 }],
+          events: [{ kind: 'thinking', text: '', attemptNo: 1 }],
         })}
       />,
     );
 
     expect(screen.getByLabelText('Agent reasoning')).toHaveTextContent('Agent is reasoning');
-    expect(screen.queryByText('private chain of thought')).not.toBeInTheDocument();
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  it('keeps recorded reasoning collapsed and separate from the assistant reply', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          events: [
+            { kind: 'thinking', text: 'Check the parser before editing.', attemptNo: 1 },
+            { kind: 'message', text: 'Fixed the parser.', attemptNo: 1 },
+          ],
+        })}
+      />,
+    );
+
+    const reasoning = screen.getByLabelText('Agent reasoning');
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('Check the parser before editing.')).toBeInTheDocument();
+    expect(within(reasoning).queryByText('Fixed the parser.')).not.toBeInTheDocument();
+    expect(screen.getByText('Fixed the parser.')).toBeVisible();
   });
 
   it('shows inline tool activity with its complete call and result available on demand', () => {

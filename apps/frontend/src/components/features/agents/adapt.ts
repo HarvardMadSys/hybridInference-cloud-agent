@@ -32,7 +32,13 @@ import type {
   ProcessObservation,
   TurnResources,
 } from './types';
-import { projectProtocolEvents, replyPreviewPiece } from './trajectoryProtocol';
+import {
+  notificationHasError,
+  projectProtocolEvents,
+  rawNotification,
+  record,
+  replyPreviewPiece,
+} from './trajectoryProtocol';
 import { agentLiveStatus } from './agentLiveStatus';
 
 /**
@@ -137,12 +143,11 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   // and the Chat reading anchor is restored by row.
   const sourceEventId = event.id;
 
-  // Never carry chain-of-thought into the display model. The UI represents
-  // this as a compact reasoning status, not as model-authored hidden text.
+  // Recorded reasoning has its own row, separate from the assistant's output.
   if (type === 'thinking')
     return asText(payload, 'parent_tool_use_id')
       ? null
-      : { kind: 'thinking', text: '', sourceEventId };
+      : { kind: 'thinking', text: asText(payload, 'text'), sourceEventId };
   if (type === 'message') {
     // A delegated agent's answer belongs to its Task/Agent result, and is
     // separately inspectable in Trajectory. It is not the main reply.
@@ -503,17 +508,71 @@ export function ownerFailureMessage(detail: string): string {
   return detail;
 }
 
-/** Preserve attempt boundaries and attach each result to its tool activity. */
+function nativeItemKey(event: AgentJobEventApi, id: string): string {
+  return `${'job_id' in event ? event.job_id : ''}:${event.attempt_id}:${id}`;
+}
+
+/** A native item snapshot carries complete channels rather than text deltas. */
+function reasoningSnapshot(
+  stored: AgentJobEventApi,
+  projected: AgentJobEventApi,
+  identified: Set<string>,
+): AgentJobEventApi {
+  const notification = rawNotification(stored);
+  if (!notification || notificationHasError(notification)) return projected;
+  const item = record(record(notification.params).item);
+  const id = typeof item.id === 'string' ? item.id : '';
+  const method = notification.method;
+  if (
+    item.type !== 'reasoning' ||
+    !id ||
+    !['item/started', 'item/updated', 'item/completed'].includes(String(method)) ||
+    (stored.payload?.protocol !== 'codex-app-server' && !identified.has(nativeItemKey(stored, id)))
+  ) {
+    return projected;
+  }
+  const blocks = [
+    { channel: 'summary', content: item.summary },
+    { channel: 'reasoning', content: item.content },
+  ].flatMap(({ channel, content }) => {
+    if (!Array.isArray(content)) return [];
+    const parts = content.map((value) => (typeof value === 'string' ? value : ''));
+    const text = parts.join('\n');
+    return text ? [{ channel, text, parts }] : [];
+  });
+  return {
+    ...projected,
+    event_type: 'thinking',
+    payload: {
+      ...projected.payload,
+      text: typeof item.text === 'string' ? item.text : '',
+      native_item_id: id,
+      stream_state: method === 'item/started' ? 'started' : 'snapshot',
+      ...(blocks.length ? { reasoning_blocks: blocks } : {}),
+    },
+  };
+}
+
+/** Preserve attempt boundaries and fold updates into their recorded activity. */
 function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEvent[] {
   const attemptIds = [...new Set(events.map((event) => event.attempt_id))].sort((a, b) => a - b);
   const attemptNoById = new Map(attemptIds.map((id, index) => [id, index + 1]));
   const rows: AgentEvent[] = [];
   const toolsById = new Map<string, number>();
   const lastToolByAttempt = new Map<number, number>();
+  const reasoningByItem = new Map<string, number>();
+  const reasoningChannelsByItem = new Map<string, Map<string, Map<number, string>>>();
+  const identifiedReasoning = new Set(
+    events.flatMap((event) => {
+      const id = event.event_type === 'thinking' ? asText(event.payload, 'native_item_id') : '';
+      return id ? [nativeItemKey(event, id)] : [];
+    }),
+  );
 
   const activityEvents = new Map(
     projectProtocolEvents(events)
-      .filter((event) => event.event_type === 'tool_use' || event.event_type === 'tool_result')
+      .map((event, index) => reasoningSnapshot(events[index], event, identifiedReasoning))
+      .filter((event) => ['tool_use', 'tool_result', 'thinking'].includes(event.event_type))
       .map((event) => [event.id, event]),
   );
   const callCounts = new Map<string, number>();
@@ -526,8 +585,8 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   for (const storedEvent of events) {
-    // Chat has its own answer-preview folding. Read native tool activity here
-    // without projecting message fragments a second time.
+    // Chat has its own answer-preview folding. Project native reasoning and
+    // tools without projecting message fragments a second time.
     const event = activityEvents.get(storedEvent.id) ?? storedEvent;
     const mapped = toDisplayEvent(event);
     if (!mapped) continue;
@@ -622,11 +681,81 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       }
     }
 
-    // Reasoning is a state, not a sequence of steps. A run emits one of these
-    // per thinking block, and rendering each as its own row turns "the agent
-    // thought about it" into a wall of identical lines. Consecutive ones
-    // collapse into the single status row that was always intended.
-    if (row.kind === 'thinking' && rows[rows.length - 1]?.kind === 'thinking') continue;
+    if (row.kind === 'thinking') {
+      const nativeId = asText(event.payload, 'native_item_id');
+      if (nativeId) {
+        const key = nativeItemKey(event, nativeId);
+        const index = reasoningByItem.get(key);
+        const previous = index === undefined ? undefined : rows[index];
+        const target = previous?.kind === 'thinking' ? previous : row;
+        const channels = reasoningChannelsByItem.get(key) ?? new Map<string, Map<number, string>>();
+        reasoningChannelsByItem.set(key, channels);
+        const snapshotBlocks = event.payload?.reasoning_blocks;
+        let updates: { text: string; channel: string; parts?: unknown[] }[] = [
+          { text: row.text, channel: asText(event.payload, 'stream_channel') || 'summary' },
+        ];
+        if (Array.isArray(snapshotBlocks)) {
+          updates = snapshotBlocks.map((value) => {
+            const block = record(value);
+            return {
+              text: typeof block.text === 'string' ? block.text : '',
+              channel: typeof block.channel === 'string' ? block.channel : 'summary',
+              parts: Array.isArray(block.parts) ? block.parts : undefined,
+            };
+          });
+        }
+        const params = record(rawNotification(storedEvent)?.params);
+        for (const update of updates) {
+          if (!update.text) continue;
+          if (event.payload?.stream_state === 'delta') {
+            const parts = channels.get(update.channel) ?? new Map<number, string>();
+            const nativeIndex =
+              update.channel === 'reasoning' ? params.contentIndex : params.summaryIndex;
+            const partIndex =
+              typeof nativeIndex === 'number' && Number.isInteger(nativeIndex) && nativeIndex >= 0
+                ? nativeIndex
+                : 0;
+            parts.set(partIndex, (parts.get(partIndex) ?? '') + update.text);
+            channels.set(update.channel, parts);
+          } else {
+            channels.set(
+              update.channel,
+              new Map(
+                (update.parts ?? [update.text]).map((text, partIndex) => [
+                  partIndex,
+                  typeof text === 'string' ? text : '',
+                ]),
+              ),
+            );
+          }
+        }
+        const blocks = [...channels].map(([channel, parts]) => ({
+          channel,
+          text: [...parts]
+            .sort(([left], [right]) => left - right)
+            .map(([, text]) => text)
+            .join('\n'),
+        }));
+        const folded = {
+          ...target,
+          text: blocks.map((block) => block.text).join('\n\n'),
+          ...(blocks.length ? { reasoningBlocks: blocks } : {}),
+        };
+        if (index === undefined) reasoningByItem.set(key, rows.push(folded) - 1);
+        else rows[index] = folded;
+        continue;
+      }
+      // Empty runtime statuses may repeat; recorded text blocks stay distinct.
+      const previous = rows[rows.length - 1];
+      if (
+        !row.text.trim() &&
+        previous?.kind === 'thinking' &&
+        !previous.text.trim() &&
+        previous.attemptNo === row.attemptNo
+      ) {
+        continue;
+      }
+    }
 
     // Same for a milestone repeated back to back: the platform's "started" and
     // the CLI's "init" both mean "setting up environment", so they rendered as

@@ -888,6 +888,35 @@ export function EventRow({
   if (event.kind === 'lifecycle')
     return <LifecycleRow text={event.text} blockKey={blockKey} firstRun={firstRun} />;
   if (event.kind === 'thinking') {
+    const blocks = (event.reasoningBlocks ?? [{ text: event.text, channel: undefined }]).filter(
+      (block) => block.text.trim(),
+    );
+    if (blocks.length) {
+      return (
+        <details
+          data-block-key={blockKey}
+          aria-label="Agent reasoning"
+          className="group my-2 rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/[0.025]"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+            <Chevron className="transition-transform group-open:rotate-90" />
+            Reasoning
+          </summary>
+          <div className="space-y-3 border-t border-gray-200 px-3 py-3 text-gray-600 dark:border-white/10 dark:text-gray-400">
+            {blocks.map((block, index) => (
+              <div key={block.channel ?? index}>
+                {blocks.length > 1 && block.channel ? (
+                  <p className="mb-1 text-xs font-medium">
+                    {block.channel === 'summary' ? 'Summary' : 'Detailed reasoning'}
+                  </p>
+                ) : null}
+                <Markdown text={block.text} />
+              </div>
+            ))}
+          </div>
+        </details>
+      );
+    }
     return (
       <div
         data-block-key={blockKey}
