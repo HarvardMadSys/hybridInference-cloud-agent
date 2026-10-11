@@ -1209,14 +1209,14 @@ describe('JobDetail', () => {
     expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
     expect(screen.getByText(path!)).toBeInTheDocument();
     expect(box).toHaveValue('Use this screenshot');
-    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(submitThreadMessage).not.toHaveBeenCalled();
 
     await act(async () => {
       finishUpload({ id: 43, path: path!, size_bytes: image.size, content_type: image.type });
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Use this screenshot',
@@ -1263,7 +1263,7 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob()} />);
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Send the follow-up' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledOnce());
     fireEvent.paste(box, {
       clipboardData: {
