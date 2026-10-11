@@ -358,7 +358,9 @@ function assistantKeyOf(event: StoredEvent, usageId: string): string {
     : `assistant:${jobIdOf(event)}:${event.attempt_id}:event:${event.id}`;
 }
 
-function toolKeyOf(event: StoredEvent, callId: string): string {
+// Adapted tool rows can address their diagnostic step without constructing the
+// rest of the trajectory. Native protocol rows supply their projected call id.
+export function toolStepKey(event: StoredEvent, callId = callIdOf(event)): string {
   const scope = `tool:${jobIdOf(event)}:${event.attempt_id}`;
   // A call with no recorded id has no identity to share, so the record's own
   // event id keeps it a step of its own instead of folding it into the call
@@ -555,7 +557,7 @@ export function buildTrajectorySteps(
   const pushTool = (event: StoredEvent): TrajectoryStep => {
     const payload = asRecord(event.payload);
     const callId = asText(payload.id);
-    const key = toolKeyOf(event, callId);
+    const key = toolStepKey(event, callId);
     const hasInput = Object.prototype.hasOwnProperty.call(payload, 'input');
     const resultEvents = resultsByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
     const outputs = outputByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
@@ -735,7 +737,7 @@ export function buildTrajectorySteps(
 
     if (event.event_type === 'tool_use') {
       const callId = asText(payload.id);
-      const key = toolKeyOf(event, callId);
+      const key = toolStepKey(event, callId);
       const existing = toolStepByKey.get(key);
       if (existing) {
         // The same call id twice in one attempt: keep both records on the step
@@ -762,7 +764,7 @@ export function buildTrajectorySteps(
 
     if (event.event_type === 'tool_result') {
       const callId = asText(payload.tool_use_id);
-      if (callId && toolStepByKey.has(toolKeyOf(event, callId))) continue; // joined to its call
+      if (callId && toolStepByKey.has(toolStepKey(event, callId))) continue; // joined to its call
       steps.push({
         key: `tool-result:${jobIdOf(event)}:${event.attempt_id}:${event.id}`,
         kind: 'tool',
@@ -870,7 +872,7 @@ export function buildTrajectorySteps(
     });
     if (!source) continue;
     const callId = asText(asRecord(source.payload).parent_tool_use_id);
-    const parent = toolStepByKey.get(toolKeyOf(source, callId));
+    const parent = toolStepByKey.get(toolStepKey(source, callId));
     if (!parent || parent === step || parent.ambiguity || step.ambiguity) continue;
     step.delegationParentKey = parent.key;
     (parent.delegatedKeys ??= []).push(step.key);

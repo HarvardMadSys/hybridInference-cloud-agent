@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # The control plane: the API, the reaper, the publisher.
 #
 # **It ships the host package too, and that is not an oversight.**
@@ -14,6 +15,16 @@
 # This image never executes an agent and never checks a repository out.
 # Publishing and optional compute lifecycle credentials arrive at runtime,
 # through configuration or the encrypted credential store, never as a layer.
+
+# Keep build inputs out of the runtime filesystem except for the explicit,
+# credential-free archive consumed by automatic Server setup. Its revision is
+# the same argument used by this image's OCI label below.
+FROM python:3.12-slim AS host-release
+ARG SOURCE_COMMIT=unknown
+COPY deploy/release/build_host_bundle.py /builder/build_host_bundle.py
+RUN --mount=type=bind,source=.,target=/source,ro \
+    python /builder/build_host_bundle.py --root /source --source-commit "${SOURCE_COMMIT}" \
+    --output /compute-host-release --allow-unknown
 
 FROM python:3.12-slim AS base
 
@@ -51,6 +62,7 @@ COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/
 # a database somebody else migrated.
 COPY alembic.ini ./
 COPY migrations/ migrations/
+COPY --from=host-release /compute-host-release/ /app/compute-host-release/
 
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 cloudagent \

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
-import { recordedTurnOutputs } from './turnDeliverables';
+import { createRecordedOutputsSelector, recordedTurnOutputs } from './turnDeliverables';
 
 const JOB: Pick<AgentJobApi, 'id' | 'state' | 'published_pr_url' | 'current_attempt_id'> = {
   id: 'old-turn',
@@ -139,5 +139,250 @@ describe('recorded turn outputs', () => {
 
   it('does not misattribute attempt-scoped output when attempt identity is unknown', () => {
     expect(recordedTurnOutputs({ ...JOB, current_attempt_id: null }, [event(patch())])).toBeNull();
+  });
+});
+
+describe('recorded outputs selector', () => {
+  it('matches per-turn selection for labelled and unlabelled events, including equal sequences', () => {
+    const selector = createRecordedOutputsSelector();
+    const jobs = [
+      JOB,
+      { ...JOB, id: 'later-turn' },
+      { ...JOB, current_attempt_id: null, id: 'unknown' },
+    ];
+    const labelled: AgentThreadEventApi = {
+      ...event(patch('labelled.tsx'), 5),
+      job_id: JOB.id,
+      turn_no: 1,
+    };
+    const unlabelled = event(patch('unlabelled.tsx'), 5);
+    const foreign: AgentThreadEventApi = {
+      ...event(patch('foreign.tsx'), 8),
+      job_id: 'foreign',
+      turn_no: 3,
+    };
+    const superseded = { ...event(patch('superseded.tsx'), 9), attempt_id: 1 };
+
+    for (const events of [
+      [labelled, unlabelled, foreign, superseded],
+      [unlabelled, labelled, foreign, superseded],
+    ]) {
+      expect(selector.select(jobs, events)).toEqual(
+        new Map(jobs.map((job) => [job.id, recordedTurnOutputs(job, events)])),
+      );
+    }
+    expect(selector.select(jobs, [labelled, unlabelled]).get(JOB.id)?.files[0].path).toBe(
+      'labelled.tsx',
+    );
+    expect(selector.select(jobs, [unlabelled, labelled]).get(JOB.id)?.files[0].path).toBe(
+      'unlabelled.tsx',
+    );
+  });
+
+  it('keeps historical output, file, and line references when unrelated events stream', () => {
+    const selector = createRecordedOutputsSelector();
+    const diff: AgentThreadEventApi = { ...event(patch()), job_id: JOB.id, turn_no: 1 };
+    const original = selector.select([JOB], [diff]).get(JOB.id);
+    const message = { ...event('streaming', 2), event_type: 'message' };
+    const foreign: AgentThreadEventApi = {
+      ...event(patch('foreign.tsx'), 3),
+      job_id: 'other-turn',
+      turn_no: 2,
+    };
+    const updated = selector.select([{ ...JOB }], [diff, message, foreign]).get(JOB.id);
+
+    expect(updated).toBe(original);
+    expect(updated?.files).toBe(original?.files);
+    expect(updated?.files[0]).toBe(original?.files[0]);
+    expect(updated?.files[0].lines).toBe(original?.files[0].lines);
+  });
+
+  it('refreshes a new latest snapshot and a replacement event with the same stored id', () => {
+    const selector = createRecordedOutputsSelector();
+    const first = event(patch('first.tsx'));
+    const original = selector.select([JOB], [first]).get(JOB.id);
+    const latest = event(patch('latest.tsx'), 2);
+    const updated = selector.select([JOB], [first, latest]).get(JOB.id);
+    const replacement = { ...latest, payload: { text: patch('replacement.tsx') } };
+    const replaced = selector.select([JOB], [first, replacement]).get(JOB.id);
+
+    expect(updated).not.toBe(original);
+    expect(updated?.files[0].path).toBe('latest.tsx');
+    expect(replaced).not.toBe(updated);
+    expect(replaced?.files).not.toBe(updated?.files);
+    expect(replaced?.files[0].path).toBe('replacement.tsx');
+    expect(selector.select([JOB], [first]).get(JOB.id)?.files[0].path).toBe('first.tsx');
+  });
+
+  it('refreshes the selected attempt and never falls back to a superseded attempt', () => {
+    const selector = createRecordedOutputsSelector();
+    const oldDiff = event(patch('old.tsx'));
+    const newDiff = { ...event(patch('new.tsx'), 2), attempt_id: 3 };
+    const retried = { ...JOB, current_attempt_id: 3 };
+
+    expect(selector.select([JOB], [oldDiff, newDiff]).get(JOB.id)?.files[0].path).toBe('old.tsx');
+    expect(selector.select([retried], [oldDiff]).get(JOB.id)).toBeNull();
+    expect(selector.select([retried], [oldDiff, newDiff]).get(JOB.id)?.files[0].path).toBe(
+      'new.tsx',
+    );
+    expect(
+      selector.select([{ ...JOB, current_attempt_id: null }], [oldDiff, newDiff]).get(JOB.id),
+    ).toBeNull();
+  });
+
+  it('refreshes PR and state values while reusing the parsed historical files', () => {
+    const selector = createRecordedOutputsSelector();
+    let patchReads = 0;
+    const diff = {
+      ...event(''),
+      payload: {
+        get text() {
+          patchReads += 1;
+          return patch();
+        },
+      },
+    };
+    const original = selector.select([JOB], [diff]).get(JOB.id);
+    const withPr = selector
+      .select([{ ...JOB, published_pr_url: 'https://github.com/a/b/pull/1' }], [diff])
+      .get(JOB.id);
+    expect(withPr).not.toBe(original);
+    expect(withPr?.prUrl).toBe('https://github.com/a/b/pull/1');
+    expect(withPr?.files).toBe(original?.files);
+
+    const changedPr = selector
+      .select([{ ...JOB, published_pr_url: 'https://github.com/a/b/pull/2' }], [diff])
+      .get(JOB.id);
+    expect(changedPr?.prUrl).toBe('https://github.com/a/b/pull/2');
+    expect(changedPr?.files).toBe(original?.files);
+    const unsafePr = selector
+      .select([{ ...JOB, published_pr_url: 'javascript:alert(1)' }], [diff])
+      .get(JOB.id);
+    expect(unsafePr?.prUrl).toBeUndefined();
+    expect(unsafePr?.files).toBe(original?.files);
+
+    expect(selector.select([{ ...JOB, state: 'running' }], [diff]).get(JOB.id)).toBeNull();
+    const settled = selector.select([{ ...JOB, state: 'failed' }], [diff]).get(JOB.id);
+    expect(settled).not.toBe(original);
+    expect(settled?.files).toBe(original?.files);
+    expect(patchReads).toBe(1);
+  });
+
+  it('parses a diff only after the turn settles and evicts removed jobs from the output cache', () => {
+    const selector = createRecordedOutputsSelector();
+    let patchReads = 0;
+    const diff = {
+      ...event(''),
+      payload: {
+        get text() {
+          patchReads += 1;
+          return patch();
+        },
+      },
+    };
+    expect(selector.select([{ ...JOB, state: 'running' }], [diff]).get(JOB.id)).toBeNull();
+    expect(patchReads).toBe(0);
+    const settled = selector.select([JOB], [diff]).get(JOB.id);
+    expect(patchReads).toBe(1);
+    expect(selector.select([], [diff]).size).toBe(0);
+    const returned = selector.select([JOB], [diff]).get(JOB.id);
+    expect(returned).not.toBe(settled);
+    expect(returned?.files).toBe(settled?.files);
+    expect(patchReads).toBe(1);
+  });
+
+  it('uses only each producing job’s PR when no attempt-scoped diff is available', () => {
+    const selector = createRecordedOutputsSelector();
+    const published = {
+      ...JOB,
+      current_attempt_id: null,
+      published_pr_url: 'https://github.com/a/b/pull/1',
+    };
+    const unpublished = { ...JOB, id: 'unpublished' };
+    const diff: AgentThreadEventApi = { ...event(patch()), job_id: JOB.id, turn_no: 1 };
+    const results = selector.select([published, unpublished], [diff]);
+    expect(results.get(JOB.id)).toEqual({
+      jobId: JOB.id,
+      files: [],
+      prUrl: 'https://github.com/a/b/pull/1',
+    });
+    expect(results.get(unpublished.id)).toBeNull();
+  });
+
+  it.each([
+    { text: patch().padEnd(4000, ' ') },
+    { text: patch(), truncated: true },
+    { text: patch().replace('+new\n', '') },
+    { text: 'diff --git "a/spaced file.ts" "b/spaced file.ts"' },
+    { text: patch('folder b/nested/file.ts') },
+    { text: `${patch()}${patch()}` },
+    { changed: true },
+  ])(
+    'does not restore an earlier valid diff when the latest payload is rejected: %j',
+    (payload) => {
+      const selector = createRecordedOutputsSelector();
+      const first = event(patch());
+      expect(selector.select([JOB], [first]).get(JOB.id)).not.toBeNull();
+      expect(selector.select([JOB], [first, { ...event('', 2), payload }]).get(JOB.id)).toBeNull();
+    },
+  );
+
+  it('scans a large log once and does not reparse settled diffs after a stream append', () => {
+    const selector = createRecordedOutputsSelector();
+    const jobs = Array.from({ length: 200 }, (_, index) => ({ ...JOB, id: `turn-${index}` }));
+    let eventReads = 0;
+    let patchReads = 0;
+    const events = jobs.flatMap((job, turn) =>
+      Array.from({ length: 30 }, (_, index): AgentThreadEventApi => {
+        const isDiff = index === 29;
+        let payload: AgentJobEventApi['payload'] = null;
+        if (isDiff) {
+          payload = {
+            get text() {
+              patchReads += 1;
+              return patch(`file-${turn}.tsx`);
+            },
+          };
+        }
+        return {
+          ...event('', turn * 30 + index + 1),
+          job_id: job.id,
+          turn_no: turn + 1,
+          get event_type() {
+            eventReads += 1;
+            return isDiff ? 'diff' : 'message';
+          },
+          payload,
+        };
+      }),
+    );
+
+    const previous = new Map(jobs.map((job) => [job.id, recordedTurnOutputs(job, events)]));
+    expect(eventReads).toBe(1200000);
+    expect(patchReads).toBe(200);
+    eventReads = 0;
+    patchReads = 0;
+
+    const historical = selector.select(jobs, events);
+    expect(eventReads).toBe(6000);
+    expect(patchReads).toBe(200);
+    expect(historical).toEqual(previous);
+
+    eventReads = 0;
+    patchReads = 0;
+    const streamEvent = {
+      ...event('streaming', 6001),
+      get event_type() {
+        eventReads += 1;
+        return 'message';
+      },
+    };
+    const streaming = selector.select(
+      jobs.map((job) => ({ ...job })),
+      [...events, streamEvent],
+    );
+    expect(eventReads).toBe(6001);
+    expect(patchReads).toBe(0);
+    for (const job of jobs) expect(streaming.get(job.id)).toBe(historical.get(job.id));
   });
 });

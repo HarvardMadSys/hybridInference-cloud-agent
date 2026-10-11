@@ -30,6 +30,7 @@ from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas_compute import CloudLabDefaults, RenewalPolicy
 
 if TYPE_CHECKING:
+    from cloud_agent.application.compute_setup import AutomaticComputeSetup
     from cloud_agent.compute_config import ComputeConfiguration
     from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
     from cloud_agent.compute_secrets import ComputeSecretStore
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
         AddComputeConnection,
         AddDeploymentProfile,
         AddServerRequest,
+        AutomaticDeploymentSetup,
         ExtendComputeRequest,
         ImportComputeRequest,
         RetireComputeRequest,
@@ -57,11 +59,13 @@ class ComputeCommands:
         registry: ComputeProviderRegistry,
         secrets: ComputeSecretStore,
         configuration: ComputeConfiguration,
+        automatic_setup: AutomaticComputeSetup | None = None,
     ) -> None:
         self.repository = repository
         self.registry = registry
         self.secrets = secrets
         self.configuration = configuration
+        self.automatic_setup = automatic_setup
         self.queries = ServerQueries(
             repository,
             registry,
@@ -89,9 +93,36 @@ class ComputeCommands:
         if listing is None:
             return profiles
         for row in await listing():
+            if not row["configuration"].get("automatic_setup", {}).get("ready", True):
+                continue
             profile = self._stored_profile(row)
             profiles[profile.id] = profile
         return profiles
+
+    async def automatic_setup_status(self) -> dict[str, Any]:
+        """Describe automatic setup without returning deployment credentials."""
+        if self.automatic_setup is None:
+            return {
+                "available": False,
+                "deployment_sha": None,
+                "blocked_reasons": [
+                    {
+                        "code": "automatic_setup_unavailable",
+                        "message": "Automatic setup is unavailable in this deployment. Update the control plane or use advanced manual setup.",
+                    }
+                ],
+            }
+        return await self.automatic_setup.read_status()
+
+    async def create_automatic_setup(self, request: AutomaticDeploymentSetup) -> dict[str, Any]:
+        """Prepare reviewed release inputs and narrowly scoped infrastructure access."""
+        if self.automatic_setup is None:
+            raise ComputeRefusal(
+                "automatic_setup_unavailable",
+                "Automatic setup is unavailable in this deployment.",
+                status=503,
+            )
+        return await self.automatic_setup.create(request)
 
     async def create_deployment_profile(self, request: AddDeploymentProfile) -> dict[str, Any]:
         """Validate, encrypt and persist one write-only Host setup."""

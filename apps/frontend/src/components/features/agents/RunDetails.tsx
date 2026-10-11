@@ -38,13 +38,9 @@ import { isOlderUsage, onAgentRecordsChanged } from './agentPush';
 import { isRepositoryTooLarge, ownerFailureMessage } from './adapt';
 import { hasLostContext, ownerRunNote } from './conversationJob';
 
-export type RunTab = 'overview' | 'usage' | 'raw';
+import type { RunTab } from './trajectoryInspectorTabs';
 
-export const RUN_TABS: Array<{ key: RunTab; label: string }> = [
-  { key: 'overview', label: 'Overview' },
-  { key: 'usage', label: 'Usage' },
-  { key: 'raw', label: 'Raw' },
-];
+export { RUN_TABS, type RunTab } from './trajectoryInspectorTabs';
 
 const STATE_LABEL: Record<AgentJobApiState, TranslationKey> = {
   queued: 'turnNavigation.state.queued',

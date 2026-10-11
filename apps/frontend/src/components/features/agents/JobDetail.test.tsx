@@ -46,6 +46,7 @@ import {
   type AgentJobApi,
   type AgentJobFilesApi,
   type AgentJobUsageApi,
+  type AgentThreadEventApi,
 } from '@/lib/api/agents';
 
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -86,6 +87,40 @@ import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import { IDLE_QUEUE_POLL_MS } from './usePendingMessages';
 import { watchPullRequestPrompt } from './watchPullRequest';
 import type { AgentJob } from './types';
+import { toDisplayEvent } from './adapt';
+import { projectProtocolEvents } from './trajectoryProtocol';
+
+const renderingWork = vi.hoisted(() => ({
+  trajectory: vi.fn(),
+  history: vi.fn(),
+  current: vi.fn(),
+}));
+
+vi.mock('./trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectorySteps')>();
+  return {
+    ...original,
+    buildTrajectorySteps: (...args: Parameters<typeof original.buildTrajectorySteps>) => {
+      renderingWork.trajectory();
+      return original.buildTrajectorySteps(...args);
+    },
+  };
+});
+
+vi.mock('./conversationTurnNavigation', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversationTurnNavigation')>();
+  return {
+    ...original,
+    describeHistoryTurns: (...args: Parameters<typeof original.describeHistoryTurns>) => {
+      renderingWork.history();
+      return original.describeHistoryTurns(...args);
+    },
+    describeCurrentTurn: (...args: Parameters<typeof original.describeCurrentTurn>) => {
+      renderingWork.current();
+      return original.describeCurrentTurn(...args);
+    },
+  };
+});
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
@@ -3256,7 +3291,7 @@ describe('JobDetail', () => {
       fireEvent.click(chip, { detail: 0 });
 
       const inspector = await screen.findByRole('region', { name: 'Step details' });
-      const close = within(inspector).getByRole('button', { name: 'Close details' });
+      const close = await within(inspector).findByRole('button', { name: 'Close details' });
       expect(close).toHaveFocus();
       expect(inspector).toHaveTextContent('pytest -q');
       expect(screen.queryByLabelText('Search steps')).not.toBeInTheDocument();
@@ -3544,6 +3579,107 @@ describe('JobDetail', () => {
       expect(within(activity).queryByText('Current implementation plan')).not.toBeInTheDocument();
     });
 
+    it.each(['native', 'duplicate'] as const)(
+      'opens %s subagent call details from chat without constructing a trajectory during overview rendering',
+      async (kind) => {
+        renderingWork.trajectory.mockClear();
+        const currentAttemptNo = kind === 'native' ? 2 : 1;
+        vi.mocked(getAgentAttemptTelemetry).mockResolvedValue({
+          attempt_id: currentAttemptNo,
+          attempt_no: currentAttemptNo,
+          continuity_mode: null,
+          context_status: null,
+          duration_ms: null,
+          resources: null,
+        });
+        function nativeRecord(
+          id: number,
+          attempt: number,
+          worker: string,
+          completed = false,
+        ): AgentThreadEventApi {
+          return {
+            id,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: attempt,
+            seq: completed ? 2 : 1,
+            event_type: 'raw',
+            created_at: null,
+            payload: {
+              protocol: 'codex-app-server',
+              notification: {
+                method: completed ? 'item/completed' : 'item/started',
+                params: {
+                  item: {
+                    type: 'collabAgentToolCall',
+                    id: 'native-reviewer',
+                    tool: 'spawnAgent',
+                    receiverThreadIds: [worker],
+                    status: completed ? 'completed' : 'inProgress',
+                    agentsStates: {
+                      [worker]: { status: 'completed', message: 'Review complete' },
+                    },
+                  },
+                },
+              },
+            },
+          };
+        }
+        let stored: AgentThreadEventApi[];
+        if (kind === 'native') {
+          stored = [
+            nativeRecord(699, 1, 'superseded-worker'),
+            nativeRecord(700, 2, 'worker-one'),
+            nativeRecord(701, 2, 'worker-one', true),
+          ];
+        } else {
+          stored = ['First review', 'Second review'].map((task, index) => ({
+            id: 700 + index,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: 1,
+            seq: index + 1,
+            event_type: 'tool_use',
+            created_at: null,
+            payload: {
+              id: 'repeated-reviewer',
+              name: 'spawn_agent',
+              input: { task_name: task },
+            },
+          }));
+        }
+        const displayEvents = projectProtocolEvents(stored).map((event) => ({
+          ...toDisplayEvent(event)!,
+          attemptNo: event.attempt_id ?? currentAttemptNo,
+        }));
+        const attempts: AgentJob['attempts'] = [{ no: currentAttemptNo, status: 'live' }];
+        if (kind === 'native') attempts.unshift({ no: 1, status: 'superseded' });
+        render(
+          <JobDetail
+            job={makeJob({ currentAttemptNo, attempts, events: displayEvents })}
+            events={stored}
+          />,
+        );
+        const actions = screen.getAllByRole('button', { name: 'View subagent execution' });
+        expect(renderingWork.trajectory).not.toHaveBeenCalled();
+        fireEvent.click(actions.at(-1)!);
+        const inspector = screen.getByRole('region', { name: 'Step details' });
+        await within(inspector).findByRole('button', { name: 'Close details' });
+        expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+        if (kind === 'native') {
+          expect(inspector).toHaveTextContent('worker-one');
+          expect(inspector).toHaveTextContent('spawn_agent');
+          expect(inspector).toHaveTextContent('Review complete');
+          expect(inspector).not.toHaveTextContent('superseded-worker');
+          expect(inspector).not.toHaveTextContent('pairing below is not verified');
+        } else {
+          expect(inspector).toHaveTextContent('This call id was stored more than once');
+          expect(inspector).toHaveTextContent('pairing below is not verified');
+        }
+      },
+    );
+
     it('moves focus into subagent execution details and restores it to the toggle', async () => {
       render(
         <JobDetail
@@ -3602,6 +3738,248 @@ describe('JobDetail', () => {
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
     expect(screen.getByLabelText('Add a follow-up')).toBeInTheDocument();
   });
+
+  it('defers a large diagnostic history until inspection and avoids derivation work while typing', async () => {
+    renderingWork.trajectory.mockClear();
+    renderingWork.history.mockClear();
+    renderingWork.current.mockClear();
+    vi.mocked(getAgentAttemptTelemetry).mockResolvedValue({
+      attempt_id: 51,
+      attempt_no: 1,
+      continuity_mode: null,
+      context_status: null,
+      duration_ms: null,
+      resources: null,
+    });
+    const historicalJobs = Array.from({ length: 50 }, (_, index) => ({
+      id: `past-${index}`,
+      state: 'succeeded',
+      turn_no: index + 1,
+      current_attempt_id: index + 1,
+      task_prompt: `Completed task ${index}`,
+      published_pr_url: null,
+    })) as AgentJobApi[];
+    const threadJobs = [
+      ...historicalJobs,
+      {
+        id: 'ajob_1',
+        state: 'running',
+        turn_no: 51,
+        current_attempt_id: 51,
+        task_prompt: 'Current task',
+        published_pr_url: null,
+      } as AgentJobApi,
+    ];
+    const historicalEvents: AgentThreadEventApi[] = historicalJobs.flatMap((turn, index) =>
+      Array.from({ length: 100 }, (_, offset) => ({
+        id: index * 100 + offset,
+        job_id: turn.id,
+        turn_no: turn.turn_no!,
+        attempt_id: turn.current_attempt_id!,
+        seq: offset,
+        event_type: 'message',
+        payload: {
+          text: `Stored historical reply ${index}/${offset}`,
+          native_item_id: `native-reply-${index}`,
+        },
+        created_at: null,
+      })),
+    );
+    const source: AgentThreadEventApi = {
+      id: 6000,
+      job_id: 'ajob_1',
+      turn_no: 51,
+      attempt_id: 51,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 'review-worker', name: 'spawn_agent', input: { task_name: 'Review scaling' } },
+      created_at: null,
+    };
+    const job = makeJob({
+      threadId: 'large-conversation',
+      turnNo: 51,
+      currentAttemptId: 51,
+      historyTurns: historicalJobs.map((turn) => ({
+        jobId: turn.id,
+        turnNo: turn.turn_no!,
+        forkable: false,
+        state: 'done',
+        events: [{ kind: 'message', text: `Completed task ${turn.turn_no}` }],
+        messages: [],
+      })),
+      events: [
+        {
+          kind: 'tool_use',
+          tool: 'spawn_agent',
+          id: 'review-worker',
+          input: { task_name: 'Review scaling' },
+          detail: 'Review scaling',
+          attemptNo: 1,
+          sourceEventId: source.id,
+        },
+      ],
+    });
+    const events = [...historicalEvents, source];
+    const { rerender } = render(<JobDetail job={job} events={events} threadJobs={threadJobs} />);
+    await screen.findByRole('button', { name: 'View subagent execution' });
+    expect(renderingWork.trajectory).not.toHaveBeenCalled();
+    expect(renderingWork.history).toHaveBeenCalledTimes(1);
+    expect(renderingWork.current).toHaveBeenCalledTimes(1);
+    const composer = screen.getByRole('textbox', { name: 'Add a follow-up' });
+    for (const value of ['h', 'he', 'hel', 'hello']) {
+      fireEvent.change(composer, { target: { value } });
+    }
+    expect(composer).toHaveValue('hello');
+    expect(renderingWork.trajectory).not.toHaveBeenCalled();
+    expect(renderingWork.history).toHaveBeenCalledTimes(1);
+    expect(renderingWork.current).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'View subagent execution' }));
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Close details' });
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    const reply: AgentThreadEventApi = {
+      ...source,
+      id: 6001,
+      seq: 2,
+      event_type: 'message',
+      payload: { text: 'Fresh streamed reply' },
+    };
+    const updatedJob = {
+      ...job,
+      events: [
+        ...job.events,
+        {
+          kind: 'message' as const,
+          text: 'Fresh streamed reply',
+          sourceEventId: reply.id,
+          attemptNo: 1,
+        },
+      ],
+    };
+    rerender(<JobDetail job={updatedJob} events={[...events, reply]} threadJobs={threadJobs} />);
+    expect(screen.getByText('Fresh streamed reply')).toBeInTheDocument();
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+    expect(renderingWork.history).toHaveBeenCalledTimes(1);
+    expect(renderingWork.current).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(await screen.findByText('Fresh streamed reply')).toBeInTheDocument();
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(2);
+    const result: AgentThreadEventApi = {
+      ...source,
+      id: 6002,
+      seq: 3,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'review-worker', content: 'Review finished', is_error: false },
+    };
+    rerender(
+      <JobDetail job={updatedJob} events={[...events, reply, result]} threadJobs={threadJobs} />,
+    );
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(3);
+    fireEvent.click(await screen.findByText('spawn_agent'));
+    const inspector = screen.getByRole('region', { name: 'Step details' });
+    await within(inspector).findByRole('button', { name: 'Close details' });
+    expect(inspector).toHaveTextContent('Review finished');
+    expect(renderingWork.trajectory).toHaveBeenCalledTimes(3);
+  });
+
+  it('initializes terminal and file panels only when selected and preserves them across closing', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (path === '') {
+        return {
+          path: '',
+          kind: 'directory',
+          entries: [{ name: 'preview.txt', path: 'preview.txt', kind: 'file' }],
+        };
+      }
+      return {
+        path,
+        kind: 'file',
+        content: 'retained preview',
+        size: 16,
+        binary: false,
+        truncated: false,
+      };
+    });
+    render(<JobDetail job={makeJob({ state: 'done', threadId: 'retained-thread' })} />);
+
+    expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Workspace files')).not.toBeInTheDocument();
+    expect(listAgentTerminals).not.toHaveBeenCalled();
+    expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+    openWorkspace();
+    expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Workspace files')).not.toBeInTheDocument();
+    expect(listAgentTerminals).not.toHaveBeenCalled();
+    expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+    const terminal = await screen.findByLabelText('Workspace terminal');
+    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+    expect(screen.getByLabelText('Workspace terminal')).toBe(terminal);
+    expect(terminal).not.toBeVisible();
+    openWorkspace();
+    expect(screen.getByLabelText('Workspace terminal')).toBe(terminal);
+    expect(terminal).toBeVisible();
+    expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+    expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+    const files = await screen.findByLabelText('Workspace files');
+    fireEvent.click(await within(files).findByRole('button', { name: /preview.txt/ }));
+    await waitFor(() => expect(files).toHaveTextContent('retained preview'));
+    fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+    expect(screen.getByLabelText('Workspace files')).toBe(files);
+    expect(files).not.toBeVisible();
+    openWorkspace();
+    expect(screen.getByLabelText('Workspace files')).toBe(files);
+    expect(files).toBeVisible();
+    expect(getAgentJobFiles).toHaveBeenLastCalledWith('ajob_1', 'preview.txt');
+    await waitFor(() => expect(files).toHaveTextContent('retained preview'));
+  });
+
+  it.each(['thread', 'account'] as const)(
+    'defers the new workspace and clears initialized panels when its %s changes',
+    async (scope) => {
+      const job = makeJob({ state: 'done', threadId: 'initial-thread' });
+      const { rerender } = render(<JobDetail job={job} userId="initial-owner" />);
+      openWorkspace();
+      fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+      const terminal = await screen.findByLabelText('Workspace terminal');
+      await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledTimes(1));
+
+      rerender(
+        <JobDetail
+          job={scope === 'thread' ? { ...job, threadId: 'new-thread' } : job}
+          userId={scope === 'account' ? 'new-owner' : 'initial-owner'}
+        />,
+      );
+      expect(terminal).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Workspace files')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+      expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+      expect(getAgentJobFiles).not.toHaveBeenCalled();
+
+      rerender(<JobDetail job={job} userId="initial-owner" />);
+      expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+      expect(screen.queryByLabelText('Workspace terminal')).not.toBeInTheDocument();
+      expect(listAgentTerminals).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('opens and closes from a stable control while preserving the selected tab', () => {
     render(<JobDetail job={makeJob()} />);
@@ -3937,7 +4315,7 @@ describe('JobDetail', () => {
     openWorkspace();
     fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
 
-    const terminal = screen.getByLabelText('Workspace terminal');
+    const terminal = await screen.findByLabelText('Workspace terminal');
     expect(terminal).toHaveTextContent('Loading terminals…');
     expect(listAgentTerminals).not.toHaveBeenCalled();
     expect(within(terminal).queryByRole('note')).not.toBeInTheDocument();
@@ -5077,7 +5455,7 @@ describe('the trajectory tab', () => {
     },
   ] as never;
 
-  it('switches between the reading of the stream and the stream itself', () => {
+  it('switches between the reading of the stream and the stream itself', async () => {
     const job = makeJob({ events: [{ kind: 'message', text: 'the build passes' }] });
     const stored = [
       {
@@ -5097,7 +5475,7 @@ describe('the trajectory tab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByLabelText('Search steps')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Search steps')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
@@ -5105,7 +5483,7 @@ describe('the trajectory tab', () => {
     expect(screen.queryByLabelText('Search steps')).toBeNull();
   });
 
-  it('separates stored events by conversation turn', () => {
+  it('separates stored events by conversation turn', async () => {
     const stored = [
       {
         id: 1,
@@ -5132,32 +5510,33 @@ describe('the trajectory tab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByText('Turn 1')).toBeInTheDocument();
+    expect(await screen.findByText('Turn 1')).toBeInTheDocument();
     expect(screen.getByText('Turn 2')).toBeInTheDocument();
     expect(screen.getByText('Read')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
   });
 
-  it('still renders when no stored stream was handed down', () => {
+  it('still renders when no stored stream was handed down', async () => {
     // Even without runtime events, the recorded turn input remains readable.
     render(<JobDetail job={makeJob()} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByText('user')).toBeInTheDocument();
+    expect(await screen.findByText('user')).toBeInTheDocument();
     expect(screen.getByText('Current task with all of its detail.')).toBeInTheDocument();
     expect(screen.getByText('1 step')).toBeInTheDocument();
   });
 
-  it('opens the selected step in the right-hand region, not under the row', () => {
+  it('opens the selected step in the right-hand region, not under the row', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     const panel = screen.getByRole('region', { name: 'Step details' });
     // The turn's User input is step 1; its joined tool call/result is step 2.
-    expect(screen.getByText('user')).toBeInTheDocument();
+    expect(await screen.findByText('user')).toBeInTheDocument();
     expect(within(panel).getByText(/Tool · Turn 1 · Step 2/)).toBeInTheDocument();
     expect(within(panel).getByRole('tab', { name: 'Schema' })).toBeInTheDocument();
     // The result joined its call rather than becoming a second row.
@@ -5165,11 +5544,12 @@ describe('the trajectory tab', () => {
     expect(screen.getAllByRole('tab')).toHaveLength(5);
   });
 
-  it('keeps one right-hand region: opening the workspace closes the details', () => {
+  it('keeps one right-hand region: opening the workspace closes the details', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
     expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
 
     openWorkspace();
@@ -5177,17 +5557,19 @@ describe('the trajectory tab', () => {
     expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
   });
 
-  it('closes the details on Escape without also stopping the run', () => {
+  it('closes the details on Escape without also stopping the run', async () => {
     render(<JobDetail job={makeJob({ state: 'running' })} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     fireEvent.keyDown(document.body, { key: 'Escape' });
 
@@ -5195,11 +5577,12 @@ describe('the trajectory tab', () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
-  it('leaves Escape alone while the reader is typing', () => {
+  it('leaves Escape alone while the reader is typing', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
 
     const search = screen.getByLabelText('Search steps');
     search.focus();
@@ -5208,7 +5591,7 @@ describe('the trajectory tab', () => {
     expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
   });
 
-  it('opens the turn the chat footer points at, even for an older turn', () => {
+  it('opens the turn the chat footer points at, even for an older turn', async () => {
     const job = makeJob({
       turnNo: 2,
       threadMessages: HISTORY,
@@ -5229,15 +5612,17 @@ describe('the trajectory tab', () => {
     );
 
     const panel = screen.getByRole('region', { name: 'Run details' });
+    await within(panel).findByRole('button', { name: 'Close details' });
     expect(within(panel).getByRole('heading', { name: 'Run details' })).toBeInTheDocument();
     expect(within(panel).getByText('Run · Turn 1')).toBeInTheDocument();
   });
 
-  it('closes the details when the reader goes back to the conversation', () => {
+  it('closes the details when the reader goes back to the conversation', async () => {
     render(<JobDetail job={makeJob()} events={STORED_CALL} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(await screen.findByText('Bash'));
+    await screen.findByRole('button', { name: 'Close details' });
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
 
     expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();

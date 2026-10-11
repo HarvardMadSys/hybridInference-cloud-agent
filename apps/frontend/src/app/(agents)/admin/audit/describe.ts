@@ -67,6 +67,7 @@ const FIXED: Record<string, string> = {
   'agent.compute.connection.create': 'Added a server connection',
   'agent.compute.connection.update': 'Updated a server connection',
   'agent.compute.connection.validate': 'Checked a server connection',
+  'agent.compute.profile.automatic_create': 'Prepared server setups automatically',
   'agent.compute.cloudlab_defaults.set': 'Changed CloudLab defaults',
   'agent.compute.allocation.policy': "Changed a server's lease policy",
   'agent.compute.server.add': 'Requested a new server',

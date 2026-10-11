@@ -44,6 +44,7 @@ from cloud_agent.api import routes as agent_jobs_router, worker, workspace as ag
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
@@ -1373,6 +1374,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        job = self.jobs.get(job_id)
+        if job is None or job["user_id"] != user_id:
+            return None
+        return JobStreamState(job["state"], job.get("published_pr_url"))
+
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
             message
@@ -1972,6 +1979,12 @@ class _FakeGateway:
         ``AttributeError`` rather than the behaviour under test.
         """
         return {model: list(values) for model, values in _TEST_MODEL_EFFORTS.items()}
+
+    async def model_catalog_with_reasoning_efforts(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """The composer's model options, returned by one current catalog read."""
+        return await self.model_catalog(user_id), await self.model_reasoning_efforts(user_id)
 
 
 class _FakeGrants:
@@ -2801,6 +2814,146 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     # must not disable itself behind a narrower historical field name.
     assert "owner/name" in config.json()["repos"]
     assert config.json()["github_connected"] is True
+
+
+async def test_config_reads_one_current_catalog_and_rechecks_admission(store: FakeStorage):
+    """One catalog response supplies both fields, for each admitted owner read."""
+    from httpx import MockTransport, Response
+
+    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.gateway import GatewayClient
+
+    catalog_owners: list[str] = []
+    admitted_owners: list[str] = []
+
+    def handler(request):
+        assert request.headers["Authorization"] == "Bearer config-dispatch-token"
+        if request.url.path.endswith("/agent-access"):
+            owner = request.url.path.split("/")[-2]
+            admitted_owners.append(owner)
+            return Response(
+                200, json={"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
+            )
+        assert request.url.path == "/internal/model-catalog"
+        owner = request.url.params["user_id"]
+        catalog_owners.append(owner)
+        model = f"{owner}-model-{len(catalog_owners)}"
+        return Response(200, json={"models": [model], "reasoning_efforts": {model: ["high"]}})
+
+    app = _build_app(store)
+    identity = {"user_id": _OWNER}
+    app.dependency_overrides[authenticate_agent_owner] = lambda: identity
+    async with AsyncClient(transport=MockTransport(handler)) as upstream:
+        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
+        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
+                identity["user_id"] = owner
+                response = await client.get("/v1/agent/config")
+                assert response.status_code == 200, response.text
+                model = f"{owner}-model-{index}"
+                assert response.json()["models"] == [model]
+                assert response.json()["model_reasoning_efforts"] == {model: ["high"]}
+                assert len(catalog_owners) == index
+                assert len(admitted_owners) == index
+    assert catalog_owners == admitted_owners == [_OWNER, _OWNER, _OTHER]
+
+
+@pytest.mark.parametrize(
+    "payload,status",
+    [({}, 200), ({"models": "all"}, 200), ({"models": ["unavailable"]}, 503)],
+)
+async def test_config_catalog_failure_offers_no_models_or_efforts(
+    store: FakeStorage, payload, status
+):
+    """Catalog failure cannot widen options or discard the remaining config."""
+    from httpx import MockTransport, Response
+
+    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.gateway import GatewayClient
+
+    def handler(request):
+        if request.url.path.endswith("/agent-access"):
+            return Response(
+                200, json={"user_id": _OWNER, "allowed": True, "permissions": ["agent.use"]}
+            )
+        return Response(status, json=payload)
+
+    app = _build_app(store)
+    async with AsyncClient(transport=MockTransport(handler)) as upstream:
+        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
+        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/v1/agent/config")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"] == []
+    assert response.json()["model_reasoning_efforts"] == {}
+    assert response.json()["repos"]
+    assert response.json()["runtimes"]
+
+
+async def test_config_reads_independent_sources_concurrently(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """Each source starts before the slow repository read releases its result."""
+    from cloud_agent.api import config as config_api
+
+    started: set[str] = set()
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    repositories_read = False
+    account_reads = 0
+
+    async def wait_for_sources(name):
+        started.add(name)
+        if len(started) == 3:
+            all_started.set()
+        await release.wait()
+
+    async def repositories(user_id, **kwargs):
+        nonlocal repositories_read
+        assert user_id == _OWNER
+        await wait_for_sources("repositories")
+        repositories_read = True
+        return ["owner/name"]
+
+    async def model_options(self, user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("models")
+        return ["glm-5.1"], {"glm-5.1": ["high"]}
+
+    async def connections(*, user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("mcp")
+        return []
+
+    async def account(*, user_id):
+        nonlocal account_reads
+        assert user_id == _OWNER
+        assert repositories_read, "entitlement must finish before its account is read"
+        account_reads += 1
+        return None
+
+    monkeypatch.setattr(config_api, "repos_for_user", repositories)
+    monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
+    monkeypatch.setattr(store, "list_mcp_connections", connections)
+    monkeypatch.setattr(store, "get_github_account", account)
+    request = asyncio.create_task(client.get("/v1/agent/config"))
+    try:
+        # This is a deadlock limit, not a speed assertion: each source waits
+        # for release, so a serial implementation cannot reach all_started.
+        await asyncio.wait_for(all_started.wait(), timeout=2)
+        assert not request.done()
+        assert account_reads == 0
+    finally:
+        release.set()
+        response = await request
+    assert response.status_code == 200, response.text
+    assert account_reads == 1
+    assert response.json()["repos"] == ["owner/name"]
+    assert response.json()["models"] == ["glm-5.1"]
+    assert response.json()["model_reasoning_efforts"] == {"glm-5.1": ["high"]}
+    assert response.json()["mcp_connections"] == []
 
 
 async def test_messages_append_to_latest_turn_and_reject_blank_prompts(

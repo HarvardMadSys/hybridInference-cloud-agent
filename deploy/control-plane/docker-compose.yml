@@ -30,6 +30,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     command: ["alembic", "upgrade", "head"]
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
@@ -43,7 +45,11 @@ services:
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     restart: unless-stopped
+    labels:
+      io.hybridinference.deployment.sha: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
     ports:
       # Loopback by default. This service terminates no TLS and authenticates
       # sessions with a cookie; putting it on a public interface without a
@@ -246,6 +252,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     command:
       - uvicorn
       - cloud_agent.app:create_mcp_app

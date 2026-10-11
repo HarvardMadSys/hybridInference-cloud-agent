@@ -83,6 +83,21 @@ class GatewayError(Exception):
         return 400 <= self.status_code < 500
 
 
+def _catalog_reasoning_efforts(body: dict[str, Any], visible: set[str]) -> dict[str, list[str]]:
+    """Read effort domains only for the models in this catalog response."""
+    raw = body.get("reasoning_efforts")
+    if not isinstance(raw, dict):
+        return {}
+    efforts: dict[str, list[str]] = {}
+    for model, values in raw.items():
+        if str(model) not in visible or not isinstance(values, list):
+            continue
+        levels = [str(value) for value in values]
+        if levels:
+            efforts[str(model)] = levels
+    return efforts
+
+
 class GatewayClient:
     """Calls the gateway's internal contracts on behalf of this service."""
 
@@ -260,17 +275,26 @@ class GatewayClient:
         body = await self._get("/internal/model-catalog", {"user_id": user_id})
         raw_models = body.get("models")
         visible = {str(model) for model in raw_models} if isinstance(raw_models, list) else set()
-        raw = body.get("reasoning_efforts")
-        if not isinstance(raw, dict):
-            return {}
-        efforts: dict[str, list[str]] = {}
-        for model, values in raw.items():
-            if str(model) not in visible or not isinstance(values, list):
-                continue
-            levels = [str(value) for value in values]
-            if levels:
-                efforts[str(model)] = levels
-        return efforts
+        return _catalog_reasoning_efforts(body, visible)
+
+    async def model_catalog_with_reasoning_efforts(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """Read model names and effort domains from one current catalog response.
+
+        A composer needs both fields, which the same Gateway endpoint serves.
+        Reading it once keeps the options together and avoids a second lookup.
+        An older response without effort domains still offers its model names.
+
+        Raises:
+            GatewayError: If the catalog is unavailable or has no model list.
+        """
+        body = await self._get("/internal/model-catalog", {"user_id": user_id})
+        raw_models = body.get("models")
+        if not isinstance(raw_models, list):
+            raise GatewayError("gateway returned no model list")
+        models = [str(model) for model in raw_models]
+        return models, _catalog_reasoning_efforts(body, set(models))
 
     async def agent_access(self, user_id: str) -> AgentAccessDecision:
         """Read the current Agent policy decision without a role-based fallback.

@@ -173,6 +173,65 @@ async def test_access_returns_the_current_permission_decision() -> None:
     assert (await _client(_serves(record)).agent_access("user_1")).model_dump() == record
 
 
+async def test_model_configuration_reads_one_current_owner_scoped_response() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        model = f"{request.url.params['user_id']}-model-{len(requests)}"
+        return httpx.Response(
+            200,
+            json={
+                "models": [model],
+                "reasoning_efforts": {
+                    model: ["low", "high"],
+                    "unavailable-model": ["max"],
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = GatewayClient(BASE, TOKEN, client=http)
+        for index, owner in enumerate(("user_1", "user_1", "user_2"), start=1):
+            model = f"{owner}-model-{index}"
+            assert await client.model_catalog_with_reasoning_efforts(owner) == (
+                [model],
+                {model: ["low", "high"]},
+            )
+            assert len(requests) == index
+    assert [request.url.params["user_id"] for request in requests] == [
+        "user_1",
+        "user_1",
+        "user_2",
+    ]
+    assert all(request.url.path == "/internal/model-catalog" for request in requests)
+    assert all(request.headers["Authorization"] == f"Bearer {TOKEN}" for request in requests)
+
+
+@pytest.mark.parametrize(
+    "efforts",
+    [None, "low", {"visible": [], "other": ["high"]}, {"visible": "high"}],
+)
+async def test_model_configuration_ignores_missing_or_unusable_effort_domains(efforts) -> None:
+    payload = {"models": ["visible"], "reasoning_efforts": efforts}
+    assert await _client(_serves(payload)).model_catalog_with_reasoning_efforts("user_1") == (
+        ["visible"],
+        {},
+    )
+
+
+async def test_model_configuration_accepts_a_legacy_catalog_without_efforts() -> None:
+    assert await _client(_serves({"models": ["visible"]})).model_catalog_with_reasoning_efforts(
+        "user_1"
+    ) == (["visible"], {})
+
+
+@pytest.mark.parametrize("models", [None, "visible", {"visible": True}])
+async def test_model_configuration_refuses_a_malformed_model_list(models) -> None:
+    with pytest.raises(GatewayError, match="no model list"):
+        await _client(_serves({"models": models})).model_catalog_with_reasoning_efforts("user_1")
+
+
 # Two `mcp_registry` tests stood here — one dropping malformed entries, one
 # refusing a response with no list. Both went with the method: the gateway no
 # longer serves `/internal/mcp-registry`.

@@ -33,6 +33,16 @@ class ComputeResourceRepository(Protocol):
         """Return the saved non-secret form defaults for one provider."""
         ...
 
+    async def activate_automatic_profiles(
+        self,
+        *,
+        profile_ids: list[str],
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
+        """Atomically admit provisioned slots while keeping release inputs immutable."""
+        ...
+
     async def set_provider_defaults(
         self, provider_id: str, defaults: dict[str, Any]
     ) -> dict[str, Any]:

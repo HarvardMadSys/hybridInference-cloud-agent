@@ -167,6 +167,25 @@ export interface DeploymentProfileRequest {
   timeout_seconds: number;
   data_mount?: string;
 }
+
+export interface AutomaticComputeSetupStatus {
+  available: boolean;
+  deployment_sha: string | null;
+  blocked_reasons: BlockedReason[];
+  defaults?: Omit<AutomaticComputeSetupRequest, 'request_id'>;
+  pending_request_id?: string | null;
+}
+
+export interface AutomaticComputeSetupRequest {
+  request_id: string;
+  gateway: { connection_id: string; address: string; port: number; username: string };
+  control: { connection_id: string; address: string; port: number; username: string };
+  gateway_port: number;
+  chat_network_pool: string;
+  dns_server: string;
+  protected_cidrs: string[];
+  slots: number;
+}
 export interface RetirementImpact {
   allocation_id: string;
   revision: number;
@@ -201,6 +220,13 @@ export const getComputeConnections = (signal?: AbortSignal) =>
   get<{ connections: ComputeConnection[] }>('/compute-connections', signal);
 export const saveComputeDeploymentProfile = (body: DeploymentProfileRequest) =>
   write<{ profile: { id: string; label: string } }>('/compute-deployment-profiles', body);
+export const getComputeAutomaticSetup = (signal?: AbortSignal) =>
+  get<AutomaticComputeSetupStatus>('/compute-automatic-setup', signal);
+export const createAutomaticComputeSetup = (body: AutomaticComputeSetupRequest) =>
+  write<{ profiles: { id: string; label: string }[] }>(
+    '/compute-deployment-profiles/automatic',
+    body,
+  );
 export const getCloudLabDefaults = (signal?: AbortSignal) =>
   get<{ defaults: CloudLabDefaults }>('/compute-defaults/cloudlab', signal);
 export const saveCloudLabDefaults = (defaults: CloudLabDefaults) =>
