@@ -868,19 +868,21 @@ function UserMessage({
     <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
       <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
         <Markdown text={text} />
+        <MessageActions align="end" className="mt-0">
+          <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
+            <CopyIcon />
+            Copy
+          </MessageActionButton>
+        </MessageActions>
       </div>
-      <MessageActions align="end" className="mt-0">
-        <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-          <CopyIcon />
-          Copy
-        </MessageActionButton>
-        {onRewind ? (
+      {onRewind ? (
+        <MessageActions align="end" className="mt-0">
           <MessageActionButton label="Edit & rewind" onClick={onRewind} disabled={busy}>
             <RewindIcon />
             Edit & rewind
           </MessageActionButton>
-        ) : null}
-      </MessageActions>
+        </MessageActions>
+      ) : null}
     </div>
   );
 }
