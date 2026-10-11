@@ -455,14 +455,25 @@ export function EventList({
     }
     index = nextIndex - 1;
     const firstReasoning = reasoning[0];
+    const reasoningBlocks = reasoning.flatMap(
+      ({ event: thought }) => thought.reasoningBlocks ?? [{ text: thought.text }],
+    );
     rows.push({
       key: blockKey,
       node: (
         <Fragment>
           {firstReasoning ? (
             <div key="reasoning" className="relative">
-              {renderEvent(firstReasoning.event, firstReasoning.index, firstReasoning.blockKey)}
-              {/* Merged statuses retain their reading anchors at the shared label. */}
+              {renderEvent(
+                {
+                  ...firstReasoning.event,
+                  text: reasoningBlocks.map((block) => block.text).join('\n\n'),
+                  reasoningBlocks,
+                },
+                firstReasoning.index,
+                firstReasoning.blockKey,
+              )}
+              {/* Grouped reasoning keeps each reading anchor at its shared section. */}
               {reasoning.slice(1).map((item) => (
                 <span
                   key={item.blockKey}
@@ -904,7 +915,7 @@ export function EventRow({
           </summary>
           <div className="space-y-3 border-t border-gray-200 px-3 py-3 text-gray-600 dark:border-white/10 dark:text-gray-400">
             {blocks.map((block, index) => (
-              <div key={block.channel ?? index}>
+              <div key={`${block.channel ?? 'text'}:${index}`}>
                 {blocks.length > 1 && block.channel ? (
                   <p className="mb-1 text-xs font-medium">
                     {block.channel === 'summary' ? 'Summary' : 'Detailed reasoning'}

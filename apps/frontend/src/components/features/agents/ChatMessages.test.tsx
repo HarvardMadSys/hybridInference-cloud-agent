@@ -264,7 +264,9 @@ describe('grouped tool calls', () => {
     ];
     render(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
 
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning.tagName).toBe('DETAILS');
+    expect(reasoning).not.toHaveAttribute('open');
     const calls = screen.getByRole('list', { name: 'Tool calls' });
     const chips = within(calls).getAllByRole('listitem');
     expect(chips.map((chip) => within(chip).getByText(/^(Bash|Read|Glob):/).textContent)).toEqual([
@@ -288,8 +290,14 @@ describe('grouped tool calls', () => {
       expect(
         document.querySelectorAll(`[data-block-key="ajob_1:e${event.sourceEventId}"]`),
       ).toHaveLength(1);
-      if (event.kind === 'thinking') expect(screen.queryByText(event.text)).not.toBeInTheDocument();
+      if (event.kind === 'thinking') {
+        expect(within(reasoning).getByText(event.text)).not.toBeVisible();
+      }
       if (event.kind === 'tool_use') expect(screen.getByText(event.output![0])).not.toBeVisible();
+    }
+    reasoning.open = true;
+    for (const event of events) {
+      if (event.kind === 'thinking') expect(within(reasoning).getByText(event.text)).toBeVisible();
     }
     fireEvent.click(screen.getByRole('button', { name: 'Show tool calls' }));
     const hide = screen.getByRole('button', { name: 'Hide tool calls' });
@@ -361,7 +369,14 @@ describe('grouped tool calls', () => {
     expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Show process (5)' }));
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning).not.toHaveAttribute('open');
+    for (const event of events) {
+      if (event.kind === 'thinking') {
+        expect(within(reasoning).getByText(event.text)).not.toBeVisible();
+      }
+    }
+    reasoning.open = true;
     const calls = screen.getByRole('list', { name: 'Tool calls' });
     const chips = within(calls).getAllByRole('listitem');
     expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
@@ -387,12 +402,67 @@ describe('grouped tool calls', () => {
     expect(screen.getByText('Project documentation')).toBeVisible();
     expect(screen.getByText('Tests passed')).toBeVisible();
     expect(screen.getByText('The change is ready.')).toBeVisible();
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    for (const event of events) {
+      if (event.kind === 'thinking') expect(within(reasoning).getByText(event.text)).toBeVisible();
+    }
     expect(
       screen.queryByRole('button', { name: /Show process|Hide process/ }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Inspect Bash: npm test' }));
     expect(inspect).toHaveBeenCalledWith(events[3], jobId);
+  });
+
+  it('keeps all grouped plain text and native reasoning channels in one collapsed section', () => {
+    const events: AgentEvent[] = [
+      { kind: 'thinking', text: 'Inspect the entry point.', attemptNo: 1, sourceEventId: 1 },
+      { kind: 'tool_use', tool: 'Read', detail: 'main.ts', attemptNo: 1, sourceEventId: 2 },
+      {
+        kind: 'thinking',
+        text: 'Combined native text should not be repeated.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Verify the token boundaries.' },
+          { channel: 'reasoning', text: 'Compare each token with the parser state.' },
+        ],
+        attemptNo: 1,
+        sourceEventId: 3,
+      },
+      { kind: 'tool_use', tool: 'Bash', detail: 'npm test', attemptNo: 1, sourceEventId: 4 },
+      { kind: 'thinking', text: 'Review the coverage.', attemptNo: 1, sourceEventId: 5 },
+      { kind: 'message', text: 'The parser is verified.', attemptNo: 1, sourceEventId: 6 },
+    ];
+    render(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
+
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning).toHaveAttribute('data-block-key', 'ajob_1:e1');
+    expect(reasoning).not.toHaveAttribute('open');
+    const texts = [
+      'Inspect the entry point.',
+      'Verify the token boundaries.',
+      'Compare each token with the parser state.',
+      'Review the coverage.',
+    ].map((text) => within(reasoning).getByText(text));
+    for (const text of texts) expect(text).not.toBeVisible();
+    expect(within(reasoning).getByText('Summary')).not.toBeVisible();
+    expect(within(reasoning).getByText('Detailed reasoning')).not.toBeVisible();
+    expect(
+      screen.queryByText('Combined native text should not be repeated.'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('The parser is verified.')).toBeVisible();
+
+    reasoning.open = true;
+    for (const text of texts) expect(text).toBeVisible();
+    for (let index = 1; index < texts.length; index += 1) {
+      expect(
+        texts[index - 1].compareDocumentPosition(texts[index]) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+    for (const event of events) {
+      expect(
+        document.querySelectorAll(`[data-block-key="ajob_1:e${event.sourceEventId}"]`),
+      ).toHaveLength(1);
+    }
   });
 
   it('extends a reasoning activity during streaming without replacing its expanded tools', () => {
@@ -427,14 +497,20 @@ describe('grouped tool calls', () => {
     const { rerender } = render(
       <EventList events={[thought]} jobId={jobId} renderEvent={renderEvent} />,
     );
-    const reasoning = screen.getByText('Agent is reasoning');
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(screen.getByText('Start inspecting.')).not.toBeVisible();
+    reasoning.open = true;
+    expect(screen.getByText('Start inspecting.')).toBeVisible();
     expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Show tool calls?/ })).not.toBeInTheDocument();
 
     rerender(
       <EventList events={[thought, first, middle]} jobId={jobId} renderEvent={renderEvent} />,
     );
-    expect(screen.getByText('Agent is reasoning')).toBe(reasoning);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    expect(screen.getByText('Start inspecting.')).toBeVisible();
+    expect(screen.getByText('Run the tests next.')).toBeVisible();
     const calls = screen.getByRole('list', { name: 'Tool calls' });
     const firstChip = screen.getByRole('listitem');
     const show = screen.getByRole('button', { name: 'Show tool call' });
@@ -455,7 +531,9 @@ describe('grouped tool calls', () => {
     expect(hide).toHaveAttribute('aria-controls', detailsId);
     expect(screen.getByRole('list', { name: 'Tool calls' })).toBe(calls);
     expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
-    expect(screen.getByText('Agent is reasoning')).toBe(reasoning);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    expect(screen.getByText('Review the results.')).toBeVisible();
     expect(screen.getByText('Project documentation')).toBeVisible();
     expect(screen.getByText('Waiting for the tool result…')).toBeVisible();
 
@@ -472,7 +550,11 @@ describe('grouped tool calls', () => {
     expect(screen.getByText('Tests passed')).toBeVisible();
     expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
     expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    expect(screen.getByLabelText('Agent reasoning')).toBe(reasoning);
+    expect(reasoning).toHaveAttribute('open');
+    for (const event of growing) {
+      if (event.kind === 'thinking') expect(within(reasoning).getByText(event.text)).toBeVisible();
+    }
     expect(document.querySelectorAll('[data-block-key]')).toHaveLength(5);
   });
 
@@ -515,7 +597,15 @@ describe('grouped tool calls', () => {
     expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual([
       1, 2, 1, 1, 1, 1,
     ]);
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(5);
+    const reasoningSections = screen.getAllByLabelText('Agent reasoning');
+    expect(reasoningSections).toHaveLength(5);
+    for (const section of reasoningSections) {
+      expect(section.tagName).toBe('DETAILS');
+      expect(section).not.toHaveAttribute('open');
+    }
+    for (const event of events) {
+      if (event.kind === 'thinking') expect(screen.getByText(event.text)).not.toBeVisible();
+    }
     expect(within(groups[1]).getAllByText('Subagent tool')).toHaveLength(2);
     for (const group of [groups[0], ...groups.slice(2)]) {
       expect(within(group).queryByText('Subagent tool')).not.toBeInTheDocument();
@@ -582,7 +672,11 @@ describe('grouped tool calls', () => {
     expect(hide).toHaveAttribute('aria-expanded', 'true');
     expect(hide).toHaveAttribute('aria-controls', detailsId);
     expect(screen.getAllByRole('listitem')[0]).toBe(chip);
-    expect(screen.getAllByText('Agent is reasoning')).toHaveLength(1);
+    const reasoning = screen.getByLabelText('Agent reasoning') as HTMLDetailsElement;
+    expect(reasoning).not.toHaveAttribute('open');
+    expect(within(reasoning).getByText('Run verification.')).not.toBeVisible();
+    reasoning.open = true;
+    expect(within(reasoning).getByText('Run verification.')).toBeVisible();
     expect(screen.getByText('Project documentation')).toBeVisible();
     expect(screen.getByText('Tests passed')).toBeVisible();
     expect(document.querySelectorAll('[data-block-key]')).toHaveLength(3);
@@ -618,7 +712,15 @@ describe('grouped tool calls', () => {
       expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual(
         showActivityDetails ? [1, 1] : [3],
       );
-      expect(screen.getAllByText('Agent is reasoning')).toHaveLength(showActivityDetails ? 2 : 1);
+      const reasoningSections = screen.getAllByLabelText('Agent reasoning');
+      expect(reasoningSections).toHaveLength(showActivityDetails ? 2 : 1);
+      for (const section of reasoningSections) {
+        expect(section.tagName).toBe('DETAILS');
+        expect(section).not.toHaveAttribute('open');
+      }
+      for (const text of ['Inspect first.', 'Delegate the review.', 'Run the tests.']) {
+        expect(screen.getByText(text)).not.toBeVisible();
+      }
       expect(document.querySelectorAll('[data-block-key]')).toHaveLength(6);
       if (showActivityDetails) {
         const card = screen.getByRole('region', { name: 'Subagent activity' });
