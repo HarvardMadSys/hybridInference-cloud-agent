@@ -121,6 +121,49 @@ def _published_blob(clone_url: str, branch: str, path: str = "asset.bin") -> byt
     ).stdout
 
 
+@pytest.mark.parametrize(
+    ("pattern_name", "token"),
+    [
+        ("openai_project_key", "sk-proj-" + "c" * 40),
+        ("openrouter_key", "sk-or-v1-" + "d" * 32),
+    ],
+)
+def test_project_credentials_are_refused_before_publication(
+    origin, pattern_name, token, monkeypatch
+):
+    """Synthetic project credentials never reach a commit or remote ref."""
+    from cloud_agent import publisher
+
+    real_run_git = publisher._run_git
+    publication_commands: list[str] = []
+
+    def record_publication_commands(args, **kwargs):
+        if args and args[0] in {"commit", "push"}:
+            publication_commands.append(args[0])
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(publisher, "_run_git", record_publication_commands)
+    patch = (
+        "diff --git a/src/config.py b/src/config.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n+++ b/src/config.py\n"
+        "@@ -0,0 +1 @@\n"
+        f'+TOKEN = "{token}"\n'
+    )
+
+    with pytest.raises(PublishError, match=pattern_name):
+        publish_patch(
+            job_id=f"ajob_{pattern_name}",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=origin[1],
+            commit_message="agent: add provider configuration",
+        )
+
+    assert publication_commands == []
+    assert _branches(origin[0]) == ["main"]
+
+
 @pytest.mark.parametrize("allow_workflow_changes", [False, True])
 def test_binary_credential_is_refused_before_commit_or_push(
     origin, tmp_path, monkeypatch, allow_workflow_changes

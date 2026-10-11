@@ -123,6 +123,8 @@ def test_symlink_creation_is_rejected():
     [
         ("github_token", "ghp_" + "a" * 36),
         ("openai_key", "sk-" + "b" * 32),
+        ("openai_project_key", "sk-proj-" + "c" * 40),
+        ("openrouter_key", "sk-or-v1-" + "d" * 32),
         ("anthropic_key", "sk-ant-" + "c" * 32),
         ("gateway_key", "hyi-" + "d" * 32),
         ("agent_worker_token", "ajt.abcdefghijkl.mnopqrstuvwx"),
@@ -156,6 +158,28 @@ def test_secret_lookalike_prose_does_not_trip_the_scanner():
     """Ordinary words near 'key' or 'token' must not false-positive."""
     patch = _patch_for("docs/readme.md", added_line="Set your API key via the SK-prefixed env var.")
     assert validate_patch(patch).ok is True
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ["sk-proj-" + "c" * 39, "sk-or-v1-" + "d" * 31],
+)
+def test_project_key_lookalikes_below_catalog_minimum_remain_allowed(secret):
+    patch = _patch_for("docs/readme.md", added_line=f"Example prefix: {secret}")
+
+    assert validate_patch(patch).ok is True
+    assert scan_blob_secrets(secret.encode()) == []
+
+
+@pytest.mark.parametrize(
+    ("secret", "pattern_name"),
+    [
+        (b"sk-proj-" + b"c" * 40, "openai_project_key"),
+        (b"sk-or-v1-" + b"d" * 32, "openrouter_key"),
+    ],
+)
+def test_staged_blob_scanner_uses_project_key_patterns(secret, pattern_name):
+    assert scan_blob_secrets(b"\x00" + secret + b"\xff") == [pattern_name]
 
 
 def test_size_limit_is_enforced():
