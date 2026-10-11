@@ -1075,17 +1075,29 @@ def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
 
     terminal = manager.spawn_terminal(spec, rows=31, cols=101)
     assert terminal.wait() == 0
+    assert terminal.shell == "bash"
 
     command, kwargs = popen_calls[0]
-    script = command[-3]
+    script, _name, pidfile, rcfile, bashrc = command[command.index("-c") + 1 :]
     assert "--interactive" in command
     assert "--tty" in command
     assert 'printf "%s\\n" "$$" > "$pidfile"' in script
+    # bash replaces the wrapper, so it leads the group the pidfile names.
+    assert 'exec bash --rcfile "$rcfile" -i' in script
     assert "/bin/sh +m -i" in script
+    assert "trap '' TSTP TTIN TTOU" in script
+    assert "trap : INT QUIT" in script
     assert "umask 0002" in script
     assert "setsid" not in script
     assert " &" not in script
+    assert pidfile.startswith(f"{ACTIVATION_TMPFS}/terminal-") and pidfile.endswith(".pid")
+    assert rcfile == pidfile.removesuffix(".pid") + ".bashrc"
+    assert 'PROMPT_COMMAND="set +m${PROMPT_COMMAND:+;$PROMPT_COMMAND}"' in bashrc
+    assert f"trap 'rm -f -- {pidfile}' EXIT" in bashrc
     assert kwargs["start_new_session"] is True
+    # The Docker CLI sizes the exec from its stdout, so stdout must be the PTY.
+    assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"]
+    assert isinstance(kwargs["stdout"], int)
 
 
 def test_retained_terminal_signal_must_be_confirmed_while_client_is_live():
@@ -1141,7 +1153,9 @@ def test_stale_terminal_reaper_matches_pidfile_and_wrapper_argv(monkeypatch):
 
     script = calls[-1][-1]
     assert f"{ACTIVATION_TMPFS}/terminal-*.pid" in script
-    assert 'grep -Fqx -- "$pidfile"' in script
+    # The sh wrapper's argv names the pidfile; an exec'd bash names its rcfile.
+    assert 'rcfile="${pidfile%.pid}.bashrc"' in script
+    assert 'grep -Fqx -e "$pidfile" -e "$rcfile"' in script
     assert 'kill -KILL -"$pid"' in script
     assert "pkill" not in script
 

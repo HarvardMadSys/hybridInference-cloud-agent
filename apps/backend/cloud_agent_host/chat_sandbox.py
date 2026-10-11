@@ -17,6 +17,7 @@ argv in several services.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import ipaddress
@@ -25,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import signal
 import struct
 import subprocess
@@ -2795,27 +2797,48 @@ class ChatSandboxManager:
             raise SandboxError("chat sandbox must be started before terminal exec")
         token = secrets.token_hex(16)
         pidfile = f"{ACTIVATION_TMPFS}/terminal-{token}.pid"
+        rcfile = _terminal_rcfile(pidfile)
         # The session shell gets its own process group.  Broker suspend/kill
         # then signals this terminal tree only; pausing or killing the retained
         # container would also stop the Agent CLI and violate one-chat
         # lifecycle ownership.
+        #
         # Docker's TTY exec already starts this wrapper as the foreground
-        # session/process-group leader.  Keep the interactive shell in that
-        # group: a background shell observes /dev/null, while another
-        # ``setsid`` loses this exec's controlling terminal.  Monitor mode is
-        # disabled so commands launched by the shell remain in the signalable
-        # group recorded in the pidfile.
+        # session/process-group leader, and the pidfile names that group.
+        # Every shell command has to stay in it: a background shell observes
+        # /dev/null, while another ``setsid`` loses this exec's controlling
+        # terminal.
+        #
+        # bash (when the image has it) gives the owner line editing, history
+        # and completion. An interactive bash always turns job control on and
+        # makes itself a process-group leader, ignoring ``+m``, so it replaces
+        # the wrapper rather than running under it: it then leads the group the
+        # pidfile already names. Its rcfile turns job control back off before
+        # every prompt -- bash restores it after reading startup files -- so the
+        # commands it runs join that group too.
+        #
+        # Nothing in this group can resume a stopped job, so Ctrl-Z must not
+        # stop one: an ignored SIGTSTP is inherited by every command. The ``sh``
+        # fallback keeps its wrapper for the pidfile cleanup, which therefore
+        # has to outlive the Ctrl-C and Ctrl-\ that reach the whole group.
         script = (
-            'pidfile="$1"; '
+            'pidfile="$1"; rcfile="$2"; '
             'printf "%s\\n" "$$" > "$pidfile" || exit 126; '
+            "umask 0002; "
+            "trap '' TSTP TTIN TTOU; "
+            "if command -v bash >/dev/null 2>&1; then "
+            'if printf "%s" "$3" > "$rcfile"; then '
+            "SHELL=$(command -v bash); export SHELL; "
+            'exec bash --rcfile "$rcfile" -i; fi; fi; '
+            'rm -f "$rcfile"; '
             'cleanup() { rm -f "$pidfile"; }; '
             "trap 'cleanup' EXIT; "
-            "umask 0002; "
+            "trap : INT QUIT; "
             '/bin/sh +m -i; status=$?; exit "$status"'
         )
         command = self.build_exec_command(
             spec,
-            ["/bin/sh", "-c", script, "sh", pidfile],
+            ["/bin/sh", "-c", script, "sh", pidfile, rcfile, _terminal_bashrc(pidfile, rcfile)],
             env=env,
             workdir=workdir,
             interactive=True,
@@ -2825,12 +2848,16 @@ class ChatSandboxManager:
         try:
             _set_pty_size(slave_fd, rows, cols)
             tty.setraw(slave_fd)
+            # All three streams share the PTY. The Docker CLI reads the window
+            # size from its *stdout*: with a pipe there it sends the exec no
+            # console size and drops every SIGWINCH, so the shell inside never
+            # learns the browser's dimensions.
             process = subprocess.Popen(
                 command,
                 env={**os.environ},
                 stdin=slave_fd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=slave_fd,
+                stderr=slave_fd,
                 bufsize=0,
                 start_new_session=True,
             )
@@ -2856,8 +2883,9 @@ class ChatSandboxManager:
         be reattached after a broker process restart.  The retained container
         is durable, however, and Docker may leave an exec process alive after
         its attaching client dies.  Match both the unguessable pidfile and the
-        exact wrapper argv before signalling, so a stale/reused numeric PID
-        can never target the Agent CLI or PID 1.
+        exact argv before signalling, so a stale/reused numeric PID can never
+        target the Agent CLI or PID 1.  The ``sh`` wrapper's argv carries the
+        pidfile; a bash terminal's carries its rcfile, named after the pidfile.
         """
         current = self._require(spec)
         if not current.running:
@@ -2866,17 +2894,18 @@ class ChatSandboxManager:
             "set -eu; command -v tr >/dev/null; command -v grep >/dev/null; "
             f"for pidfile in {ACTIVATION_TMPFS}/terminal-*.pid; do "
             '[ -e "$pidfile" ] || continue; '
+            'rcfile="${pidfile%.pid}.bashrc"; '
             'pid=$(cat "$pidfile" 2>/dev/null || :); '
-            'case "$pid" in ""|*[!0-9]*) rm -f "$pidfile"; continue;; esac; '
+            'case "$pid" in ""|*[!0-9]*) rm -f "$pidfile" "$rcfile"; continue;; esac; '
             'if [ -r "/proc/$pid/cmdline" ] '
             '&& tr "\\000" "\\n" < "/proc/$pid/cmdline" '
-            '| grep -Fqx -- "$pidfile"; then '
+            '| grep -Fqx -e "$pidfile" -e "$rcfile"; then '
             'kill -CONT -"$pid" 2>/dev/null || :; '
             'kill -KILL -"$pid" 2>/dev/null || :; '
             'attempt=0; while kill -0 -"$pid" 2>/dev/null; do '
             'attempt=$((attempt + 1)); test "$attempt" -lt 100 || exit 124; '
             "sleep 0.05; done; "
-            'fi; rm -f "$pidfile"; done'
+            'fi; rm -f "$pidfile" "$rcfile"; done'
         )
         result = self.exec_capture(
             spec,
@@ -3905,8 +3934,36 @@ def _set_pty_size(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def _terminal_rcfile(pidfile: str) -> str:
+    """Name the bash startup file that belongs to one terminal's pidfile."""
+    return pidfile.removesuffix(".pid") + ".bashrc"
+
+
+def _terminal_bashrc(pidfile: str, rcfile: str) -> str:
+    """Return the startup file a terminal's interactive bash reads.
+
+    It deletes itself first: bash has read it whole by then, and its path
+    stays in bash's argv, which is what marks the process as this terminal's.
+    """
+    lines = (
+        f"rm -f -- {shlex.quote(rcfile)}",
+        "[ -r ~/.bashrc ] && . ~/.bashrc",
+        # bash re-enables job control after reading its startup files, which
+        # would put each command in a process group of its own. Switching it
+        # off before every prompt keeps commands in the group the broker
+        # suspends and signals.
+        'PROMPT_COMMAND="set +m${PROMPT_COMMAND:+;$PROMPT_COMMAND}"',
+        f"trap {shlex.quote('rm -f -- ' + shlex.quote(pidfile))} EXIT",
+    )
+    return "\n".join(lines) + "\n"
+
+
 class _RetainedTerminalProcess(TerminalProcess):
     """One Docker-exec PTY whose lifecycle never removes the chat container."""
+
+    # The wrapper falls back to ``sh`` only for an image without bash; the
+    # sandbox image this platform ships always has it.
+    shell = "bash"
 
     def __init__(
         self,
@@ -3928,9 +3985,28 @@ class _RetainedTerminalProcess(TerminalProcess):
         self._suspended = False
 
     def chunks(self) -> Iterator[bytes]:
-        assert self._process.stdout is not None
-        while chunk := self._process.stdout.read(64 * 1024):
-            yield chunk
+        # The output side reads its own descriptor for the PTY master, so
+        # closing the input side (kill, wait) can neither cut off output still
+        # buffered nor hand this read a reused descriptor number.
+        with self._write_lock:
+            if self._input_fd is None:
+                return
+            output_fd = os.dup(self._input_fd)
+        try:
+            while True:
+                try:
+                    chunk = os.read(output_fd, 64 * 1024)
+                except OSError as exc:
+                    # EIO: the Docker client exited and closed the last
+                    # descriptor for the PTY's other end.
+                    if exc.errno == errno.EIO:
+                        return
+                    raise
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            os.close(output_fd)
 
     def write(self, data: bytes) -> None:
         with self._write_lock:
@@ -4007,7 +4083,10 @@ class _RetainedTerminalProcess(TerminalProcess):
             if self._killed:
                 return
             if self._process.poll() is None:
-                self._signal_tree("TERM")
+                # A hangup, as when a terminal window closes. An interactive
+                # shell ignores SIGTERM, so a TERM would always wait out the
+                # deadline below before the KILL.
+                self._signal_tree("HUP")
                 deadline = time.monotonic() + 3
                 while self._process.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.05)

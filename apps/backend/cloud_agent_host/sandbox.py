@@ -265,6 +265,9 @@ class TerminalProcess(ABC):
     interactive programs.
     """
 
+    #: The shell this terminal runs, as its owner sees it named.
+    shell: str = "sh"
+
     @abstractmethod
     def chunks(self) -> Iterator[bytes]:
         """Yield terminal output bytes until the terminal reaches EOF."""
