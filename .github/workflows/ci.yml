@@ -259,11 +259,22 @@ jobs:
           [ "${failed}" -eq 0 ] || exit 1
           echo "Lint: green"
 
+  # A pull request splits the tier over two hosted VMs: on one, pytest took a
+  # median 140s of the job's 174s. Trusted events keep it whole on the fast
+  # persistent pool, whose few runners a second job would only queue for.
+  # `scripts/ci_shard.py` deals whole files, so `--dist loadfile` and the
+  # isolation it buys are unchanged, and the shards cover each file once.
   test:
-    name: Tests
+    name: Tests (${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }})
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[1, 2]' || '[1]') }}
+    env:
+      SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -292,11 +303,18 @@ jobs:
       # test file into its own process, which is what surfaces environment
       # leakage between files. A serial run silently passes on that class of bug.
       - name: Pytest
-        run: uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest"
+        run: |
+          set -euo pipefail
+          files="$(uv run python scripts/ci_shard.py --shard "${SHARD}" -- -m "not external and not dbtest")"
+          mapfile -t paths <<< "${files}"
+          uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
+      # The external checks below run once per commit, in the first shard.
+      #
       # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
       # Check the real normalizer across Linux UIDs before allowing deployment.
       - name: Shared member permissions survive a sibling CLI restart
+        if: matrix.shard == 1
         timeout-minutes: 5
         env:
           AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
@@ -308,11 +326,13 @@ jobs:
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.
       - name: Set up Node for native CLI regression
+        if: matrix.shard == 1
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install the sandbox's pinned Claude CLI
+        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -322,6 +342,7 @@ jobs:
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
       - name: Install the sandbox's pinned Claude SDK
+        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^[[:space:]]*org\.freeinference\.helper\.claude-agent-sdk\.version="\([^"]*\)".*/\1/p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -337,6 +358,7 @@ jobs:
       # port — `FakeAnthropicGateway` binds port 0 — so there is nothing for
       # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
+        if: matrix.shard == 1
         timeout-minutes: 10
         env:
           PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
@@ -360,12 +382,21 @@ jobs:
   # the fast, dependency-free one that every backend change waits on, and it
   # stays that way. The split also matches `make test` / `make test-db`, which
   # is the contract AGENTS.md already documents.
+  #
+  # Sharded like `test`, and for the same reason: on one hosted VM the tier took
+  # a median 218s of a 244s job. Each shard gets a Postgres of its own.
   test-db:
-    name: Tests (Postgres)
+    name: Tests (Postgres, ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }})
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # This pool can start service containers; postgres:15 supports ARM64.
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[1, 2]' || '[1]') }}
+    env:
+      SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
 
     services:
       postgres:
@@ -502,9 +533,15 @@ jobs:
       # spark2 with the worker databases present: 343s serial, 166s this way,
       # the same 329 tests, zero skips.
       - name: Pytest (dbtest tier)
-        run: uv run pytest -q -n 4 --dist loadfile -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
+        run: |
+          set -euo pipefail
+          files="$(uv run python scripts/ci_shard.py --shard "${SHARD}" -- -m "dbtest")"
+          mapfile -t paths <<< "${files}"
+          uv run pytest -q -n 4 --dist loadfile -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml" "${paths[@]}"
 
+      # Once per commit, not once per shard.
       - name: Previous release survives the candidate migration
+        if: matrix.shard == 1
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
@@ -566,11 +603,21 @@ jobs:
   # than waiting for them. The guard builds the one that must fail, and the
   # acceptance builds both web variants. That replaces a plain `npm run build`
   # step rather than adding to it.
+  #
+  # The unit tests then took a median 142s of `check`'s 208s, so a pull request
+  # splits them over two VMs with vitest's own `--shard`, and the first shard
+  # also runs the three quick checks. Trusted events keep one shard, as `test`.
   check:
-    name: Web
+    name: Web (${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }})
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[1, 2]' || '[1]') }}
+    env:
+      SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -607,18 +654,21 @@ jobs:
       # order is now something a reader can spend.
       - name: ESLint
         id: eslint
+        if: matrix.shard == 1
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run lint
 
       - name: Prettier
         id: prettier
+        if: matrix.shard == 1
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run format:check
 
       - name: TypeScript
         id: typescript
+        if: matrix.shard == 1
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run type-check
@@ -627,8 +677,9 @@ jobs:
         id: tests
         continue-on-error: true
         working-directory: ./apps/frontend
-        run: npm run test
+        run: npm run test -- --shard="${SHARD}"
 
+      # A skipped check is only acceptable in a shard that does not run it.
       - name: Every check passed
         env:
           RESULTS: >-
@@ -644,6 +695,7 @@ jobs:
             result="${entry#*=}"
             case "${result}" in
               success) ;;
+              skipped) [ "${SHARD%%/*}" != 1 ] || { echo "::error title=Web::${name} is skipped"; failed=1; } ;;
               *) echo "::error title=Web::${name} is ${result}"; failed=1 ;;
             esac
           done

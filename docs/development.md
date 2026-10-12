@@ -190,6 +190,17 @@ does not wait for it and its failure does not affect CI's conclusion. Of the
 (kilo, …)` jobs, one case each, and the other twelve in
 the sandbox image job; trusted events run all 15 in the sandbox image job.
 
+A pull request also splits the default test tier, the PostgreSQL tier, and the
+frontend unit tests over two hosted VMs each, shown as `Tests (1/2)` and so on.
+`scripts/ci_shard.py` deals whole test files to the pytest shards, and vitest
+splits its own with `--shard`. Trusted events run each tier as a single shard.
+To run one shard locally, pass its files to pytest:
+
+```bash
+uv run pytest -m "not external and not dbtest" \
+  $(uv run python scripts/ci_shard.py --shard 1/2 -- -m "not external and not dbtest")
+```
+
 GitHub issue [#464](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/464)
 tracks the remaining administrator work: the runner-group controls below,
 validated against an untrusted fork.
