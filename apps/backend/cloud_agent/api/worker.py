@@ -20,7 +20,8 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
+from fastapi.routing import APIRoute
 
 from cloud_agent.api._workspace_access import (
     _workspace_id,
@@ -108,6 +109,8 @@ from cloud_agent.workspace_errors import _workspace_broker_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
@@ -183,6 +186,61 @@ _CLONE_SCOPE = {"contents": "read"}
 #: report it claims to be. Enforced on the raw body before parsing so an
 #: oversized post cannot allocate a model first.
 MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
+
+
+def _turn_resources_too_large() -> HTTPException:
+    """The 413 for a turn resource snapshot past its contract's bound."""
+    return HTTPException(
+        status_code=413,
+        detail={
+            "error": {
+                "type": "payload_too_large",
+                "message": (
+                    f"A turn resource snapshot is limited to {MAX_TURN_RESOURCES_BODY_BYTES} bytes."
+                ),
+            }
+        },
+    )
+
+
+class _TurnResourcesRequest(Request):
+    """A request whose body is refused past the snapshot bound as it arrives.
+
+    FastAPI reads and validates a declared body before the handler runs, so a
+    length check in the handler only ever measured a body that had already
+    been read whole and built into a model. This is the read FastAPI makes: a
+    declared length past the bound is refused unread, and a streamed body is
+    counted as it arrives and refused at the first byte past it.
+    """
+
+    async def body(self) -> bytes:
+        """Read the body, refusing it once it is larger than the bound."""
+        if not hasattr(self, "_body"):
+            declared = self.headers.get("content-length") or ""
+            if declared.isdigit() and int(declared) > MAX_TURN_RESOURCES_BODY_BYTES:
+                raise _turn_resources_too_large()
+            chunks: list[bytes] = []
+            received = 0
+            async for chunk in self.stream():
+                received += len(chunk)
+                if received > MAX_TURN_RESOURCES_BODY_BYTES:
+                    raise _turn_resources_too_large()
+                chunks.append(chunk)
+            self._body = b"".join(chunks)
+        return self._body
+
+
+class _TurnResourcesRoute(APIRoute):
+    """Hands the turn-resources handler the bounded request, for FastAPI to read."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        """Wrap the generated handler so its body read is the bounded one."""
+        handler = super().get_route_handler()
+
+        async def bounded(request: Request) -> Response:
+            return await handler(_TurnResourcesRequest(request.scope, request.receive))
+
+        return bounded
 
 
 #: Cheap structural check before touching the signing key: host credentials
@@ -1374,9 +1432,7 @@ async def worker_report_resources(
     return WorkerAckResponse(ok=True)
 
 
-@router.post("/worker/jobs/{job_id}/turn-resources", response_model=WorkerAckResponse)
 async def worker_report_turn_resources(
-    request: Request,
     job_id: str,
     body: WorkerTurnResourcesRequest,
     authorization: str | None = Header(None),
@@ -1404,19 +1460,8 @@ async def worker_report_turn_resources(
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    if len(await request.body()) > MAX_TURN_RESOURCES_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "error": {
-                    "type": "payload_too_large",
-                    "message": (
-                        "A turn resource snapshot is limited to "
-                        f"{MAX_TURN_RESOURCES_BODY_BYTES} bytes."
-                    ),
-                }
-            },
-        )
+    # The size bound has already been applied by the route: ``body`` exists
+    # only because the raw bytes fitted (see ``_TurnResourcesRequest``).
     result = await job_store.attempt_commands.record_attempt_turn_summary(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -1430,6 +1475,17 @@ async def worker_report_turn_resources(
     if result == "conflict":
         raise _turn_summary_conflict()
     return WorkerAckResponse(ok=True)
+
+
+# Registered here rather than by decorator only because the decorator cannot
+# name a route class, and this route's body has to be bounded by its own.
+router.add_api_route(
+    "/worker/jobs/{job_id}/turn-resources",
+    worker_report_turn_resources,
+    methods=["POST"],
+    response_model=WorkerAckResponse,
+    route_class_override=_TurnResourcesRoute,
+)
 
 
 @router.post("/worker/jobs/{job_id}/terminals/suspend", response_model=WorkerAckResponse)

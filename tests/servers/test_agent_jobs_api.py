@@ -7350,6 +7350,56 @@ async def test_an_oversized_turn_resource_snapshot_is_refused_before_parsing(
     assert store.turn_summaries == {}
 
 
+async def test_an_oversized_invalid_turn_resource_snapshot_is_refused_for_its_size(
+    client: AsyncClient, store: FakeStorage
+):
+    """The bound runs before the model is built, so it wins over validation.
+
+    A body that is both too large and not a snapshot at all can only be
+    answered 413 if nothing parsed it first: a server that validated before
+    measuring would read the whole thing, build the model, and answer 422.
+    """
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    refused = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/turn-resources",
+        json={"report_seq": "not a number", "padding": "x" * (16 * 1024)},
+        headers=auth,
+    )
+
+    assert refused.status_code == 413
+    assert refused.json()["detail"]["error"]["type"] == "payload_too_large"
+    assert store.turn_summaries == {}
+
+
+async def test_a_streamed_oversized_turn_resource_snapshot_is_refused(
+    client: AsyncClient, store: FakeStorage
+):
+    """No ``Content-Length`` to read, so the bound counts what arrives."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {
+        "Authorization": f"Bearer {claim['worker_token']}",
+        "Content-Type": "application/json",
+    }
+
+    async def chunks():
+        yield b'{"padding": "'
+        for _ in range(32):
+            yield b"x" * 1024
+        yield b'"}'
+
+    refused = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/turn-resources", content=chunks(), headers=auth
+    )
+
+    assert refused.status_code == 413
+    assert refused.json()["detail"]["error"]["type"] == "payload_too_large"
+    assert store.turn_summaries == {}
+
+
 async def test_a_turn_resource_response_never_echoes_body_identity(
     client: AsyncClient, store: FakeStorage
 ):
