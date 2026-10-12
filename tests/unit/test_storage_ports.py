@@ -26,14 +26,23 @@ REPOSITORIES_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "storage" / 
 UNPORTED: set[str] = set()
 
 
-def _method_names(path: Path) -> set[str]:
+def _method_names(path: Path, *, protocols: bool = False) -> set[str]:
     """The method inventory of a capability's protocol or repository."""
     tree = ast.parse(path.read_text())
     classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
-    assert len(classes) == 1, f"{path}: expected one class, found {len(classes)}"
+    if protocols:
+        classes = [
+            node
+            for node in classes
+            if any(isinstance(base, ast.Name) and base.id == "Protocol" for base in node.bases)
+        ]
+        assert classes, f"{path}: expected at least one protocol"
+    else:
+        assert len(classes) == 1, f"{path}: expected one class, found {len(classes)}"
     return {
         node.name
-        for node in classes[0].body
+        for class_node in classes
+        for node in class_node.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
@@ -73,7 +82,7 @@ def test_every_public_repository_method_is_claimed_once() -> None:
     public = {name for name in store if not name.startswith("_")}
     claimed: dict[str, str] = {}
     for path in _port_files():
-        for name in _method_names(path):
+        for name in _method_names(path, protocols=True):
             assert name not in claimed, f"{name}: both {claimed[name]} and {path.name}"
             claimed[name] = path.name
     assert sorted(public - set(claimed)) == sorted(UNPORTED)

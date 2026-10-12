@@ -131,6 +131,102 @@ async def test_delete_rejects_changed_review(db, store, changed):
     assert await request_delete(store, "asbx_stale", **changed) == "stale"
 
 
+async def test_broker_confirmed_force_delete_atomically_repairs_stale_running_state(db, store):
+    origin = await seed(db, store, "asbx_force", state="running")
+    await member(db, "asbx_force", origin, 0)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET idle_deadline=NULL, terminal_count=0, terminal_count_observed_at=NOW(),
+                resource_snapshot='{}'::jsonb, resource_sampled_at=NOW(),
+                resource_received_at=NOW()
+            WHERE id='asbx_force'
+            """
+        )
+
+    assert await request_delete(store, "asbx_force", broker_confirmed_stopped=True) == "accepted"
+    async with db.acquire() as conn:
+        group = await conn.fetchrow(
+            """
+            SELECT state, deletion_state, idle_deadline, stop_requested_at,
+                   resource_snapshot, resource_sampled_at, resource_received_at,
+                   terminal_count, terminal_count_observed_at
+            FROM agent_sandboxes WHERE id='asbx_force'
+            """
+        )
+        resident_state = await conn.fetchval(
+            "SELECT resident_state FROM agent_thread_sandbox_memberships "
+            "WHERE sandbox_id='asbx_force'"
+        )
+        audit_proof = await conn.fetchrow(
+            "SELECT details->>'force' AS force, "
+            "details->>'broker_confirmed_stopped' AS broker_confirmed_stopped, "
+            "details->>'docker_status' AS docker_status FROM agent_admin_audit_log "
+            "WHERE action='agent.sandbox.delete.requested'"
+        )
+    assert group["state"] == "stopped" and group["deletion_state"] == "pending"
+    for field in (
+        "idle_deadline",
+        "stop_requested_at",
+        "resource_snapshot",
+        "resource_sampled_at",
+        "resource_received_at",
+        "terminal_count",
+        "terminal_count_observed_at",
+    ):
+        assert group[field] is None
+    assert resident_state == "stopped"
+    assert dict(audit_proof) == {
+        "force": "true",
+        "broker_confirmed_stopped": "true",
+        "docker_status": "stopped",
+    }
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None and claim["id"] == "asbx_force"
+
+
+async def test_broker_confirmed_force_delete_keeps_all_busy_fences(db, store):
+    await seed(db, store, "asbx_force_busy", state="running")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET active_operation_count=1 WHERE id='asbx_force_busy'"
+        )
+    assert await request_delete(store, "asbx_force_busy", broker_confirmed_stopped=True) == "busy"
+    detail = await store.admin_sandboxes.detail("asbx_force_busy")
+    assert detail is not None
+    assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"
+
+
+async def test_force_delete_audit_failure_rolls_back_repair_and_deletion_fence(db, store):
+    origin = await seed(db, store, "asbx_force_audit", state="running")
+    await member(db, "asbx_force_audit", origin, 0)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE agent_admin_audit_log ADD CONSTRAINT reject_force_delete_audit "
+            "CHECK (action <> 'agent.sandbox.delete.requested')"
+        )
+    try:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await request_delete(store, "asbx_force_audit", broker_confirmed_stopped=True)
+        detail = await store.admin_sandboxes.detail("asbx_force_audit")
+        assert detail is not None
+        assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT resident_state FROM agent_thread_sandbox_memberships "
+                    "WHERE sandbox_id='asbx_force_audit'"
+                )
+                == "starting"
+            )
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_force_delete_audit"
+            )
+
+
 async def test_delete_claim_excludes_other_workers_and_expired_worker_receipts(db, store):
     await seed(db, store, "asbx_lease", state="stopped")
     assert await request_delete(store, "asbx_lease") == "accepted"
@@ -155,6 +251,40 @@ async def test_delete_claim_excludes_other_workers_and_expired_worker_receipts(d
     assert replacement["deletion_claim_token"] != first["deletion_claim_token"]
     assert not await store.sandbox.fail_admin_sandbox_deletion(**worker_fence(first), error="stale")
     assert await checkpoint_archive(store, replacement)
+
+
+async def test_deletion_receipt_rechecks_claim_expiry_after_a_plain_row_lock(db, store):
+    await seed(db, store, "asbx_blocked_lease", state="stopped")
+    assert await request_delete(store, "asbx_blocked_lease") == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=0.4)
+    assert claim is not None
+    archiving = None
+    async with db.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+            claim["id"],
+        )
+        archiving = asyncio.create_task(checkpoint_archive(store, claim))
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "archive receipt did not wait on the sandbox row lock"
+        await asyncio.sleep(0.55)
+
+    assert archiving is not None
+    assert not await asyncio.wait_for(archiving, timeout=2)
+    detail = await store.admin_sandboxes.detail(claim["id"])
+    assert detail is not None
+    assert detail.sandbox.deletion_state == "pending"
+    assert detail.sandbox.deletion_archive_key is None
 
 
 @pytest.mark.parametrize(
@@ -305,9 +435,12 @@ async def settled_group(db, store):
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-deletion", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-survives",

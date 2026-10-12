@@ -293,24 +293,48 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # The same per-runner builder CI uses, for the same reasons: its layer
-      # cache outlives the job, and its name carries the runner so two runners
-      # on one host cannot delete each other's buildkitd.
-      - name: Reuse this runner's builder, or make one
+      # A builder of this job's own, configured under RUNNER_TEMP and removed
+      # when the job ends. Not CI's per-runner `ci-<runner>` builder: CI builds
+      # on these same runners, and that builder's layer cache and cache mounts
+      # outlive the jobs that wrote them. A release is built only from the
+      # vetted tree and the registries, so it starts cold, once per commit.
+      #
+      # The name carries the runner as well as the run, attempt and cell:
+      # buildx names the buildkitd container after the builder alone, and
+      # several cells share one Docker host.
+      - name: Make this job's own builder
         run: |
           set -euo pipefail
-          buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+          builder_scope="$(
+            printf '%s-%s' "${GITHUB_REPOSITORY}" "${RUNNER_NAME}" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -c '[:alnum:]_.-' '-'
+          )"
+          builder_prefix="publish-${builder_scope}-"
+          builder="${builder_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
+          buildx_config="${RUNNER_TEMP}/buildx"
           mkdir -p "${buildx_config}"
           export BUILDX_CONFIG="${buildx_config}"
           echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
-          builder="ci-${RUNNER_NAME}"
-          if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
-            docker buildx rm "${builder}" >/dev/null 2>&1 || true
-            docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
-            docker buildx inspect "${builder}" --bootstrap >/dev/null
-          fi
-          docker buildx use "${builder}" >/dev/null
           echo "BUILDER=${builder}" >> "${GITHUB_ENV}"
+          # A job killed before its final step leaves its buildkitd behind. A
+          # runner executes one job at a time, so another container under this
+          # runner's prefix is such an orphan, never a live build. The rest of
+          # the name must be <run>-<attempt>-<cell>, so a runner whose name
+          # merely extends this one's is not mistaken for it.
+          stale_prefix="buildx_buildkit_${builder_prefix}"
+          while IFS= read -r container; do
+            [ "${container}" = "buildx_buildkit_${builder}0" ] && continue
+            [[ "${container}" == "${stale_prefix}"* ]] || continue
+            [[ "${container#"${stale_prefix}"}" =~ ^[0-9]+-[0-9]+-[a-z-]+0$ ]] || continue
+            docker rm -fv "${container}" >/dev/null 2>&1 || true
+            docker volume rm "${container}_state" >/dev/null 2>&1 || true
+          done < <(
+            docker ps -a --filter "name=${stale_prefix}" --format '{{.Names}}' \
+              2>/dev/null || true
+          )
+          docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
+          docker buildx inspect "${builder}" --bootstrap >/dev/null
           echo "builder ${builder} ready in ${buildx_config}"
 
       # Pushed by digest and nothing else: no tag is written here, so no tag
@@ -438,6 +462,15 @@ jobs:
             | xargs -r docker rm -f || true
           docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
           docker image rm "${IMAGE_REF}" >/dev/null 2>&1 || true
+
+      # The builder goes with the job, its cache and state volume included, so
+      # nothing this build left behind reaches another one.
+      - name: Drop this job's builder
+        if: always()
+        run: |
+          if [ -n "${BUILDER:-}" ]; then
+            docker buildx rm "${BUILDER}" >/dev/null 2>&1 || true
+          fi
 
   # -------------------------------------------------------------- acceptance
   # A release is published only if it deploys. This job assembles the candidate

@@ -206,6 +206,18 @@ def test_the_shadow_check_sees_same_path_with_different_methods() -> None:
     )
 
 
+def test_host_drain_contract_publishes_the_required_epoch_cas() -> None:
+    document = create_app().openapi()
+    schemas = document["components"]["schemas"]
+    host = schemas["AgentRunnerHost"]
+    acquire = schemas["AcquireHostDrainFenceRequest"]
+
+    assert "drain_fence_epoch" in host["required"]
+    assert host["properties"]["drain_fence_epoch"]["format"] == "uuid"
+    assert "expected_fence_epoch" in acquire["required"]
+    assert acquire["properties"]["expected_fence_epoch"]["format"] == "uuid"
+
+
 def test_the_served_openapi_is_the_committed_contract() -> None:
     """A shape change is a deliberate edit to the contract file, not a drift."""
     committed = json.loads(CONTRACT_FILE.read_text())

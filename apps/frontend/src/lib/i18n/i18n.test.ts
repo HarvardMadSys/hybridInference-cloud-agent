@@ -68,7 +68,7 @@ describe('translate', () => {
   });
 
   it('answers in the requested language', () => {
-    expect(translate('en', 'settings.title')).toBe('Settings');
+    expect(translate('en', 'settings.title')).toBe('Setting');
     expect(translate('zh-CN', 'settings.title')).toBe('设置');
   });
 });

@@ -26,8 +26,10 @@ only ever a handle.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -203,20 +205,143 @@ def request_meta(
     return meta
 
 
-def request_headers(method: str, params: Mapping[str, Any] | None) -> dict[str, str]:
+#: SEP-2243 copies an annotated argument into ``Mcp-Param-<name>``. The server
+#: rejects the call when the header is missing or disagrees with the body.
+_PARAM_HEADER_PREFIX = "Mcp-Param-"
+_BASE64_SENTINEL_PREFIX = "=?base64?"
+_BASE64_SENTINEL_SUFFIX = "?="
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+_HEADER_TYPES = frozenset({"string", "integer", "boolean"})
+_MISSING = object()
+
+
+def _is_tchar(char: str) -> bool:
+    """Whether ``char`` is one HTTP token character."""
+    if "0" <= char <= "9" or "A" <= char <= "Z" or "a" <= char <= "z":
+        return True
+    return char in "!#$%&'*+-.^_`|~"
+
+
+def _header_name_ok(name: str) -> bool:
+    """Whether an ``x-mcp-header`` value is a legal HTTP field-name."""
+    return bool(name) and all(_is_tchar(char) for char in name)
+
+
+def _requires_base64(value: str) -> bool:
+    """Whether a string must travel as the SEP-2243 base64 sentinel."""
+    if not value:
+        return False
+    if value[0] in " \t" or value[-1] in " \t":
+        return True
+    if any(ord(char) < 0x20 or ord(char) > 0x7E for char in value):
+        return True
+    return value.startswith(_BASE64_SENTINEL_PREFIX) and value.endswith(_BASE64_SENTINEL_SUFFIX)
+
+
+def _encode_header_value(value: str) -> str:
+    """Encode one header value the way the stateless revision requires."""
+    if not _requires_base64(value):
+        return value
+    encoded = base64.b64encode(value.encode()).decode("ascii")
+    return f"{_BASE64_SENTINEL_PREFIX}{encoded}{_BASE64_SENTINEL_SUFFIX}"
+
+
+def _primitive_header(value: Any, expected_type: str) -> str | None:
+    """Render one annotated argument, or ``None`` when it is not that primitive."""
+    if expected_type == "boolean":
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return None
+    if expected_type == "integer":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, float) and (not math.isfinite(value) or value != math.trunc(value)):
+            return None
+        number = int(value)
+        if number < -_MAX_SAFE_INTEGER or number > _MAX_SAFE_INTEGER:
+            return None
+        return str(number)
+    if expected_type == "string" and isinstance(value, str):
+        return _encode_header_value(value)
+    return None
+
+
+def _argument_at(arguments: Mapping[str, Any], path: tuple[str, ...]) -> Any:
+    """Read one nested argument, or :data:`_MISSING` when the path is absent."""
+    current: Any = arguments
+    for part in path:
+        if not isinstance(current, Mapping) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def annotated_param_headers(
+    schema: Mapping[str, Any], arguments: Mapping[str, Any]
+) -> dict[str, str]:
+    """Mirror ``x-mcp-header`` arguments into the headers the server compares.
+
+    The values come from the body this platform is about to send. A header the
+    caller attached is not a source: the server refuses the call unless the
+    header decodes to that body value, so the body is the one copy.
+    """
+    headers: dict[str, str] = {}
+    claimed: set[str] = set()
+
+    def walk(properties: Any, prefix: tuple[str, ...]) -> None:
+        if not isinstance(properties, Mapping):
+            return
+        for name, prop in properties.items():
+            if not isinstance(name, str) or not isinstance(prop, Mapping):
+                continue
+            path = (*prefix, name)
+            header = prop.get("x-mcp-header")
+            prop_type = prop.get("type")
+            if (
+                isinstance(header, str)
+                and prop_type in _HEADER_TYPES
+                and _header_name_ok(header)
+                and header.casefold() not in claimed
+            ):
+                claimed.add(header.casefold())
+                value = _argument_at(arguments, path)
+                if value is not _MISSING and value is not None:
+                    encoded = _primitive_header(value, str(prop_type))
+                    if encoded is not None:
+                        headers[f"{_PARAM_HEADER_PREFIX}{header}"] = encoded
+            nested = prop.get("properties")
+            if isinstance(nested, Mapping):
+                walk(nested, path)
+
+    walk(schema.get("properties"), ())
+    return headers
+
+
+def request_headers(
+    method: str,
+    params: Mapping[str, Any] | None,
+    *,
+    input_schema: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
     """The metadata headers a stateless-era HTTP request must repeat.
 
     They mirror body fields the server already has, which the revision requires
-    so an intermediary can route without parsing the body. Only the subset this
-    platform can fill is produced; a tool parameter a server marked
-    ``x-mcp-header`` is not forwarded, because a value that must survive as a
-    header is a value the platform cannot verify against the schema it holds.
+    so an intermediary can route without parsing the body. Tool arguments marked
+    ``x-mcp-header`` are copied from the body, because a server on the
+    2026-07-28 revision rejects the call when those headers are absent.
     """
     headers = {"mcp-method": method}
     if isinstance(params, Mapping):
         name = params.get("name") or params.get("uri")
         if isinstance(name, str) and name:
             headers["mcp-name"] = name
+        arguments = params.get("arguments")
+        if (
+            method == TOOLS_CALL
+            and isinstance(input_schema, Mapping)
+            and isinstance(arguments, Mapping)
+        ):
+            headers.update(annotated_param_headers(input_schema, arguments))
     return headers
 
 

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cloud_agent.api import turns
+from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.workers.job_event_signal import JobEventSignal
 
 JOB = "ajob_1"
@@ -27,9 +28,7 @@ class Store:
         self.reads = 0
         self.conversation_queries = SimpleNamespace(get_job=self._get_job)
         self.pending_messages = SimpleNamespace(
-            queue_state=AsyncMock(
-                return_value={"messages": [{"id": "apmsg_1", "state": "sending"}]}
-            )
+            return_to_queue=AsyncMock(return_value=None),
         )
 
     async def _get_job(self, job_id: str) -> dict:
@@ -38,10 +37,10 @@ class Store:
 
 
 async def test_the_claim_hands_the_message_over_at_once(monkeypatch):
-    monkeypatch.setattr(turns, "HAND_OVER_POLL_S", 30.0)
-    monkeypatch.setattr(turns, "HAND_OVER_IDLE_S", 30.0)
-    handed = AsyncMock(return_value=None)
-    monkeypatch.setattr(turns, "_hand_over", handed)
+    monkeypatch.setattr(send_now_delivery, "HAND_OVER_POLL_S", 30.0)
+    monkeypatch.setattr(send_now_delivery, "HAND_OVER_IDLE_S", 30.0)
+    handed = AsyncMock(return_value=send_now_delivery.HandoffOutcome(accepted=True))
+    monkeypatch.setattr(send_now_delivery, "deliver_handoff", handed)
     store = Store()
     signal = JobEventSignal()
     signal.reset(listening=True)
@@ -64,14 +63,17 @@ async def test_the_claim_hands_the_message_over_at_once(monkeypatch):
 
     await asyncio.wait_for(task, 0.5)
     handed.assert_awaited_once()
-    assert handed.await_args.kwargs["attempt_id"] == 7
+    assert handed.await_args.kwargs == {
+        "message_id": MESSAGE["id"],
+        "revision": MESSAGE["revision"],
+    }
     assert signal.subscribers(JOB) == 0
 
 
 async def test_without_a_signal_it_still_looks_on_its_clock(monkeypatch):
-    monkeypatch.setattr(turns, "HAND_OVER_POLL_S", 0.01)
-    handed = AsyncMock(return_value=None)
-    monkeypatch.setattr(turns, "_hand_over", handed)
+    monkeypatch.setattr(send_now_delivery, "HAND_OVER_POLL_S", 0.01)
+    handed = AsyncMock(return_value=send_now_delivery.HandoffOutcome(accepted=True))
+    monkeypatch.setattr(send_now_delivery, "deliver_handoff", handed)
     store = Store()
     task = asyncio.create_task(
         turns._hand_over_once_claimed(
@@ -91,9 +93,9 @@ async def test_without_a_signal_it_still_looks_on_its_clock(monkeypatch):
 
 @pytest.mark.parametrize("state", ["succeeded", "cancelled"])
 async def test_a_turn_that_ends_first_stops_the_wait(monkeypatch, state):
-    monkeypatch.setattr(turns, "HAND_OVER_IDLE_S", 30.0)
+    monkeypatch.setattr(send_now_delivery, "HAND_OVER_IDLE_S", 30.0)
     handed = AsyncMock()
-    monkeypatch.setattr(turns, "_hand_over", handed)
+    monkeypatch.setattr(send_now_delivery, "deliver_handoff", handed)
     store = Store()
     signal = JobEventSignal()
     signal.reset(listening=True)

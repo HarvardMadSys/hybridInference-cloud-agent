@@ -26,12 +26,18 @@ export function AdminSetupNotice() {
   return (
     <div
       role="status"
-      className="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
+      className="mt-4 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3.5 text-sm leading-6 text-amber-950 shadow-subtle dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
     >
-      Administrator setup required{features.length > 0 ? `: ${features.join(', ')}.` : '.'}{' '}
-      <Link href="/admin/settings" className="font-medium underline">
-        Complete missing settings
-      </Link>
+      <span
+        aria-hidden
+        className="mt-2 h-2 w-2 shrink-0 rounded-full bg-amber-500 dark:bg-amber-300"
+      />
+      <p>
+        Administrator setup required{features.length > 0 ? `: ${features.join(', ')}.` : '.'}{' '}
+        <Link href="/admin/settings" className="font-semibold underline underline-offset-2">
+          Complete missing settings
+        </Link>
+      </p>
     </div>
   );
 }

@@ -23,6 +23,21 @@ import os
 import sys
 
 
+def plugin_args() -> list[str]:
+    """Load only user-selected packages alongside the reviewed MCP bridge."""
+    try:
+        paths = json.loads(os.environ.get("AGENT_PLUGIN_PATHS") or "[]")
+    except ValueError:
+        sys.stderr.write("pi-freeinference: AGENT_PLUGIN_PATHS is not valid JSON.\n")
+        raise SystemExit(64) from None
+    if not isinstance(paths, list) or any(
+        not isinstance(path, str) or not os.path.isabs(path) for path in paths
+    ):
+        sys.stderr.write("pi-freeinference: AGENT_PLUGIN_PATHS must contain absolute paths.\n")
+        raise SystemExit(64)
+    return [argument for path in paths for argument in ("-e", path)]
+
+
 def main() -> None:
     """Write pi's provider config from the environment and exec pi."""
     try:
@@ -65,7 +80,9 @@ def main() -> None:
     with open(os.path.join(config_dir, "models.json"), "w", encoding="utf-8") as handle:
         json.dump(config, handle)
 
-    os.execvp("pi", ["pi", *sys.argv[1:]])
+    # pi 0.73.1 accepts explicit package directories under --no-extensions;
+    # the CLI resolves each manifest's extensions, skills, prompts, and themes.
+    os.execvp("pi", ["pi", *plugin_args(), *sys.argv[1:]])
 
 
 if __name__ == "__main__":

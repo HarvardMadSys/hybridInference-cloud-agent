@@ -6,13 +6,11 @@
 # dependencies and execute code from a repository nobody vetted. Two rules
 # follow from that and shape everything below.
 #
-# 1. **No credentials are baked in.** The only secret that ever reaches this
-#    image is the job's model-scoped token, injected as an environment variable
-#    at run time. It authorizes a fixed set of models and MCP tools and nothing
-#    else — spend is governed by the user's quota at the gateway, not by
-#    anything this container holds. There is no GitHub token here, because the
-#    agent never pushes — it emits a patch and the trusted publisher outside
-#    handles git.
+# 1. **No credentials are baked in.** Scoped inference and MCP credentials
+#    arrive at run time, along with a short-lived, single-repository GitHub App
+#    token with contents/PR write permissions in the owning member's
+#    environment. Account credentials and the App's private key stay outside.
+#    The trusted publisher separately validates the changes it publishes.
 # 2. **Nothing here is trusted at run time.** Every chat uses a retained Docker
 #    container; timeout stops it without removing its writable layer. The
 #    process runs as non-root and (under the kata backend) has its own kernel.
@@ -132,9 +130,11 @@ ARG OPENCODE_VERSIONS=${OPENCODE_VERSION}${OPENCODE_EXTRA_VERSIONS:+,${OPENCODE_
 ARG KILO_VERSIONS=${KILO_VERSION}${KILO_EXTRA_VERSIONS:+,${KILO_EXTRA_VERSIONS}}
 
 # Tools an agent legitimately needs to understand and change a repository.
+# Ship GitHub CLI so it is available as soon as a sandbox starts. Installing
+# the CLI does not provision GitHub credentials; the runner injects a scoped
+# token into each member's environment for pushes and pull requests.
 # Deliberately not installed: anything that would let it reach the host
-# (docker CLI) or persist beyond the job, and `gh` — the sandbox holds no
-# GitHub credential, so it could only fail to authenticate.
+# (docker CLI) or persist beyond the job.
 #
 # The agent runs as non-root with no sudo, and a repository's setup script runs
 # as the same user, so nothing can `apt-get install` once a chat starts. What a
@@ -148,6 +148,7 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
     && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         git \
+        gh \
         ca-certificates \
         curl \
         jq \
@@ -319,19 +320,6 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.runtime.opencode.versions="${OPENCODE_VERSIONS}" \
       org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}"
 
-# What this image is, in the two places a deployment looks: OCI's own labels,
-# and one of ours naming the artifact's role. A resolver reads both out of the
-# platform image it is about to run and compares them with the release
-# manifest — the revision against the manifest's source commit, the role
-# against the artifact it stands in for — so a build matrix that swaps two
-# digests is caught where the release is consumed rather than where it is
-# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
-# built by hand says `unknown`, and a resolver refuses it.
-ARG SOURCE_COMMIT=unknown
-LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
-      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
-      io.hybridinference.artifact.role="sandbox"
-
 # pi, OpenCode, and Kilo all ignore OPENAI_BASE_URL; each one's supported
 # route to a custom gateway is a provider config file whose content (gateway
 # address, per-job credential, model) is only known at run time. These
@@ -483,7 +471,25 @@ RUN set -eu; \
     command -v pnpm; \
     command -v yarn; \
     fd --version; \
-    git lfs version
+    git lfs version; \
+    gh --version
+
+# What this image is, in the two places a deployment looks: OCI's own labels,
+# and one of ours naming the artifact's role. A resolver reads both out of the
+# platform image it is about to run and compares them with the release
+# manifest — the revision against the manifest's source commit, the role
+# against the artifact it stands in for — so a build matrix that swaps two
+# digests is caught where the release is consumed rather than where it is
+# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
+# built by hand says `unknown`, and a resolver refuses it.
+#
+# Last, after every RUN: a RUN has each ARG declared above it in its
+# environment, so a commit-valued ARG declared earlier invalidated every layer
+# below it on every commit, in every builder and every layer cache.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.hybridinference.artifact.role="sandbox"
 
 # No ENTRYPOINT: the runner supplies the full argv from the runtime adapter,
 # so this image never decides what an agent run looks like.

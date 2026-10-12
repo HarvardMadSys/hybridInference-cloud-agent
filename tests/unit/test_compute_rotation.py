@@ -108,6 +108,7 @@ def test_an_unconfirmed_extension_moves_the_host_halfway_through_the_lead_time()
         {"mode": "attach"},
         {"management_mode": "observe"},
         {"hosts": []},
+        {"autoscaling_owned": True},
         {"policy": {**POLICY.model_dump(), "rotation_enabled": False}},
     ],
 )
@@ -159,10 +160,12 @@ def test_replacement_request_keeps_scope_but_never_the_old_identity():
         "name": "ca-old",
         "profile_name": "cloud-agent-node",
         "host_key_source": "registration",
+        "ssh_public_key": "ssh-ed25519 AAAA researcher",
         "bindings": {"phystype": "c6420", "dataMount": "/mydata"},
     }
     derived = candidate_configuration(source, POLICY, "r6615")
     assert "external_id" not in derived and "name" not in derived
+    assert derived["ssh_public_key"] == "ssh-ed25519 AAAA researcher"
     assert derived["bindings"] == {"phystype": "r6615", "dataMount": "/mydata"}
     assert derived["host_key_source"] == "registration"
     assert source["bindings"]["phystype"] == "c6420"
@@ -199,6 +202,31 @@ async def test_scheduler_moves_an_old_node_instead_of_extending_it(monkeypatch):
     assert [entry["kind"] for entry in created] == ["rotate"]
     assert created[0]["parameters"] == {"allocation_id": "allocation-a", "trigger": "max_age"}
     commands.extend.assert_not_awaited()
+
+
+async def test_scheduler_extends_owned_autoscaling_node_instead_of_rotating_legacy_policy():
+    old = row(created_at=NOW - timedelta(days=8), autoscaling_owned=True)
+    repository = SimpleNamespace(
+        list_allocations=AsyncMock(return_value=[old]),
+        list_operations=AsyncMock(return_value=[]),
+        create_operation=AsyncMock(),
+    )
+    commands = SimpleNamespace(
+        repository=repository,
+        configuration=SimpleNamespace(observation_seconds=120),
+        extend=AsyncMock(),
+        queue_inspection=AsyncMock(),
+    )
+    reconciler = ComputeReconciler(
+        commands=commands,  # type: ignore[arg-type]
+        host_pool=SimpleNamespace(),  # type: ignore[arg-type]
+        bootstrap=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    await reconciler.schedule()
+
+    commands.extend.assert_awaited_once()
+    repository.create_operation.assert_not_awaited()
 
 
 async def test_scheduler_still_extends_when_the_move_is_stuck(monkeypatch):

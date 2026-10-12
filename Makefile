@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint typecheck test test-db test-all check clean
+.PHONY: help setup-dev format lint typecheck test test-db test-all check ci ci-backend ci-database ci-frontend clean
 
 .DEFAULT_GOAL := help
 
@@ -54,6 +54,18 @@ test-all:  ## Run all tests except external (includes db-dependent)
 	$(UV_RUN) pytest -q -m "not external"
 
 check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
+
+ci:  ## Run all local CI tiers (check-only; needs uv, Python 3.12, Node 22, and Docker)
+	./scripts/ci-local.sh
+
+ci-backend:  ## Run local backend CI (lint, mypy, and non-external/non-db tests)
+	./scripts/ci-local.sh backend
+
+ci-database:  ## Run local database CI against disposable PostgreSQL 15
+	./scripts/ci-local.sh database
+
+ci-frontend:  ## Run local frontend CI (lint, format check, types, tests, and build guards)
+	./scripts/ci-local.sh frontend
 
 clean:  ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info

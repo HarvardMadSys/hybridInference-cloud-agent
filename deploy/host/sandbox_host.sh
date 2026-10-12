@@ -41,10 +41,16 @@
 #   AGENT_EGRESS_CHAT_NETWORK_POOL this deployment's own RFC1918 pool for group bridges
 #   AGENT_EGRESS_DNS_SERVER        the one IPv4 resolver sandboxes may reach
 #
-# Restrict the tunnel key on the gateway host — it needs one forwarded port and
-# no shell:
+# Each tunnel key gets its own account on the far host, one authorized_keys
+# line there, and that account's Match block from
+# deploy/host/sshd-tunnels.conf.example; Admin → Servers → Server setup
+# generates all of it. The inference key needs one forwarded port and no shell:
 #
 #   command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... agent-tunnel
+#
+# The control-plane key also names the one reverse listener it may open:
+#
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8000",permitlisten="172.24.0.1:18092" ssh-ed25519 AAAA... agent-control
 
 set -Eeuo pipefail
 

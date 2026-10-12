@@ -57,16 +57,6 @@ RAW = "raw"
 # so the credential never becomes a process argument.
 MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"
 
-# Every environment variable a runtime below hands a credential in: the
-# inference grant under each name a CLI reads it from, and the MCP relay's
-# token. The retained sandbox passes these to ``docker exec`` by name, with the
-# value in the Docker client's own environment, because a resident exec keeps
-# its argv on the host for the whole residency, readable by every host user.
-# A runtime that puts a credential under a new name must add the name here.
-CREDENTIAL_ENV_NAMES = frozenset(
-    {"ANTHROPIC_API_KEY", "CODEX_API_KEY", "OPENAI_API_KEY", MCP_TOKEN_ENV}
-)
-
 # Where the relay entry is handed to an image-shipped wrapper, as one JSON
 # object of ``{name: url}``.
 #

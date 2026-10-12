@@ -97,6 +97,16 @@ def test_cloudlab_ssh_defaults_to_no_host_key_check_without_weakening_existing_s
         "none",
         "registration",
     ]
+    public_key = next(
+        field
+        for field in cloudlab.catalog({"ssh_public_key": "ssh-ed25519 AAAA"})["fields"]
+        if field["key"] == "ssh_public_key"
+    )
+    assert public_key["section"] == "access"
+    assert public_key["label"] == "SSH public key"
+    assert public_key["modes"] == ["provision"]
+    assert public_key["deployment_only"] is True
+    assert public_key["default"] == "ssh-ed25519 AAAA"
 
 
 def test_key_only_connection_error_does_not_require_a_hidden_host_key_field():
@@ -175,7 +185,8 @@ async def test_scheduler_reloads_poll_interval_between_passes(monkeypatch):
         commands=SimpleNamespace(configuration=configuration),
         schedule=AsyncMock(),
     )
-    worker = compute_resources.ComputeResourceWorker(reconciler)
+    autoscaler = SimpleNamespace(reconcile=AsyncMock())
+    worker = compute_resources.ComputeResourceWorker(reconciler, autoscaler=autoscaler)
     delays = []
 
     async def tick(delay):
@@ -188,3 +199,4 @@ async def test_scheduler_reloads_poll_interval_between_passes(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await worker._schedule()
     assert delays == [10, 25]
+    assert autoscaler.reconcile.await_count == 2

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from tests.integration.storage.test_admin_sandbox_queries import member, seed
 from tests.integration.storage.test_host_pool_store import (
     _claim,
     _create_job,
@@ -16,7 +17,11 @@ from tests.integration.storage.test_host_pool_store import (
 )
 
 from cloud_agent.host_pool import hash_secret
-from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
+from cloud_agent.storage._sql.compute_admission import (
+    host_compute_admission,
+    lock_compute_entry,
+    lock_compute_topology,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -89,6 +94,166 @@ async def operation(repo, allocation_id, kind="retire"):
 
 def fence(op):
     return {"operation_id": op["id"], "generation": op["generation"], "worker_id": "worker"}
+
+
+async def complete_admin_deletion(store, sandbox_id: str) -> None:
+    """Drive one stopped retained group through the durable deletion protocol."""
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None
+    assert (
+        await store.sandbox.request_admin_delete(
+            sandbox_id=sandbox_id,
+            generation=detail.sandbox.generation,
+            container_id=detail.sandbox.container_id,
+            last_activity_at=detail.sandbox.last_activity_at,
+            actor_id="admin:scale-in-test",
+            admin_ip="127.0.0.1",
+        )
+        == "accepted"
+    )
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None and claim["id"] == sandbox_id
+    worker_fence = {
+        "sandbox_id": sandbox_id,
+        "request_id": claim["deletion_request_id"],
+        "claim_token": claim["deletion_claim_token"],
+        "generation": claim["generation"],
+        "container_id": claim["container_id"],
+    }
+    assert await store.sandbox.record_admin_sandbox_archive(
+        **worker_fence,
+        archive_key=f"s3://sandbox-archive-bucket/{sandbox_id}.tar",
+        sha256="d" * 64,
+        size_bytes=4096,
+    )
+    assert await store.sandbox.complete_admin_sandbox_deletion(**worker_fence)
+
+
+async def retained_group_counts(store, *, allocation_id: str, host: str) -> tuple[int, int, int]:
+    """Read the three payloads that feed autoscaling and retirement decisions."""
+    observation = await store.host_pool.autoscaling_observation(expected_deployment_sha="")
+    observed_host = next(row for row in observation["hosts"] if row["host"] == host)
+    allocation = await store.compute_resources.get_allocation(allocation_id)
+    assert allocation is not None
+    allocation_host = next(row for row in allocation["hosts"] if row["host"] == host)
+    inventory = await store.compute_resources.server_inventory()
+    inventory_host = next(row for row in inventory["hosts"] if row["host"] == host)
+    return (
+        observed_host["retained_groups"],
+        allocation_host["retained_groups"],
+        inventory_host["retained_groups"],
+    )
+
+
+async def autoscale_acquisition(
+    db,
+    store,
+    *,
+    request_id: str,
+    state: str | None = "blocked",
+    result: dict | None = None,
+):
+    """Create and optionally finish one owned acquisition without a provider call."""
+    repo = store.compute_resources
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_compute_connections
+               (id,name,provider_id,secret_ciphertext,status)
+               VALUES ('cancel-cloudlab','CloudLab','cloudlab','ciphertext','verified'),
+                      ('cancel-ssh','SSH','existing_ssh','ciphertext','verified')"""
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1,
+                   connection_id='cancel-cloudlab',ssh_connection_id='cancel-ssh',
+                   deployment_profiles=ARRAY['cancel-route']"""
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot)
+               VALUES ('cancel-route','{"id":"cancel-route"}')"""
+        )
+    created = await repo.create_autoscale_allocation_operation(
+        expected_revision=0,
+        expected_generation=0,
+        request_id=request_id,
+        fingerprint=request_id,
+        allocation={"name": "cancel candidate"},
+        parameters={},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_up"},
+        cooldown_seconds=60,
+    )
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == created["operation"]["id"]
+    if state is not None:
+        assert await repo.finish_operation(
+            **fence(claimed),
+            state=state,
+            step="pending",
+            message="provider rejected before submission",
+            result=result or {},
+        )
+    return created["operation"]["allocation_id"], claimed
+
+
+SLOT_CAPACITY = {
+    "cpu_logical_count": 16,
+    "memory_total_bytes": 64 * 1024**3,
+}
+
+
+async def autoscaling_slot_member(db, store, hosts, *, name: str):
+    allocation_id, _, _ = await resource(store, hosts, name=name)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1"""
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,$2,'active')""",
+            allocation_id,
+            name + "-route",
+        )
+        sampled_at = await conn.fetchval(
+            """UPDATE agent_runner_hosts
+               SET slots_total=6,slots_desired=6,last_heartbeat_at=NOW(),
+                   launch_error=NULL,
+                   capacity_snapshot=jsonb_build_object(
+                       'cpu_logical_count',16,
+                       'memory_total_bytes',$2::bigint
+                   ),
+                   capacity_received_at=NOW(),capacity_sampled_at=NOW()
+               WHERE host=$1 RETURNING capacity_sampled_at""",
+            name,
+            SLOT_CAPACITY["memory_total_bytes"],
+        )
+        await conn.execute(
+            """INSERT INTO agent_host_admission_holds
+               (host,allocation_id,purpose,source_id,scope)
+               VALUES ($1,$2,'autoscaling_slots',$2,'all_claims')""",
+            name,
+            allocation_id,
+        )
+    return allocation_id, sampled_at
+
+
+async def wait_until_blocked_by(db, blocker_pid: int) -> None:
+    for _ in range(200):
+        async with db.acquire() as conn:
+            blocked = await conn.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM pg_stat_activity activity
+                       WHERE $1=ANY(pg_blocking_pids(activity.pid))
+                   )""",
+                blocker_pid,
+            )
+        if blocked:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("slot target transaction did not reach the expected database lock")
 
 
 async def test_provider_defaults_are_isolated_and_replace_atomically(store):
@@ -231,6 +396,318 @@ async def test_bootstrap_and_drain_are_independent_and_node_identity_cannot_chan
     assert await hosts.forget_runner_host(host="machine") == "resource_bound"
 
 
+async def test_autoscaling_bootstrap_keeps_claims_closed_until_slots_are_applied(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, node, _ = await resource(store, name="autoscale-sizing")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile) VALUES ($1,'sizing-route')""",
+            allocation_id,
+        )
+
+    await repo.prepare_bootstrap_binding(
+        node_id=node["id"],
+        host="autoscale-sizing",
+        operation_id="autoscale-bootstrap",
+    )
+    await hosts.register_host(
+        host="autoscale-sizing",
+        credential_hash=hash_secret("autoscale-sizing-credential"),
+        slots_total=2,
+    )
+    await hosts.record_host_heartbeat(host="autoscale-sizing")
+    purposes = {hold["purpose"] for hold in (await repo.get_allocation(allocation_id))["holds"]}
+    assert purposes == {"bootstrap", "autoscaling_slots"}
+
+    assert await repo.clear_bootstrap_hold(
+        node_id=node["id"],
+        host="autoscale-sizing",
+        operation_id="autoscale-bootstrap",
+    )
+    holds = (await repo.get_allocation(allocation_id))["holds"]
+    assert [(hold["purpose"], hold["scope"]) for hold in holds] == [
+        ("autoscaling_slots", "all_claims")
+    ]
+
+    revision = holds[0]["revision"]
+    for _ in range(2):
+        await repo.set_admission_hold(
+            allocation_id=allocation_id,
+            purpose="autoscaling_slots",
+            source_id=allocation_id,
+            scope="all_claims",
+        )
+    reasserted = (await repo.get_allocation(allocation_id))["holds"]
+    assert len(reasserted) == 1
+    assert reasserted[0]["revision"] == revision
+    async with db.acquire() as conn, conn.transaction():
+        await lock_compute_entry(conn)
+        assert await host_compute_admission(conn, "autoscale-sizing") == (
+            False,
+            False,
+        )
+
+    with pytest.raises(ValueError, match="autoscaling_slot_fence_required"):
+        await repo.set_admission_hold(
+            allocation_id=allocation_id,
+            purpose="autoscaling_slots",
+            source_id=allocation_id,
+            scope=None,
+        )
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE agent_cloudlab_autoscaling_policy SET enabled=TRUE WHERE id")
+        sampled_at = await conn.fetchval(
+            """UPDATE agent_runner_hosts
+               SET slots_total=6,slots_desired=6,last_heartbeat_at=NOW(),
+                   launch_error=NULL,
+                   capacity_snapshot=jsonb_build_object(
+                       'cpu_logical_count',16,
+                       'memory_total_bytes',$2::bigint
+                   ),
+                   capacity_received_at=NOW(),capacity_sampled_at=NOW()
+               WHERE host=$1 RETURNING capacity_sampled_at""",
+            "autoscale-sizing",
+            SLOT_CAPACITY["memory_total_bytes"],
+        )
+    cleared = await repo.apply_cloudlab_autoscaling_slot_target(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        host="autoscale-sizing",
+        target_slots=6,
+        capacity_sampled_at=sampled_at,
+        capacity_snapshot=SLOT_CAPACITY,
+    )
+    assert cleared["outcome"] == "ready"
+    assert (await repo.get_allocation(allocation_id))["holds"] == []
+
+
+async def test_autoscaling_slot_target_stays_held_until_the_host_confirms(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, sampled_at = await autoscaling_slot_member(db, store, hosts, name="slot-apply")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_runner_hosts
+               SET slots_total=2,slots_desired=NULL WHERE host='slot-apply'"""
+        )
+
+    awaiting = await repo.apply_cloudlab_autoscaling_slot_target(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        host="slot-apply",
+        target_slots=6,
+        capacity_sampled_at=sampled_at,
+        capacity_snapshot=SLOT_CAPACITY,
+    )
+
+    assert awaiting["outcome"] == "awaiting_host_apply"
+    assert awaiting["slots_desired"] == 6
+    assert (await repo.get_allocation(allocation_id))["holds"][0]["scope"] == "all_claims"
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE agent_runner_hosts SET slots_total=6 WHERE host='slot-apply'")
+
+    ready = await repo.apply_cloudlab_autoscaling_slot_target(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        host="slot-apply",
+        target_slots=6,
+        capacity_sampled_at=sampled_at,
+        capacity_snapshot=SLOT_CAPACITY,
+    )
+
+    assert ready["outcome"] == "ready"
+    assert (await repo.get_allocation(allocation_id))["holds"] == []
+
+
+async def test_pause_committing_before_slot_clear_keeps_all_claims_held(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, sampled_at = await autoscaling_slot_member(
+        db, store, hosts, name="slot-pause-race"
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM agent_host_admission_holds WHERE allocation_id=$1",
+            allocation_id,
+        )
+    slot_task = None
+    async with db.acquire() as admin:
+        transaction = admin.transaction()
+        await transaction.start()
+        try:
+            await lock_compute_entry(admin, exclusive=True)
+            blocker_pid = await admin.fetchval("SELECT pg_backend_pid()")
+            await admin.execute(
+                """UPDATE agent_cloudlab_autoscaling_policy
+                   SET enabled=FALSE,revision=revision+1,updated_at=NOW() WHERE id"""
+            )
+            await admin.execute(
+                """UPDATE agent_cloudlab_autoscaling_runtime
+                   SET generation=generation+1,updated_at=NOW() WHERE id"""
+            )
+            slot_task = asyncio.create_task(
+                repo.apply_cloudlab_autoscaling_slot_target(
+                    expected_revision=0,
+                    expected_generation=0,
+                    allocation_id=allocation_id,
+                    host="slot-pause-race",
+                    target_slots=6,
+                    capacity_sampled_at=sampled_at,
+                    capacity_snapshot=SLOT_CAPACITY,
+                )
+            )
+            await wait_until_blocked_by(db, blocker_pid)
+            await transaction.commit()
+        except BaseException:
+            if slot_task is not None:
+                slot_task.cancel()
+                await asyncio.gather(slot_task, return_exceptions=True)
+            await transaction.rollback()
+            raise
+
+    assert slot_task is not None
+    refused = await slot_task
+    assert refused["blocker_code"] == "autoscaling_revision_conflict"
+    holds = (await repo.get_allocation(allocation_id))["holds"]
+    assert holds == []
+
+    await repo.set_admission_hold(
+        allocation_id=allocation_id,
+        purpose="autoscaling_slots",
+        source_id=allocation_id,
+        scope="all_claims",
+    )
+    still_refused = await repo.apply_cloudlab_autoscaling_slot_target(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        host="slot-pause-race",
+        target_slots=6,
+        capacity_sampled_at=sampled_at,
+        capacity_snapshot=SLOT_CAPACITY,
+    )
+    assert still_refused["blocker_code"] == "autoscaling_revision_conflict"
+    holds = (await repo.get_allocation(allocation_id))["holds"]
+    assert [(hold["purpose"], hold["scope"]) for hold in holds] == [
+        ("autoscaling_slots", "all_claims")
+    ]
+
+
+async def test_pin_committing_before_slot_clear_keeps_all_claims_held(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, sampled_at = await autoscaling_slot_member(
+        db, store, hosts, name="slot-pin-race"
+    )
+    await hosts.register_host(
+        host="manual-pin",
+        credential_hash=hash_secret("manual-pin-credential"),
+        slots_total=2,
+    )
+    await hosts.record_host_heartbeat(host="manual-pin")
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM agent_host_admission_holds WHERE allocation_id=$1",
+            allocation_id,
+        )
+    slot_task = None
+    async with db.acquire() as admin:
+        transaction = admin.transaction()
+        await transaction.start()
+        try:
+            await admin.execute("SELECT active_host FROM agent_runner_policy WHERE id FOR UPDATE")
+            await lock_compute_topology(admin)
+            blocker_pid = await admin.fetchval("SELECT pg_backend_pid()")
+            await admin.execute(
+                """UPDATE agent_runner_policy
+                   SET active_host='manual-pin',updated_at=NOW() WHERE id"""
+            )
+            slot_task = asyncio.create_task(
+                repo.apply_cloudlab_autoscaling_slot_target(
+                    expected_revision=0,
+                    expected_generation=0,
+                    allocation_id=allocation_id,
+                    host="slot-pin-race",
+                    target_slots=6,
+                    capacity_sampled_at=sampled_at,
+                    capacity_snapshot=SLOT_CAPACITY,
+                )
+            )
+            await wait_until_blocked_by(db, blocker_pid)
+            await transaction.commit()
+        except BaseException:
+            if slot_task is not None:
+                slot_task.cancel()
+                await asyncio.gather(slot_task, return_exceptions=True)
+            await transaction.rollback()
+            raise
+
+    assert slot_task is not None
+    refused = await slot_task
+    assert refused["blocker_code"] == "autoscaling_placement_pinned"
+    holds = (await repo.get_allocation(allocation_id))["holds"]
+    assert holds == []
+
+    await repo.set_admission_hold(
+        allocation_id=allocation_id,
+        purpose="autoscaling_slots",
+        source_id=allocation_id,
+        scope="all_claims",
+    )
+    still_refused = await repo.apply_cloudlab_autoscaling_slot_target(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        host="slot-pin-race",
+        target_slots=6,
+        capacity_sampled_at=sampled_at,
+        capacity_snapshot=SLOT_CAPACITY,
+    )
+    assert still_refused["blocker_code"] == "autoscaling_placement_pinned"
+    holds = (await repo.get_allocation(allocation_id))["holds"]
+    assert [(hold["purpose"], hold["scope"]) for hold in holds] == [
+        ("autoscaling_slots", "all_claims")
+    ]
+
+
+async def test_autoscaling_ownership_committing_before_admin_slot_edit_refuses_write(
+    db, store, hosts
+):
+    allocation_id, _, _ = await resource(store, hosts, name="slot-admin-race")
+    assert await hosts.set_host_slots_desired(host="slot-admin-race", slots=2) == "ok"
+
+    slot_task = None
+    async with db.acquire() as owner:
+        transaction = owner.transaction()
+        await transaction.start()
+        try:
+            await lock_compute_entry(owner, exclusive=True)
+            blocker_pid = await owner.fetchval("SELECT pg_backend_pid()")
+            await owner.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_members
+                   (allocation_id,deployment_profile,state)
+                   VALUES ($1,'slot-admin-race-route','active')""",
+                allocation_id,
+            )
+            slot_task = asyncio.create_task(
+                hosts.set_host_slots_desired(host="slot-admin-race", slots=8)
+            )
+            await wait_until_blocked_by(db, blocker_pid)
+            await transaction.commit()
+        except BaseException:
+            if slot_task is not None:
+                slot_task.cancel()
+                await asyncio.gather(slot_task, return_exceptions=True)
+            await transaction.rollback()
+            raise
+
+    assert slot_task is not None
+    assert await slot_task == "autoscaling_managed"
+    assert (await hosts.get_host(host="slot-admin-race"))["slots_desired"] == 2
+
+
 async def test_expiry_is_enforced_by_claim_even_without_worker_and_stale_observation_is_not_eternal(
     db, store, hosts
 ):
@@ -324,6 +801,201 @@ async def test_stopped_retained_group_blocks_release_even_with_zero_slots(db, st
     assert await hosts.forget_runner_host(host="machine") == "retained_groups_present"
 
 
+async def test_completed_admin_deletion_makes_autoscaled_host_scale_down_eligible(db, store, hosts):
+    repo = store.compute_resources
+    first, _, _ = await resource(store, hosts, name="autoscale-retained-peer")
+    candidate, _, _ = await resource(store, hosts, name="autoscale-retained-candidate")
+    origin = await seed(
+        db,
+        store,
+        "autoscale-retained-group",
+        state="stopped",
+        host="autoscale-retained-candidate",
+    )
+    await member(db, "autoscale-retained-group", origin, None)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=1,max_hosts=2,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY['retained-peer','retained-candidate']"""
+        )
+        for allocation_id, profile in (
+            (first, "retained-peer"),
+            (candidate, "retained-candidate"),
+        ):
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_members
+                   (allocation_id,deployment_profile,state) VALUES ($1,$2,'active')""",
+                allocation_id,
+                profile,
+            )
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+                   (deployment_profile,profile_snapshot,allocation_id)
+                   VALUES ($1,jsonb_build_object('id',$1::text),$2)""",
+                profile,
+                allocation_id,
+            )
+
+    assert await retained_group_counts(
+        store, allocation_id=candidate, host="autoscale-retained-candidate"
+    ) == (1, 1, 1)
+    with pytest.raises(ValueError, match="autoscaling_member_not_idle"):
+        await repo.queue_autoscale_retire(
+            expected_revision=0,
+            expected_generation=0,
+            allocation_id=candidate,
+            request_id="retire-retained-live",
+            fingerprint="retire-retained-live",
+            parameters={"allocation_id": candidate},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_down_idle", "allocation_id": candidate},
+            cooldown_seconds=60,
+        )
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_sandboxes
+               SET state='lost',deletion_state='failed'
+               WHERE id='autoscale-retained-group'"""
+        )
+    assert await retained_group_counts(
+        store, allocation_id=candidate, host="autoscale-retained-candidate"
+    ) == (1, 1, 1)
+    with pytest.raises(ValueError, match="autoscaling_member_not_idle"):
+        await repo.queue_autoscale_retire(
+            expected_revision=0,
+            expected_generation=0,
+            allocation_id=candidate,
+            request_id="retire-retained-lost-incomplete",
+            fingerprint="retire-retained-lost-incomplete",
+            parameters={"allocation_id": candidate},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_down_idle", "allocation_id": candidate},
+            cooldown_seconds=60,
+        )
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_sandboxes
+               SET state='stopped',deletion_state='none'
+               WHERE id='autoscale-retained-group'"""
+        )
+    await complete_admin_deletion(store, "autoscale-retained-group")
+
+    assert await retained_group_counts(
+        store, allocation_id=candidate, host="autoscale-retained-candidate"
+    ) == (0, 0, 0)
+    # General host removal intentionally remains conservative: the audit row
+    # still owns durable history even though it no longer represents capacity.
+    assert (
+        await hosts.forget_runner_host(host="autoscale-retained-candidate")
+        == "retained_groups_present"
+    )
+    queued = await repo.queue_autoscale_retire(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=candidate,
+        request_id="retire-after-admin-deletion",
+        fingerprint="retire-after-admin-deletion",
+        parameters={"allocation_id": candidate},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_down_idle", "allocation_id": candidate},
+        cooldown_seconds=60,
+    )
+    assert queued["operation"]["kind"] == "retire"
+    assert queued["operation"]["allocation_id"] == candidate
+
+
+async def test_completed_admin_deletion_unblocks_resource_retirement(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="retirement-after-deletion")
+    origin = await seed(
+        db,
+        store,
+        "retirement-retained-group",
+        state="stopped",
+        host="retirement-after-deletion",
+    )
+    await member(db, "retirement-retained-group", origin, None)
+    op = await operation(repo, allocation_id)
+
+    impact = await repo.begin_retirement(allocation_id=allocation_id, **fence(op))
+    assert impact["hosts"][0]["retained_groups"] == 1
+    assert [group["id"] for group in impact["retained_groups"]] == ["retirement-retained-group"]
+    assert "retained_groups_present" in impact["blocked_reasons"]
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_sandboxes
+               SET state='lost',deletion_state='failed'
+               WHERE id='retirement-retained-group'"""
+        )
+    lost = await repo.retirement_impact(allocation_id)
+    assert lost["hosts"][0]["retained_groups"] == 1
+    assert [group["id"] for group in lost["retained_groups"]] == ["retirement-retained-group"]
+    assert "retained_groups_present" in lost["blocked_reasons"]
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_sandboxes
+               SET state='stopped',deletion_state='none'
+               WHERE id='retirement-retained-group'"""
+        )
+    await complete_admin_deletion(store, "retirement-retained-group")
+
+    deleted = await repo.retirement_impact(allocation_id)
+    assert deleted["hosts"][0]["retained_groups"] == 0
+    assert deleted["retained_groups"] == []
+    assert "retained_groups_present" not in deleted["blocked_reasons"]
+    assert (
+        await hosts.forget_runner_host(host="retirement-after-deletion")
+        == "retained_groups_present"
+    )
+    assert await repo.record_inventory(
+        allocation_id=allocation_id,
+        hosts=["retirement-after-deletion"],
+        empty=True,
+        **fence(op),
+    )
+    committed = await repo.commit_release(allocation_id=allocation_id, **fence(op))
+    assert committed["release_committed"]
+    assert committed["retained_groups"] == []
+    assert committed["blocked_reasons"] == []
+
+
+async def test_terminal_provider_state_commits_release_and_revokes_host_despite_retention(
+    db, store, hosts
+):
+    repo = store.compute_resources
+    allocation_id, _node, _ = await resource(store, hosts, name="terminal-release")
+    job = await _create_job(store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_sandboxes
+            (id,user_id,origin_thread_id,host,container_name,runtime_id,execution_profile,state)
+            VALUES ('terminal-retained','u1',$1,'terminal-release','terminal-container',
+                    'claude-code','trusted-v1','stopped')""",
+            job["thread_id"],
+        )
+    op = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(op))
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(op),
+    )
+
+    committed = await repo.commit_release(allocation_id=allocation_id, **fence(op))
+
+    assert committed["release_committed"]
+    assert committed["blocked_reasons"] == []
+    assert len(committed["retained_groups"]) == 1
+    host = await hosts.get_host(host="terminal-release")
+    assert host["status"] == "disabled"
+    assert not host["enrolled"]
+
+
 async def test_complete_inventory_and_pin_are_rechecked_at_irreversible_commit(store, hosts):
     repo = store.compute_resources
     allocation_id, _node, _ = await resource(store, hosts)
@@ -358,6 +1030,44 @@ async def test_complete_inventory_and_pin_are_rechecked_at_irreversible_commit(s
             parameters={},
             requested_by="admin",
         )
+
+
+async def test_release_commit_waits_for_active_deployment_drain(store, hosts):
+    repo = store.compute_resources
+    allocation_id, _node, _ = await resource(store, hosts, name="drain-safe-release")
+    op = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(op))
+    assert await repo.record_inventory(
+        allocation_id=allocation_id,
+        hosts=["drain-safe-release"],
+        empty=True,
+        **fence(op),
+    )
+    host = await hosts.get_host(host="drain-safe-release")
+    token = uuid4()
+    outcome, _status_before, _epoch = await hosts.acquire_host_drain_fence(
+        host="drain-safe-release",
+        expected_fence_token=None,
+        expected_fence_epoch=host["drain_fence_epoch"],
+        fence_token=token,
+    )
+    assert outcome == "ok"
+
+    impact = await repo.commit_release(allocation_id=allocation_id, **fence(op))
+
+    assert impact["blocked_reasons"] == ["deployment_drain_active"]
+    assert not impact["release_committed"]
+    allocation = await repo.get_allocation(allocation_id)
+    assert allocation["release_committed_at"] is None
+    assert (await hosts.get_host(host="drain-safe-release"))["enrolled"]
+
+    released, _epoch = await hosts.release_host_drain_fence(
+        host="drain-safe-release", fence_token=token
+    )
+    assert released == "ok"
+
+    committed = await repo.commit_release(allocation_id=allocation_id, **fence(op))
+    assert committed["release_committed"]
 
 
 async def test_failed_bootstrap_can_retire_after_full_trusted_node_scan(store):
@@ -410,6 +1120,57 @@ async def test_waiting_external_call_serializes_until_positive_confirmation(stor
         requested_by="admin",
     )
     assert await repo.claim_operation(worker_id="other") is None
+
+
+@pytest.mark.parametrize("renewal_state", ["waiting", "unknown", "running"])
+async def test_recovery_rotation_can_pass_only_a_waiting_extension(store, renewal_state):
+    """A lost renewal reply must not prevent moving the Host before expiry.
+
+    An in-flight local call or an unknown internal outcome remains exclusive;
+    retirement also stays blocked by an unresolved provider mutation.
+    """
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store)
+    renewal = await operation(repo, allocation_id, "extend")
+    if renewal_state != "running":
+        await repo.finish_operation(
+            **fence(renewal),
+            state=renewal_state,
+            step="confirming_extension",
+            result={"external_pending": True},
+            retry_after_seconds=3600,
+        )
+    rotation = await repo.create_operation(
+        request_id="recover-unconfirmed-renewal",
+        fingerprint="recover-unconfirmed-renewal",
+        kind="rotate",
+        allocation_id=allocation_id,
+        parameters={"trigger": "renewal_unconfirmed"},
+        requested_by="compute-rotation",
+    )
+    claimed = await repo.claim_operation(worker_id="rotation-worker")
+    if renewal_state != "waiting":
+        assert claimed is None
+        return
+    assert claimed["id"] == rotation["id"]
+    # No second provider call is dispatched while rotation itself is running.
+    assert await repo.claim_operation(worker_id="other") is None
+    await repo.finish_operation(
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="rotation-worker",
+        state="succeeded",
+        step="rotated",
+    )
+    await repo.create_operation(
+        request_id="retire-old-node",
+        fingerprint="retire-old-node",
+        kind="retire",
+        allocation_id=allocation_id,
+        parameters={},
+        requested_by="compute-rotation",
+    )
+    assert await repo.claim_operation(worker_id="release-worker") is None
 
 
 async def test_retirement_revision_check_is_atomic(store):
@@ -503,9 +1264,12 @@ async def test_retirement_freezes_fork_membership_at_source_group(store, hosts):
     assert await store.sandbox.mark_thread_sandbox_running(
         **attempt_fence, container_id="fork-container", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**attempt_fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **attempt_fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **attempt_fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-source",
@@ -597,6 +1361,27 @@ async def test_unknown_expiry_observation_preserves_known_hard_deadline(db, stor
         assert await host_compute_admission(conn, "machine") == (False, False)
 
 
+async def test_compute_admission_uses_wall_time_in_an_aged_transaction(db, store, hosts):
+    allocation_id, _, _ = await resource(store, hosts)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_compute_allocations
+            SET expires_at = clock_timestamp() + INTERVAL '400 milliseconds',
+                policy = '{"stop_new_groups_before_seconds": 0,
+                           "stop_claims_before_seconds": 0}'::jsonb
+            WHERE id = $1
+            """,
+            allocation_id,
+        )
+    async with db.acquire() as conn, conn.transaction():
+        started_at = await conn.fetchval("SELECT NOW()")
+        await asyncio.sleep(0.55)
+        await lock_compute_entry(conn)
+        assert await conn.fetchval("SELECT NOW() = $1", started_at)
+        assert await host_compute_admission(conn, "machine") == (False, False)
+
+
 async def test_stale_worker_cannot_clear_retirement_or_bootstrap_hold(db, store, hosts):
     repo = store.compute_resources
     allocation_id, node, _ = await resource(store, hosts)
@@ -624,6 +1409,81 @@ async def test_stale_worker_cannot_clear_retirement_or_bootstrap_hold(db, store,
     with pytest.raises(ValueError, match="operation_lease_lost"):
         await repo.prepare_bootstrap_binding(node_id=node["id"], host="machine", **fence(op))
     assert (await repo.get_allocation(allocation_id))["holds"]
+
+
+async def test_uncreated_allocation_releases_without_a_provider_observation(store):
+    repo = store.compute_resources
+    request = str(uuid4())
+    created = await repo.create_allocation_operation(
+        request_id=request,
+        fingerprint=request,
+        kind="add",
+        allocation={
+            "name": "never-created",
+            "provider_id": "cloudlab",
+            "mode": "provision",
+            "management_mode": "manage",
+            "lease_managed": True,
+            "release_supported": True,
+        },
+        parameters={},
+        requested_by="admin",
+    )
+    claimed = await repo.claim_operation(worker_id="fixture")
+    assert claimed["id"] == created["id"]
+    assert await repo.finish_operation(
+        operation_id=created["id"],
+        generation=claimed["generation"],
+        worker_id="fixture",
+        state="succeeded",
+        step="created",
+    )
+    allocation_id = created["allocation_id"]
+    blocked = await repo.create_operation(
+        request_id=str(uuid4()),
+        fingerprint=str(uuid4()),
+        kind="acquire",
+        allocation_id=allocation_id,
+        parameters={},
+        requested_by="admin",
+    )
+    claimed = await repo.claim_operation(worker_id="fixture")
+    assert claimed["id"] == blocked["id"]
+    assert await repo.finish_operation(
+        operation_id=blocked["id"],
+        generation=claimed["generation"],
+        worker_id="fixture",
+        state="blocked",
+        step="acquiring",
+    )
+    retire = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+    impact = await repo.retirement_impact(allocation_id)
+    assert "unmanaged_scope" not in impact["blocked_reasons"]
+    assert "observation_stale" not in impact["blocked_reasons"]
+    assert "inventory_unverified" not in impact["blocked_reasons"]
+    committed = await repo.commit_release(allocation_id=allocation_id, **fence(retire))
+    assert committed["release_committed"] is True
+    assert (await repo.get_operation(blocked["id"]))["state"] == "cancelled"
+    row = await repo.get_allocation(allocation_id)
+    assert row["external_id"] is None
+    assert row["nodes"] == []
+    assert row["release_committed_at"] is not None
+
+
+async def test_incomplete_scope_still_blocks_release_when_a_node_exists(db, store):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, provision=True)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET scope_complete=FALSE, observed_at=NULL WHERE id=$1",
+            allocation_id,
+        )
+    op = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(op))
+    impact = await repo.retirement_impact(allocation_id)
+    assert "unmanaged_scope" in impact["blocked_reasons"]
+    assert "observation_stale" in impact["blocked_reasons"]
 
 
 async def test_failed_bootstrap_with_reserved_unregistered_host_can_retire_by_full_node_proof(
@@ -921,3 +1781,1245 @@ async def test_committed_release_accepts_disappearing_manifest_without_rebinding
     terminal = await repo.get_allocation(allocation_id)
     assert terminal["observed_state"] == "terminated"
     assert terminal["nodes"] == before["nodes"]
+
+
+async def test_manual_allocation_rejects_an_autoscaling_reserved_profile(db, store):
+    repo = store.compute_resources
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot) VALUES ('reserved','{"id":"reserved"}')"""
+        )
+
+    with pytest.raises(ValueError, match="deployment_profile_reserved"):
+        await repo.create_allocation_operation(
+            request_id="manual-reserved",
+            fingerprint="manual-reserved",
+            kind="acquire",
+            allocation={
+                "name": "manual",
+                "provider_id": "cloudlab",
+                "mode": "provision",
+                "deployment_profile": {"id": "reserved"},
+            },
+            parameters={},
+            requested_by="admin",
+        )
+
+
+async def test_default_autoscaling_snapshot_preserves_array_shapes(store):
+    snapshot = await store.compute_resources.get_cloudlab_autoscaling()
+
+    assert snapshot["runtime"]["slot_status"] == []
+
+
+async def test_autoscaling_snapshot_projects_blocked_acquire_before_provider_ready(db, store):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, name="provider-ready-blocked-acquire")
+    acquire = await operation(repo, allocation_id, "acquire")
+    assert await repo.finish_operation(
+        **fence(acquire),
+        state="blocked",
+        step="pending",
+        message="provider rejected the request",
+        result={"external_pending": False},
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'blocked-route','provisioning')""",
+            allocation_id,
+        )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+
+    assert snapshot["members"][0]["state"] == "blocked"
+    assert snapshot["members"][0]["latest_acquire_state"] == "blocked"
+
+
+async def test_autoscaling_snapshot_keeps_persisted_retiring_ahead_of_acquire_failure(db, store):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, name="provider-ready-retiring")
+    acquire = await operation(repo, allocation_id, "acquire")
+    assert await repo.finish_operation(
+        **fence(acquire),
+        state="failed",
+        step="pending",
+        message="old acquisition failure",
+        result={"external_pending": False},
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'retiring-route','retiring')""",
+            allocation_id,
+        )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+
+    assert snapshot["members"][0]["state"] == "retiring"
+    assert snapshot["members"][0]["latest_acquire_state"] == "failed"
+
+
+async def test_terminal_observation_releases_blocked_identified_autoscale_acquire(db, store):
+    repo = store.compute_resources
+    allocation_id, acquire = await autoscale_acquisition(
+        db,
+        store,
+        request_id="terminal-blocked-identified-acquire",
+        result={
+            "external_pending": False,
+            "resource_ref": {"provider_id": "cloudlab", "external_id": "experiment-terminal"},
+        },
+    )
+
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "external_id": "experiment-terminal",
+            "observed_state": "terminated",
+            "scope_complete": True,
+        },
+    )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == "released"
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+    assert (await repo.get_operation(acquire["id"]))["state"] == "blocked"
+    with pytest.raises(ValueError, match="operation_not_retryable"):
+        await repo.retry_operation(acquire["id"])
+    with pytest.raises(ValueError, match="release_committed"):
+        await repo.cancel_operation(acquire["id"])
+
+
+@pytest.mark.parametrize("operation_state", ["blocked", "unknown"])
+async def test_terminal_observation_releases_nonrunning_autoscale_retire_history(
+    db, store, hosts, operation_state
+):
+    repo = store.compute_resources
+    name = f"terminal-retire-{operation_state}"
+    profile = name + "-route"
+    allocation_id, _, _ = await resource(store, hosts, name=name)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state) VALUES ($1,$2,'active')""",
+            allocation_id,
+            profile,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ($1,jsonb_build_object('id',$1::text),$2)""",
+            profile,
+            allocation_id,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY[$1::text]""",
+            profile,
+        )
+
+    queued = await repo.queue_autoscale_retire(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        request_id=name,
+        fingerprint=name,
+        parameters={"allocation_id": allocation_id},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_down_idle", "allocation_id": allocation_id},
+        cooldown_seconds=60,
+    )
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == queued["operation"]["id"]
+    assert await repo.finish_operation(
+        **fence(claimed),
+        state=operation_state,
+        step="release",
+        result={"external_pending": operation_state == "unknown"},
+    )
+
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+    )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == "released"
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+    with pytest.raises(ValueError, match="operation_not_retryable"):
+        await repo.retry_operation(claimed["id"])
+    with pytest.raises(ValueError, match="release_committed"):
+        await repo.cancel_operation(claimed["id"])
+
+
+async def test_unknown_finish_after_terminal_observation_fences_autoscale_retire(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="terminal-retire-finish")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'terminal-retire-finish-route','active')""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ('terminal-retire-finish-route',
+                       '{"id":"terminal-retire-finish-route"}',$1)""",
+            allocation_id,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY['terminal-retire-finish-route']"""
+        )
+
+    queued = await repo.queue_autoscale_retire(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        request_id="terminal-retire-finish",
+        fingerprint="terminal-retire-finish",
+        parameters={"allocation_id": allocation_id},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_down_idle", "allocation_id": allocation_id},
+        cooldown_seconds=60,
+    )
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == queued["operation"]["id"]
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(claimed))
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(claimed),
+    )
+    before = await repo.get_cloudlab_autoscaling()
+    assert before["profile_reservations"][0]["allocation_id"] == allocation_id
+    assert before["members"][0]["state"] == "blocked"
+    assert before["members"][0]["latest_operation_state"] == "running"
+    assert (await repo.get_allocation(allocation_id))["release_committed_at"] is None
+    assert (await hosts.get_host(host="terminal-retire-finish"))["enrolled"]
+
+    assert await repo.finish_operation(
+        **fence(claimed),
+        state="unknown",
+        step="checking_retention",
+    )
+
+    allocation = await repo.get_allocation(allocation_id)
+    after = await repo.get_cloudlab_autoscaling()
+    host = await hosts.get_host(host="terminal-retire-finish")
+    assert allocation["desired_state"] == "absent"
+    assert allocation["release_committed_at"] is not None
+    assert host["status"] == "disabled"
+    assert not host["enrolled"]
+    assert after["members"][0]["state"] == "released"
+    assert after["profile_reservations"][0]["allocation_id"] is None
+    with pytest.raises(ValueError, match="operation_not_retryable"):
+        await repo.retry_operation(claimed["id"])
+
+
+async def test_natural_terminal_autoscale_observation_revokes_host_before_profile_reuse(
+    db, store, hosts
+):
+    repo = store.compute_resources
+    name = "natural-terminal-autoscale"
+    profile = name + "-route"
+    allocation_id, _, _ = await resource(store, hosts, name=name)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state) VALUES ($1,$2,'active')""",
+            allocation_id,
+            profile,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ($1,jsonb_build_object('id',$1::text),$2)""",
+            profile,
+            allocation_id,
+        )
+
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET deployment_profiles=ARRAY[$1::text]""",
+            profile,
+        )
+    credential_hash = hash_secret("cred-" + name)
+    assert await hosts.authenticate_host(host=name, credential_hash=credential_hash)
+    inspected = await operation(repo, allocation_id, "inspect")
+
+    observed = await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(inspected),
+    )
+
+    assert observed["desired_state"] == "absent"
+    assert observed["release_committed_at"] is not None
+    assert await hosts.authenticate_host(host=name, credential_hash=credential_hash) is None
+    host = await hosts.get_host(host=name)
+    assert host["status"] == "disabled"
+    assert not host["enrolled"]
+    with pytest.raises(ValueError, match="resource_retiring"):
+        await hosts.register_host(host=name, credential_hash=hash_secret("replacement"))
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == "released"
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+    assert await repo.finish_operation(**fence(inspected), state="succeeded", step="observed")
+
+
+async def test_terminal_observation_fences_running_autoscale_extension(db, store):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, name="terminal-autoscale-extend")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'terminal-autoscale-extend-route','active')""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ('terminal-autoscale-extend-route',
+                       '{"id":"terminal-autoscale-extend-route"}',$1)""",
+            allocation_id,
+        )
+
+    extending = await operation(repo, allocation_id, "extend")
+    observed = await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(extending),
+    )
+
+    assert observed["release_committed_at"] is not None
+    assert await repo.finish_operation(
+        **fence(extending), state="blocked", step="observed_terminal"
+    )
+    with pytest.raises(ValueError, match="operation_not_retryable"):
+        await repo.retry_operation(extending["id"])
+    assert await repo.claim_operation(worker_id="other") is None
+
+
+@pytest.mark.parametrize("operation_state", ["blocked", "unknown"])
+async def test_terminal_observation_releases_nonrunning_autoscale_discard_history(
+    db, store, operation_state
+):
+    repo = store.compute_resources
+    profile = f"terminal-discard-{operation_state}-route"
+    allocation_id, _, _ = await resource(store, name=f"terminal-discard-{operation_state}")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state) VALUES ($1,$2,'retiring')""",
+            allocation_id,
+            profile,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ($1,jsonb_build_object('id',$1::text),$2)""",
+            profile,
+            allocation_id,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET deployment_profiles=ARRAY[$1::text]""",
+            profile,
+        )
+
+    discard = await operation(repo, allocation_id, "discard")
+    assert await repo.finish_operation(
+        **fence(discard),
+        state=operation_state,
+        step="release",
+        result={"external_pending": operation_state == "unknown"},
+    )
+
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+    )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == "released"
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+    with pytest.raises(ValueError, match="operation_not_retryable"):
+        await repo.retry_operation(discard["id"])
+    with pytest.raises(ValueError, match="release_committed"):
+        await repo.cancel_operation(discard["id"])
+
+
+async def test_autoscaling_policy_propagates_renewal_only_to_live_owned_allocations(db, store):
+    repo = store.compute_resources
+    first, _, _ = await resource(store, name="renew-owned-active")
+    second, _, _ = await resource(store, name="renew-owned-retiring")
+    manual, _, _ = await resource(store, name="renew-manual")
+    old_policy = {"enabled": False, "reason": "allocation-specific"}
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_compute_allocations
+               SET policy='{"enabled":false,"reason":"allocation-specific"}'::jsonb
+               WHERE id=ANY($1::text[])""",
+            [first, second, manual],
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'renew-route-one','active'),
+                      ($2,'renew-route-two','retiring')""",
+            first,
+            second,
+        )
+    renewal = {
+        "enabled": True,
+        "renew_before_seconds": 7200,
+        "extend_to_horizon_seconds": 28800,
+        "stop_new_groups_before_seconds": 3600,
+        "stop_claims_before_seconds": 600,
+        "reason": "keep autoscaled staging capacity available",
+        "rotation_enabled": False,
+        "max_node_age_seconds": 604800,
+        "node_types": [],
+        "node_type_binding": "phystype",
+    }
+    policy = {
+        "enabled": False,
+        "min_hosts": 0,
+        "max_hosts": 2,
+        "connection_id": None,
+        "ssh_connection_id": None,
+        "configuration": {},
+        "deployment_profiles": ["renew-route-one", "renew-route-two"],
+        "sandbox_storage_path": None,
+        "renewal_policy": renewal,
+        "slot_policy": {},
+        "scale_up_sustain_seconds": 120,
+        "scale_down_idle_seconds": 3600,
+        "cooldown_seconds": 600,
+        "scale_down_enabled": False,
+    }
+
+    saved = await repo.update_cloudlab_autoscaling(
+        expected_revision=0,
+        policy=policy,
+        profile_snapshots={
+            "renew-route-one": {"id": "renew-route-one"},
+            "renew-route-two": {"id": "renew-route-two"},
+        },
+        requested_by="admin",
+    )
+
+    assert saved["policy"]["renewal_policy"] == renewal
+    assert (await repo.get_allocation(first))["policy"] == renewal
+    assert (await repo.get_allocation(second))["policy"] == renewal
+    assert (await repo.get_allocation(manual))["policy"] == old_policy
+
+
+async def test_terminal_owned_profile_removed_from_policy_returns_to_manual_pool(db, store):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, name="autoscaled")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_compute_allocations
+               SET deployment_profile='{"id":"released-route"}'::jsonb WHERE id=$1""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile) VALUES ($1,'released-route')""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ('released-route','{"id":"released-route"}',$1)""",
+            allocation_id,
+        )
+
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+    )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == "released"
+    assert snapshot["profile_reservations"] == []
+    operation = await repo.create_allocation_operation(
+        request_id="manual-after-terminal",
+        fingerprint="manual-after-terminal",
+        kind="acquire",
+        allocation={
+            "name": "manual replacement",
+            "provider_id": "cloudlab",
+            "mode": "provision",
+            "deployment_profile": {"id": "released-route"},
+        },
+        parameters={},
+        requested_by="admin",
+    )
+    assert operation["allocation_id"] != allocation_id
+
+
+@pytest.mark.parametrize(
+    ("lifecycle_kind", "finish_state"),
+    [
+        ("acquire", "succeeded"),
+        ("acquire", "failed"),
+        ("retire", "succeeded"),
+        ("discard", "succeeded"),
+    ],
+)
+async def test_terminal_profile_stays_reserved_until_lifecycle_operation_finishes(
+    db, store, lifecycle_kind, finish_state
+):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, name="autoscaled-retiring")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_compute_allocations
+               SET deployment_profile='{"id":"retiring-route"}'::jsonb WHERE id=$1""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'retiring-route','retiring')""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ('retiring-route','{"id":"retiring-route"}',$1)""",
+            allocation_id,
+        )
+
+    lifecycle = await operation(repo, allocation_id, lifecycle_kind)
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(lifecycle),
+    )
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["profile_reservations"][0]["allocation_id"] == allocation_id
+    with pytest.raises(ValueError, match="deployment_profile_reserved"):
+        await repo.create_allocation_operation(
+            request_id="manual-before-retire-completes",
+            fingerprint="manual-before-retire-completes",
+            kind="acquire",
+            allocation={
+                "name": "premature replacement",
+                "provider_id": "cloudlab",
+                "mode": "provision",
+                "deployment_profile": {"id": "retiring-route"},
+            },
+            parameters={},
+            requested_by="admin",
+        )
+
+    assert await repo.finish_operation(
+        operation_id=lifecycle["id"],
+        generation=lifecycle["generation"],
+        worker_id="worker",
+        state=finish_state,
+        step="released",
+    )
+    assert (await repo.get_cloudlab_autoscaling())["profile_reservations"] == []
+    if lifecycle_kind == "acquire" and finish_state == "failed":
+        with pytest.raises(ValueError, match="operation_not_retryable"):
+            await repo.retry_operation(lifecycle["id"])
+        assert (await repo.get_operation(lifecycle["id"]))["state"] == "failed"
+
+    replacement = await repo.create_allocation_operation(
+        request_id="manual-after-retire-completes",
+        fingerprint="manual-after-retire-completes",
+        kind="acquire",
+        allocation={
+            "name": "safe replacement",
+            "provider_id": "cloudlab",
+            "mode": "provision",
+            "deployment_profile": {"id": "retiring-route"},
+        },
+        parameters={},
+        requested_by="admin",
+    )
+    assert replacement["allocation_id"] != allocation_id
+
+
+async def test_autoscale_retire_rechecks_busy_host_under_lock(db, store, hosts):
+    repo = store.compute_resources
+    first, _, _ = await resource(store, hosts, name="autoscale-one")
+    second, _, _ = await resource(store, hosts, name="autoscale-two")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=1,max_hosts=2,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY['route-one','route-two']"""
+        )
+        for allocation_id, profile in ((first, "route-one"), (second, "route-two")):
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_members
+                   (allocation_id,deployment_profile,state) VALUES ($1,$2,'active')""",
+                allocation_id,
+                profile,
+            )
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+                   (deployment_profile,profile_snapshot,allocation_id)
+                   VALUES ($1,jsonb_build_object('id',$1::text),$2)""",
+                profile,
+                allocation_id,
+            )
+        await conn.execute("UPDATE agent_runner_hosts SET slots_used=1 WHERE host='autoscale-two'")
+
+    with pytest.raises(ValueError, match="autoscaling_member_not_idle"):
+        await repo.queue_autoscale_retire(
+            expected_revision=0,
+            expected_generation=0,
+            allocation_id=second,
+            request_id="autoscale-retire-busy",
+            fingerprint="autoscale-retire-busy",
+            parameters={"allocation_id": second},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_down_idle", "allocation_id": second},
+            cooldown_seconds=60,
+        )
+    assert await repo.list_operations(allocation_id=second, kinds=["retire"]) == []
+
+
+async def test_unchanged_enabled_policy_can_pause_with_unverified_connections(db, store):
+    repo = store.compute_resources
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_compute_connections
+               (id,name,provider_id,secret_ciphertext,status)
+               VALUES ('pause-cloudlab','CloudLab','cloudlab','ciphertext','unverified'),
+                      ('pause-ssh','SSH','existing_ssh','ciphertext','unverified')"""
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=1,max_hosts=1,
+                   connection_id='pause-cloudlab',ssh_connection_id='pause-ssh',
+                   configuration='{"project":"research"}'::jsonb,
+                   deployment_profiles=ARRAY['pause-route']"""
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot)
+               VALUES ('pause-route','{"id":"pause-route"}')"""
+        )
+    paused_policy = {
+        "enabled": False,
+        "min_hosts": 1,
+        "max_hosts": 1,
+        "connection_id": "pause-cloudlab",
+        "ssh_connection_id": "pause-ssh",
+        "configuration": {"project": "research"},
+        "deployment_profiles": ["pause-route"],
+        "sandbox_storage_path": None,
+        "renewal_policy": {},
+        "slot_policy": {},
+        "scale_up_sustain_seconds": 120,
+        "scale_down_idle_seconds": 3600,
+        "cooldown_seconds": 600,
+        "scale_down_enabled": False,
+    }
+
+    saved = await repo.update_cloudlab_autoscaling(
+        expected_revision=0,
+        policy=paused_policy,
+        profile_snapshots={},
+        requested_by="admin",
+    )
+
+    assert saved["policy"]["enabled"] is False
+    assert saved["policy"]["revision"] == 1
+    assert [reservation["deployment_profile"] for reservation in saved["profile_reservations"]] == [
+        "pause-route"
+    ]
+    with pytest.raises(ValueError, match="autoscaling_connection_unverified"):
+        await repo.update_cloudlab_autoscaling(
+            expected_revision=1,
+            policy={
+                **paused_policy,
+                "configuration": {"project": "changed-while-paused"},
+            },
+            profile_snapshots={"pause-route": {"id": "pause-route"}},
+            requested_by="admin",
+        )
+
+
+@pytest.mark.parametrize("degraded_connection", ["scale-cloudlab", "scale-ssh"])
+async def test_autoscale_create_rechecks_connection_health_after_enable(
+    db, store, degraded_connection
+):
+    repo = store.compute_resources
+    for connection_id, provider_id in (
+        ("scale-cloudlab", "cloudlab"),
+        ("scale-ssh", "existing_ssh"),
+    ):
+        await repo.save_connection(
+            connection_id=connection_id,
+            name=connection_id,
+            provider_id=provider_id,
+            configuration={},
+            secret_ciphertext="ciphertext",
+            masked_summary="configured",
+            status="verified",
+        )
+    policy = {
+        "enabled": True,
+        "min_hosts": 0,
+        "max_hosts": 1,
+        "connection_id": "scale-cloudlab",
+        "ssh_connection_id": "scale-ssh",
+        "configuration": {},
+        "deployment_profiles": ["scale-route"],
+        "sandbox_storage_path": None,
+        "renewal_policy": {},
+        "slot_policy": {},
+        "scale_up_sustain_seconds": 120,
+        "scale_down_idle_seconds": 3600,
+        "cooldown_seconds": 600,
+        "scale_down_enabled": False,
+    }
+    await repo.update_cloudlab_autoscaling(
+        expected_revision=0,
+        policy=policy,
+        profile_snapshots={"scale-route": {"id": "scale-route"}},
+        requested_by="admin",
+    )
+    # Simulate a legacy/degraded row that predates the update fence.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_connections SET status='unverified' WHERE id=$1",
+            degraded_connection,
+        )
+
+    with pytest.raises(ValueError, match="autoscaling_connection_unverified"):
+        await repo.create_autoscale_allocation_operation(
+            expected_revision=1,
+            expected_generation=1,
+            request_id=f"degraded-{degraded_connection}",
+            fingerprint=f"degraded-{degraded_connection}",
+            allocation={"name": "must not provision"},
+            parameters={},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_up"},
+            cooldown_seconds=60,
+        )
+
+    assert await repo.list_allocations() == []
+    assert (await repo.get_cloudlab_autoscaling())["profile_reservations"][0][
+        "allocation_id"
+    ] is None
+
+
+async def test_connection_rotation_requires_pause_and_blocked_acquire(db, store):
+    repo = store.compute_resources
+    for connection_id, provider_id in (
+        ("rotate-cloudlab", "cloudlab"),
+        ("rotate-ssh", "existing_ssh"),
+    ):
+        await repo.save_connection(
+            connection_id=connection_id,
+            name=connection_id,
+            provider_id=provider_id,
+            configuration={},
+            secret_ciphertext="ciphertext-v1",
+            masked_summary="configured",
+            status="verified",
+        )
+    policy = {
+        "enabled": True,
+        "min_hosts": 0,
+        "max_hosts": 1,
+        "connection_id": "rotate-cloudlab",
+        "ssh_connection_id": "rotate-ssh",
+        "configuration": {},
+        "deployment_profiles": ["rotate-route"],
+        "sandbox_storage_path": None,
+        "renewal_policy": {},
+        "slot_policy": {},
+        "scale_up_sustain_seconds": 120,
+        "scale_down_idle_seconds": 3600,
+        "cooldown_seconds": 600,
+        "scale_down_enabled": False,
+    }
+    await repo.update_cloudlab_autoscaling(
+        expected_revision=0,
+        policy=policy,
+        profile_snapshots={"rotate-route": {"id": "rotate-route"}},
+        requested_by="admin",
+    )
+    queued = await repo.create_autoscale_allocation_operation(
+        expected_revision=1,
+        expected_generation=1,
+        request_id="rotate-before-provider",
+        fingerprint="rotate-before-provider",
+        allocation={"name": "queued autoscale"},
+        parameters={},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_up"},
+        cooldown_seconds=60,
+    )
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == queued["operation"]["id"]
+    with pytest.raises(ValueError, match="autoscaling_connection_in_use"):
+        await repo.save_connection(
+            connection_id="rotate-cloudlab",
+            name="rotated",
+            provider_id="cloudlab",
+            configuration={},
+            secret_ciphertext="ciphertext-v2",
+            masked_summary="configured",
+            status="unverified",
+            expected_revision=1,
+        )
+
+    await repo.update_cloudlab_autoscaling(
+        expected_revision=1,
+        policy={**policy, "enabled": False},
+        profile_snapshots={},
+        requested_by="admin",
+    )
+    # Pausing allows repair only after the pre-submit operation is no longer
+    # pending or running, closing the check-to-provider-call rotation window.
+    with pytest.raises(ValueError, match="autoscaling_connection_in_use"):
+        await repo.save_connection(
+            connection_id="rotate-cloudlab",
+            name="rotated",
+            provider_id="cloudlab",
+            configuration={},
+            secret_ciphertext="ciphertext-v2",
+            masked_summary="configured",
+            status="unverified",
+            expected_revision=1,
+        )
+    assert await repo.finish_operation(
+        **fence(claimed),
+        state="blocked",
+        step="pending",
+        result={"external_pending": False},
+    )
+    repaired = await repo.save_connection(
+        connection_id="rotate-cloudlab",
+        name="rotated",
+        provider_id="cloudlab",
+        configuration={},
+        secret_ciphertext="ciphertext-v2",
+        masked_summary="configured",
+        status="unverified",
+        expected_revision=1,
+    )
+    assert repaired["revision"] == 2
+    assert repaired["status"] == "unverified"
+
+
+async def test_terminal_failed_acquire_history_does_not_block_new_autoscale_create(db, store):
+    repo = store.compute_resources
+    old_allocation, _, _ = await resource(store, name="old-autoscaled")
+    failed_acquire = await operation(repo, old_allocation, "acquire")
+    assert await repo.finish_operation(
+        **fence(failed_acquire),
+        state="failed",
+        step="failed",
+        message="provider confirmed failure",
+    )
+    await repo.observe_allocation(
+        allocation_id=old_allocation,
+        observation={"observed_state": "terminated", "scope_complete": True},
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'old-route','released')""",
+            old_allocation,
+        )
+        await conn.execute(
+            """INSERT INTO agent_compute_connections
+               (id,name,provider_id,secret_ciphertext,status)
+               VALUES ('replacement-cloudlab','CloudLab','cloudlab','ciphertext','verified'),
+                      ('replacement-ssh','SSH','existing_ssh','ciphertext','verified')"""
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,max_hosts=1,
+                   connection_id='replacement-cloudlab',ssh_connection_id='replacement-ssh',
+                   deployment_profiles=ARRAY['replacement-route']"""
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot)
+               VALUES ('replacement-route','{"id":"replacement-route"}')"""
+        )
+
+    created = await repo.create_autoscale_allocation_operation(
+        expected_revision=0,
+        expected_generation=0,
+        request_id="autoscale-after-terminal-failure",
+        fingerprint="autoscale-after-terminal-failure",
+        allocation={"name": "replacement"},
+        parameters={},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_up"},
+        cooldown_seconds=60,
+    )
+
+    assert created["operation"]["kind"] == "acquire"
+    assert created["operation"]["allocation_id"] != old_allocation
+
+
+async def test_terminal_blocked_operation_history_does_not_block_autoscale_retire(db, store, hosts):
+    repo = store.compute_resources
+    old_allocation, _, _ = await resource(store, name="old-blocked")
+    blocked_retire = await operation(repo, old_allocation, "retire")
+    assert await repo.finish_operation(
+        **fence(blocked_retire),
+        state="blocked",
+        step="release",
+        message="administrator review required",
+    )
+    await repo.observe_allocation(
+        allocation_id=old_allocation,
+        observation={"observed_state": "terminated", "scope_complete": True},
+    )
+    candidate, _, _ = await resource(store, hosts, name="healthy-candidate")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'old-route','released'),($2,'healthy-route','active')""",
+            old_allocation,
+            candidate,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ('healthy-route','{"id":"healthy-route"}',$1)""",
+            candidate,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY['healthy-route']"""
+        )
+
+    queued = await repo.queue_autoscale_retire(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=candidate,
+        request_id="retire-after-terminal-history",
+        fingerprint="retire-after-terminal-history",
+        parameters={"allocation_id": candidate},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_down_idle", "allocation_id": candidate},
+        cooldown_seconds=60,
+    )
+
+    assert queued["operation"]["kind"] == "retire"
+    assert queued["operation"]["allocation_id"] == candidate
+
+
+async def test_manual_and_autoscale_retire_creation_serialize(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="retire-race")
+    allocation = await repo.get_allocation(allocation_id)
+    assert allocation is not None
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'retire-race-route','active')""",
+            allocation_id,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY['retire-race-route']"""
+        )
+
+    manual, automatic = await asyncio.gather(
+        repo.create_operation(
+            request_id="manual-retire-race",
+            fingerprint="manual-retire-race",
+            kind="retire",
+            allocation_id=allocation_id,
+            parameters={"expected_revision": allocation["revision"]},
+            requested_by="admin",
+        ),
+        repo.queue_autoscale_retire(
+            expected_revision=0,
+            expected_generation=0,
+            allocation_id=allocation_id,
+            request_id="autoscale-retire-race",
+            fingerprint="autoscale-retire-race",
+            parameters={"allocation_id": allocation_id},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_down_idle", "allocation_id": allocation_id},
+            cooldown_seconds=60,
+        ),
+        return_exceptions=True,
+    )
+
+    outcomes = (manual, automatic)
+    assert sum(not isinstance(outcome, Exception) for outcome in outcomes) == 1
+    refused = next(outcome for outcome in outcomes if isinstance(outcome, Exception))
+    assert str(refused) in {"operation_in_flight", "autoscaling_operation_in_flight"}
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                """SELECT count(*) FROM agent_compute_operations
+                   WHERE allocation_id=$1 AND kind='retire'
+                     AND state IN ('pending','running','waiting','blocked','unknown')""",
+                allocation_id,
+            )
+            == 1
+        )
+
+
+async def test_live_blocked_extend_on_other_member_does_not_block_autoscale_retire(
+    db, store, hosts
+):
+    repo = store.compute_resources
+    other, _, _ = await resource(store, name="live-blocked-extend")
+    candidate, _, _ = await resource(store, hosts, name="retire-candidate")
+    blocked_extend = await operation(repo, other, "extend")
+    assert await repo.finish_operation(
+        **fence(blocked_extend),
+        state="blocked",
+        step="extension_rejected",
+        message="extension is unavailable",
+        result={"external_pending": False},
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state)
+               VALUES ($1,'extend-route','active'),($2,'retire-route','active')""",
+            other,
+            candidate,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=2,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY['extend-route','retire-route']"""
+        )
+
+    queued = await repo.queue_autoscale_retire(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=candidate,
+        request_id="retire-with-unrelated-blocked-extend",
+        fingerprint="retire-with-unrelated-blocked-extend",
+        parameters={"allocation_id": candidate},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_down_idle", "allocation_id": candidate},
+        cooldown_seconds=60,
+    )
+
+    assert queued["operation"]["kind"] == "retire"
+    assert queued["operation"]["allocation_id"] == candidate
+
+
+@pytest.mark.parametrize(
+    ("observed_state", "unbind_host", "expected_state", "cancellable"),
+    [
+        ("ready", True, "active", True),
+        ("pending", False, "provisioning", True),
+        ("terminated", False, "blocked", False),
+    ],
+    ids=["ready-unbound", "provider-not-ready", "provider-terminated"],
+)
+async def test_cancel_autoscale_retire_restores_owned_member_capacity_state(
+    db, store, hosts, observed_state, unbind_host, expected_state, cancellable
+):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name=f"cancel-retire-{expected_state}")
+    profile = f"cancel-retire-{expected_state}-route"
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state) VALUES ($1,$2,'active')""",
+            allocation_id,
+            profile,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ($1,jsonb_build_object('id',$1::text),$2)""",
+            profile,
+            allocation_id,
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=1,scale_down_enabled=TRUE,
+                   deployment_profiles=ARRAY[$1::text]""",
+            profile,
+        )
+
+    queued = await repo.queue_autoscale_retire(
+        expected_revision=0,
+        expected_generation=0,
+        allocation_id=allocation_id,
+        request_id=f"cancel-retire-{expected_state}",
+        fingerprint=f"cancel-retire-{expected_state}",
+        parameters={"allocation_id": allocation_id},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_down_idle", "allocation_id": allocation_id},
+        cooldown_seconds=60,
+    )
+    assert queued["operation"]["kind"] == "retire"
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET observed_state=$2 WHERE id=$1",
+            allocation_id,
+            observed_state,
+        )
+        if unbind_host:
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET compute_node_id=NULL WHERE host=$1",
+                f"cancel-retire-{expected_state}",
+            )
+
+    if not cancellable:
+        with pytest.raises(ValueError, match="operation_not_cancellable"):
+            await repo.cancel_operation(queued["operation"]["id"])
+        allocation = await repo.get_allocation(allocation_id)
+        assert allocation["desired_state"] == "present"
+        assert allocation["release_committed_at"] is None
+        assert (await hosts.get_host(host=f"cancel-retire-{expected_state}"))["enrolled"]
+        snapshot = await repo.get_cloudlab_autoscaling()
+        assert snapshot["members"][0]["state"] == "blocked"
+        assert snapshot["profile_reservations"][0]["allocation_id"] == allocation_id
+        return
+
+    cancelled = await repo.cancel_operation(queued["operation"]["id"])
+
+    assert cancelled["state"] == "cancelled"
+    assert (await repo.get_allocation(allocation_id))["desired_state"] == "present"
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == expected_state
+    reservation = snapshot["profile_reservations"][0]
+    assert reservation["allocation_id"] == allocation_id
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT state FROM agent_cloudlab_autoscaling_members WHERE allocation_id=$1",
+                allocation_id,
+            )
+            == expected_state
+        )
+
+
+@pytest.mark.parametrize("operation_state", ["blocked", "waiting", "failed"])
+async def test_cancel_definite_pre_submit_autoscale_rejection_releases_profile(
+    db, store, operation_state
+):
+    repo = store.compute_resources
+    allocation_id, operation_row = await autoscale_acquisition(
+        db,
+        store,
+        request_id=f"cancel-definite-autoscale-{operation_state}",
+        state=operation_state,
+        result={"external_pending": False},
+    )
+
+    cancelled = await repo.cancel_operation(operation_row["id"])
+
+    assert cancelled["state"] == "cancelled"
+    allocation = await repo.get_allocation(allocation_id)
+    assert allocation["desired_state"] == "absent"
+    assert allocation["observed_state"] == "absent"
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] == "released"
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("state", "result", "external_id", "expected_error"),
+    [
+        (
+            "unknown",
+            {"external_pending": False},
+            None,
+            "operation_not_cancellable",
+        ),
+        (
+            "blocked",
+            {"external_pending": True},
+            None,
+            "operation_not_cancellable",
+        ),
+        (
+            "blocked",
+            {
+                "external_pending": False,
+                "resource_ref": {"provider_id": "cloudlab", "external_id": "experiment-a"},
+            },
+            None,
+            "operation_not_cancellable",
+        ),
+        (
+            "blocked",
+            {"external_pending": False},
+            "experiment-a",
+            "operation_not_cancellable",
+        ),
+    ],
+    ids=["unknown", "external-pending", "receipt-identity", "allocation-identity"],
+)
+async def test_unsafe_autoscale_acquisitions_cannot_be_cancelled(
+    db, store, state, result, external_id, expected_error
+):
+    repo = store.compute_resources
+    allocation_id, operation_row = await autoscale_acquisition(
+        db,
+        store,
+        request_id=f"unsafe-cancel-{state}-{external_id or bool(result.get('resource_ref'))}",
+        state=state,
+        result=result,
+    )
+    if external_id is not None:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_compute_allocations SET external_id=$2 WHERE id=$1",
+                allocation_id,
+                external_id,
+            )
+
+    with pytest.raises(ValueError, match=expected_error):
+        await repo.cancel_operation(operation_row["id"])
+
+    assert (await repo.get_operation(operation_row["id"]))["state"] == state
+    allocation = await repo.get_allocation(allocation_id)
+    assert allocation["desired_state"] == "present"
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["members"][0]["state"] != "released"
+    assert snapshot["profile_reservations"][0]["allocation_id"] == allocation_id
+
+
+async def test_running_autoscale_acquisition_cannot_be_cancelled(db, store):
+    repo = store.compute_resources
+    _allocation_id, operation_row = await autoscale_acquisition(
+        db,
+        store,
+        request_id="cancel-running-autoscale-acquire",
+        state=None,
+        result={"external_pending": False},
+    )
+
+    with pytest.raises(ValueError, match="operation_in_flight"):
+        await repo.cancel_operation(operation_row["id"])

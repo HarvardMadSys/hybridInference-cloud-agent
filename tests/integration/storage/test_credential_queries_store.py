@@ -208,3 +208,47 @@ async def test_a_settled_job_resolves_nothing(
     await store.attempt_commands.transition(**fence, from_states=("running",), to_state="succeeded")
 
     assert await credentials.resolve_model_credential(**fence) is None
+
+
+async def test_a_stopped_turn_resolves_nothing(
+    store: Storage, credentials: PostgresCredentialQueries
+) -> None:
+    """Stop takes effect on the next tool call, not when the lease runs out.
+
+    Cancelling a running turn only raises a flag: the job stays ``running``
+    and the attempt keeps its lease so the worker can settle. The relay's
+    fence reads that flag, so a stopped turn calls no more of the owner's
+    tools — including one parked waiting for an approval.
+    """
+    job, claim = await _live(store)
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    assert await credentials.resolve_model_credential(**fence) is not None
+
+    assert await store.attempt_commands.request_cancel(job_id=job["id"]) == "running"
+
+    assert await credentials.resolve_model_credential(**fence) is None
+
+
+async def test_a_removed_hosts_attempt_resolves_nothing(
+    store: Storage, credentials: PostgresCredentialQueries
+) -> None:
+    """The MCP token names an attempt, never a host; the fence asks about both.
+
+    Disabling the machine changes neither the attempt nor the job, so only
+    the host predicate can be what refuses here.
+    """
+    job, claim = await _live(store)
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    assert await credentials.resolve_model_credential(**fence) is not None
+
+    assert await store.host_pool.set_host_status(host="runner-a", status="disabled") == "ok"
+
+    assert await credentials.resolve_model_credential(**fence) is None

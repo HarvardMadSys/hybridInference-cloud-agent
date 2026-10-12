@@ -22,6 +22,7 @@ vi.mock('@/lib/api/compute', () => ({
 }));
 
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
+import { APIError } from '@/lib/utils/errors';
 
 import CloudLabSettings from './CloudLabSettings';
 
@@ -34,6 +35,7 @@ const defaults = {
   profile_project: 'cloud-agent',
   profile_name: 'kata-node',
   ssh_username: 'researcher',
+  ssh_public_key: '',
 };
 
 beforeEach(() => {
@@ -62,7 +64,75 @@ describe('admin CloudLab settings', () => {
     expect(screen.getByLabelText('Template project')).toHaveValue('cloud-agent');
     expect(screen.getByLabelText('Template name')).toHaveValue('kata-node');
     expect(screen.getByLabelText('CloudLab SSH user')).toHaveValue('researcher');
+    expect(screen.getByLabelText('CloudLab project').closest('details')).toBeNull();
+    expect(screen.getByLabelText('Initial duration (hours)').closest('details')).toBeNull();
+    const advanced = screen.getByText('Advanced').closest('details');
+    expect(advanced).not.toHaveAttribute('open');
+    expect(advanced).toContainElement(screen.getByLabelText('Template project'));
+    expect(advanced).toContainElement(screen.getByLabelText('Template name'));
+    expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH user'));
+    expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH public key'));
+    expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeDisabled();
+  });
+
+  it('preserves advanced edits when collapsed and submits them with important defaults', async () => {
+    const updated = { ...defaults, profile_name: 'new-template', ssh_username: 'new-user' };
+    saveDefaults.mockResolvedValue({ defaults: updated });
+    render(<CloudLabSettings />);
+
+    await screen.findByLabelText('CloudLab project');
+    const advanced = screen.getByText('Advanced').closest('details')!;
+    const summary = advanced.querySelector('summary')!;
+    fireEvent.click(summary);
+    expect(advanced).toHaveAttribute('open');
+    const template = screen.getByLabelText('Template name');
+    fireEvent.change(template, { target: { value: 'new-template' } });
+    fireEvent.change(screen.getByLabelText('CloudLab SSH user'), {
+      target: { value: 'new-user' },
+    });
+    fireEvent.click(summary);
+
+    expect(advanced).not.toHaveAttribute('open');
+    expect(screen.getByLabelText('Template name')).toBe(template);
+    expect(template).toHaveValue('new-template');
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
+  });
+
+  it('saves an SSH public key for the CloudLab SSH user', async () => {
+    const publicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTheFormOnly researcher';
+    const updated = { ...defaults, ssh_public_key: publicKey };
+    saveDefaults.mockResolvedValue({ defaults: updated });
+    render(<CloudLabSettings />);
+
+    await screen.findByLabelText('CloudLab project');
+    fireEvent.click(screen.getByText('Advanced').closest('details')!.querySelector('summary')!);
+    fireEvent.change(screen.getByLabelText('CloudLab SSH public key'), {
+      target: { value: publicKey },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
+  });
+
+  it('keeps an invalid SSH public key in the advanced section', async () => {
+    render(<CloudLabSettings />);
+
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'next-project' } });
+    fireEvent.change(screen.getByLabelText('CloudLab SSH public key'), {
+      target: { value: 'not-a-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'SSH public key must be one OpenSSH public key.',
+    );
+    expect(screen.getByText('Advanced').closest('details')).toHaveAttribute('open');
+    expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('not-a-key');
+    expect(saveDefaults).not.toHaveBeenCalled();
   });
 
   it('saves edited defaults and uses the returned values', async () => {
@@ -95,5 +165,30 @@ describe('admin CloudLab settings', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Settings unavailable');
     expect(screen.getByLabelText('Template name')).toHaveValue('new-template');
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeEnabled();
+  });
+
+  it('reveals advanced defaults when the server returns a validation error', async () => {
+    saveDefaults.mockRejectedValue(new APIError('VALIDATION_ERROR', 'Invalid template', 422));
+    render(<CloudLabSettings />);
+
+    const project = await screen.findByLabelText('CloudLab project');
+    fireEvent.change(project, { target: { value: 'next-project' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid template');
+    const advanced = screen.getByText('Advanced').closest('details')!;
+    expect(advanced).toHaveAttribute('open');
+    expect(screen.getByLabelText('Template name')).toHaveValue('kata-node');
+
+    const summary = advanced.querySelector('summary')!;
+    fireEvent.click(summary);
+    expect(advanced).not.toHaveAttribute('open');
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+    await waitFor(() => expect(saveDefaults).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(advanced).toHaveAttribute('open'));
+
+    fireEvent.click(summary);
+    fireEvent.change(project, { target: { value: 'another-project' } });
+    expect(advanced).not.toHaveAttribute('open');
   });
 });

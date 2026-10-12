@@ -1,5 +1,7 @@
 'use client';
 
+import { useModalDialog } from '@/components/ui/useModalDialog';
+
 import Link from 'next/link';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -49,25 +51,11 @@ export function CreateRepositoryDialog({
     };
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    const previous = document.activeElement as HTMLElement | null;
-    const overflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    (panel.current?.querySelector<HTMLElement>('input') ?? panel.current)?.focus();
-    return () => {
-      document.body.style.overflow = overflow;
-      if (previous?.isConnected) previous.focus();
-    };
-  }, [open]);
+  useModalDialog(panel, { open, busy, onClose, initialFocus: 'input' });
 
   useEffect(() => {
     if (open && created) panel.current?.querySelector<HTMLElement>('a')?.focus();
   }, [open, created]);
-
-  useEffect(() => {
-    if (open && busy && !created) panel.current?.focus();
-  }, [open, busy, created]);
 
   async function checkAvailability(repository: CreatedGitHubRepository) {
     const config = await getAgentConfig({ fresh: true });
@@ -142,38 +130,7 @@ export function CreateRepositoryDialog({
 
   if (!open || typeof document === 'undefined') return null;
   return createPortal(
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          event.stopPropagation();
-          if (!busy) onClose();
-        }
-        if (event.key !== 'Tab') return;
-        const controls = Array.from(
-          panel.current?.querySelectorAll<HTMLElement>(
-            'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href]',
-          ) ?? [],
-        ).sort((left, right) =>
-          left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
-        );
-        const first = controls[0];
-        const last = controls[controls.length - 1];
-        if (!first || !last) {
-          event.preventDefault();
-          panel.current?.focus();
-          return;
-        }
-        if (event.shiftKey && document.activeElement === first && last) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last && first) {
-          event.preventDefault();
-          first.focus();
-        }
-      }}
-    >
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <button
         type="button"
         tabIndex={-1}

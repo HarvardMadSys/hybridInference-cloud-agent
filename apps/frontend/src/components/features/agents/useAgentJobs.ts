@@ -207,9 +207,15 @@ export function useAgentJob(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
-  const seen = useRef<Set<number>>(new Set());
-  const generation = useRef(0);
   const reads = useAgentReads();
+  const seen = useRef<Map<number, AgentThreadEventApi>>(new Map());
+  const seenScope = useRef({ jobId, reads });
+  const historyRead = useRef<{
+    jobId: string;
+    events: Map<number, AgentThreadEventApi>;
+    lifecycleEvents: Map<number, AgentThreadEventApi>;
+  } | null>(null);
+  const generation = useRef(0);
   const loadedStreamCursor = useRef<{
     jobId: string;
     reads: typeof reads;
@@ -248,7 +254,16 @@ export function useAgentJob(
     if (!active || !jobId) return undefined;
     let cancelled = false;
     const requestGeneration = generation.current;
-    seen.current = new Set();
+    if (seenScope.current.jobId !== jobId || seenScope.current.reads !== reads) {
+      seen.current = new Map();
+      seenScope.current = { jobId, reads };
+    }
+    const read = {
+      jobId,
+      events: new Map(seen.current),
+      lifecycleEvents: new Map<number, AgentThreadEventApi>(),
+    };
+    historyRead.current = read;
     setPatch(null);
     setLoading(true);
 
@@ -264,15 +279,45 @@ export function useAgentJob(
       .then((snapshot) => {
         if (!snapshot || cancelled || requestGeneration !== generation.current) return;
         const [job, foundThread, foundEvents] = snapshot;
-        const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
+        // The existing stream stays open during a same-turn reload. Its events
+        // can arrive after the history snapshot was taken but before this read
+        // returns; replacing state with that snapshot would discard them while
+        // the stream's resume cursor has already advanced past them.
+        const merged = new Map(foundEvents.map((event) => [event.id, event]));
+        const replay = new Map(read.lifecycleEvents);
+        for (const [id, event] of read.events) {
+          if (!merged.has(id)) replay.set(id, event);
+        }
+        for (const [id, event] of read.events) merged.set(id, event);
+        const completeEvents = [...merged.values()].sort((left, right) => left.id - right.id);
+        if (historyRead.current === read) historyRead.current = null;
+        const ownEvents = completeEvents.filter((event) => event.job_id === jobId);
         let cursor = 0;
         for (const event of ownEvents) cursor = Math.max(cursor, event.id);
         loadedStreamCursor.current = { jobId, reads, cursor };
-        setApi((current) => preserveResolvedTaskTitle(current, overlayPushed(job)));
+        let latest = overlayPushed(job);
+        // A queued/running row can also predate the lifecycle frame received
+        // during this read. Apply new frames in stream order, while leaving a
+        // terminal row and a newer attempt/publication phase authoritative.
+        if (isActiveJobState(latest.state)) {
+          for (const event of [...replay.values()].sort((a, b) => a.id - b.id)) {
+            if (latest.current_attempt_id != null && event.attempt_id < latest.current_attempt_id)
+              continue;
+            if (
+              latest.state === 'publishing' &&
+              latest.current_attempt_id === event.attempt_id &&
+              event.event_type === 'lifecycle' &&
+              ACTIVE_ATTEMPT_PHASES.has(String(event.payload?.phase))
+            )
+              continue;
+            latest = applyAgentLifecycleEvent(latest, event);
+          }
+        }
+        setApi((current) => preserveResolvedTaskTitle(current, latest));
         setEvents(ownEvents);
-        setThreadEvents(foundEvents);
+        setThreadEvents(completeEvents);
         setThread(foundThread);
-        ownEvents.forEach((event) => seen.current.add(event.id));
+        ownEvents.forEach((event) => seen.current.set(event.id, event));
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -280,11 +325,13 @@ export function useAgentJob(
           setError(cause instanceof Error ? cause.message : 'could not load the job');
       })
       .finally(() => {
+        if (historyRead.current === read) historyRead.current = null;
         if (!cancelled && requestGeneration === generation.current) setLoading(false);
       });
 
     return () => {
       cancelled = true;
+      if (historyRead.current === read) historyRead.current = null;
     };
   }, [active, jobId, reads, tick]);
 
@@ -343,15 +390,19 @@ export function useAgentJob(
           : 0,
       onEvent: (event) => {
         streamFailures.current = 0;
+        const threadEvent = { ...event, job_id: jobId, turn_no: currentTurnNo };
+        if (historyRead.current?.jobId === jobId) {
+          historyRead.current.events.set(event.id, threadEvent);
+        }
         // The stream can replay across a reconnect, so dedupe on the global id
         // the server assigns rather than assuming each frame is new.
         if (seen.current.has(event.id)) return;
-        seen.current.add(event.id);
+        seen.current.set(event.id, threadEvent);
+        if (historyRead.current?.jobId === jobId) {
+          historyRead.current.lifecycleEvents.set(event.id, threadEvent);
+        }
         setEvents((current) => [...current, event]);
-        setThreadEvents((current) => [
-          ...current,
-          { ...event, job_id: jobId, turn_no: currentTurnNo },
-        ]);
+        setThreadEvents((current) => [...current, threadEvent]);
         // The stream is also the fastest authority for a queued child
         // becoming active; keep the status pill in step without polling.
         setApi((current) => (current ? applyAgentLifecycleEvent(current, event) : current));
@@ -447,8 +498,9 @@ export function useAgentJob(
     let requests = 0;
     let pending = false;
     const version = generation.current;
-    const timer = setInterval(() => {
-      if (pending) return;
+    const read = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (pending || requests >= 65) return;
       pending = true;
       if (++requests >= 65) clearInterval(timer);
       void getAgentJob(jobId)
@@ -482,10 +534,13 @@ export function useAgentJob(
         .finally(() => {
           pending = false;
         });
-    }, 2_000);
+    };
+    const timer = setInterval(read, 2_000);
+    document.addEventListener('visibilitychange', read);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
     };
   }, [active, awaitingTitle, jobId, pushLive, tick]);
 
@@ -510,7 +565,8 @@ export function useAgentJob(
     let cancelled = false;
     let pending = false;
     const version = generation.current;
-    const timer = setInterval(() => {
+    const read = () => {
+      if (document.visibilityState === 'hidden') return;
       if (pending) return;
       pending = true;
       // These updates change only fields on the job row. Fetching the complete
@@ -536,10 +592,13 @@ export function useAgentJob(
         .finally(() => {
           pending = false;
         });
-    }, metadataInterval);
+    };
+    const timer = setInterval(read, metadataInterval);
+    document.addEventListener('visibilitychange', read);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
     };
   }, [active, jobId, metadataActive, metadataInterval, reload, tick]);
 

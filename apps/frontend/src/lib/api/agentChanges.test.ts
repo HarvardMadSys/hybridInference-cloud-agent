@@ -108,4 +108,30 @@ describe('streamAgentChanges', () => {
       vi.useRealTimers();
     }
   });
+
+  it('releases each reconnect abort listener on timeout and abort', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchWithAuth).mockRejectedValue(new TypeError('network'));
+      const controller = new AbortController();
+      const add = vi.spyOn(controller.signal, 'addEventListener');
+      const remove = vi.spyOn(controller.signal, 'removeEventListener');
+      const opts = options(controller);
+      opts.onDisconnect = vi.fn();
+      const done = streamAgentChanges(opts);
+
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(4);
+      expect(add).toHaveBeenCalledTimes(4);
+      expect(remove).toHaveBeenCalledTimes(3);
+      controller.abort();
+      await expect(done).resolves.toBe('aborted');
+      expect(remove.mock.calls.map((call) => call[1])).toEqual(
+        add.mock.calls.map((call) => call[1]),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
