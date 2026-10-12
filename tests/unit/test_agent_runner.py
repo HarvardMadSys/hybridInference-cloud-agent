@@ -538,7 +538,7 @@ def _run_shared_boundary_case(
         "native_session_id": "native-existing",
         "resident_slot_id": 0,
     }
-    control.mark_chat_sandbox_running.return_value = {}
+    control.mark_chat_sandbox_running.return_value = {"residency_generation": 11}
     supervisor = Mock()
 
     def acquire_shared(_thread_id, **kwargs):
@@ -727,6 +727,9 @@ def test_settled_success_survives_a_failed_completion_event_upload(
     assert result == expected_code
     supervisor.settle_shared.assert_called_once()
     control.settle_chat_sandbox.assert_called_once()
+    assert control.record_chat_process.call_args.kwargs["residency_generation"] == 11
+    assert control.admit_chat_turn.call_args.kwargs["residency_generation"] == 11
+    assert control.settle_chat_sandbox.call_args.kwargs["residency_generation"] == 11
     control.abandon_chat_sandbox.assert_not_called()
     if expected_code == 0:
         finish.assert_called_once()

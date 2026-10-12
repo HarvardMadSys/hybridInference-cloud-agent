@@ -31,6 +31,10 @@ HOST_COLUMN_NAMES = (
     "runner_version",
     "broker_url",
     "last_heartbeat_at",
+    "drain_fence_token",
+    "drain_fence_status_before",
+    "drain_fence_active",
+    "drain_fence_epoch",
     "sandbox_runtime",
     "sandbox_image_digest",
     "runtime_versions",
@@ -73,6 +77,25 @@ CAPACITY_COLUMN_NAMES = (
 
 
 HOST_CAPACITY_COLUMNS = ", ".join(CAPACITY_COLUMN_NAMES)
+
+
+#: Whether the machine an attempt ran on may still speak for it. Binds the
+#: attempt as ``a``; the caller supplies that alias.
+#:
+#: A worker token is a stateless signature over the attempt fence. It names no
+#: host and carries no expiry, so revoking a host's credential does not, on its
+#: own, stop anything that token opens. This predicate is what does: every
+#: write that keeps an attempt going — the lease extension, the renewal of its
+#: grant, a residency it establishes, a tool call it relays — asks it in the
+#: same statement, so a removed or disabled machine stops being able to keep
+#: its work alive the moment the revocation commits. ``EXISTS`` rather than a
+#: join, so a caller's row count never depends on it.
+LIVE_ATTEMPT_HOST = """EXISTS (
+    SELECT 1 FROM agent_runner_hosts live_host
+    WHERE live_host.host = a.host_id
+      AND live_host.credential_hash IS NOT NULL
+      AND live_host.status <> 'disabled'
+)"""
 
 
 def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:
@@ -122,8 +145,37 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
 
     Callers own admission locks and busy/retention policy; this is the one
     credential transition shared by Host Remove and committed resource release.
+
+    **The work the machine was holding ends with its credential.** Clearing
+    the hash stops the host's own requests, but its attempts run on worker
+    tokens that name no host, and its resident processes on grants the host
+    heartbeat renews. So the same transaction brings forward the expiry of
+    every lease the machine holds: its running attempts' and its hot
+    residencies'. Nothing is superseded or revoked here — the reaper's next
+    pass does that exactly as it does for any lapsed lease, retained-context
+    LOST policy and grant revocation included — but from this commit on no
+    fenced write, heartbeat, renewal or tool call can succeed for them.
+    ``LEAST`` so an already-lapsed lease is never pushed back out.
     """
     await conn.execute(
-        "UPDATE agent_runner_hosts SET status='disabled',credential_hash=NULL WHERE host=ANY($1::text[])",
+        "UPDATE agent_runner_hosts "
+        "SET status='disabled',credential_hash=NULL,drain_fence_token=NULL,"
+        "drain_fence_status_before=NULL,drain_fence_active=FALSE "
+        "WHERE host=ANY($1::text[])",
+        hosts,
+    )
+    await conn.execute(
+        "UPDATE agent_attempts SET lease_expires_at = LEAST(lease_expires_at, NOW()) "
+        "WHERE host_id = ANY($1::text[]) AND status = 'running'",
+        hosts,
+    )
+    await conn.execute(
+        """
+        UPDATE agent_thread_sandbox_memberships m
+        SET residency_lease_expires_at = LEAST(m.residency_lease_expires_at, NOW())
+        FROM agent_sandboxes g
+        WHERE g.id = m.sandbox_id AND g.host = ANY($1::text[])
+          AND m.residency_status = 'hot'
+        """,
         hosts,
     )

@@ -9,8 +9,10 @@ actually opens.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -55,6 +57,7 @@ class FakeHostStore(AllCapabilities):
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
         self.global_settings: dict[str, Any] = {}
+        self.autoscaling_managed: set[str] = set()
         self.archive_settings: dict[str, Any] = {
             "enabled": False,
             "s3_uri": "s3://freeinference/cloud-agent/sandbox",
@@ -76,6 +79,7 @@ class FakeHostStore(AllCapabilities):
             "last_worker_id": f"w-{host}",
             "first_seen_at": seen,
             "last_seen_at": seen,
+            "drain_fence_epoch": uuid4(),
             "runtime_versions": {"claude-code": "2.1.220"},
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.235"]},
         }
@@ -132,6 +136,8 @@ class FakeHostStore(AllCapabilities):
         row = self.rows.get(host)
         if row is None:
             return "unknown"
+        if host in self.autoscaling_managed:
+            return "autoscaling_managed"
         row["slots_desired"] = slots
         return "ok"
 
@@ -514,6 +520,23 @@ async def test_sizing_an_unknown_host_is_a_404(admin_client):
 
 
 @pytest.mark.asyncio
+async def test_sizing_an_autoscaling_managed_host_is_refused(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    store.rows["runner-a"]["slots_desired"] = 6
+    store.autoscaling_managed.add("runner-a")
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/slots", json={"slots": 8}, headers=ADMIN
+    )
+
+    assert response.status_code == 409
+    assert "managed by CloudLab autoscaling" in response.json()["detail"]
+    assert store.rows["runner-a"]["slots_desired"] == 6
+    assert len(store.audit) == 0
+
+
+@pytest.mark.asyncio
 async def test_a_size_change_is_audited_with_both_values(admin_client):
     """The trail answers 'who resized this host, from what' without a diff."""
     client, store = admin_client
@@ -549,6 +572,7 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "agent_timeout_s",
         "chat_idle_timeout_s",
         "source_import_max_mib",
+        "storage_min_available_mib",
         "shared_resident_capacity",
         "terminal_idle_ttl_s",
         "terminal_hard_ttl_s",
@@ -574,6 +598,17 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "default": 1024,
         "minimum": 1,
         "maximum": 65536,
+        "scope": "runner",
+    }
+    assert definitions["storage_min_available_mib"] | {"label": None, "description": None} == {
+        "key": "storage_min_available_mib",
+        "env": "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+        "label": None,
+        "description": None,
+        "unit": "MiB",
+        "default": 1024,
+        "minimum": 1,
+        "maximum": 1048576,
         "scope": "runner",
     }
 
@@ -696,8 +731,11 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
     assert response.json() | {"updated_at": None} == {
         **_archive_policy(revision=1),
         "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+        "aws_access_key_id": "",
+        "aws_secret_access_key_configured": False,
         "updated_at": None,
     }
+    assert "aws_secret_access_key" not in response.json()
     assert store.audit[-1]["action"] == "agent.sandbox_archive_settings.set"
     assert store.audit[-1]["details"] == {
         "old_revision": 0,
@@ -707,13 +745,16 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
             "region": "",
             "kms_key_arn": "",
             "expected_bucket_owner": "",
+            "aws_access_key_id": "",
+            "aws_secret_access_key_configured": False,
             "max_archive_bytes": 2 * 1024**3,
             "multipart_threshold_bytes": 8 * 1024**2,
             "multipart_part_bytes": 8 * 1024**2,
         },
         "new_settings": {
             key: value for key, value in _archive_policy().items() if key != "revision"
-        },
+        }
+        | {"aws_access_key_id": "", "aws_secret_access_key_configured": False},
     }
 
     no_op = await client.put(
@@ -799,6 +840,48 @@ async def test_archive_policy_rejects_stale_or_unsafe_writes(admin_client):
     )
     assert bool_enabled.status_code == 422
     assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_stores_an_access_key_without_returning_the_secret(admin_client):
+    client, store = admin_client
+    secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    access_key = "AKIAIOSFODNN7EXAMPLE"
+    saved = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            kms_key_arn="",
+            expected_bucket_owner="",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret,
+        ),
+        headers=ADMIN,
+    )
+
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["aws_access_key_id"] == access_key
+    assert body["aws_secret_access_key_configured"] is True
+    assert "aws_secret_access_key" not in body
+    assert body["kms_key_arn"] == ""
+    assert body["expected_bucket_owner"] == ""
+    assert store.archive_settings["aws_secret_access_key"] == secret
+    assert secret not in json.dumps(store.audit[-1])
+
+    kept = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            revision=1,
+            kms_key_arn="",
+            expected_bucket_owner="",
+            aws_access_key_id=access_key,
+            aws_secret_access_key="",
+        ),
+        headers=ADMIN,
+    )
+    assert kept.status_code == 200
+    assert kept.json()["revision"] == 1
+    assert store.archive_settings["aws_secret_access_key"] == secret
 
 
 @pytest.mark.asyncio

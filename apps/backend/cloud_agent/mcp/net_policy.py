@@ -25,7 +25,6 @@ configuration, and nothing else. The default is public-only.
 from __future__ import annotations
 
 import ipaddress
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -53,6 +52,7 @@ _ACTIVE_PINS: ContextVar[Mapping[str, tuple[str, ...]] | None] = ContextVar(
 FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
     {
         "host",
+        "accept-encoding",
         "connection",
         "content-length",
         "cookie",
@@ -96,7 +96,24 @@ PRIVATE_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
+    # Special-purpose IPv4 space with no public server in it: IETF protocol
+    # assignments, the three documentation ranges, and benchmarking -- which
+    # some networks and fake-IP resolvers use as private space.
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    # Deprecated IPv6 site-local space, and the local-use NAT64 prefix. Where
+    # an operator's translator puts the IPv4 address inside the latter is the
+    # operator's choice, so it cannot be decoded and checked; it is private.
+    ipaddress.ip_network("fec0::/10"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
 )
+
+#: The well-known NAT64 prefix. A translator delivers an address in it to the
+#: IPv4 address in its last 32 bits, which is the address that is checked.
+_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
 
 #: Redirects are followed only to these schemes, and only this many times. A
 #: redirect chain is a way to spend our credential on somebody else's host, so
@@ -229,6 +246,31 @@ def normalize_url(raw: str) -> NormalizedEndpoint:
     )
 
 
+def _delivered_to(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    """Every address a packet to ``address`` can end up at, itself included.
+
+    IPv6 has several forms that carry an IPv4 address for a translator or a
+    tunnel to deliver to: IPv4-mapped, NAT64, 6to4 and Teredo. Checking only
+    the IPv6 form would let ``64:ff9b::7f00:1`` reach loopback through a
+    translator, so the IPv4 addresses inside are checked as well. Teredo
+    carries two -- the relay server and the client -- and both are checked.
+    """
+    if not isinstance(address, ipaddress.IPv6Address):
+        return (address,)
+    embedded: list[ipaddress.IPv4Address] = []
+    if address.ipv4_mapped is not None:
+        embedded.append(address.ipv4_mapped)
+    if address in _NAT64_WELL_KNOWN:
+        embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+    if address.sixtofour is not None:
+        embedded.append(address.sixtofour)
+    if address.teredo is not None:
+        embedded.extend(address.teredo)
+    return (address, *embedded)
+
+
 def _blocked_reason(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool
 ) -> str | None:
@@ -275,14 +317,14 @@ def check_addresses(
         except ValueError as exc:
             raise EndpointRejected(f"{host} resolved to something that is not an address") from exc
         # An IPv4-mapped IPv6 address (``::ffff:127.0.0.1``) is the classic way
-        # to slip a loopback past an IPv4-only check, so it is unwrapped first.
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-            address = address.ipv4_mapped
-        reason = _blocked_reason(
-            address, allow_private=policy.allow_private or host.lower() in policy.allowed_hosts
-        )
-        if reason is not None:
-            raise EndpointRejected(reason)
+        # to slip a loopback past an IPv4-only check, and NAT64, 6to4 and
+        # Teredo carry an IPv4 address the same way, so each embedded address
+        # is checked alongside the IPv6 one.
+        allow_private = policy.allow_private or host.lower() in policy.allowed_hosts
+        for candidate in _delivered_to(address):
+            reason = _blocked_reason(candidate, allow_private=allow_private)
+            if reason is not None:
+                raise EndpointRejected(reason)
     _pin(host, resolved)
     return resolved
 
@@ -449,29 +491,12 @@ def sanitize_headers(headers: Mapping[str, str], *, max_bytes: int = 8192) -> di
     return cleaned
 
 
-#: An RFC 9110 field name: one ``token``, nothing else.
-_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-
-
-def validate_header_name(name: str) -> str:
-    """Refuse a header a connection's credential may not be sent as.
-
-    The credential header is attached after every other header, so it can
-    replace any of them. :func:`sanitize_headers` drops a forbidden name
-    silently, which suits extra headers but not this one: a credential sent as
-    ``Host`` re-targets the request on a shared ingress, and one that vanished
-    would leave a connection authenticating with nothing. So this raises, at
-    the form and again before dispatch. A name must also be a single token;
-    anything else is not a header an HTTP client can send as written.
-    """
-    lowered = name.lower()
-    if not _HEADER_NAME.fullmatch(name):
-        raise EndpointRejected(f"{name!r} is not a valid HTTP header name")
-    if lowered in FORBIDDEN_HEADER_NAMES or any(
-        lowered.startswith(prefix) for prefix in FORBIDDEN_HEADER_PREFIXES
-    ):
-        raise EndpointRejected(f"a credential cannot be sent as the {name!r} header")
-    return name
+def credential_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Validate credential headers without silently dropping forbidden names."""
+    cleaned = sanitize_headers(headers)
+    if len(cleaned) != len(headers):
+        raise EndpointRejected("a credential cannot use a reserved or forwarding header")
+    return cleaned
 
 
 def resource_covers(resource: str | None, target: str) -> bool:
@@ -551,6 +576,7 @@ __all__ = [
     "NormalizedEndpoint",
     "UncheckedTarget",
     "check_addresses",
+    "credential_headers",
     "dial_host",
     "dial_spellings",
     "normalize_url",
@@ -560,6 +586,5 @@ __all__ = [
     "resource_covers",
     "sanitize_headers",
     "validate_endpoint",
-    "validate_header_name",
     "validate_redirect",
 ]

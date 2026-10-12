@@ -37,7 +37,7 @@ async def host_compute_admission(conn: Any, host: str) -> tuple[bool, bool]:
     """
     row = await conn.fetchrow(
         """
-        SELECT a.*, NOW() AS database_now,
+        SELECT a.*, clock_timestamp() AS database_now,
                EXISTS (SELECT 1 FROM agent_host_admission_holds x WHERE x.host=h.host) AS held,
                EXISTS (SELECT 1 FROM agent_host_admission_holds x WHERE x.host=h.host
                        AND x.scope='all_claims') AS all_held

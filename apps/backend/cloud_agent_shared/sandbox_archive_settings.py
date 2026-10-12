@@ -1,15 +1,16 @@
 """Validated deployment-wide policy for retained-sandbox archives.
 
 The control plane stores this policy and returns it on every host heartbeat.
-The runner only relays it over the authenticated workspace-broker channel; AWS
-credentials remain the broker's workload identity and are deliberately not
-part of this vocabulary.
+The runner relays it over the authenticated workspace-broker channel. Brokers
+authenticate with their workload identity, or with an AWS access key saved by
+an administrator. The secret stays out of ``as_dict``: that form is written
+into sandbox markers, and long-lived credentials never enter the sandbox.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -33,6 +34,8 @@ MAX_MULTIPART_PARTS: Final = 10_000
 SANDBOX_ARCHIVE_CAPABILITY: Final = "sandbox-archive-settings-v1"
 
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
+_ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
+_SECRET_ACCESS_KEY_RE: Final = re.compile(r"[A-Za-z0-9/+=]{40}")
 _KMS_KEY_ARN_RE: Final = re.compile(
     r"arn:(?P<partition>[^:]+):kms:(?P<region>[a-z0-9-]+):"
     r"(?P<account>[0-9]{12}):key/(?P<key>[A-Za-z0-9-]+)"
@@ -59,6 +62,12 @@ class SandboxArchivePolicy:
     region: str = ""
     kms_key_arn: str = ""
     expected_bucket_owner: str = ""
+    # True when uploads authenticate with an access key. Markers keep this
+    # flag and drop the secret, so a sandbox never receives the credential
+    # while still matching the live policy.
+    access_key_auth: bool = False
+    aws_access_key_id: str = field(default="", compare=False, repr=False)
+    aws_secret_access_key: str = field(default="", compare=False, repr=False)
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
     multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
     multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
@@ -67,21 +76,41 @@ class SandboxArchivePolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise SandboxArchivePolicyError("enabled must be a boolean")
+        if not isinstance(self.access_key_auth, bool):
+            raise SandboxArchivePolicyError("access_key_auth must be a boolean")
+        if (self.aws_access_key_id or self.aws_secret_access_key) and not self.access_key_auth:
+            object.__setattr__(self, "access_key_auth", True)
         for name, value in (
             ("region", self.region),
             ("kms_key_arn", self.kms_key_arn),
             ("expected_bucket_owner", self.expected_bucket_owner),
+            ("aws_access_key_id", self.aws_access_key_id),
+            ("aws_secret_access_key", self.aws_secret_access_key),
         ):
             if not isinstance(value, str) or value.strip() != value:
                 raise SandboxArchivePolicyError(f"{name} must be a trimmed string")
 
         if self.enabled and not self.region:
             raise SandboxArchivePolicyError("region is required when sandbox archives are enabled")
-        if self.enabled and not self.kms_key_arn:
+        if bool(self.aws_access_key_id) != bool(self.aws_secret_access_key):
+            raise SandboxArchivePolicyError(
+                "aws_access_key_id and aws_secret_access_key must both be set"
+            )
+        if self.aws_access_key_id and _ACCESS_KEY_ID_RE.fullmatch(self.aws_access_key_id) is None:
+            raise SandboxArchivePolicyError(
+                "aws_access_key_id must be a 20-character AWS access key id"
+            )
+        if self.aws_secret_access_key and (
+            _SECRET_ACCESS_KEY_RE.fullmatch(self.aws_secret_access_key) is None
+        ):
+            raise SandboxArchivePolicyError(
+                "aws_secret_access_key must be a 40-character AWS secret access key"
+            )
+        if self.enabled and not self.access_key_auth and not self.kms_key_arn:
             raise SandboxArchivePolicyError(
                 "kms_key_arn is required when sandbox archives are enabled"
             )
-        if self.enabled and not self.expected_bucket_owner:
+        if self.enabled and not self.access_key_auth and not self.expected_bucket_owner:
             raise SandboxArchivePolicyError(
                 "expected_bucket_owner is required when sandbox archives are enabled"
             )
@@ -135,9 +164,32 @@ class SandboxArchivePolicy:
         if self.revision < 0:
             raise SandboxArchivePolicyError("revision must be a non-negative integer")
 
+    @property
+    def uses_access_key(self) -> bool:
+        """Whether uploads authenticate with a saved access key."""
+        return self.access_key_auth
+
+    def equivalent(self, other: SandboxArchivePolicy) -> bool:
+        """Compare archive identity and credentials.
+
+        Equality ignores credentials so a sandbox marker matches the live
+        policy. Heartbeat replay still has to notice a key rotation that
+        arrives without a new revision.
+        """
+        return (
+            self == other
+            and self.aws_access_key_id == other.aws_access_key_id
+            and self.aws_secret_access_key == other.aws_secret_access_key
+        )
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> SandboxArchivePolicy:
-        """Parse a database or heartbeat object without accepting credential fields."""
+        """Parse a database or heartbeat object.
+
+        Static credentials are optional. Session tokens and custom endpoints
+        stay rejected: an access key is the only extra credential, and the
+        destination remains the fixed AWS bucket.
+        """
         raw = dict(value or {})
         uri = raw.pop("s3_uri", SANDBOX_ARCHIVE_S3_URI)
         if uri != SANDBOX_ARCHIVE_S3_URI:
@@ -147,12 +199,17 @@ class SandboxArchivePolicy:
             "region",
             "kms_key_arn",
             "expected_bucket_owner",
+            "access_key_auth",
+            "aws_access_key_id",
+            "aws_secret_access_key",
             "max_archive_bytes",
             "multipart_threshold_bytes",
             "multipart_part_bytes",
             "revision",
             # A response timestamp is metadata, not broker configuration.
             "updated_at",
+            # Admin responses name this flag. Hosts ignore it.
+            "aws_secret_access_key_configured",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -160,11 +217,15 @@ class SandboxArchivePolicy:
                 "unknown sandbox archive setting(s): " + ", ".join(unknown)
             )
         raw.pop("updated_at", None)
+        raw.pop("aws_secret_access_key_configured", None)
         return cls(
             enabled=raw.get("enabled", False),
             region=raw.get("region", ""),
             kms_key_arn=raw.get("kms_key_arn", ""),
             expected_bucket_owner=raw.get("expected_bucket_owner", ""),
+            access_key_auth=raw.get("access_key_auth", False),
+            aws_access_key_id=raw.get("aws_access_key_id", ""),
+            aws_secret_access_key=raw.get("aws_secret_access_key", ""),
             max_archive_bytes=raw.get("max_archive_bytes", DEFAULT_MAX_ARCHIVE_BYTES),
             multipart_threshold_bytes=raw.get(
                 "multipart_threshold_bytes", DEFAULT_MULTIPART_THRESHOLD_BYTES
@@ -174,7 +235,11 @@ class SandboxArchivePolicy:
         )
 
     def as_dict(self) -> dict[str, bool | int | str]:
-        """Return the canonical heartbeat/admin representation."""
+        """Return the marker and admin identity, without AWS credentials.
+
+        Sandbox markers are written inside the container. Keeping the access
+        key out of this form is what stops it from entering the sandbox.
+        """
         return {
             "enabled": self.enabled,
             "s3_uri": SANDBOX_ARCHIVE_S3_URI,
@@ -185,13 +250,27 @@ class SandboxArchivePolicy:
             "multipart_threshold_bytes": self.multipart_threshold_bytes,
             "multipart_part_bytes": self.multipart_part_bytes,
             "revision": self.revision,
+            **({"access_key_auth": True} if self.access_key_auth else {}),
         }
+
+    def as_broker_dict(self) -> dict[str, bool | int | str]:
+        """Return the host payload, including a saved access key when one exists."""
+        values = self.as_dict()
+        if self.aws_access_key_id:
+            values["aws_access_key_id"] = self.aws_access_key_id
+        if self.aws_secret_access_key:
+            values["aws_secret_access_key"] = self.aws_secret_access_key
+        return values
 
     def as_storage_dict(self) -> dict[str, bool | int | str]:
         """Return only values kept inside the JSONB policy column."""
         values = self.as_dict()
         values.pop("s3_uri")
         values.pop("revision")
+        if self.aws_access_key_id:
+            values["aws_access_key_id"] = self.aws_access_key_id
+        if self.aws_secret_access_key:
+            values["aws_secret_access_key"] = self.aws_secret_access_key
         return values
 
 

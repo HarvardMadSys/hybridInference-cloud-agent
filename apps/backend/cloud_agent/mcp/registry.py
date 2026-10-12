@@ -52,7 +52,7 @@ from cloud_agent.mcp.models import (
     ToolRule,
     Transport,
 )
-from cloud_agent.mcp.net_policy import EndpointRejected, resource_covers, validate_header_name
+from cloud_agent.mcp.net_policy import EndpointRejected, resource_covers
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
@@ -392,24 +392,6 @@ async def resolve_connection(
             error="This connection's sign-in was for another address. Sign in again.",
             error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
         )
-    if (
-        connection.auth.kind is AuthKind.STATIC
-        and connection.config.transport is not Transport.STDIO
-    ):
-        # Again at dispatch, not only on the form: a row saved before the form
-        # refused these names would otherwise still send its secret as one.
-        try:
-            validate_header_name(connection.auth.header.header_name)
-        except EndpointRejected as exc:
-            return ResolvedConnection(
-                connection=connection,
-                snapshot=snapshot,
-                error=(
-                    f"This connection's credential header is not allowed ({exc}). "
-                    "Connect it again with a different header name."
-                ),
-                error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
-            )
 
     resolved_cipher = cipher
     if resolved_cipher is None:
@@ -449,6 +431,16 @@ async def resolve_connection(
             error="This connection could not be read. Connect it again.",
             error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
         )
+    if connection.auth.kind is AuthKind.STATIC:
+        try:
+            connection.auth.header.render(secret)
+        except EndpointRejected:
+            return ResolvedConnection(
+                connection=connection,
+                snapshot=snapshot,
+                error="This connection's credential uses an invalid HTTP header.",
+                error_kind=ConnectionErrorKind.PROTOCOL_INCOMPATIBLE,
+            )
     return ResolvedConnection(
         connection=connection,
         credential={"secret": secret, "refresh_rotates": bool(row.get("refresh_rotates"))},

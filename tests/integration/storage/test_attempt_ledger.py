@@ -89,6 +89,7 @@ def _fence(job: dict, claim: dict, sandbox: dict) -> dict:
 async def _residency(
     store: Storage,
     job: dict,
+    claim: dict,
     sandbox: dict,
     *,
     grant_id: str = "grant-actual-resident",
@@ -96,6 +97,8 @@ async def _residency(
 ) -> dict:
     residency = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="shared-runner",
         runtime_id="claude-code",
         runtime_version=sandbox["runtime_version"],
@@ -244,7 +247,7 @@ async def test_capture_actual_residency_grant_before_cli_and_preserve_rotations(
             "UPDATE agent_attempts SET grant_id = 'disposable-wrong-grant' WHERE id = $1",
             claim["attempt_id"],
         )
-    residency = await _residency(store, job, sandbox)
+    residency = await _residency(store, job, claim, sandbox)
     assert await _record(store, job, claim, sandbox, residency)
     assert await _record(store, job, claim, sandbox, residency)
     rows = await ledger.ledger_rows_for_job(job_id=job["id"])
@@ -261,6 +264,8 @@ async def test_capture_actual_residency_grant_before_cli_and_preserve_rotations(
         )
     rotated = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="shared-runner",
         runtime_id="claude-code",
         runtime_version=sandbox["runtime_version"],
@@ -296,11 +301,14 @@ async def test_hot_followup_captures_same_grant_for_its_own_attempt(
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="ledger-container", context_status="new"
     )
-    residency = await _residency(store, job, sandbox)
+    residency = await _residency(store, job, claim, sandbox)
     assert await _record(store, job, claim, sandbox, residency)
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=residency["generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=residency["generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="ledger-native-session",
@@ -342,8 +350,12 @@ async def test_hot_followup_captures_same_grant_for_its_own_attempt(
         **next_fence, container_id="ledger-container", context_status="live"
     )
     assert (await ledger.ledger_rows_for_job(job_id=followup["id"]))[0]["id"] is None
-    assert await store.sandbox.admit_thread_sandbox_turn(**next_fence, job_id=followup["id"])
-    assert await store.sandbox.admit_thread_sandbox_turn(**next_fence, job_id=followup["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **next_fence, residency_generation=residency["generation"], job_id=followup["id"]
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **next_fence, residency_generation=residency["generation"], job_id=followup["id"]
+    )
     rows = await ledger.ledger_rows_for_job(job_id=followup["id"])
     assert len(rows) == 1 and rows[0]["id"] is not None
     assert rows[0]["grant_id"] == "grant-actual-resident"
@@ -360,7 +372,11 @@ async def test_missing_historical_attribution_remains_untracked(
     """No grant or no binding must never become a false zero."""
     job, claim, sandbox = await _reserve_shared_chat(store)
     residency = await _residency(
-        store, job, sandbox, binding_id=None if missing == "binding" else "gateway-binding-one"
+        store,
+        job,
+        claim,
+        sandbox,
+        binding_id=None if missing == "binding" else "gateway-binding-one",
     )
     if missing == "grant":
         async with db.acquire() as conn:
@@ -371,7 +387,9 @@ async def test_missing_historical_attribution_remains_untracked(
             )
     assert await _record(store, job, claim, sandbox, residency)
     assert await store.sandbox.admit_thread_sandbox_turn(
-        **_fence(job, claim, sandbox), job_id=job["id"]
+        **_fence(job, claim, sandbox),
+        residency_generation=residency["generation"],
+        job_id=job["id"],
     )
     rows = await ledger.ledger_rows_for_job(job_id=job["id"])
     assert len(rows) == 1
@@ -385,17 +403,123 @@ async def test_missing_historical_attribution_remains_untracked(
 async def test_a_stale_residency_generation_is_refused_at_record(store):
     """The lease has one row now; a host echoing another generation is fenced out."""
     job, claim, sandbox = await _reserve_shared_chat(store)
-    residency = await _residency(store, job, sandbox)
+    residency = await _residency(store, job, claim, sandbox)
     stale = {**residency, "generation": residency["generation"] + 1}
     assert not await _record(store, job, claim, sandbox, stale)
     assert await _record(store, job, claim, sandbox, residency)
+
+
+async def test_an_expired_residency_cannot_be_recorded_or_capture_a_ledger_row(
+    db, store, ledger: PostgresLedgerRepository
+):
+    """The residency clock removes authority before the reaper changes its status."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    residency = await _residency(store, job, claim, sandbox)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_thread_sandbox_memberships
+            SET residency_lease_expires_at = NOW() - INTERVAL '1 second'
+            WHERE thread_id = $1
+            """,
+            job["thread_id"],
+        )
+        still_hot = await conn.fetchval(
+            """
+            SELECT residency_status = 'hot'
+              AND residency_generation = $2
+              AND residency_lease_expires_at <= NOW()
+            FROM agent_thread_sandbox_memberships
+            WHERE thread_id = $1
+            """,
+            job["thread_id"],
+            residency["generation"],
+        )
+    assert still_hot, "the reaper must not be needed to make this lease invalid"
+
+    assert not await _record(store, job, claim, sandbox, residency)
+    rows = await ledger.ledger_rows_for_job(job_id=job["id"])
+    assert len(rows) == 1
+    assert rows[0]["attempt_id"] == claim["attempt_id"]
+    assert rows[0]["id"] is None
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_attempt_ledger WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == 0
+        )
+
+
+async def test_residency_grant_link_rechecks_expiry_after_waiting_on_the_row(
+    db,
+    store: Storage,
+):
+    """A blocked link cannot attach a grant after the residency clock expires."""
+    job, _claim_row, sandbox = await _reserve_shared_chat(store)
+    generation = sandbox["residency_generation"]
+    linking = None
+
+    async with db.acquire() as setup:
+        await setup.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = "
+            "clock_timestamp() + INTERVAL '250 milliseconds' "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    async with db.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT thread_id FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = $1 FOR UPDATE",
+            job["thread_id"],
+        )
+        linking = asyncio.create_task(
+            store.grants.link_residency_grant(
+                thread_id=job["thread_id"],
+                generation=generation,
+                grant_id="grant-too-late",
+                binding_id="binding-too-late",
+            )
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        if not waiting:
+            linking.cancel()
+            await asyncio.gather(linking, return_exceptions=True)
+            pytest.fail("residency grant linking did not wait on the membership row lock")
+        await asyncio.sleep(0.35)
+
+    assert linking is not None
+    assert not await asyncio.wait_for(linking, timeout=2)
+    async with db.acquire() as conn:
+        member = await conn.fetchrow(
+            "SELECT residency_status, residency_grant_id, residency_binding_id, "
+            "residency_lease_expires_at <= clock_timestamp() AS expired "
+            "FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert member["residency_status"] == "hot"
+    assert member["expired"] is True
+    assert member["residency_grant_id"] is None
+    assert member["residency_binding_id"] is None
 
 
 @pytest.mark.parametrize("write", ["startup", "admission"])
 async def test_attribution_insert_failure_rolls_back_the_cli_admission(db, store, write):
     """A failed snapshot-reference write cannot acknowledge untracked execution."""
     job, claim, sandbox = await _reserve_shared_chat(store)
-    residency = await _residency(store, job, sandbox)
+    residency = await _residency(store, job, claim, sandbox)
     async with db.acquire() as conn:
         before_generation = await conn.fetchval(
             "SELECT residency_generation FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
@@ -418,7 +542,9 @@ async def test_attribution_insert_failure_rolls_back_the_cli_admission(db, store
                 await _record(store, job, claim, sandbox, residency)
             else:
                 await store.sandbox.admit_thread_sandbox_turn(
-                    **_fence(job, claim, sandbox), job_id=job["id"]
+                    **_fence(job, claim, sandbox),
+                    residency_generation=residency["generation"],
+                    job_id=job["id"],
                 )
         async with db.acquire() as conn:
             member = await conn.fetchrow(
@@ -442,7 +568,7 @@ async def test_stale_attempt_cannot_capture_a_grant(
 ):
     """The execution fence, including expiry, protects both capture paths."""
     job, claim, sandbox = await _reserve_shared_chat(store)
-    residency = await _residency(store, job, sandbox)
+    residency = await _residency(store, job, claim, sandbox)
     if expired:
         async with db.acquire() as conn:
             await conn.execute(
@@ -454,7 +580,9 @@ async def test_stale_attempt_cannot_capture_a_grant(
         claim["lease_generation"] += 1
     assert not await _record(store, job, claim, sandbox, residency)
     assert not await store.sandbox.admit_thread_sandbox_turn(
-        **_fence(job, claim, sandbox), job_id=job["id"]
+        **_fence(job, claim, sandbox),
+        residency_generation=residency["generation"],
+        job_id=job["id"],
     )
     assert (await ledger.ledger_rows_for_job(job_id=job["id"]))[0]["id"] is None
 
@@ -468,7 +596,7 @@ async def test_capture_serializes_with_finish_without_inverting_attempt_membersh
 ):
     """A finish owning the attempt can still close membership while capture waits."""
     job, claim, sandbox = await _reserve_shared_chat(store)
-    residency = await _residency(store, job, sandbox)
+    residency = await _residency(store, job, claim, sandbox)
     async with db.acquire() as conn:
         if write == "admission":
             await conn.execute(
@@ -486,7 +614,9 @@ async def test_capture_serializes_with_finish_without_inverting_attempt_membersh
                 _record(store, job, claim, sandbox, residency)
                 if write == "startup"
                 else store.sandbox.admit_thread_sandbox_turn(
-                    **_fence(job, claim, sandbox), job_id=job["id"]
+                    **_fence(job, claim, sandbox),
+                    residency_generation=residency["generation"],
+                    job_id=job["id"],
                 )
             )
             try:
@@ -593,6 +723,46 @@ async def test_refresh_claims_are_exclusive_and_expired_writes_are_fenced(
     row = (await ledger.ledger_rows_for_job(job_id=job["id"]))[0]
     assert row["snapshot"]["totals"]["calls"] == 3
     assert row["refreshing"] is False
+
+
+async def test_queue_refresh_rechecks_a_claim_expiry_after_a_plain_row_lock(
+    db, store, ledger: PostgresLedgerRepository
+):
+    job, _, ledger_id = await _seed_attempt(db, store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempt_ledger "
+            "SET refresh_lease_expires_at = clock_timestamp() + INTERVAL '400 milliseconds', "
+            "next_refresh_at = NULL WHERE id = $1",
+            ledger_id,
+        )
+
+    queuing = None
+    async with db.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT id FROM agent_attempt_ledger WHERE id = $1 FOR UPDATE",
+            ledger_id,
+        )
+        queuing = asyncio.create_task(ledger.queue_job_ledger_refresh(job_id=job["id"]))
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "refresh queueing did not wait on the ledger row lock"
+        await asyncio.sleep(0.55)
+
+    assert queuing is not None
+    assert await asyncio.wait_for(queuing, timeout=2) == 1
+    row = (await ledger.ledger_rows_for_job(job_id=job["id"]))[0]
+    assert row["next_refresh_at"] is not None
+    assert row["refresh_lease_expires_at"] <= datetime.now(timezone.utc)
 
 
 async def test_failure_preserves_cached_snapshot_and_throttles_manual_retry(

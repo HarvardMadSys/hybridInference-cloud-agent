@@ -1,4 +1,4 @@
-"""The shared archive policy accepts only bounded, non-credential configuration."""
+"""The shared archive policy accepts bounded configuration and one optional access key."""
 
 from __future__ import annotations
 
@@ -78,3 +78,32 @@ def test_disabled_default_is_valid_and_contains_no_credentials() -> None:
     assert policy.enabled is False
     assert policy.revision == 0
     assert not any("credential" in key or "access_key" in key for key in policy.as_dict())
+
+
+_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+
+def test_access_key_replaces_bucket_owner_and_kms_and_stays_out_of_markers() -> None:
+    policy = SandboxArchivePolicy.from_mapping(
+        {
+            **_enabled(),
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "aws_access_key_id": _ACCESS_KEY_ID,
+            "aws_secret_access_key": _SECRET_ACCESS_KEY,
+        }
+    )
+
+    assert policy.uses_access_key is True
+    assert "aws_access_key_id" not in policy.as_dict()
+    assert "aws_secret_access_key" not in policy.as_dict()
+    assert policy.as_broker_dict()["aws_access_key_id"] == _ACCESS_KEY_ID
+    assert policy.as_broker_dict()["aws_secret_access_key"] == _SECRET_ACCESS_KEY
+    assert policy.as_storage_dict()["aws_secret_access_key"] == _SECRET_ACCESS_KEY
+    restored = SandboxArchivePolicy.from_mapping(policy.as_dict())
+    assert restored == policy
+    assert restored.access_key_auth is True
+    assert restored.aws_secret_access_key == ""
+    assert not restored.equivalent(policy)
+    assert SandboxArchivePolicy.from_mapping(policy.as_broker_dict()).equivalent(policy)

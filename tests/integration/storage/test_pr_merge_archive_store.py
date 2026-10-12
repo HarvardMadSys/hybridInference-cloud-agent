@@ -62,9 +62,23 @@ async def _published_job(pool, store, *, pr_url=PR_URL, retain=False, **override
         assert await store.sandbox.mark_thread_sandbox_running(
             **fence, container_id=f"merge-container-{job['thread_id']}", context_status="new"
         )
-        assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+        residency = await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host="runner-a",
+            sandbox_id=sandbox["sandbox_id"],
+            runtime_id=sandbox["runtime_id"],
+            runtime_version=sandbox["runtime_version"],
+            ttl_seconds=1800,
+        )
+        assert residency is not None
+        assert await store.sandbox.admit_thread_sandbox_turn(
+            **fence, residency_generation=residency["generation"], job_id=job["id"]
+        )
         assert await store.sandbox.settle_thread_sandbox(
             **fence,
+            residency_generation=residency["generation"],
             job_id=job["id"],
             context_status="live",
             native_session_id=f"merge-native-{job['thread_id']}",

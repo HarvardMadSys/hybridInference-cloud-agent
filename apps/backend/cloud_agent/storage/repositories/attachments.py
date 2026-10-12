@@ -37,7 +37,7 @@ _WORKER_FENCE = """
 _WORKER_AUTHORIZATION = """
     WHERE j.id = $1 AND a.id = $2 AND a.lease_generation = $3
       AND j.state = 'running' AND a.status = 'running'
-      AND a.lease_expires_at > NOW()
+      AND a.lease_expires_at > clock_timestamp()
       AND h.credential_hash IS NOT NULL AND h.status <> 'disabled'
 """
 

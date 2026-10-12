@@ -72,6 +72,7 @@ if TYPE_CHECKING:
         McpConnectionRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.ports.source_control import GitHubAccountSession, GitLabAccountSession
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -234,9 +235,16 @@ async def _connect_github_for_user(
         user_id=user_id,
         provider="github",
     )
-    tokens = await app_credentials.exchange_user_code(body.code)
-    profile = await app_credentials.user_profile(tokens.access_token)
-    installations = await app_credentials.installations_for_user(tokens.access_token)
+    # GitHub revokes a user's whole App authorization, not one access token.
+    # Start serialization before exchanging the code so a concurrent disconnect
+    # cannot revoke the just-minted grant before this callback stores it.
+    async with store.source_control.serialize_github_account(user_id=user_id) as account_store:
+        profile, installations = await _complete_github_connection(
+            body=body,
+            user_id=user_id,
+            account_store=account_store,
+            app_credentials=app_credentials,
+        )
     install_url = None
     # Offered whenever the App is not on the user's own account — not only when
     # it is on no account at all. A member of an organization that already had
@@ -249,10 +257,32 @@ async def _connect_github_for_user(
     if not own_account_installed:
         github_install_url = (setting_env("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
         if github_install_url:
+            # This independent state write happens after the account lock has
+            # released its connection, so a one-connection pool cannot deadlock.
             install_state = await issue_oauth_state(
                 store.source_control, user_id=user_id, provider="github"
             )
             install_url = github_authorization_url(github_install_url, state=install_state)
+    return GitHubConnectionResponse(
+        connections=await store.source_control.list_repo_grants(user_id=user_id),
+        repos=await repos_for_user(
+            user_id, store=store.source_control, app_credentials=app_credentials
+        ),
+        install_url=install_url,
+    )
+
+
+async def _complete_github_connection(
+    *,
+    body: GitHubConnectRequest | OAuthConnectRequest,
+    user_id: str,
+    account_store: GitHubAccountSession,
+    app_credentials: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Complete GitHub OAuth while the user's whole-grant lock is held."""
+    tokens = await app_credentials.exchange_user_code(body.code)
+    profile = await app_credentials.user_profile(tokens.access_token)
+    installations = await app_credentials.installations_for_user(tokens.access_token)
     # The account is recorded even with no installation: the user *has*
     # connected, and what they lack is repository access. Treating the two as
     # one sent them back to a Connect button they had just pressed.
@@ -260,7 +290,7 @@ async def _connect_github_for_user(
     # repositories the user may work on is asked of GitHub as them, long after
     # this request: the publisher and the goal controller check again.
     cipher = app_credentials.cipher
-    await store.source_control.connect_github_account(
+    await account_store.connect_github_account(
         user_id=user_id,
         github_user_id=profile["id"],
         login=profile["login"],
@@ -277,13 +307,40 @@ async def _connect_github_for_user(
         "agent_github_connected",
         extra={"event": "agent_github_connected", "installations": len(installations)},
     )
-    return GitHubConnectionResponse(
-        connections=await store.source_control.list_repo_grants(user_id=user_id),
-        repos=await repos_for_user(
-            user_id, store=store.source_control, app_credentials=app_credentials
-        ),
-        install_url=install_url,
+    return profile, installations
+
+
+async def _complete_gitlab_connection(
+    *,
+    code: str,
+    verifier: str,
+    user_id: str,
+    account_store: GitLabAccountSession,
+    gitlab_oauth: GitLabOAuthClient,
+) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+    """Complete GitLab OAuth while this user's provider lock is held."""
+    token = await gitlab_oauth.exchange_code(code, verifier)
+    profile = await gitlab_oauth.verify_user(token["access_token"])
+    projects = await gitlab_oauth.list_projects(token["access_token"])
+    previous_connection = await account_store.get_gitlab_connection(user_id=user_id)
+    connection_id = await account_store.upsert_gitlab_connection(
+        user_id=user_id,
+        external_user_id=profile["id"],
+        username=profile["username"],
+        display_name=profile.get("name"),
+        web_url=profile.get("web_url"),
+        access_token_ciphertext=gitlab_oauth.cipher.encrypt(token["access_token"]),
+        refresh_token_ciphertext=gitlab_oauth.cipher.encrypt(token["refresh_token"]),
+        expires_at=gitlab_oauth.token_expiry(token),
     )
+    if previous_connection is not None:
+        try:
+            await gitlab_oauth.revoke(
+                gitlab_oauth.cipher.decrypt(previous_connection["access_token_ciphertext"])
+            )
+        except Exception:
+            logger.warning("agent_gitlab_previous_token_revoke_failed", exc_info=True)
+    return connection_id, profile, projects
 
 
 async def _source_control_providers(
@@ -537,29 +594,16 @@ async def connect_gitlab_integration(
         )
         if verifier is None:
             raise OAuthStateError("The source-control authorization expired or is invalid.")
-        token = await gitlab_oauth.exchange_code(body.code, verifier)
-        profile = await gitlab_oauth.verify_user(token["access_token"])
-        projects = await gitlab_oauth.list_projects(token["access_token"])
-        previous_connection = await job_store.source_control.get_gitlab_connection(
+        async with job_store.source_control.serialize_gitlab_account(
             user_id=user["user_id"]
-        )
-        connection_id = await job_store.source_control.upsert_gitlab_connection(
-            user_id=user["user_id"],
-            external_user_id=profile["id"],
-            username=profile["username"],
-            display_name=profile.get("name"),
-            web_url=profile.get("web_url"),
-            access_token_ciphertext=gitlab_oauth.cipher.encrypt(token["access_token"]),
-            refresh_token_ciphertext=gitlab_oauth.cipher.encrypt(token["refresh_token"]),
-            expires_at=gitlab_oauth.token_expiry(token),
-        )
-        if previous_connection is not None:
-            try:
-                await gitlab_oauth.revoke(
-                    gitlab_oauth.cipher.decrypt(previous_connection["access_token_ciphertext"])
-                )
-            except Exception:
-                logger.warning("agent_gitlab_previous_token_revoke_failed", exc_info=True)
+        ) as account_store:
+            connection_id, profile, projects = await _complete_gitlab_connection(
+                code=body.code,
+                verifier=verifier,
+                user_id=user["user_id"],
+                account_store=account_store,
+                gitlab_oauth=gitlab_oauth,
+            )
     except Exception as exc:
         if not isinstance(exc, (OAuthStateError, SourceControlError)):
             logger.warning("agent_gitlab_connect_failed", exc_info=True)
@@ -592,22 +636,25 @@ async def disconnect_gitlab_integration(
     gitlab_oauth: GitLabOAuthClient | None = Depends(get_agent_gitlab_oauth),
     gitlab_load_status: LoadStatus = Depends(get_gitlab_load_status),
 ) -> SourceControlIntegrationsResponse:
-    """Revoke GitLab best-effort, then always remove the local credential."""
+    """Conditionally remove the local credential and revoke its original token."""
     job_store = _require_store(store)
-    connection = await job_store.source_control.get_gitlab_connection(user_id=user["user_id"])
-    if connection is None or connection["id"] != connection_id:
-        raise HTTPException(status_code=404, detail="No such GitLab connection")
-    if gitlab_oauth is not None:
-        try:
-            access_token = await gitlab_oauth.access_token_for_connection(
-                job_store.source_control, connection
-            )
-            await gitlab_oauth.revoke(access_token)
-        except Exception:
-            logger.warning("agent_gitlab_revoke_failed", exc_info=True)
-    await job_store.source_control.delete_gitlab_connection(
-        user_id=user["user_id"], connection_id=connection_id
-    )
+    async with job_store.source_control.serialize_gitlab_account(
+        user_id=user["user_id"]
+    ) as account_store:
+        connection = await account_store.delete_gitlab_connection(
+            user_id=user["user_id"], connection_id=connection_id
+        )
+        if connection is None:
+            raise HTTPException(status_code=404, detail="No such GitLab connection")
+        if gitlab_oauth is not None:
+            try:
+                await gitlab_oauth.revoke(
+                    gitlab_oauth.cipher.decrypt(connection["access_token_ciphertext"])
+                )
+            except Exception:
+                # Keep reconnect behind the lock until the old token's best-effort
+                # revocation completes, matching the GitHub whole-account boundary.
+                logger.warning("agent_gitlab_revoke_failed", exc_info=True)
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
             user_id=user["user_id"],
@@ -670,18 +717,23 @@ async def disconnect_github_account(
     App is unavailable: these are this service's own rows.
     """
     job_store = _require_store(store)
-    account = await job_store.source_control.get_github_account(user_id=user["user_id"])
     credentials = github.credentials
-    if credentials is not None and account and account.get("access_token_ciphertext"):
-        try:
-            await credentials.revoke_user_authorization(
-                credentials.cipher.decrypt(account["access_token_ciphertext"])
-            )
-        except Exception:
-            logger.warning("agent_github_revoke_failed", exc_info=True)
-    await job_store.source_control.disconnect_github_account(user_id=user["user_id"])
-    if credentials is not None:
-        credentials.forget_user(user["user_id"])
+    async with job_store.source_control.serialize_github_account(
+        user_id=user["user_id"]
+    ) as account_store:
+        account = await account_store.disconnect_github_account(user_id=user["user_id"])
+        if credentials is not None:
+            if account is not None and account.get("access_token_ciphertext"):
+                try:
+                    await credentials.revoke_user_authorization(
+                        credentials.cipher.decrypt(account["access_token_ciphertext"])
+                    )
+                except Exception:
+                    # The local disconnect remains authoritative. Holding the
+                    # serialization lock through this best-effort call prevents a
+                    # live reconnect from minting a grant that this revoke removes.
+                    logger.warning("agent_github_revoke_failed", exc_info=True)
+            credentials.forget_user(user["user_id"])
     logger.info("agent_github_disconnected", extra={"event": "agent_github_disconnected"})
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(

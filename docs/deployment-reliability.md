@@ -14,6 +14,45 @@ readiness fence continues; activation still requires success. The watcher never
 interrupts migrations or service replacement. Deployments outside Actions use
 the bounded check directly.
 
+## Drain through both activations
+
+A single-host rollout that must not interrupt work uses one explicit host as a
+database-backed admission fence. The orchestrator runs on the control-plane
+machine, outside the pool it is draining. It first reads the host's current
+owner token and canonical `drain_fence_epoch`, then asks the API to replace that
+exact pair with a fresh opaque owner token. The database accepts the change only
+if both observations are still current and rotates the epoch as it commits.
+
+The orchestrator then waits until that exact host still reports `draining` and
+`slots_used=0`. A claim that committed just before Drain is allowed to finish;
+no later claim can commit while the status remains draining. The host is
+activated while the fence stays in place. Control-plane activation sets
+`AGENT_DEPLOY_DRAINING_HOST` to the exact enrollment name, which authorizes the
+deployment readiness check to accept only that named draining host. When
+new-chat placement is pinned to a different enrolled host, that host must be
+online at the same target commit; the name difference is not itself a failure.
+The check requires zero occupied slots on the draining host, the target
+deployment capability, a fresh heartbeat and a successful reverse broker probe,
+then rereads the same conditions after the network await. Ordinary readiness
+remains online-only.
+
+Only a normal fenced release holding the exact active owner token may put the host online.
+An identical acquire or release retry is idempotent, including after a lost
+success response. A successor may transfer ownership only from the exact token
+and epoch it observed; an operator action, lifecycle or credential change,
+placement change, or competing rollout rotates the epoch and makes the stale
+request fail. The database also refuses deletion of a host while its fence is
+active. Deployment remains serialized for the rest of the activation protocol,
+but drain safety no longer depends on that serialization or on operators
+leaving the row untouched.
+
+On cancellation or an uncertain result, fail closed: leave the host draining
+and retry with the same verified owner. Queued work waits; an in-flight turn is
+never killed or replayed. Migration `0051_host_drain_fence_epoch` and the
+`AGENT_DEPLOY_DRAIN_FENCE_V2` recipe marker are the rollback floor after V2
+activation. The V1 marker remains only for an older orchestrator performing the
+bridge upgrade.
+
 ## Before stopping a serving runner
 
 Source and artifact deployments resolve the candidate runner image through
@@ -23,6 +62,12 @@ or live stack mounts other than the Docker socket. It creates and removes its
 own temporary guest on network `none`, verifies kernel isolation and the guest
 observer, and compares the **built image's** runtime/helper labels with the
 candidate's pins.
+
+The stop signal drains the host service itself: it stops claiming and waits for
+every tracked turn child to exit without forwarding SIGTERM to those children.
+Each child owns exactly one turn and exits naturally when that turn settles.
+Turn children also install their drain handler before preflight as protection
+against an out-of-band signal, but deployment does not rely on that fallback.
 
 If that check fails, the old readiness marker and runners remain in place. The
 replacement runners, relays and broker must still pass their live checks before
@@ -159,6 +204,10 @@ deployment owner configures the receiver and its credentials.
 
 ## Recovery boundaries
 
+The [backup and recovery runbook](disaster-recovery.md) defines initial retention
+and recovery targets, coordinated database/host recovery sets, encryption-key
+preservation, restore-drill acceptance, and previous artifact-release recovery.
+
 Inspect both machines' deployment markers and the failure reason, then retry
 the same verified target. A failed host rollout remains a failed rollout even
 if it restored the recorded generation. Control-plane failure leaves compatible
@@ -166,8 +215,9 @@ migrations in place; there is no automatic database downgrade.
 
 A hard-cancelled host activation may leave the readiness marker pending while
 Docker Engine continues the unbounded graceful runner stop. Running turns still
-finish; after the runner exits, the host remains unavailable until activation
-is rerun for the same verified target. Do not publish readiness by hand.
+finish naturally without a deployment signal reaching their child processes;
+after the runner exits, the host remains unavailable until activation is rerun
+for the same verified target. Do not publish readiness by hand.
 
 If the host succeeds before the control plane fails, the exact-SHA gate can keep
 new work queued until the retry succeeds. The queue monitor detects this state.

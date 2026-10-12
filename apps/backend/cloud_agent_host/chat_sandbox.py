@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_EVENTS,
@@ -142,6 +143,12 @@ ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S = 120.0
 ARCHIVE_EXPORT_TIMEOUT_PER_GIB_S = ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S
 CHAT_STATE_DIR = "/agent-state"
 CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
+#: Where Codex, OpenCode and Kilo keep one mode-0700 provider home per member
+#: (``resident_transport.PRIVATE_MEMBER_STATE_ROOTS``). Only a home's own
+#: member UID can open it.
+PRIVATE_MEMBER_HOME_COLLECTIONS = tuple(
+    f"{CHAT_STATE_DIR}/{runtime}-members" for runtime in ("codex", "opencode", "kilo")
+)
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
 #: Broker-owned durable receipt for the immutable pre-prompt archive.  It is
@@ -342,7 +349,50 @@ KATA_HELPER_CAPABILITIES = (
     "SYS_PTRACE",
 )
 _UNPRIVILEGED_EXEC = ("/usr/bin/setpriv", "--no-new-privs", "--")
+# A sandbox environment reaches ``docker exec`` by name (``--env KEY``), its
+# value through the Docker CLI's own environment, so a member's inference or
+# MCP credential never sits in the client's argv (``/proc/<pid>/cmdline``,
+# ``ps``, process accounting) for the life of a resident CLI. Only the names
+# the Docker CLI itself reads -- its endpoint and config directory, executable,
+# plugin and credential-helper lookup, TLS roots, proxies, the Go runtime and
+# the dynamic loader -- still travel as ``KEY=VALUE``: a sandbox value under one
+# of them must not reconfigure the client, and none of them carries a secret.
+_DOCKER_CLIENT_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "GODEBUG",
+        "GOGC",
+        "GOMAXPROCS",
+        "GOMEMLIMIT",
+        "GOTRACEBACK",
+        "GLIBC_TUNABLES",
+    }
+)
+_DOCKER_CLIENT_ENV_PREFIXES = (
+    "DOCKER_",
+    "BUILDKIT_",
+    "BUILDX_",
+    "COMPOSE_",
+    "LD_",
+    "OTEL_",
+    "XDG_",
+)
+_PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY"})
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+
+def _exec_env_by_name(key: str) -> bool:
+    """Whether one sandbox variable crosses ``docker exec`` as a bare name."""
+    return not (
+        key in _DOCKER_CLIENT_ENV
+        or key.upper() in _PROXY_ENV
+        or key.startswith(_DOCKER_CLIENT_ENV_PREFIXES)
+    )
+
 
 # PID 1 contains no chat credential and owns no chat state outside the
 # container writable layer. A reconnectable protocol bridge may later replace
@@ -1776,7 +1826,19 @@ class ChatSandboxManager:
         relays = [[relay.host, relay.port] for relay in network.relays]
         result = self.exec_capture(
             spec,
-            ["python3", "-c", _GUEST_NETWORK_CHECK, expected_resolver, json.dumps(relays)],
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                _GUEST_NETWORK_CHECK,
+                expected_resolver,
+                json.dumps(relays),
+            ],
+            # The workspace is writable by the repository and every agent turn.
+            # Isolated Python from / never imports a planted json.py or
+            # socket.py in place of the standard library, so the check can
+            # neither be spoofed nor stall start-up behind its timeout.
+            workdir="/",
             timeout_s=45,
         )
         try:
@@ -2450,7 +2512,11 @@ class ChatSandboxManager:
         user_gid: int | None = None,
         container_id: str | None = None,
     ) -> builtins.list[str]:
-        """Compose ``docker exec`` after identity/running checks at spawn time."""
+        """Compose ``docker exec`` after identity/running checks at spawn time.
+
+        Most of ``env`` is named here and valued only in the client environment
+        :meth:`exec_client_env` builds; run the command with that environment.
+        """
         if not argv:
             raise ValueError("a retained sandbox exec needs an argv")
         command = [self.backend.docker_binary, "exec"]
@@ -2468,7 +2534,7 @@ class ChatSandboxManager:
         for key, value in sorted((env or {}).items()):
             if not key or "=" in key or "\x00" in key or "\x00" in value:
                 raise ValueError(f"invalid environment entry {key!r}")
-            command += ["--env", f"{key}={value}"]
+            command += ["--env", key if _exec_env_by_name(key) else f"{key}={value}"]
         command.append(container_id or spec.container_name)
         if self.backend.runtime == KATA_RUNTIME:
             command += list(_UNPRIVILEGED_EXEC)
@@ -2478,6 +2544,17 @@ class ChatSandboxManager:
                 command += ["/bin/sh", "-c", 'exec "$@" </dev/null', "sh"]
         command += argv
         return command
+
+    @staticmethod
+    def exec_client_env(env: dict[str, str] | None = None) -> dict[str, str]:
+        """Return the Docker CLI environment that supplies a named ``env``.
+
+        The broker's own environment still configures the client; only the
+        values :meth:`build_exec_command` passed by name are added to it.
+        """
+        client = {**os.environ}
+        client.update({key: value for key, value in (env or {}).items() if _exec_env_by_name(key)})
+        return client
 
     def spawn(
         self,
@@ -2530,7 +2607,7 @@ class ChatSandboxManager:
         )
         process = subprocess.Popen(
             command,
-            env={**os.environ},
+            env=self.exec_client_env(env),
             stdin=subprocess.PIPE if live_input else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2849,13 +2926,15 @@ class ChatSandboxManager:
             raise ValueError("resident slot does not match its member uid")
         # Codex, OpenCode, and Kilo each need a member-private provider home:
         # Codex can make temp files owner-only, while the HTTP runtimes keep
-        # SQLite databases and per-project process locks. A sibling UID must
-        # never traverse those homes merely to normalize its own writes.
+        # SQLite databases and per-project process locks. Each home is mode
+        # 0700 to its member UID and is never widened, not even by its owner:
+        # its config and plugins run as that member, with that member's
+        # credentials, at every process start. Fork copies a child's home
+        # through a pipe between the two UIDs, so no sibling needs to read it.
         # Claude now loads settings and its sessions/ process registry from
         # /home/agent-member-N/.claude-members, outside this traversal. Only projects/
         # remains shared; never widen other legacy shared Claude files.
-        # Normalize shared roots while pruning every private-home collection,
-        # then enter only direct children owned by this member.
+        # Normalize shared roots while pruning every private-home collection.
         script = (
             "set -eu; uid=$1; "
             'normalize_dirs() { find "$@" -xdev -uid "$uid" -type d '
@@ -2879,15 +2958,7 @@ class ChatSandboxManager:
             '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
             f"if test -d {CLAUDE_SHARED_PROJECTS_DIR}; then "
             f"normalize_dirs {CLAUDE_SHARED_PROJECTS_DIR}; "
-            f"normalize_files {CLAUDE_SHARED_PROJECTS_DIR}; fi; "
-            f"for collection in {CHAT_STATE_DIR}/codex-members "
-            f"{CHAT_STATE_DIR}/opencode-members {CHAT_STATE_DIR}/kilo-members; do "
-            'test -d "$collection" || continue; '
-            'for member in "$collection"/*; do '
-            'test -e "$member" || continue; '
-            'test "$(stat -c %u "$member" 2>/dev/null || :)" = "$uid" || continue; '
-            'normalize_dirs "$member"; normalize_files "$member"; '
-            "done; done"
+            f"normalize_files {CLAUDE_SHARED_PROJECTS_DIR}; fi"
         )
         result = self.exec_capture(
             spec,
@@ -3218,7 +3289,7 @@ class ChatSandboxManager:
         user_uid: int,
         user_gid: int,
     ) -> None:
-        """Signal one verified resident process group, never the container."""
+        """Signal one verified resident or command process group, never the container."""
         self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
         argv = [
             "/bin/sh",
@@ -3253,6 +3324,15 @@ class ChatSandboxManager:
         """Build an exact PID/start receipt wait, verification, and group kill."""
         return (
             'set -eu; expected_uid="$1"; '
+            # kill -0 sees zombies too. Docker's init normally reaps them,
+            # but a delayed reap is not a surviving command. Examine state
+            # before declaring cleanup failed, without requiring procps.
+            'group_alive() { kill -0 "-$pid" 2>/dev/null || return 1; '
+            "for task in /proc/[0-9]*/stat; do "
+            'read -r raw < "$task" 2>/dev/null || continue; '
+            'set -- ${raw##*) }; [ "${3:-}" = "$pid" ] || continue; '
+            'case "${1:-}" in Z|X) continue;; esac; return 0; '
+            "done; return 1; }; "
             f"for pidfile in {pidfile_expression}; do "
             'attempt=0; ready=0; pid=""; started=""; '
             'while [ "$attempt" -lt 40 ]; do '
@@ -3268,10 +3348,10 @@ class ChatSandboxManager:
             "set -- $fields; current_pgid=${3:-}; current_started=${20:-}; "
             '[ "$current_pgid" = "$pid" ] && [ "$current_started" = "$started" ] '
             '|| { rm -f -- "$pidfile"; exit 126; }; '
-            'kill -TERM -- "-$pid" 2>/dev/null || :; attempt=0; '
-            'while kill -0 -- "-$pid" 2>/dev/null; do attempt=$((attempt + 1)); '
-            '[ "$attempt" -lt 40 ] || { kill -KILL -- "-$pid" 2>/dev/null || :; '
-            'attempt=0; while kill -0 -- "-$pid" 2>/dev/null; do '
+            'kill -TERM "-$pid" 2>/dev/null || :; attempt=0; '
+            "while group_alive; do attempt=$((attempt + 1)); "
+            '[ "$attempt" -lt 40 ] || { kill -KILL "-$pid" 2>/dev/null || :; '
+            "attempt=0; while group_alive; do "
             'attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || exit 124; '
             "sleep 0.05; done; break; }; "
             'sleep 0.05; done; rm -f -- "$pidfile"; '
@@ -3350,7 +3430,7 @@ class ChatSandboxManager:
             # learns the browser's dimensions.
             process = subprocess.Popen(
                 command,
-                env={**os.environ},
+                env=self.exec_client_env(env),
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -3463,7 +3543,7 @@ class ChatSandboxManager:
             with substage(observer, "exec"):
                 return subprocess.run(
                     command,
-                    env={**os.environ},
+                    env=self.exec_client_env(env),
                     input=input_bytes,
                     capture_output=True,
                     timeout=timeout_s,
@@ -3471,6 +3551,97 @@ class ChatSandboxManager:
                 )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"chat sandbox exec failed: {exc}") from exc
+
+    def pipe_member_exec(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        source_argv: builtins.list[str],
+        source_uid: int,
+        target_argv: builtins.list[str],
+        target_uid: int,
+        user_gid: int,
+        timeout_s: float,
+    ) -> tuple[subprocess.CompletedProcess[bytes], subprocess.CompletedProcess[bytes]]:
+        """Stream one member exec's stdout into another member exec's stdin.
+
+        The two commands meet only in a pipe on this host, so a file private to
+        one member UID can reach another member without being widened inside
+        the container or staged where a sibling could read it. Both run in the
+        one inspected container. Returns ``(source, target)`` results carrying
+        each command's bounded stderr tail; the target's stdout is discarded.
+        """
+        current = self._require(spec)
+        if not current.running:
+            raise SandboxError("chat sandbox must be started before exec")
+        commands = (
+            self.build_exec_command(
+                spec,
+                source_argv,
+                workdir="/",
+                user_uid=source_uid,
+                user_gid=user_gid,
+                container_id=current.container_id,
+            ),
+            self.build_exec_command(
+                spec,
+                target_argv,
+                workdir="/",
+                interactive=True,
+                user_uid=target_uid,
+                user_gid=user_gid,
+                container_id=current.container_id,
+            ),
+        )
+        deadline = time.monotonic() + timeout_s
+        processes: builtins.list[subprocess.Popen[bytes]] = []
+        with (
+            tempfile.TemporaryFile(prefix="freeinference-member-pipe-") as source_stderr,
+            tempfile.TemporaryFile(prefix="freeinference-member-pipe-") as target_stderr,
+        ):
+            try:
+                source = subprocess.Popen(
+                    commands[0],
+                    env=self.exec_client_env(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=source_stderr,
+                )
+                processes.append(source)
+                assert source.stdout is not None
+                try:
+                    processes.append(
+                        subprocess.Popen(
+                            commands[1],
+                            env=self.exec_client_env(),
+                            stdin=source.stdout,
+                            stdout=subprocess.DEVNULL,
+                            stderr=target_stderr,
+                        )
+                    )
+                finally:
+                    # The target owns the read end now; a target that exits
+                    # early ends the source on a broken pipe.
+                    source.stdout.close()
+                codes = [
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    for process in reversed(processes)
+                ]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise SandboxError(f"chat sandbox member pipe failed: {exc}") from exc
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            process.wait(timeout=5)
+            results = []
+            for command, code, stderr in zip(
+                commands, reversed(codes), (source_stderr, target_stderr), strict=True
+            ):
+                stderr.seek(max(0, stderr.seek(0, os.SEEK_END) - 4096))
+                results.append(subprocess.CompletedProcess(command, code, b"", stderr.read()))
+        return results[0], results[1]
 
     def _kata_privileged_exec(
         self,
@@ -4454,18 +4625,14 @@ finally:
                 spec,
                 expected_container_id=expected_container_id,
             )
-        except SandboxError as exc:
-            detail = str(exc).lower()
-            if FINAL_ARCHIVE_MARKER_NAME in detail and any(
-                phrase in detail
-                for phrase in (
-                    "could not find the file",
-                    "no such file or directory",
-                    "no such file",
-                )
-            ):
-                return None
-            raise
+        except FileNotFoundError as exc:
+            marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+            # export_archive normalizes only Docker's exact missing source
+            # for the inspected container. Host-side missing files and other
+            # Docker failures must still prevent activation.
+            if exc.args != (marker_path,):
+                raise
+            return None
 
     def write_stopped_final_archive_marker(
         self,
@@ -4650,24 +4817,72 @@ finally:
         sandbox are cleared. A failed prompt admission is marked LOST and can
         never reach this method; it is only for checkout/setup failures before
         the Agent CLI saw the user's message.
+
+        A resident that started before the failure left a member-private
+        provider home that only its member UID can open. The reset names
+        those owners before it deletes anything, has each member remove its
+        own homes, and only then clears both roots.
         """
+        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; "
+            f"owners=$(for collection in {collections}; do "
+            'test -d "$collection" || continue; '
+            'find "$collection" -mindepth 1 -maxdepth 1 ! -uid "$(id -u)" -printf "%U\\n"; '
+            "done | sort -u); "
+            'if test -n "$owners"; then printf "%s\\n" "$owners"; exit 75; fi; '
             f"for root in {CHAT_WORKDIR} {CHAT_STATE_DIR}; do "
             'find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             "done"
         )
-        result = self.exec_capture(
-            spec,
-            ["/bin/sh", "-c", script],
-            workdir="/",
-            timeout_s=120,
-        )
+        for attempt in range(2):
+            result = self.exec_capture(
+                spec,
+                ["/bin/sh", "-c", script],
+                workdir="/",
+                timeout_s=120,
+            )
+            if result.returncode != 75 or attempt:
+                break
+            self._clear_private_member_homes(spec, result.stdout)
         if result.returncode != 0:
             raise SandboxError(
                 "chat sandbox unsettled-state reset failed: "
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
+
+    def _clear_private_member_homes(self, spec: ChatSandboxSpec, owners: bytes) -> None:
+        """Have each named member UID remove the provider homes it owns."""
+        uids: set[int] = set()
+        for line in owners.decode("ascii", "replace").split():
+            if not line.isdigit():
+                raise SandboxError("private member home owners are malformed")
+            uid = int(line)
+            if not MEMBER_UID_BASE <= uid < MEMBER_UID_BASE + spec.resident_slot_capacity:
+                raise SandboxError(f"private member home is owned by unexpected uid {uid}")
+            uids.add(uid)
+        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS)
+        script = (
+            "set -eu; uid=$(id -u); "
+            f"for collection in {collections}; do "
+            'test -d "$collection" || continue; '
+            'find "$collection" -mindepth 1 -maxdepth 1 -uid "$uid" -exec rm -rf -- {} +; '
+            "done"
+        )
+        for uid in sorted(uids):
+            result = self.exec_capture(
+                spec,
+                ["/bin/sh", "-c", script],
+                workdir="/",
+                timeout_s=120,
+                user_uid=uid,
+                user_gid=self.backend.gid,
+            )
+            if result.returncode != 0:
+                raise SandboxError(
+                    "private member home could not be cleared: "
+                    + result.stderr.decode("utf-8", "replace")[:300]
+                )
 
     def import_base_bundle(
         self,
@@ -5038,7 +5253,7 @@ class _RetainedExecProcess(SandboxProcess):
         self._process_pidfile = process_pidfile
         self._user_uid = user_uid
         self._user_gid = user_gid
-        self._stderr_chunks: builtins.list[str] = []
+        self._stderr_tail = TextTail()
         self._stderr_thread: threading.Thread | None = None
         if process.stderr is not None:
             self._stderr_thread = threading.Thread(
@@ -5054,13 +5269,23 @@ class _RetainedExecProcess(SandboxProcess):
 
     def _drain_stderr(self) -> None:
         assert self._process.stderr is not None
-        for line in self._process.stderr:
-            self._stderr_chunks.append(line)
-            del self._stderr_chunks[:-200]
+        for chunk in text_chunks(self._process.stderr):
+            self._stderr_tail.append(chunk)
 
     def lines(self) -> Iterator[str]:
+        try:
+            yield from protocol_lines(self.chunks())
+        except SandboxError:
+            # Docker's attached exec channels can backpressure cleanup execs.
+            # Discard any remaining stdout while the scoped reaper runs.
+            drain = OutputPump(self.chunks(), name="oversized-resident-output")
+            drain.close(drain=True)
+            self.kill()
+            raise
+
+    def chunks(self) -> Iterator[str]:
         assert self._process.stdout is not None
-        yield from self._process.stdout
+        yield from text_chunks(self._process.stdout)
 
     def write_line(self, text: str) -> None:
         if self._process.stdin is None:
@@ -5098,7 +5323,7 @@ class _RetainedExecProcess(SandboxProcess):
     def stderr_text(self) -> str:
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
-        return "".join(self._stderr_chunks)
+        return self._stderr_tail.text()
 
 
 def _set_pty_size(fd: int, rows: int, cols: int) -> None:

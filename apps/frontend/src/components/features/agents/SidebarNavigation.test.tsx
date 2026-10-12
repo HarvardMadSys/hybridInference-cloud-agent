@@ -39,9 +39,6 @@ vi.mock('@/components/providers', async () => {
     useLocale: () => ({ locale: 'en', t }),
   };
 });
-vi.mock('@/components/features/settings/SettingsLauncher', () => ({
-  SettingsLauncher: () => null,
-}));
 vi.mock('@/lib/api/agents', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/agents')>()),
   listAgentConversations: api.list,
@@ -127,6 +124,25 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('shows one Setting link and highlights it on the integrations route', async () => {
+    const view = render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    const setting = screen.getByRole('link', { name: 'Setting' });
+    expect(screen.getAllByText('Setting')).toHaveLength(1);
+    expect(setting).toHaveAttribute('href', '/integrations');
+    expect(setting).not.toHaveAttribute('aria-current');
+    expect(screen.queryByRole('link', { name: /^Integrations?$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Settings?$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    api.pathname = '/integrations';
+    view.rerender(<AgentsSidebar />);
+    expect(screen.getByRole('link', { name: 'Setting' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getAllByRole('link', { name: 'Setting' })).toHaveLength(1);
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.thread).not.toHaveBeenCalled();
+  });
+
   it('does not resolve the approval inbox route as a conversation job', async () => {
     api.pathname = '/approvals';
     render(
