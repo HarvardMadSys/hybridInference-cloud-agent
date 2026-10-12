@@ -972,11 +972,21 @@ def _decode(
     ``changed`` keys stay strict, so an update cannot save what this refuses.
     Decryption failures and unencrypted secrets always raise.
     """
+    from cloud_agent.source_control import SourceControlError
+
     values: dict[str, SettingValue] = {}
     for setting in SETTINGS:
         value = encoded.get(setting.key, setting.default)
         if setting.secret and isinstance(value, dict) and set(value) == {"ciphertext"}:
-            value = _cipher(setting.key).decrypt(value["ciphertext"])
+            cipher = _cipher(setting.key)
+            try:
+                value = cipher.decrypt(value["ciphertext"])
+            except SourceControlError:
+                # Name the setting, never the value: the cipher's own message
+                # cannot say which of the stored secrets failed.
+                raise SourceControlError(
+                    f"Stored secret for {setting.label} could not be decrypted"
+                ) from None
         elif setting.secret and value:
             raise ValueError(f"Unencrypted stored secret for {setting.label}")
         try:

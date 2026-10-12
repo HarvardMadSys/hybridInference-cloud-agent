@@ -281,6 +281,31 @@ async def test_a_failed_synchronization_names_the_setting_in_its_log(monkeypatch
     ]
 
 
+async def test_a_secret_that_cannot_be_decrypted_is_named_in_the_log(monkeypatch, caplog):
+    """Which stored credential failed is what an operator can act on; never its value."""
+    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "test-dispatch-secret-unique-value")
+    encoded = settings.initial_settings()
+    repository = Repository()
+    repository.revision = 2
+    repository.values = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
+    ticks = 0
+
+    async def tick(_delay):
+        nonlocal ticks
+        ticks += 1
+        if ticks > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(settings.asyncio, "sleep", tick)
+    caplog.set_level(logging.WARNING, logger=settings.__name__)
+    with pytest.raises(asyncio.CancelledError):
+        await settings.synchronize_settings(repository)
+    assert _warnings(caplog) == [
+        "settings synchronization failed "
+        "(SourceControlError: Stored secret for On-call dispatch token could not be decrypted)"
+    ]
+
+
 @pytest.mark.parametrize(
     "key", ["compute.cloudlab_api_url", "compute.registration_url", "mcp_registry_url"]
 )
