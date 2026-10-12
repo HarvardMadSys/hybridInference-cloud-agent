@@ -298,15 +298,32 @@ def test_retained_writer_replaces_in_place_and_keeps_the_files_inode_and_mode(tm
     assert (after.st_ino, stat.S_IMODE(after.st_mode)) == (before.st_ino, 0o755)
 
 
-def test_retained_writer_refuses_a_fifo_without_blocking_on_it(tmp_path):
+#: What the type check saw before a sibling swapped a FIFO in at the path: the
+#: regular file that was there a moment earlier.
+_FIFO_SWAPPED_IN_AFTER_THE_CHECK = (
+    "import os, stat\n"
+    "_stat = os.stat\n"
+    "def _stat_before_the_swap(path, *args, **kwargs):\n"
+    "    found = _stat(path, *args, **kwargs)\n"
+    "    if stat.S_ISFIFO(found.st_mode):\n"
+    "        return os.stat_result((stat.S_IFREG | 0o664,) + tuple(found)[1:])\n"
+    "    return found\n"
+    "os.stat = _stat_before_the_swap\n"
+)
+
+
+@pytest.mark.parametrize("swapped_in", [False, True], ids=["already_there", "swapped_in"])
+def test_retained_writer_refuses_a_fifo_without_blocking_on_it(tmp_path, swapped_in):
+    """A FIFO with no reader would block the open, and the save, for good."""
     os.mkfifo(tmp_path / "pipe")
+    prefix = _FIFO_SWAPPED_IN_AFTER_THE_CHECK if swapped_in else ""
 
     refused = subprocess.run(
-        [sys.executable, "-c", _WRITE_PROGRAM, str(tmp_path), "pipe", "100"],
+        [sys.executable, "-c", prefix + _WRITE_PROGRAM, str(tmp_path), "pipe", "100"],
         input=b"data",
         capture_output=True,
         check=False,
         timeout=10,
     )
 
-    assert refused.returncode == 49
+    assert refused.returncode == 49, refused.stderr
