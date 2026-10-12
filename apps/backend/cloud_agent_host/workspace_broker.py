@@ -1005,6 +1005,11 @@ class _TerminalManager:
         self._workspace_suspensions: dict[str, set[str]] = {}
         self._workspace_generations: dict[str, int] = {}
         self._lock = threading.RLock()
+        # One workspace's suspensions, resumptions and creations still run one
+        # at a time, but under a lock of that workspace's own, kept only while
+        # a caller holds or waits for it: suspension and resumption wait on
+        # Docker, and ``_lock`` is taken by every terminal request on the broker.
+        self._workspace_locks: dict[str, tuple[threading.Lock, int]] = {}
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
 
@@ -1078,6 +1083,27 @@ class _TerminalManager:
         if self._reaper is not None:
             self._reaper.join(timeout=5)
 
+    @contextlib.contextmanager
+    def _serialized(self, workspace_id: str) -> Iterator[None]:
+        """Run one suspension, resumption or creation of a workspace at a time.
+
+        Suspension and resumption signal every terminal through Docker, which
+        can take seconds each, so they hold this workspace's own lock across
+        those calls and ``_lock`` only for bookkeeping: no other workspace's
+        terminal request waits behind them.
+        """
+        with self._lock:
+            lock, holders = self._workspace_locks.get(workspace_id) or (threading.Lock(), 0)
+            self._workspace_locks[workspace_id] = (lock, holders + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._lock:
+                lock, holders = self._workspace_locks.pop(workspace_id)
+                if holders > 1:
+                    self._workspace_locks[workspace_id] = (lock, holders - 1)
+
     def create(
         self,
         workspace_id: str,
@@ -1095,7 +1121,9 @@ class _TerminalManager:
         now = time.monotonic()
         evicted: list[_TerminalSession] = []
         try:
-            with self._lock:
+            # After a suspension or resumption of this workspace in progress,
+            # as when one lock covered both, rather than in its middle.
+            with self._serialized(workspace_id), self._lock:
                 if workspace_id in self._suspended_workspaces:
                     raise HTTPException(status_code=409, detail="terminal workspace is not ready")
                 group = self._sessions.setdefault(workspace_id, {})
@@ -1212,20 +1240,25 @@ class _TerminalManager:
         job_id: str | None = None,
     ) -> dict[str, Any]:
         """Freeze PTYs and retain one independent token per protected turn."""
-        with self._lock:
-            if job_id is None:
-                # Previous control planes did not identify the turn. Preserve
-                # their monotonic check only for that compatibility token;
-                # current sibling turns must not fence one another by their
-                # unrelated, per-job lease generations.
-                current_generation = self._workspace_generations.get(workspace_id, 0)
-                if lease_generation < current_generation:
-                    raise HTTPException(status_code=409, detail="stale terminal workspace fence")
-                self._workspace_generations[workspace_id] = lease_generation
-            key = self._suspension_key(job_id)
-            self._workspace_suspensions.setdefault(workspace_id, set()).add(key)
-            self._suspended_workspaces.add(workspace_id)
-            sessions = list(self._sessions.get(workspace_id, {}).values())
+        with self._serialized(workspace_id):
+            with self._lock:
+                if job_id is None:
+                    # Previous control planes did not identify the turn.
+                    # Preserve their monotonic check only for that
+                    # compatibility token; current sibling turns must not
+                    # fence one another by their unrelated, per-job lease
+                    # generations.
+                    current_generation = self._workspace_generations.get(workspace_id, 0)
+                    if lease_generation < current_generation:
+                        raise HTTPException(
+                            status_code=409, detail="stale terminal workspace fence"
+                        )
+                    self._workspace_generations[workspace_id] = lease_generation
+                key = self._suspension_key(job_id)
+                self._workspace_suspensions.setdefault(workspace_id, set()).add(key)
+                # From here no terminal of this workspace takes input or opens.
+                self._suspended_workspaces.add(workspace_id)
+                sessions = list(self._sessions.get(workspace_id, {}).values())
             try:
                 for session in sessions:
                     session.suspend()
@@ -1244,6 +1277,19 @@ class _TerminalManager:
         job_id: str | None = None,
     ) -> dict[str, Any]:
         """Release one turn token and resume PTYs only after the last release."""
+        with self._serialized(workspace_id):
+            return self._resume_serialized(
+                workspace_id, lease_generation=lease_generation, job_id=job_id
+            )
+
+    def _resume_serialized(
+        self,
+        workspace_id: str,
+        *,
+        lease_generation: int,
+        job_id: str | None,
+    ) -> dict[str, Any]:
+        """Resume under this workspace's own lock, which the caller holds."""
         with self._lock:
             if job_id is None:
                 current_generation = self._workspace_generations.get(workspace_id, 0)
@@ -1258,25 +1304,28 @@ class _TerminalManager:
             if suspensions:
                 return {"ok": True, "resumed": 0}
             sessions = list(self._sessions.get(workspace_id, {}).values())
-            attempted: list[_TerminalSession] = []
-            try:
-                for session in sessions:
-                    attempted.append(session)
-                    session.resume()
-            except (SandboxError, OSError) as exc:
-                # Restore every PTY already resumed in this batch. A retry
-                # must see both the logical workspace fence and the actual
-                # processes suspended; otherwise one shell could mutate the
-                # shared tree inside a quiescent capture after a sibling's
-                # resume failed.
-                for session in attempted:
-                    with contextlib.suppress(SandboxError, OSError):
-                        session.suspend()
+        # The workspace stays fenced until every PTY has resumed: no terminal
+        # of it takes input or opens before then.
+        attempted: list[_TerminalSession] = []
+        try:
+            for session in sessions:
+                attempted.append(session)
+                session.resume()
+        except (SandboxError, OSError) as exc:
+            # Restore every PTY already resumed in this batch. A retry must
+            # see both the logical workspace fence and the actual processes
+            # suspended; otherwise one shell could mutate the shared tree
+            # inside a quiescent capture after a sibling's resume failed.
+            for session in attempted:
+                with contextlib.suppress(SandboxError, OSError):
+                    session.suspend()
+            with self._lock:
                 suspensions.add(key)
-                raise HTTPException(
-                    status_code=503,
-                    detail="terminal resume could not be confirmed; retry resume",
-                ) from exc
+            raise HTTPException(
+                status_code=503,
+                detail="terminal resume could not be confirmed; retry resume",
+            ) from exc
+        with self._lock:
             self._workspace_suspensions.pop(workspace_id, None)
             self._suspended_workspaces.discard(workspace_id)
         return {"ok": True, "resumed": len(sessions)}
@@ -1291,16 +1340,18 @@ class _TerminalManager:
         # Generation is irrelevant for a terminal job. The reserved legacy
         # token is the only state an old control plane may release; a new
         # request names its job and therefore cannot thaw another member.
-        with self._lock:
-            legacy_generation = max(1, self._workspace_generations.get(workspace_id, 0))
-            result = self.resume(
+        with self._serialized(workspace_id):
+            with self._lock:
+                legacy_generation = max(1, self._workspace_generations.get(workspace_id, 0))
+            result = self._resume_serialized(
                 workspace_id,
                 lease_generation=legacy_generation,
                 job_id=job_id,
             )
             if job_id is None:
                 # Lease generations restart at one for the next platform job.
-                self._workspace_generations.pop(workspace_id, None)
+                with self._lock:
+                    self._workspace_generations.pop(workspace_id, None)
             return result
 
     def list(self, workspace_id: str) -> list[dict[str, Any]]:

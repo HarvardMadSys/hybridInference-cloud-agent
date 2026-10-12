@@ -1617,7 +1617,7 @@ def _finish_within(seconds: float, function):
     worker = threading.Thread(target=run, daemon=True)
     worker.start()
     worker.join(seconds)
-    assert not worker.is_alive(), f"the bounded command was still running after {seconds}s"
+    assert not worker.is_alive(), f"the call was still running after {seconds}s"
     if "error" in outcome:
         raise outcome["error"]  # type: ignore[misc]
     return outcome["result"]
@@ -2034,6 +2034,109 @@ def test_partial_terminal_resume_refreezes_every_process(tmp_path):
     assert processes[0].suspend_calls == 2
     assert processes[1].suspend_calls == 2
     assert "athr_source" in terminals._suspended_workspaces
+
+
+class _SlowToStopTerminalProcess(_SuspendableTerminalProcess):
+    """A terminal whose STOP, a Docker exec in production, waits to be released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stopping = threading.Event()
+        self.release = threading.Event()
+
+    def suspend(self) -> None:
+        self.stopping.set()
+        assert self.release.wait(5)
+        super().suspend()
+
+
+def _listed_session(terminals: _TerminalManager, workspace_id: str, process, tmp_path):
+    session = _TerminalSession(
+        terminal_id=f"term_{len(terminals._sessions.get(workspace_id, {}))}_{workspace_id}",
+        process=process,
+        workdir=tmp_path,
+        rows=24,
+        cols=80,
+        now=time.monotonic(),
+    )
+    terminals._sessions.setdefault(workspace_id, {})[session.id] = session
+    return session
+
+
+def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
+    """Every terminal request on the broker takes the manager's lock.
+
+    Suspending a workspace signals each of its terminals through Docker, which
+    can take seconds; holding that lock meanwhile stalled every keystroke,
+    listing and attach in every other workspace on the host.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    slow = _SlowToStopTerminalProcess()
+    _listed_session(terminals, "athr_source", slow, tmp_path)
+    other = _listed_session(terminals, "athr_other", _TerminalProcess(), tmp_path)
+    suspension = threading.Thread(
+        target=functools.partial(
+            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
+        ),
+        daemon=True,
+    )
+    suspension.start()
+    assert slow.stopping.wait(2)
+
+    try:
+        controlled, listed = _finish_within(
+            1,
+            lambda: (
+                terminals.get_for_control("athr_other", other.id),
+                terminals.list("athr_other"),
+            ),
+        )
+    finally:
+        slow.release.set()
+        suspension.join(5)
+
+    assert controlled is other
+    assert [item["id"] for item in listed] == [other.id]
+    assert slow.suspended
+    assert terminals._workspace_locks == {}
+
+
+def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
+    """A workspace's freeze and thaw still run one at a time.
+
+    Releasing the turn's token mid-freeze would let a terminal the freeze had
+    not reached yet be stopped after the thaw, with no turn left to resume it.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    slow = _SlowToStopTerminalProcess()
+    processes = [slow, _SuspendableTerminalProcess()]
+    for process in processes:
+        _listed_session(terminals, "athr_source", process, tmp_path)
+    suspension = threading.Thread(
+        target=functools.partial(
+            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
+        ),
+        daemon=True,
+    )
+    suspension.start()
+    assert slow.stopping.wait(2)
+    resumption = threading.Thread(
+        target=functools.partial(
+            terminals.resume, "athr_source", lease_generation=1, job_id="job-parent"
+        ),
+        daemon=True,
+    )
+    resumption.start()
+    resumption.join(0.3)
+    tokens_mid_freeze = set(terminals._workspace_suspensions.get("athr_source", ()))
+    slow.release.set()
+    suspension.join(5)
+    resumption.join(5)
+
+    assert tokens_mid_freeze == {"job-parent"}
+    assert [process.suspended for process in processes] == [False, False]
+    assert "athr_source" not in terminals._suspended_workspaces
+    assert terminals._workspace_locks == {}
 
 
 def test_terminal_ring_is_bounded_and_reports_cursor_reset(tmp_path):
