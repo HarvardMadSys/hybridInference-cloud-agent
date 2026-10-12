@@ -542,6 +542,89 @@ class TestTheLeaseAfterANetworkFailure:
         assert outcome.contended
 
     @pytest.mark.asyncio
+    async def test_an_answer_that_trickles_ends_while_the_lease_is_held(self, monkeypatch) -> None:
+        """httpx's timeout is per read, so a trickled answer never trips it.
+
+        An exchange that outlived the lease would let a second caller claim it
+        and present the same rotating refresh token while the first request was
+        still in flight -- the reuse a rotating issuer revokes the grant for.
+        The exchange ends inside the lease instead, and keeps it, because the
+        request was on the wire.
+        """
+        import asyncio
+
+        import httpx
+
+        class _Trickle(httpx.AsyncByteStream):
+            async def __aiter__(self) -> Any:
+                yield b'{"access_token": "'
+                while True:
+                    await asyncio.sleep(0.01)
+                    yield b"x"
+
+            async def aclose(self) -> None:
+                """Nothing to release."""
+
+        real_client = httpx.AsyncClient
+
+        def factory(**kwargs: Any) -> Any:
+            kwargs.pop("transport", None)
+            return real_client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, stream=_Trickle())
+                ),
+                **kwargs,
+            )
+
+        monkeypatch.setattr(httpx, "AsyncClient", factory)
+        monkeypatch.setattr(refresh, "REFRESH_EXCHANGE_SECONDS", 0.2)
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await asyncio.wait_for(
+                refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK),
+                timeout=5,
+            )
+        assert raised.value.uncertain
+        assert store.released == []
+        assert store.leased == {1}
+
+    @pytest.mark.asyncio
+    async def test_a_resolver_that_does_not_answer_in_time_releases_the_lease(
+        self, monkeypatch
+    ) -> None:
+        """The deadline covers resolution too, and nothing was sent before it."""
+        import asyncio
+
+        async def unanswered(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", unanswered)
+        monkeypatch.setattr(refresh, "REFRESH_EXCHANGE_SECONDS", 0.2)
+        store = FakeStore(_row(token_endpoint="https://slow-resolver.example/token"))
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await asyncio.wait_for(
+                refresh.refresh_credential(store, row=store.row, policy=EgressPolicy()),
+                timeout=5,
+            )
+        assert not raised.value.uncertain
+        assert raised.value.kind == "unreachable"
+        assert store.released == [1]
+
+    def test_the_exchange_ends_before_the_lease_does(self) -> None:
+        """The margin is what the fenced write after the exchange runs in."""
+        assert 0 < refresh.REFRESH_EXCHANGE_SECONDS < refresh.REFRESH_LEASE_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_an_answer_nested_too_deeply_to_read_keeps_the_lease(self, monkeypatch) -> None:
+        """Unreadable like any other mangled 2xx, rather than a crash past the lease logic."""
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        _client_that_answers(monkeypatch, status_code=200, text="[" * 100_000 + "]" * 100_000)
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert raised.value.uncertain
+        assert store.leased == {1}
+
+    @pytest.mark.asyncio
     async def test_an_answer_that_cannot_be_read_keeps_the_lease(self, monkeypatch) -> None:
         """A 2xx we cannot parse may still have issued the tokens."""
 
