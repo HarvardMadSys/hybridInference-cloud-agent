@@ -5321,7 +5321,11 @@ class _RetainedExecProcess(SandboxProcess):
         return self._process.wait()
 
     def stderr_text(self) -> str:
-        if self._stderr_thread is not None:
+        # A resident CLI holds stderr open for its whole life, so the drain
+        # reaches EOF only after the exec exits. Waiting on a live process
+        # would hold every turn's result for the full timeout; the tail
+        # collected so far is the answer until then.
+        if self._stderr_thread is not None and self._process.poll() is not None:
             self._stderr_thread.join(timeout=5)
         return self._stderr_tail.text()
 

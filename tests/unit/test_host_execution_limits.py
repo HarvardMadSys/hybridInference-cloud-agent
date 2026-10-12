@@ -7,12 +7,13 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host import bounded_output, chat_sandbox
+from cloud_agent_host import bounded_output, chat_sandbox, sandbox
 from cloud_agent_host.bounded_output import (
     OUTPUT_CHUNK_BYTES,
     OUTPUT_QUEUE_ITEMS,
@@ -124,6 +125,54 @@ def test_newline_free_stderr_retains_only_a_byte_bounded_tail():
     tail = process.stderr_text()
     assert len(tail.encode()) <= STDERR_TAIL_BYTES
     assert tail.endswith("TAIL")
+
+
+@pytest.mark.parametrize("wrapper", ["process", "retained"])
+def test_a_live_process_stderr_is_read_without_waiting_for_its_exit(wrapper):
+    """A resident CLI keeps stderr open, so its tail cannot wait for EOF.
+
+    Every resident turn's result frame carries this tail. Joining the drain
+    thread of a process that is still running always ran the full timeout,
+    so each settled turn reached the runner five seconds late.
+    """
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys, time; sys.stderr.write('warming up\\n'); sys.stderr.flush(); time.sleep(30)",
+    ]
+    popen = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    process = (
+        sandbox._PopenProcess(popen)
+        if wrapper == "process"
+        else chat_sandbox._RetainedExecProcess(
+            popen,
+            manager=SimpleNamespace(),
+            spec=SimpleNamespace(container_name="test"),
+            process_pidfile=None,
+            user_uid=None,
+            user_gid=None,
+        )
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while "warming up" not in process.stderr_text():
+            assert time.monotonic() < deadline, "the drain never collected the first line"
+            time.sleep(0.01)
+        started = time.monotonic()
+        assert process.stderr_text() == "warming up\n"
+        assert time.monotonic() - started < 1
+        assert process.poll() is None
+    finally:
+        popen.kill()
+        popen.wait()
+    # Once the process has exited, its tail is still read to the end.
+    assert process.stderr_text() == "warming up\n"
 
 
 def test_oversized_native_protocol_record_is_refused_before_full_accumulation():

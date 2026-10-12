@@ -455,8 +455,12 @@ class _PopenProcess(SandboxProcess):
         return self._process.returncode
 
     def stderr_text(self) -> str:
-        """Return the child's stderr tail, collected by the drain thread."""
-        if self._stderr_thread is not None:
+        """Return the child's stderr tail, collected by the drain thread.
+
+        Only an exited child is waited for: a live one keeps its stderr open,
+        so its drain cannot finish, and the tail so far is the answer.
+        """
+        if self._stderr_thread is not None and self._process.poll() is not None:
             self._stderr_thread.join(timeout=5)
         return self._stderr_tail.text()
 
