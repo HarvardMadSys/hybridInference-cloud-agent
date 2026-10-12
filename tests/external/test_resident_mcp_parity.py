@@ -400,8 +400,20 @@ for directory in (".kilo", ".kilocode"):
         for key in [*env, "HOME"]:
             command.extend(["--env", key])
         if runtime == "kilo":
+            # `debug config` boots a whole Kilo instance and can exit while its
+            # background snapshot work is taking Kilo's cross-process lock,
+            # leaving an empty lock directory that Kilo treats as held for
+            # 60 s. The next turn then trips the 10 s slow-snapshot question
+            # and waits out its 120 s timeout. No Kilo process is running here.
             resolved = subprocess.run(
-                [*command, container, "kilo-freeinference", "debug", "config"],
+                [
+                    *command,
+                    container,
+                    "sh",
+                    "-c",
+                    "kilo-freeinference debug config; status=$?; "
+                    'rm -rf -- "${XDG_STATE_HOME:?}/kilo/locks"; exit "$status"',
+                ],
                 env=child_env,
                 capture_output=True,
                 text=True,
