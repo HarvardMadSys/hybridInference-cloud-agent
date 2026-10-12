@@ -1282,6 +1282,38 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
 
 
 @pytest.mark.asyncio
+async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch):
+    """The supervisor's metadata lock is never waited on by the event loop."""
+    supervisor = _SharedSupervisor()
+    loop_thread = threading.current_thread()
+    callers: list[threading.Thread] = []
+    resolve = supervisor.backend
+
+    def backend(thread_id: str):
+        callers.append(threading.current_thread())
+        return resolve(thread_id)
+
+    monkeypatch.setattr(supervisor, "backend", backend)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        imported = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers=headers,
+            json={
+                **_identity(),
+                "snapshot_id": 9,
+                "commit_sha": "b" * 40,
+                "bundle_b64": base64.b64encode(b"trusted-git-bundle").decode(),
+            },
+        )
+
+    assert imported.status_code == 200
+    assert callers and all(caller is not loop_thread for caller in callers)
+
+
+@pytest.mark.asyncio
 async def test_file_routes_use_the_shared_container_not_a_host_directory(monkeypatch):
     supervisor = _SharedSupervisor()
     reads: list[tuple[object, str]] = []

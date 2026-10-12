@@ -2743,7 +2743,8 @@ def create_app(
             )
             token, _descriptor = await endpoint_calls.run(owner.operation_opened, thread_id)
             try:
-                backend = owner.backend(thread_id)
+                # The supervisor's lock is never taken on the event loop.
+                backend = await endpoint_calls.run(owner.backend, thread_id)
                 await endpoint_calls.run(
                     backend.manager.import_base_bundle,
                     backend.spec,
