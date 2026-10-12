@@ -2135,6 +2135,90 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
     assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
 
 
+async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
+    """Renewals run after the reply, together, and once per grant.
+
+    A host's heartbeat times out at 15 s, and each renewal may take the
+    gateway's full request timeout. Awaited one by one before the reply, two
+    slow renewals were enough to time the beat out — and the host then never
+    received the stops and lost residencies the reply carries. Here every
+    renewal blocks until all of them have started: awaited inline the reply
+    never comes, and awaited one at a time the renewals never finish.
+    """
+    from fastapi import BackgroundTasks
+
+    from cloud_agent.schemas import HostHeartbeatRequest
+
+    class GatedGrants(RecordingGrants):
+        def __init__(self, expected: int) -> None:
+            super().__init__()
+            self.started: list[str] = []
+            self._expected = expected
+            self._all_started = asyncio.Event()
+
+        async def renew(self, grant_id: str) -> dict[str, Any]:
+            self.started.append(grant_id)
+            if len(self.started) >= self._expected:
+                self._all_started.set()
+            await self._all_started.wait()
+            return await super().renew(grant_id)
+
+    store = FakeHostPoolStore()
+    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
+    store.beat_answers = {("th-1", 1): "agr-1", ("th-2", 1): "agr-2"}
+    grants = GatedGrants(expected=2)
+    body = HostHeartbeatRequest.model_validate(
+        {
+            "residencies": [
+                {"thread_id": "th-1", "generation": 1},
+                {"thread_id": "th-2", "generation": 1},
+            ],
+            # The same member again, as a live member of its retained group:
+            # one extended residency is one renewal, however it was reported.
+            "retained_sandboxes": [
+                {
+                    "thread_id": "th-1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 7,
+                    "running": True,
+                    "activity_active": True,
+                    "idle_remaining_seconds": 1799.5,
+                    "shared_live": True,
+                    "members": [
+                        {
+                            "thread_id": "th-1",
+                            "native_session_id": "native-1",
+                            "process_generation": 2,
+                            "residency_generation": 1,
+                            "resident_state": "live",
+                            "resident_slot_id": 0,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    background = BackgroundTasks()
+
+    reply = await asyncio.wait_for(
+        hosts.heartbeat_host(
+            body,
+            background_tasks=background,
+            host={"host": "runner-a", "credential_hash": "credential-hash"},
+            store=store,
+            grants=grants,
+        ),
+        timeout=5,
+    )
+
+    assert reply.residencies_lost == []
+    assert grants.started == [], "the reply waited on the gateway"
+    await asyncio.wait_for(background(), timeout=5)
+    assert sorted(grants.renewed) == ["agr-1", "agr-2"]
+
+
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
     client, store, _grants = residency_client
     credential = await _enroll(client, store)

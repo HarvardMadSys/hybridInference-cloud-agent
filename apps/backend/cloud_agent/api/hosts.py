@@ -19,11 +19,12 @@ minutes.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
@@ -254,6 +255,7 @@ async def register_host(
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
 async def heartbeat_host(
     body: HostHeartbeatRequest,
+    background_tasks: BackgroundTasks,
     host: dict[str, Any] = Depends(authenticate_host),
     store: _HostsStorage | None = Depends(get_storage),
     grants: Any = Depends(get_grant_client),
@@ -306,6 +308,9 @@ async def heartbeat_host(
     # so a beat from a taken-over residency extends nothing — it comes back in
     # residencies_lost and the host tears that sandbox down.
     lost: list[ResidencyBeat] = []
+    # The grants of every residency this beat extends, once each, renewed after
+    # the reply: see ``_renew_residency_grants``.
+    renewals: dict[str, None] = {}
     for residency_beat in body.residencies or []:
         extended = await job_store.residency.heartbeat_residency(
             thread_id=residency_beat.thread_id,
@@ -313,12 +318,10 @@ async def heartbeat_host(
             host=updated["host"],
             ttl_seconds=residency_ttl_s(),
         )
-        if extended and grants is not None:
+        if extended:
             # The credential lives exactly as long as the residency_beat: the residency_beat
-            # that extends the lease extends the grant. Best-effort — a missed
-            # renewal starves hot turns into warm, never into an outage.
-            with contextlib.suppress(Exception):
-                await grants.renew(extended)
+            # that extends the lease extends the grant.
+            renewals[extended] = None
         if extended is None:
             # Echo the generation back (review finding 5): a residency_beat carrying
             # gen N can be answered after the host re-established gen N+1,
@@ -378,9 +381,8 @@ async def heartbeat_host(
                 host=updated["host"],
                 ttl_seconds=residency_ttl_s(),
             )
-            if extended and grants is not None:
-                with contextlib.suppress(Exception):
-                    await grants.renew(extended)
+            if extended:
+                renewals[extended] = None
             if extended is None and not any(
                 item.thread_id == member.thread_id
                 and item.generation == member.residency_generation
@@ -402,6 +404,8 @@ async def heartbeat_host(
             )
             if due is not None:
                 retained_stops.append(RetainedSandboxStop.model_validate(due))
+    if renewals and grants is not None:
+        background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -433,6 +437,23 @@ async def heartbeat_host(
 
 
 from cloud_agent.application.residency import residency_ttl_s
+
+
+async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
+    """Renew the grants a heartbeat extended, together, after its reply was sent.
+
+    Each renewal may take the gateway's whole request timeout, and the host
+    stops waiting for its heartbeat's answer at 15 s. Awaited one by one before
+    the reply, two slow renewals were enough for the host never to receive the
+    stops and lost residencies that answer carries. Best-effort, as before: a
+    missed renewal starves hot turns into warm, never into an outage.
+    """
+
+    async def renew(grant_id: str) -> None:
+        with contextlib.suppress(Exception):
+            await grants.renew(grant_id)
+
+    await asyncio.gather(*(renew(grant_id) for grant_id in grant_ids))
 
 
 async def _probed_broker_error(
