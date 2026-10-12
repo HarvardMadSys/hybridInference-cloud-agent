@@ -588,6 +588,88 @@ class TestWhatTheTransportIsWillingToRead:
         await client.aclose()
 
 
+class _KeptAlive(httpx.AsyncByteStream):
+    """A body that sends ``opening`` and then keeps the stream alive forever."""
+
+    def __init__(self, opening: bytes = b"", *, filler: bytes = b": keep-alive\n\n") -> None:
+        self._opening = opening
+        self._filler = filler
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self._opening:
+            yield self._opening
+        while True:
+            await asyncio.sleep(0.01)
+            yield self._filler
+
+    async def aclose(self) -> None:
+        """Record that the platform let go of the stream."""
+        self.closed = True
+
+
+class TestTheCallDeadline:
+    """A call ends at its answer, and in any case at the request timeout.
+
+    httpx's timeouts are per read, so a server that keeps a stream alive never
+    trips one: a call that waited for the stream to close held its socket and
+    its session for as long as the server liked.
+    """
+
+    async def test_a_streamed_answer_is_returned_while_the_stream_stays_open(self) -> None:
+        """Reading on after the answer waited for a close the server never sends."""
+        streams: list[_KeptAlive] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            answer = {"jsonrpc": "2.0", "id": _json_body(request)["id"], "result": {"ok": True}}
+            streams.append(_KeptAlive(_frame(answer)))
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=streams[-1]
+            )
+
+        client = _client(handler)
+        transport = StreamableHttpTransport(_config(request_timeout=30.0), client, owns_client=True)
+        assert await asyncio.wait_for(transport.request("tools/call"), timeout=5) == {"ok": True}
+        assert streams[0].closed, "the answered stream was not released"
+        await client.aclose()
+
+    @pytest.mark.parametrize("shape", ["sse-keep-alive", "trickled-json"])
+    async def test_a_reply_that_never_completes_ends_at_the_request_timeout(
+        self, shape: str
+    ) -> None:
+        """Comments every few milliseconds, or a body a byte at a time."""
+        stream = (
+            _KeptAlive()
+            if shape == "sse-keep-alive"
+            else _KeptAlive(b'{"jsonrpc": "2.0", ', filler=b" ")
+        )
+        content_type = "text/event-stream" if shape == "sse-keep-alive" else "application/json"
+        client = _client(
+            lambda request: httpx.Response(
+                200, headers={"content-type": content_type}, stream=stream
+            )
+        )
+        transport = StreamableHttpTransport(_config(request_timeout=0.2), client, owns_client=True)
+        with pytest.raises(TransportError) as raised:
+            await asyncio.wait_for(transport.request("tools/call"), timeout=5)
+        assert raised.value.kind == "unreachable"
+        assert stream.closed
+        await client.aclose()
+
+    async def test_a_legacy_post_that_never_completes_ends_at_the_request_timeout(self) -> None:
+        """The legacy wait had a limit; the POST in front of it had none."""
+        stream = _KeptAlive(filler=b"x")
+        client = _client(lambda request: httpx.Response(202, stream=stream))
+        transport = LegacySseTransport(
+            _config(request_timeout=0.2), client, message_url="https://127.0.0.1:9/messages"
+        )
+        with pytest.raises(TransportError) as raised:
+            await asyncio.wait_for(transport.request("tools/call"), timeout=5)
+        assert raised.value.kind == "unreachable"
+        assert transport._waiters == {}
+        await client.aclose()
+
+
 class TestAddressPinning:
     """The dial goes where the check went, not to a second resolver answer.
 
