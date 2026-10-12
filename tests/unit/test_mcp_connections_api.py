@@ -1365,6 +1365,57 @@ class TestTheCredentialHeader:
         assert server_for(resolved, _binding(connection_id)).headers == {}
 
 
+class TestATokenStaysWithItsResource:
+    """An OAuth token is sent only to an address its resource covers.
+
+    Editing a connection's address used to keep its token, so rows edited before
+    edits cleared credentials still hold one minted for the old server.
+    """
+
+    def test_a_token_for_the_old_address_is_not_sent_to_the_new_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={"client_id": "client"},
+            url="https://elsewhere.example.com/mcp",
+            issuer="https://auth.example.com",
+            resource="https://mcp.example.com/mcp",
+        )
+        discover = AsyncMock(side_effect=AssertionError("the old token was sent"))
+        monkeypatch.setattr(mcp_connections.McpHost, "discover", discover)
+        with _client(store) as client:
+            result = client.post(f"/v1/agent/mcp/connections/{connection_id}/test").json()
+        discover.assert_not_called()
+        assert result["ok"] is False
+        assert result["error_kind"] == "needs_authorization"
+        assert "another address" in result["message"]
+
+    @pytest.mark.parametrize(
+        "resource",
+        ["https://mcp.example.com/mcp", "https://mcp.example.com/", None],
+    )
+    async def test_a_covering_or_unrecorded_resource_is_still_used(
+        self, resource: str | None
+    ) -> None:
+        """Connections signed in for their own address are unaffected."""
+        from cloud_agent.mcp.registry import resolve_connection
+
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={"client_id": "client"},
+            issuer="https://auth.example.com",
+            resource=resource,
+        )
+        resolved = await resolve_connection(store, row=store._row(connection_id))
+        assert resolved.usable
+        assert resolved.credential["secret"] == "upstream-secret"
+
+
 def _binding(connection_id: int) -> Any:
     """A default selection for one connection, as a new conversation gets."""
     from cloud_agent.mcp.registry import binding_from_row

@@ -779,7 +779,11 @@ async def update_connection(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _McpConnectionsStorage | None = Depends(get_storage),
 ) -> ConnectionView:
-    """Edit a connection. A target change invalidates approvals made against it."""
+    """Edit a connection. A target change invalidates approvals made against it.
+
+    A new address or authentication kind also drops the stored credential, so
+    the connection has to be signed in to (or given its secret) again.
+    """
     job_store = _require_store(store)
     existing = await job_store.mcp.get_mcp_connection(
         connection_id=connection_id, user_id=user["user_id"]

@@ -52,7 +52,7 @@ from cloud_agent.mcp.models import (
     ToolRule,
     Transport,
 )
-from cloud_agent.mcp.net_policy import EndpointRejected, validate_header_name
+from cloud_agent.mcp.net_policy import EndpointRejected, resource_covers, validate_header_name
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
@@ -376,6 +376,20 @@ async def resolve_connection(
             connection=connection,
             snapshot=snapshot,
             error="This connection has expired. Connect it again.",
+            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
+        )
+    if (
+        connection.auth.kind is AuthKind.OAUTH
+        and connection.config.url
+        and not resource_covers(_optional(row.get("resource")), connection.config.url)
+    ):
+        # A token is minted for one resource (RFC 8707). A connection whose
+        # address was edited while it held one -- before edits cleared it --
+        # must not send it to the new address.
+        return ResolvedConnection(
+            connection=connection,
+            snapshot=snapshot,
+            error="This connection's sign-in was for another address. Sign in again.",
             error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
         )
     if (
