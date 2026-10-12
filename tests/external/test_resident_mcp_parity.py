@@ -397,7 +397,7 @@ for directory in (".kilo", ".kilocode"):
     class TracedProcess(_PopenProcess):
         def lines(self):
             for line in super().lines():
-                _mark("OUT " + line.rstrip()[:160])
+                _mark("OUT " + line.rstrip()[: 4000 if '"question.' in line else 160])
                 with trace.open("a") as output:
                     output.write(line)
                 yield line
@@ -534,7 +534,9 @@ for directory in (".kilo", ".kilocode"):
             output = "".join(process.lines())
             _mark("exec: output drained")
             assert process.wait() == 0, process.stderr_text()
-            _mark("exec: exited")
+            _mark(
+                "exec: exited; stderr tail: " + process.stderr_text()[-3000:].replace("\n", " | ")
+            )
             assert "done" in output, output
             answers.append("done")
         _mark("turns: end")
