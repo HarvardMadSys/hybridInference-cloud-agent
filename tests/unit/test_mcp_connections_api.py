@@ -1956,7 +1956,14 @@ class TestATokenStaysWithItsResource:
 
     @pytest.mark.parametrize(
         "resource",
-        ["https://mcp.example.com/mcp", "https://mcp.example.com/", None],
+        [
+            "https://mcp.example.com/mcp",
+            # Discovery accepts a resource that differs only by a trailing
+            # slash, and stores the server's spelling of it.
+            "https://mcp.example.com/mcp/",
+            "https://mcp.example.com/",
+            None,
+        ],
     )
     async def test_a_covering_or_unrecorded_resource_is_still_used(
         self, resource: str | None

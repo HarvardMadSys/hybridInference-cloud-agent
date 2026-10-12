@@ -378,10 +378,13 @@ async def resolve_connection(
             error="This connection has expired. Connect it again.",
             error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
         )
+    resource = _optional(row.get("resource"))
     if (
         connection.auth.kind is AuthKind.OAUTH
         and connection.config.url
-        and not resource_covers(_optional(row.get("resource")), connection.config.url)
+        # Without its trailing slash, as discovery compares a resource to the
+        # address: a server may name ``.../mcp/`` for a connection at ``.../mcp``.
+        and not resource_covers(resource.rstrip("/") if resource else None, connection.config.url)
     ):
         # A token is minted for one resource (RFC 8707). A connection whose
         # address was edited while it held one -- before edits cleared it --
