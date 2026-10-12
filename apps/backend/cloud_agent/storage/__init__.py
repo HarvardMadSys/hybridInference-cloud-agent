@@ -19,10 +19,11 @@ the same two rows in opposite orders deadlock, and Postgres aborts one of them:
 8. the group's pending snapshot;
 9. the runner host row.
 
-A foreign key counts: inserting a row that references a job, or pointing a
-row's reference at another job, share-locks that job. So a transcript message
-is written after its conversation is locked, and a capture handed back moves
-its turns' rows to the pending snapshot rather than writing new ones. Rows
+A foreign key counts: inserting a row that references a conversation or a job,
+or pointing a row's reference at another one, share-locks it. So a transcript
+message is written after its conversation is locked, a chat's first
+reservation takes its conversation before its turn, and a capture handed back
+moves its turns' rows to the pending snapshot rather than writing new ones. Rows
 that only ever change under their conversation's lock, such as its waiting
 messages, are ordered by that lock. A lock taken with ``SKIP LOCKED`` or
 ``NOWAIT`` never waits, so it may come out of order; the locks after it may not.

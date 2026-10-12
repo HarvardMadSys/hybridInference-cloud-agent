@@ -633,6 +633,66 @@ async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
         await _settle(append)
 
 
+async def test_cancelling_a_first_turn_does_not_deadlock_with_its_reservation(
+    pool, store: Storage, monkeypatch
+):
+    """A chat's first reservation takes the conversation before the turn, as a cancel does.
+
+    Reserving a chat's first sandbox creates its group and membership, whose
+    foreign keys share-lock the conversation, and the reservation already held
+    the turn by then. A cancel takes the conversation and then the turn, so
+    cancelling a first turn while its host reserved the sandbox deadlocked.
+    """
+    job = await _create_job(store, base_sha="a" * 40)
+    claim = await _claim(
+        store,
+        worker_id="first-turn",
+        lease_ttl_seconds=60,
+        host=_HOST,
+        host_credential_hash=_HOST_CREDENTIAL,
+    )
+    assert claim is not None and claim["id"] == job["id"]
+    held, release = asyncio.Event(), asyncio.Event()
+    cancel_pid: list[int] = []
+    original = attempt_module.lock_conversation_by_job
+
+    async def hold_the_conversation(conn, *, job_id):
+        thread_id = await original(conn, job_id=job_id)
+        cancel_pid.append(await conn.fetchval("SELECT pg_backend_pid()"))
+        held.set()
+        await release.wait()
+        return thread_id
+
+    monkeypatch.setattr(attempt_module, "lock_conversation_by_job", hold_the_conversation)
+    cancel = reserve = None
+    try:
+        cancel = asyncio.create_task(store.attempt_commands.request_cancel(job_id=job["id"]))
+        await asyncio.wait_for(held.wait(), timeout=10)
+        reserve = asyncio.create_task(
+            store.sandbox.reserve_thread_sandbox(
+                thread_id=job["thread_id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                host=_HOST,
+                sandbox_id="asbx_lock_order",
+                container_name="freeinference-lock-order",
+                runtime_id="claude-code",
+                runtime_version=claim.get("runtime_version"),
+                sandbox_image_digest=claim.get("sandbox_image_digest"),
+                execution_profile=job["execution_profile"],
+            )
+        )
+        await _blocked_by(pool, cancel_pid[0])
+        release.set()
+        assert await asyncio.wait_for(cancel, timeout=10) == "running"
+        reserved = await asyncio.wait_for(reserve, timeout=10)
+    finally:
+        release.set()
+        await _settle(cancel)
+        await _settle(reserve)
+    assert reserved is not None and reserved["sandbox_id"] == "asbx_lock_order"
+
+
 async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
     pool, store: Storage, monkeypatch
 ):

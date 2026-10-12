@@ -811,6 +811,15 @@ class PostgresSandboxRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn)
+            # The attempt, then the conversation, then the turn. A first
+            # reservation creates the group and membership, whose foreign keys
+            # share-lock the conversation: taken only then, after the turn, it
+            # crossed a cancel, which holds the conversation and waits for the
+            # turn.
+            await conn.execute("SELECT id FROM agent_attempts WHERE id = $1 FOR SHARE", attempt_id)
+            await conn.execute(
+                "SELECT id FROM agent_threads WHERE id = $1 FOR KEY SHARE", thread_id
+            )
             earns = await conn.fetchrow(
                 """
                 SELECT j.id, j.thread_id, j.user_id
