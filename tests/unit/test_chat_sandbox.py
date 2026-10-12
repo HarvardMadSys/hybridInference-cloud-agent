@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import os
@@ -52,6 +53,12 @@ from cloud_agent_host.guest_observer import (
     GuestObserverCursor,
     GuestObserverSnapshot,
     GuestObserverStatus,
+)
+from cloud_agent_host.runtimes import (
+    CREDENTIAL_ENV_NAMES,
+    RuntimeMCPConfig,
+    get_runtime,
+    registered_runtimes,
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError, SandboxSpec
 
@@ -1155,6 +1162,102 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
     assert 'exec "$@"' in wrapper
     assert "shift 20" not in wrapper
     assert command[-4:] == [pidfile, "claude", "--model", "local-demo-model"]
+
+
+def _assert_credentials_passed_by_name(
+    argv: list[str], client_env: dict[str, str], credentials: dict[str, str]
+) -> None:
+    """Values reach the Docker client's environment, never its argv."""
+    for name, value in credentials.items():
+        assert not any(value in part for part in argv), f"{name} is readable in argv"
+        assert argv[argv.index(name) - 1] == "--env"
+        assert client_env[name] == value
+
+
+def test_a_resident_credential_is_never_a_docker_client_argument(monkeypatch):
+    """Every host user reads argv, and a resident exec keeps its argv for hours."""
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    credentials = {name: f"agr.secret-{name.lower()}" for name in CREDENTIAL_ENV_NAMES}
+    env = {**credentials, "HOME": "/home/agent-member-0"}
+    calls: list[tuple[list[str], dict]] = []
+
+    class Process:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[1:3] == ["container", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=payload, stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def fake_popen(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return Process()
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+
+    manager.spawn(
+        spec,
+        ["claude"],
+        env=env,
+        live_input=True,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+        process_pidfile=f"{MEMBER_TMPFS_ROOT}/0/resident-{'a' * 32}.pid",
+    )
+    manager.exec_capture(spec, ["true"], env=env)
+
+    execs = [(argv, kwargs) for argv, kwargs in calls if argv[1] == "exec"]
+    assert len(execs) == 2
+    for argv, kwargs in execs:
+        _assert_credentials_passed_by_name(argv, kwargs["env"], credentials)
+        # Everything else keeps its value on the exec, and the client keeps
+        # its own HOME: the sandbox's must not move the Docker CLI's config.
+        assert "HOME=/home/agent-member-0" in argv
+        assert kwargs["env"].get("HOME") == os.environ.get("HOME")
+
+
+@pytest.mark.parametrize("name", registered_runtimes())
+def test_every_credential_a_runtime_hands_over_is_passed_by_name(name):
+    """A credential under a name the exec layer does not know would reach argv."""
+    grant, token = "agr.grant-sentinel", "mcp-token-sentinel"
+    runtime = get_runtime(name)
+    arguments = {
+        "workdir": CHAT_WORKDIR,
+        "task_prompt": "do the thing",
+        "model": "glm-5.1",
+        "gateway_base_url": "http://agent-gateway:8080",
+        "credential": grant,
+        "provides_isolation": True,
+        "mcp_config": RuntimeMCPConfig(
+            server_ids=("server",), base_url="http://agent-mcp:8000", credential=token
+        ),
+        "session_state_dir": CHAT_STATE_DIR,
+        "activation_dir": f"{ACTIVATION_TMPFS}/{name}",
+    }
+    for prepare in (runtime.prepare, getattr(runtime, "prepare_live", None)):
+        if prepare is None:
+            continue
+        accepted = inspect.signature(prepare).parameters
+        _argv, env = prepare(**{key: value for key, value in arguments.items() if key in accepted})
+        carrying = {key for key, value in env.items() if grant in value or token in value}
+        assert carrying, f"{name} handed over no credential at all"
+        assert carrying <= CREDENTIAL_ENV_NAMES
 
 
 def test_member_permission_normalization_prunes_platform_and_sibling_provider_homes(

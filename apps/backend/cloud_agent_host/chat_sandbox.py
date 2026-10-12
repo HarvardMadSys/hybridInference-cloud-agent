@@ -56,6 +56,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverSnapshot,
 )
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
+from cloud_agent_host.runtimes import CREDENTIAL_ENV_NAMES
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -2450,7 +2451,12 @@ class ChatSandboxManager:
         user_gid: int | None = None,
         container_id: str | None = None,
     ) -> builtins.list[str]:
-        """Compose ``docker exec`` after identity/running checks at spawn time."""
+        """Compose ``docker exec`` after identity/running checks at spawn time.
+
+        A credential in ``env`` is passed by name only: run the command with
+        :meth:`exec_client_env` of the same ``env``, from which the Docker
+        client reads its value.
+        """
         if not argv:
             raise ValueError("a retained sandbox exec needs an argv")
         command = [self.backend.docker_binary, "exec"]
@@ -2468,7 +2474,10 @@ class ChatSandboxManager:
         for key, value in sorted((env or {}).items()):
             if not key or "=" in key or "\x00" in key or "\x00" in value:
                 raise ValueError(f"invalid environment entry {key!r}")
-            command += ["--env", f"{key}={value}"]
+            # Every host user can read a process's argv, and a resident exec
+            # keeps its argv for the whole residency. A bare name makes the
+            # Docker client copy the value from its own environment instead.
+            command += ["--env", key if key in CREDENTIAL_ENV_NAMES else f"{key}={value}"]
         command.append(container_id or spec.container_name)
         if self.backend.runtime == KATA_RUNTIME:
             command += list(_UNPRIVILEGED_EXEC)
@@ -2478,6 +2487,20 @@ class ChatSandboxManager:
                 command += ["/bin/sh", "-c", 'exec "$@" </dev/null', "sh"]
         command += argv
         return command
+
+    @staticmethod
+    def exec_client_env(env: dict[str, str] | None = None) -> dict[str, str]:
+        """The Docker client's environment for an exec built from ``env``.
+
+        This process's own environment plus the credentials that
+        :meth:`build_exec_command` names without a value. Only those: the
+        client reads ``HOME``, ``PATH`` and ``DOCKER_*`` for itself, so the
+        sandbox's values of anything else must not reach it.
+        """
+        credentials = {
+            key: value for key, value in (env or {}).items() if key in CREDENTIAL_ENV_NAMES
+        }
+        return {**os.environ, **credentials}
 
     def spawn(
         self,
@@ -2530,7 +2553,7 @@ class ChatSandboxManager:
         )
         process = subprocess.Popen(
             command,
-            env={**os.environ},
+            env=self.exec_client_env(env),
             stdin=subprocess.PIPE if live_input else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -3350,7 +3373,7 @@ class ChatSandboxManager:
             # learns the browser's dimensions.
             process = subprocess.Popen(
                 command,
-                env={**os.environ},
+                env=self.exec_client_env(env),
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -3463,7 +3486,7 @@ class ChatSandboxManager:
             with substage(observer, "exec"):
                 return subprocess.run(
                     command,
-                    env={**os.environ},
+                    env=self.exec_client_env(env),
                     input=input_bytes,
                     capture_output=True,
                     timeout=timeout_s,
