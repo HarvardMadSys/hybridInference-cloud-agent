@@ -973,9 +973,11 @@ class SshHostBootstrap:
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> None:
         """Stop the Host stack, its sandboxes and the container daemons, keeping all state."""
-        params = self._params(profile, intent)
+        params = {**self._params(profile, intent), "broker_drain_seconds": _BROKER_DRAIN_SECONDS}
         script = "sudo -n python3 -c " + shlex.quote(_STOP) + " " + shlex.quote(json.dumps(params))
-        result = self._json(await self._transport.run(self._connection(node), script, timeout=900))
+        result = self._json(
+            await self._transport.run(self._connection(node), script, timeout=_STOP_TIMEOUT_SECONDS)
+        )
         if result.get("stopped") is not True:
             raise ProviderError(
                 str(result.get("reason") or "host_stop_failed"),
@@ -1093,6 +1095,11 @@ class SshHostBootstrap:
 _TRANSFER_STREAMS = 6
 _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
 
+# The broker's drain must end early enough inside the stop's SSH deadline to
+# leave time for the runner, the remaining containers and the daemons.
+_STOP_TIMEOUT_SECONDS = 900
+_BROKER_DRAIN_SECONDS = 600
+
 _STOP = r"""
 import json, subprocess, sys
 from pathlib import Path
@@ -1105,12 +1112,21 @@ quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
 def running(*filters):
     result = subprocess.run(['docker', 'ps', '-q', *filters], capture_output=True, text=True)
     return result.stdout.split() if result.returncode == 0 else []
+def service(name):
+    return running('--filter', 'label=com.docker.compose.project=' + params['project'],
+                   '--filter', 'label=com.docker.compose.service=' + name)
 if subprocess.run(['systemctl', 'is-active', '--quiet', 'docker'], **quiet).returncode == 0:
     # The runner first: nothing may claim or resume while the state is moving.
-    runner = running('--filter', 'label=com.docker.compose.project=' + params['project'],
-                     '--filter', 'label=com.docker.compose.service=runner')
+    runner = service('runner')
     if runner:
         subprocess.run(['docker', 'stop', '-t', '60', *runner], **quiet)
+    # Then the broker, alone: its shutdown stops each running sandbox cleanly.
+    # While lifecycle archives are enabled, the next node's broker quarantines
+    # a sandbox that Docker stopped behind the broker's back.
+    broker = service('workspace-broker')
+    if broker:
+        drain = str(params['broker_drain_seconds'])
+        subprocess.run(['docker', 'stop', '-t', drain, *broker], **quiet)
     # Explicitly stopped containers stay stopped when a daemon starts again,
     # including on the node that receives this state. The CLI stops them in
     # parallel, each with its own configured grace period.

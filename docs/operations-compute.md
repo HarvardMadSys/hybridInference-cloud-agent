@@ -459,7 +459,12 @@ expiry.
 
 The worker stops the source Host and container daemons, copies final changes,
 transfers the database binding, starts the replacement and verifies deployment,
-fresh heartbeat and broker access. Claims resume only after successful takeover
+fresh heartbeat and broker access. The stop takes the runner first, then the
+workspace broker alone for up to 10 minutes: its shutdown stops each running
+sandbox cleanly and, when lifecycle archives are enabled, stores its final
+archive. Remaining containers stop afterwards. While archives are enabled, the
+replacement's broker quarantines a sandbox that Docker stopped without the
+broker, so its chat cannot continue. Claims resume only after successful takeover
 is recorded durably. Recovery after that boundary can clean up the source; it
 cannot restore its stale copy over new work.
 
