@@ -792,6 +792,9 @@ jobs:
   # the one applied to the bytes that get published.
   artifacts:
     name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
+    # PROBE (do not merge): phase timestamps for the twelve fast cases.
+    env:
+      MCP_TEST_TRACE_DIR: /tmp/mcp-trace
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && (matrix.artifact.arch == 'arm64' && '["ubuntu-24.04-arm"]' || '["ubuntu-24.04"]') || matrix.artifact.runner) }}
@@ -1149,6 +1152,14 @@ jobs:
       # and an image per attempt until the disk fills, and the symptom lands on
       # whatever job happens to be running then. Containers first — an image with
       # a container still referencing it is not removed even with `-f`.
+      - name: Show the MCP phase timings
+        if: always()
+        run: |
+          for log in /tmp/mcp-trace/*.log; do
+            [ -e "${log}" ] || { echo "no trace"; break; }
+            echo "=== ${log}"; cat "${log}"
+          done
+
       - name: Drop this run's containers and image
         if: always() && runner.environment != 'github-hosted'
         run: |
@@ -1190,7 +1201,10 @@ jobs:
   # way it is. `test_artifacts_workflow.py` fails if the copies diverge, so the
   # image these cases run is the image the sandbox cell builds and starts.
   mcp:
-    name: MCP conformance (kilo, ${{ matrix.case }})
+    name: MCP conformance (kilo, ${{ matrix.case }}, ${{ matrix.attempt }})
+    # PROBE (do not merge): phase timestamps, two samples per case.
+    env:
+      MCP_TEST_TRACE_DIR: /tmp/mcp-trace
     needs: changes
     if: github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || matrix.artifact.runner) }}
@@ -1200,6 +1214,7 @@ jobs:
         # Kilo's three policy cases. With the sandbox cell's selection these
         # partition the parity suite; the policy test collects it to prove so.
         case: [allow, confirm, confirm-normalized-name]
+        attempt: [1, 2]
         artifact:
           - name: sandbox
             arch: amd64
@@ -1379,6 +1394,14 @@ jobs:
           # CLI processes while the worker databases isolate their storage.
           uv run pytest -q -n "${MCP_TEST_WORKERS}" --dist load \
             -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py
+
+      - name: Show the MCP phase timings
+        if: always()
+        run: |
+          for log in /tmp/mcp-trace/*.log; do
+            [ -e "${log}" ] || { echo "no trace"; break; }
+            echo "=== ${log}"; cat "${log}"
+          done
 
       - name: Drop this run's containers and image
         if: always() && runner.environment != 'github-hosted'
