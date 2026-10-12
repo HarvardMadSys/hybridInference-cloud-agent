@@ -23,12 +23,16 @@ from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
     _expire_attempt,
+    _reserve_retained_chat,
     _reserve_shared_chat,
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
 
-from cloud_agent.storage.repositories import attempt_commands as attempt_module
+from cloud_agent.storage.repositories import (
+    attempt_commands as attempt_module,
+    snapshot as snapshot_module,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
@@ -40,7 +44,13 @@ _HOST_CREDENTIAL = "test-credential-hash"
 
 
 async def _run_turn(
-    store: Storage, job: dict, claim: dict, sandbox: dict, *, context_status: str = "new"
+    store: Storage,
+    job: dict,
+    claim: dict,
+    sandbox: dict,
+    *,
+    context_status: str = "new",
+    container_id: str = "container-lock-order",
 ) -> None:
     """Start, admit, settle and finish one retained turn, as its runner does."""
     fence = {
@@ -51,7 +61,7 @@ async def _run_turn(
         "activation_generation": sandbox["activation_generation"],
     }
     assert await store.sandbox.mark_thread_sandbox_running(
-        **fence, container_id="container-lock-order", context_status=context_status
+        **fence, container_id=container_id, context_status=context_status
     )
     assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
     assert await store.sandbox.settle_thread_sandbox(
@@ -141,10 +151,10 @@ async def _snapshots(pool, sandbox_id: str) -> list[dict]:
 
 
 @pytest.mark.parametrize("recovery", ["deferred", "reaped"])
-async def test_a_turn_settled_during_a_capture_is_folded_into_the_capture_handed_back(
+async def test_a_capture_handed_back_folds_into_the_snapshot_a_turn_settled_meanwhile(
     pool, store: Storage, recovery: str
 ):
-    """A capture handed back carries the turn that settled while it was out.
+    """A capture handed back joins the pending snapshot of a turn settled while it was out.
 
     A turn is not refused while its workspace is captured, so the next turn's
     settlement opens a second, pending snapshot behind the capturing one. The
@@ -179,17 +189,31 @@ async def test_a_turn_settled_during_a_capture_is_folded_into_the_capture_handed
             capture["snapshot_id"]
         ]
 
-    # One pending snapshot: the claim that was handed back, now at the second
-    # turn's boundary and carrying both turns.
+    # One pending snapshot: the second turn's, at its boundary, carrying both
+    # turns. The capture's own row is gone, so its receipt is a stale one.
     assert await _snapshots(pool, sandbox["sandbox_id"]) == [
         {
-            "id": capture["snapshot_id"],
+            "id": opened[0]["id"],
             "state": "pending",
             "workspace_epoch": opened[0]["workspace_epoch"],
             "anchor_job_id": second["id"],
             "included": [first["id"], second["id"]],
         }
     ]
+    late = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=late,
+            content_sha256=hashlib.sha256(late.encode()).hexdigest(),
+        )
+        is None
+    )
     async with pool.acquire() as conn:
         assert (
             await conn.fetchval(
@@ -201,12 +225,12 @@ async def test_a_turn_settled_during_a_capture_is_folded_into_the_capture_handed
             assert await store.snapshot.claim_due_sandbox_snapshot() is None, "not before its retry"
             await conn.execute(
                 "UPDATE agent_sandbox_snapshots SET retry_at = NOW() WHERE id = $1",
-                capture["snapshot_id"],
+                opened[0]["id"],
             )
 
     again = await store.snapshot.claim_due_sandbox_snapshot()
     assert again is not None
-    assert again["snapshot_id"] == capture["snapshot_id"]
+    assert again["snapshot_id"] == opened[0]["id"]
     assert again["anchor_job_id"] == second["id"]
     patch = "diff --git a/docs.md b/docs.md\nnew file mode 100644\n"
     assert (
@@ -225,6 +249,115 @@ async def test_a_turn_settled_during_a_capture_is_folded_into_the_capture_handed
     publication = await store.snapshot.claim_for_publish()
     assert publication is not None
     assert publication["included_job_ids"] == [first["id"], second["id"]]
+
+
+@pytest.mark.parametrize("recovery", ["deferred", "reaped"])
+async def test_a_capture_handed_back_does_not_wait_for_a_turn_a_follow_up_holds(
+    pool, store: Storage, recovery: str
+):
+    """Folding a capture into the pending snapshot locks none of their turns.
+
+    A follow-up takes the conversation's newest turn and then the group. A
+    capture is handed back with its group locked, so a fold that locked a turn
+    it moved -- inserting a turn's row into another snapshot, or naming a new
+    anchor, share-locks that turn through its foreign key -- waited for the
+    follow-up while holding the group the follow-up waits for next.
+    """
+    first, first_claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, first, first_claim, sandbox)
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    second = await _run_next_turn(store, first, sandbox)
+    recover = None
+    async with pool.acquire() as follow_up:
+        try:
+            async with follow_up.transaction():
+                # A follow-up's first two locks, in ``insert_follow_up``'s order:
+                # the newest turn is the one the settled pending snapshot holds.
+                await follow_up.execute(
+                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", first["thread_id"]
+                )
+                newest = await follow_up.fetchval(
+                    "SELECT id FROM agent_jobs WHERE thread_id = $1 "
+                    "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
+                    first["thread_id"],
+                )
+                assert newest == second["id"]
+                if recovery == "deferred":
+                    recover = asyncio.create_task(
+                        store.snapshot.defer_sandbox_snapshot_capture(
+                            snapshot_id=capture["snapshot_id"],
+                            sandbox_id=capture["sandbox_id"],
+                            sandbox_generation=capture["generation"],
+                            container_id=capture["container_id"],
+                            detail="the host is busy",
+                        )
+                    )
+                else:
+                    recover = asyncio.create_task(
+                        store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0)
+                    )
+                # Handed back while the follow-up holds the turn...
+                assert await asyncio.wait_for(recover, timeout=10)
+                # ...so the follow-up's next two locks are free.
+                await follow_up.execute(
+                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE",
+                    first["thread_id"],
+                )
+                await follow_up.execute(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
+                    sandbox["sandbox_id"],
+                )
+        finally:
+            await _settle(recover)
+    assert [
+        (row["state"], row["included"]) for row in await _snapshots(pool, sandbox["sandbox_id"])
+    ] == [("pending", [first["id"], second["id"]])]
+
+
+async def test_a_stalled_capture_the_reaper_cannot_hand_back_does_not_hold_back_the_others(
+    pool, store: Storage, monkeypatch
+):
+    """Each stalled capture is handed back in a transaction of its own.
+
+    The reaper handed back every stalled capture of the deployment in one
+    statement, so a capture the database refused kept every workspace's
+    capture stuck with it. That one is left for the next pass now, and the
+    others go back to the queue.
+    """
+    first, first_claim, first_sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, first, first_claim, first_sandbox)
+    other, other_claim, other_sandbox = await _reserve_retained_chat(store)
+    await _run_turn(store, other, other_claim, other_sandbox, container_id="container-lock-other")
+    captures = [await store.snapshot.claim_due_sandbox_snapshot() for _ in range(2)]
+    assert [capture["sandbox_id"] for capture in captures if capture is not None] == [
+        first_sandbox["sandbox_id"],
+        other_sandbox["sandbox_id"],
+    ]
+    stuck, freed = (int(capture["snapshot_id"]) for capture in captures if capture is not None)
+    original = snapshot_module._fold_into_pending_snapshot
+
+    async def refuse_one(conn, *, snapshot_id, sandbox_id):
+        if snapshot_id == stuck:
+            raise asyncpg.exceptions.DeadlockDetectedError("deadlock detected")
+        return await original(conn, snapshot_id=snapshot_id, sandbox_id=sandbox_id)
+
+    monkeypatch.setattr(snapshot_module, "_fold_into_pending_snapshot", refuse_one)
+    assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [freed]
+    async with pool.acquire() as conn:
+        states = await conn.fetch(
+            "SELECT id, state FROM agent_sandbox_snapshots WHERE id = ANY($1::bigint[]) "
+            "ORDER BY id",
+            [stuck, freed],
+        )
+    assert [(row["id"], row["state"]) for row in states] == [
+        (stuck, "capturing"),
+        (freed, "pending"),
+    ]
+
+    monkeypatch.undo()
+    assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [stuck]
 
 
 async def _claimed_for_publication(store: Storage) -> tuple[dict, dict, dict]:
