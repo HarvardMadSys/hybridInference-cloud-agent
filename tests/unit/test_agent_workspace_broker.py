@@ -1690,6 +1690,56 @@ def test_oversized_output_without_newlines_is_refused_before_it_is_buffered(tmp_
     assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
 
 
+class _ReceiptGoneManager(_CommandReceiptManager):
+    """The reaper reports failure, as when the command finished just before it.
+
+    Nothing of the command is left running afterwards, as in that case; only
+    the report differs.
+    """
+
+    def kill_member_process(self, _spec, *, pidfile: str, user_uid: int, user_gid: int) -> None:
+        super().kill_member_process(_spec, pidfile=pidfile, user_uid=user_uid, user_gid=user_gid)
+        raise SandboxError("resident process cleanup failed: ")
+
+
+@pytest.mark.parametrize(
+    ("command", "timeout_seconds", "status_code"),
+    [
+        # Just past the limit: the command can finish writing, and exit,
+        # before the broker has read far enough to stop it.
+        ("head -c 1100000 /dev/zero | tr '\\000' x", 20, 413),
+        ("sleep 10", 1, 408),
+    ],
+)
+def test_a_command_stopped_for_overrunning_answers_why_even_if_its_kill_fails(
+    tmp_path, command, timeout_seconds, status_code
+):
+    """A kill that finds nothing left to signal must not replace the answer.
+
+    The owner asked why the command was stopped; a cleanup error in its place
+    reads as a broken workspace. The Docker client is killed either way.
+    """
+    backend = _LocalRetainedBackend(str(tmp_path))
+    backend.manager = _ReceiptGoneManager()
+    request = TerminalRequest(command=command, cwd=str(tmp_path), timeout_seconds=timeout_seconds)
+
+    with pytest.raises(HTTPException) as stopped:
+        _finish_within(
+            30,
+            lambda: _run_terminal(
+                backend,  # type: ignore[arg-type]
+                str(tmp_path),
+                request,
+                max_output_bytes=1024 * 1024,
+            ),
+        )
+
+    assert stopped.value.status_code == status_code
+    assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
+    # The client was killed all the same; a kill is delivered, not awaited.
+    assert all(process.wait(timeout=5) is not None for process in backend.manager.processes)
+
+
 def test_a_broker_command_carries_its_own_process_receipt(monkeypatch):
     """Stopping a timed-out or oversized command must never stop its group.
 

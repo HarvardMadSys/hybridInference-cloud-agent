@@ -64,6 +64,7 @@ from cloud_agent_host.sandbox import (
     ContainerBackend,
     SandboxBackend,
     SandboxError,
+    SandboxProcess,
     SandboxSpec,
     TerminalNotSupportedError,
     TerminalProcess,
@@ -1456,6 +1457,21 @@ def _relative_path(raw: str | None) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _stop_overrun_command(process: SandboxProcess) -> None:
+    """Stop a bounded command that overran, keeping why it was stopped.
+
+    The kill signals only the command's own process group, and the Docker
+    client goes with it either way. A command can finish just before its
+    kill, leaving no receipt to honour: the caller's answer (timed out, too
+    large, unreadable) is still what happened, so a failed kill is logged
+    rather than raised in its place.
+    """
+    try:
+        process.kill()
+    except (SandboxError, OSError):
+        logger.warning("workspace_command_kill_failed", exc_info=True)
+
+
 def _run_sandbox(
     backend: SandboxBackend,
     *,
@@ -1507,7 +1523,7 @@ def _run_sandbox(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            process.kill()
+            _stop_overrun_command(process)
             raise HTTPException(status_code=408, detail="workspace command timed out")
         try:
             event = events.get(timeout=remaining)
@@ -1517,13 +1533,13 @@ def _run_sandbox(
             exit_code = event
             break
         if isinstance(event, Exception):
-            process.kill()
+            _stop_overrun_command(process)
             raise HTTPException(
                 status_code=502, detail="workspace command output could not be read"
             ) from event
         stdout += event
         if len(stdout) > max_output_bytes:
-            process.kill()
+            _stop_overrun_command(process)
             raise HTTPException(status_code=413, detail="workspace command output is too large")
     stderr = process.stderr_text()
     if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
