@@ -359,10 +359,11 @@ async def resolve_connection(
         # by network position or not at all is usable as soon as it is reachable.
         return ResolvedConnection(connection=connection, snapshot=snapshot)
 
-    credential_present = bool(row.get("access_token_ciphertext")) or bool(
-        row.get("client_secret_ciphertext")
-    )
-    if not credential_present:
+    # The access token (or static secret) only. A client secret is how this
+    # platform authenticates to the authorization server, under its own cipher
+    # domain; it is never what the MCP server is sent, and a row holding only
+    # one is a sign-in that has not completed yet.
+    if not row.get("access_token_ciphertext"):
         return ResolvedConnection(
             connection=connection,
             snapshot=snapshot,
@@ -396,9 +397,8 @@ async def resolve_connection(
                 error_kind=ConnectionErrorKind.NONE,
             )
 
-    ciphertext = row.get("access_token_ciphertext") or row.get("client_secret_ciphertext") or ""
     try:
-        secret = resolved_cipher.decrypt(str(ciphertext))
+        secret = resolved_cipher.decrypt(str(row["access_token_ciphertext"]))
     except SourceControlError:
         # Narrow deliberately: this is the whole contract of `decrypt`, and a
         # broader catch would swallow a genuine bug here as "the user's

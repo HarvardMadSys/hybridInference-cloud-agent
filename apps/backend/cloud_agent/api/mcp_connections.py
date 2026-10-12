@@ -517,9 +517,9 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         error_detail=connection.error_detail,
         account_label=row.get("account_label"),
         connector_id=int(row["connector_id"]) if row.get("connector_id") else None,
-        has_credential=bool(
-            row.get("access_token_ciphertext") or row.get("client_secret_ciphertext")
-        ),
+        # The credential the server is sent. A stored OAuth client secret is
+        # not one: until a sign-in completes there is nothing to send.
+        has_credential=bool(row.get("access_token_ciphertext")),
         # The stored hint is already two characters and two more; rendering it
         # here rather than masking again keeps it recognisable without ever
         # having held the whole value.

@@ -1237,6 +1237,66 @@ class TestTheDynamicClientIdentity:
         assert self.exchanges == []
 
 
+class TestTheClientSecretIsNotACredential:
+    """A client secret authenticates to the authorization server, never upstream.
+
+    A user who brings a client id and secret has them stored before the browser
+    flow starts, so an abandoned or failed sign-in leaves a row holding a client
+    secret and no access token. That row needs authorizing; it has no credential.
+    """
+
+    def test_an_unfinished_sign_in_needs_authorizing_rather_than_reconnecting(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = FakeStore()
+        connection_id = _seed(
+            store, auth_kind="oauth", auth_config={}, access_token_ciphertext=None
+        )
+        with _client(store) as client:
+            client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                json={"client_id": "our-client", "client_secret": "shh"},
+            )
+            assert store.connections[connection_id]["client_secret_ciphertext"]
+            view = client.get(f"/v1/agent/mcp/connections/{connection_id}").json()
+            with caplog.at_level("WARNING"):
+                result = client.post(f"/v1/agent/mcp/connections/{connection_id}/test").json()
+        assert view["has_credential"] is False
+        assert result["ok"] is False
+        assert result["error_kind"] == "needs_authorization"
+        assert result["message"] == "This connection needs to be authorized."
+        assert "agent_mcp_credential_unreadable" not in caplog.text
+
+    async def test_a_client_secret_is_never_resolved_as_the_bearer(self) -> None:
+        """Not even one the credential cipher could read."""
+        from cloud_agent.mcp.registry import resolve_connection, server_for
+
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={},
+            access_token_ciphertext=None,
+            client_secret_ciphertext=mcp_cipher(_ENCRYPTION_KEY).encrypt("client-secret"),
+        )
+        resolved = await resolve_connection(store, row=store._row(connection_id))
+        assert not resolved.usable
+        assert "client-secret" not in json.dumps(dict(resolved.credential))
+        assert resolved.error == "This connection needs to be authorized."
+        assert "client-secret" not in json.dumps(
+            server_for(resolved, _binding(connection_id)).headers
+        )
+
+
+def _binding(connection_id: int) -> Any:
+    """A default selection for one connection, as a new conversation gets."""
+    from cloud_agent.mcp.registry import binding_from_row
+
+    return binding_from_row(
+        {"thread_id": "thread-1", "connection_id": connection_id, "alias": "docs"}
+    )
+
+
 class TestImport:
     """Pasting a configuration."""
 
