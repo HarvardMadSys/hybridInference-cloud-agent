@@ -1002,6 +1002,62 @@ def test_a_settled_turn_whose_finish_is_fenced_on_retry_reports_nothing_more(mon
     control.abandon_chat_sandbox.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("admitted", "code", "heart"),
+    [
+        (False, 0, SimpleNamespace(cancel_requested=True, lease_lost=False)),
+        (True, 130, None),
+    ],
+    ids=["stop_before_admission", "stop_after_admission"],
+)
+@pytest.mark.parametrize(
+    "failures",
+    [
+        [_status_error(503)],
+        [httpx.ReadTimeout("finish answer lost"), _status_error(502)],
+        [httpx.ReadTimeout("down")] * 3,
+    ],
+)
+def test_a_stopped_turn_is_never_reported_failed_because_its_finish_was(
+    monkeypatch, admitted, code, heart, failures
+):
+    """The owner's Stop decided the outcome; a finish error is retried, never downgraded.
+
+    Both cancel paths finished with one request: a 503 there fell into the
+    generic handler, which reported the cancelled turn as a failure -- with the
+    control plane's URL in the owner's detail.
+    """
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    pending = list(failures)
+
+    def configure(_control, _supervisor, finish):
+        def answer(*_args, **_kwargs):
+            if pending:
+                raise pending.pop(0)
+
+        finish.side_effect = answer
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        code,
+        {"kind": "result", "status": "cancelled"},
+        "claude-code",
+        configure=configure,
+        heart=heart,
+    )
+
+    assert result == 0
+    assert {call.args[:2] for call in finish.call_args_list} == {
+        ("cancelled", "cancelled by owner")
+    }
+    assert finish.call_count == min(len(failures) + 1, 3)
+    assert control.admit_chat_turn.called is admitted
+    control.abandon_chat_sandbox.assert_called_once()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is admitted
+    for call in control.append_event.call_args_list:
+        assert call.args[0].event_type != "error"
+
+
 @pytest.mark.parametrize("stage", ["admission", "supervisor_settle", "control_settle"])
 def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatch, stage):
     from cloud_agent_host import runner as runner_mod

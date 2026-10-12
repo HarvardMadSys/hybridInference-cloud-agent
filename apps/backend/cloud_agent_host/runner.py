@@ -2475,13 +2475,16 @@ def _run_shared_live_attempt(
         except Exception as exc:
             _log_control_failure("finish", job.job_id, exc)
 
-    def finish_settled(state: str, detail: str, base_sha: str | None) -> None:
-        # Both settlements are durable, so the outcome is already decided.
-        # The receipt is retried through a brief control-plane error and never
-        # downgraded: an exhausted retry is logged and left to the control
-        # plane's settled-finalization path rather than reported as a failed
-        # turn. A fence refusing a retry (LeaseLost) is usually the earlier
-        # try having landed, and there is nothing left to report either way.
+    def finish_decided(state: str, detail: str, base_sha: str | None) -> None:
+        # The outcome is already decided: both settlements are durable, or the
+        # owner's Stop has released or interrupted the turn. The receipt is
+        # retried through a brief control-plane error and never downgraded to
+        # a failure of its own: an exhausted retry is logged and left to the
+        # lease reaper, which ends the job from that durable state (a settled
+        # context is kept, a requested cancel stays a cancel) and never
+        # replays the prompt. A fence refusing a retry (LeaseLost) is usually
+        # the earlier try having landed, and there is nothing left to report
+        # either way.
         try:
             _retry_lifecycle_receipt(
                 "finish_retry",
@@ -2900,7 +2903,7 @@ def _run_shared_live_attempt(
             failure_detail = "cancelled by owner before prompt admission"
             operation_profiling.finish(measurement, outcome="cancelled", failure_stage=stage)
             abandon_before_finish(lost=False, detail=failure_detail)
-            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
+            finish_decided("cancelled", "cancelled by owner", base_sha)
             return 0
         _retry_lifecycle_receipt(
             "prompt_admission_retry",
@@ -2977,7 +2980,7 @@ def _run_shared_live_attempt(
         if exit_code == 130:
             failure_detail = "cancelled by owner after shared-session admission"
             abandon_before_finish(lost=True, detail=failure_detail)
-            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
+            finish_decided("cancelled", "cancelled by owner", base_sha)
             return 0
         if exit_code == 124:
             failure_detail = "shared Agent CLI turn exceeded its execution timeout"
@@ -3043,7 +3046,7 @@ def _run_shared_live_attempt(
         if settled_failure:
             # Record the native turn ordinal before failing the job, so later
             # retries and historical forks keep matching the CLI transcript.
-            finish_settled(
+            finish_decided(
                 "failed", f"agent failed at native turn boundary: {tail[-500:]}", base_sha
             )
             return 1
@@ -3064,7 +3067,7 @@ def _run_shared_live_attempt(
             # Both authoritative settlements succeeded. A missing UI notice
             # must not turn that success into a failed terminal transition.
             _log_control_failure("completion_event", job.job_id, exc)
-        finish_settled(
+        finish_decided(
             "succeeded",
             "agent completed (shared workspace; publication snapshot pending)",
             base_sha,
