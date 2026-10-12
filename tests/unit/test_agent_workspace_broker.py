@@ -275,6 +275,11 @@ class _SharedSupervisor:
     def list(self):
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
+    def list_for_thread(self, thread_id: str):
+        if not self.owns(thread_id):
+            raise SandboxError("unknown member")
+        return [_descriptor("athr_source"), _descriptor("athr_child")]
+
     def register_manifest(self, spec, members, *, expected_container_id=None):
         self.calls.append(("manifest", spec, members, expected_container_id))
         self.threads.update(member.thread_id for member in members)
@@ -600,6 +605,56 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
 
 @pytest.mark.asyncio
+async def test_targeted_inventory_is_authenticated_and_isolated_from_full_inventory_failure():
+    supervisor = _SharedSupervisor()
+    calls = []
+
+    def failed_inventory():
+        calls.append(("list",))
+        raise SandboxError("unrelated sandbox reconciliation failed")
+
+    def targeted_inventory(thread_id):
+        calls.append(("list_for_thread", thread_id))
+        return [_descriptor("athr_source"), _descriptor("athr_child")]
+
+    supervisor.list = failed_inventory
+    supervisor.list_for_thread = targeted_inventory
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        denied = await client.get("/sandboxes", params={"thread_id": "athr_child"})
+        assert denied.status_code == 401
+        assert calls == []
+        failed = await client.get("/sandboxes", headers=headers)
+        response = await client.get(
+            "/sandboxes", headers=headers, params={"thread_id": "athr_child"}
+        )
+
+    assert failed.status_code == 503
+    assert response.status_code == 200
+    assert calls == [("list",), ("list_for_thread", "athr_child")]
+    row = response.json()["sandboxes"][0]
+    assert row["thread_id"] == "athr_source"
+    assert {member["thread_id"] for member in row["members"]} == {"athr_source", "athr_child"}
+
+
+@pytest.mark.asyncio
+async def test_targeted_inventory_rejects_unknown_members_without_falling_back_to_full_inventory():
+    supervisor = _SharedSupervisor()
+    supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params={"thread_id": "athr_unknown"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "unknown member"}
+
+
+@pytest.mark.asyncio
 async def test_targeted_shared_status_serializes_force_delete_proof_fields():
     supervisor = _SharedSupervisor()
     supervisor.status = lambda thread_id: replace(
@@ -654,19 +709,24 @@ async def test_targeted_shared_status_serializes_force_delete_proof_fields():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "athr_source", "athr_child"])
 @pytest.mark.parametrize("origin_count,child_count", [(0, 2), (1, 2), (2, 0), (0, 0)])
 async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
-    origin_count, child_count
+    origin_count, child_count, thread_id
 ):
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: [
+    descriptors = [
         replace(_descriptor("athr_source"), terminal_count=origin_count),
         replace(_descriptor("athr_child"), terminal_count=child_count),
     ]
+    supervisor.list = lambda: descriptors
+    supervisor.list_for_thread = lambda _thread_id: descriptors
     app = _app(supervisor)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
         response = await client.get(
-            "/sandboxes", headers={"X-Agent-Workspace-Token": "broker-secret"}
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params={} if thread_id is None else {"thread_id": thread_id},
         )
 
     assert response.status_code == 200
@@ -786,6 +846,36 @@ async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running
     else:
         assert len(calls) == 1
         assert row["resource_usage"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [True, False])
+async def test_targeted_inventory_reads_cached_resources_without_syncing_collection_targets(
+    running,
+):
+    supervisor = _SharedSupervisor()
+    supervisor.list_for_thread = lambda _thread_id: [
+        replace(_descriptor("athr_source"), running=running),
+        replace(_descriptor("athr_child"), running=running),
+    ]
+    app = _app(supervisor)
+    calls = []
+    sample = {"sample_id": "resource-sample", "sample_age_ms": 4000, "memory_bytes": 1024}
+    app.state.sandbox_resource_collector = SimpleNamespace(
+        sync_targets=lambda _rows: pytest.fail("partial inventory must not evict other groups"),
+        latest=lambda container: calls.append(("latest", container)) or sample,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params={"thread_id": "athr_child"},
+        )
+
+    assert response.status_code == 200
+    row = response.json()["sandboxes"][0]
+    assert calls == ([("latest", "container-shared")] if running else [])
+    assert row["resource_usage"] == (sample if running else None)
 
 
 @pytest.mark.asyncio

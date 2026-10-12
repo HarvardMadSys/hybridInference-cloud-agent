@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from httpx import ASGITransport, AsyncClient, ConnectError, ReadTimeout, Request
 from tests.servers.test_admin_runs import ADMIN, setup as run_setup  # noqa: F401
 from tests.unit.test_ledger_snapshots import END, START
@@ -23,7 +23,7 @@ from cloud_agent.api import admin_sandboxes
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.broker_routing import BrokerUrlRefused
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_broker_client import WorkspaceBrokerClient, WorkspaceBrokerError
 
 PREFIX = "/admin/agent/sandboxes"
 
@@ -435,7 +435,7 @@ async def test_detail_refreshes_unavailable_or_zero_terminal_activity_before_rer
     broker_factory.assert_called_once_with(host_pool.get_host.return_value)
     assert sequence.mock_calls == [
         call.detail("asbx_other"),
-        call.list_sandboxes(timeout=5),
+        call.list_sandboxes(thread_id="athr_other", timeout=5),
         call.record_terminal_observation(
             sandbox_id="asbx_other",
             host="runner-one",
@@ -446,6 +446,48 @@ async def test_detail_refreshes_unavailable_or_zero_terminal_activity_before_rer
         call.detail("asbx_other"),
     ]
     commands.request_admin_stop.assert_not_awaited()
+
+
+async def test_detail_refreshes_own_group_when_full_host_inventory_fails(terminal_probe):
+    app, queries, commands, _, broker, broker_factory = terminal_probe
+    broker_app = FastAPI()
+    selections: list[str | None] = []
+    row = broker.list_sandboxes.return_value[0]
+
+    @broker_app.get("/sandboxes")
+    async def inventory(request: FastAPIRequest):
+        assert request.headers["X-Agent-Workspace-Token"] == "secret"
+        thread_id = request.query_params.get("thread_id")
+        selections.append(thread_id)
+        if thread_id != "athr_other":
+            raise HTTPException(503, "An unrelated retained container cannot be inspected.")
+        return {"sandboxes": [row]}
+
+    queries.detail.side_effect = [
+        sandbox_detail(),
+        sandbox_detail(terminal_count=0, terminal_count_observed_at=END),
+    ]
+    async with AsyncClient(
+        transport=ASGITransport(app=broker_app), base_url="http://broker"
+    ) as broker_http:
+        real_broker = WorkspaceBrokerClient("http://broker", "secret", client=broker_http)
+        broker_factory.return_value = real_broker
+        with pytest.raises(WorkspaceBrokerError):
+            await real_broker.list_sandboxes()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"{PREFIX}/asbx_other", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert response.json()["terminal_activity_error"] is None
+    assert response.json()["sandbox"]["terminal_count"] == 0
+    assert selections == [None, "athr_other"]
+    commands.record_terminal_observation.assert_awaited_once_with(
+        sandbox_id="asbx_other",
+        host="runner-one",
+        generation=1,
+        container_id="container-one",
+        terminal_count=0,
+    )
 
 
 @pytest.mark.parametrize(
@@ -498,7 +540,7 @@ async def test_detail_explains_unavailable_broker_without_recording_an_idle_cens
     commands.record_terminal_observation.assert_not_awaited()
     commands.request_admin_stop.assert_not_awaited()
     if failure == "broker_error":
-        broker.list_sandboxes.assert_awaited_once_with(timeout=5)
+        broker.list_sandboxes.assert_awaited_once_with(thread_id="athr_other", timeout=5)
         assert "refresh details" in body["terminal_activity_error"]
     else:
         broker.list_sandboxes.assert_not_awaited()
@@ -713,7 +755,10 @@ async def test_stop_probes_unknown_activity_then_retries_all_original_review_fen
     )
     assert commands.request_admin_stop.await_args_list == [reviewed_fences, reviewed_fences]
     probe_count = 2 if review_current else 1
-    assert broker.list_sandboxes.await_args_list == [call(timeout=5)] * probe_count
+    assert (
+        broker.list_sandboxes.await_args_list
+        == [call(thread_id="athr_other", timeout=5)] * probe_count
+    )
     observation = call(
         sandbox_id="asbx_other",
         host="runner-one",
@@ -802,7 +847,7 @@ async def test_stop_rejects_busy_legacy_census_before_atomic_stop(
         )
     assert response.status_code == 409
     assert "Wait until it is idle" in response.json()["detail"]
-    broker.list_sandboxes.assert_awaited_once_with(timeout=5)
+    broker.list_sandboxes.assert_awaited_once_with(thread_id="athr_other", timeout=5)
     commands.record_terminal_observation.assert_not_awaited()
     commands.request_admin_stop.assert_not_awaited()
     queries.detail.assert_awaited_once_with("asbx_other")
@@ -836,7 +881,7 @@ async def test_stop_verifies_current_group_census_before_atomic_stop(
     assert response.json()["sandbox"]["state"] == "stopping"
     assert sequence.mock_calls == [
         call.detail("asbx_other"),
-        call.list_sandboxes(timeout=5),
+        call.list_sandboxes(thread_id="athr_other", timeout=5),
         call.record_terminal_observation(
             sandbox_id="asbx_other",
             host="runner-one",

@@ -3394,6 +3394,48 @@ class SharedChatSessionSupervisor:
                 transport.close()
         return descriptors
 
+    def list_for_thread(self, thread_id: str) -> builtins.list[SharedSessionDescriptor]:
+        """Observe one known group without running host-wide reconciliation."""
+        with self._lock:
+            group, member = self._member(thread_id)
+            spec = group.spec
+            lifecycle_generation = group.lifecycle_generation
+            inspection = group.inspection
+            container_id = inspection.container_id
+
+        current = self._manager.inspect(spec.container_name)
+        stale_transports: builtins.list[ResidentTransport[DialectRuntime]] = []
+        with self._lock:
+            # A concurrent start can refresh inspection without advancing the
+            # lifecycle generation. Never overwrite its accepted Docker state.
+            if (
+                self._groups.get(spec.sandbox_id) is not group
+                or self._members.get(thread_id) is not group
+                or group.members.get(thread_id) is not member
+                or group.spec != spec
+                or group.lifecycle_generation != lifecycle_generation
+                or group.inspection != inspection
+            ):
+                raise SessionLeaseLost("shared sandbox lifecycle changed during observation")
+            if current is None:
+                self._mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container is missing")
+            if current.container_id != container_id:
+                self._mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container identity changed")
+            if self._spec_from_inspection(current) != spec:
+                raise SandboxError("shared sandbox immutable labels changed")
+            self._accept_inspection_locked(group, current)
+            for group_member in group.members.values():
+                stale = self._detach_dead_transport(group_member)
+                if stale is not None:
+                    stale_transports.append(stale)
+            descriptors = self._descriptors(group)
+        for transport in stale_transports:
+            with contextlib.suppress(Exception):
+                transport.close()
+        return descriptors
+
     def stop_if_idle(
         self,
         thread_id: str,

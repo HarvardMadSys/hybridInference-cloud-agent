@@ -71,7 +71,7 @@ async def _refresh_terminal_activity(
     if broker is None:
         return "Terminal activity is unavailable. Check the host's workspace broker connection."
     try:
-        rows = await broker.list_sandboxes(timeout=5)
+        rows = await broker.list_sandboxes(thread_id=sandbox.origin_thread_id, timeout=5)
     except WorkspaceBrokerError:
         return "The host's workspace broker is unavailable. Restore its connection and refresh details."
     row = next((row for row in rows if row.get("sandbox_id") == sandbox.id), None)

@@ -1141,6 +1141,235 @@ def test_status_listing_never_stops_a_managed_running_group():
     assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
 
 
+def test_targeted_listing_refreshes_all_members_without_host_reconciliation(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.terminal_opened("athr_peer")
+    supervisor.terminal_opened("athr_peer")
+    supervisor.operation_opened("athr_source")
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+    inspected: list[str] = []
+
+    def inspect(container_name):
+        inspected.append(container_name)
+        return manager.items[container_name]
+
+    def inventory():
+        raise SandboxError("unrelated sandbox inventory failed")
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+    monkeypatch.setattr(manager, "list", inventory)
+
+    descriptors = supervisor.list_for_thread("athr_peer")
+
+    assert inspected == [_spec().container_name]
+    assert {row.thread_id for row in descriptors} == {"athr_source", "athr_peer"}
+    assert sum(row.terminal_count for row in descriptors) == 2
+    assert sum(row.operation_count for row in descriptors) == 1
+    assert all(row.running is False and row.group_busy for row in descriptors)
+    assert manager.stop_count == 0
+    assert manager.pruned_specs == []
+    with pytest.raises(SandboxError, match="unrelated sandbox inventory failed"):
+        supervisor.list()
+
+
+def test_targeted_listing_unknown_member_does_not_discover_or_inspect_containers(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    monkeypatch.setattr(manager, "list", lambda: pytest.fail("unexpected inventory"))
+    monkeypatch.setattr(manager, "inspect", lambda _name: pytest.fail("unexpected inspection"))
+
+    with pytest.raises(SandboxError, match="no shared sandbox membership"):
+        supervisor.list_for_thread("athr_unknown")
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_targeted_listing_marks_missing_or_replaced_container_lost(missing):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    if missing:
+        manager.items.pop(_spec().container_name)
+    else:
+        manager.items[_spec().container_name] = replace(
+            original,
+            container_id="container-replacement",
+        )
+
+    with pytest.raises(RetainedChatLost, match="missing" if missing else "identity changed"):
+        supervisor.list_for_thread("athr_peer")
+
+    group = supervisor._members["athr_source"]
+    assert group.inspection == original
+    assert group.container_lost is True
+    assert {member.context_status for member in group.members.values()} == {"lost"}
+    assert manager.stop_count == 0
+
+
+def test_targeted_listing_rejects_changed_immutable_labels_without_accepting_inspection():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        labels=replace(_spec(), generation=2).docker_labels(),
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+
+    with pytest.raises(SandboxError, match="immutable labels changed"):
+        supervisor.list_for_thread("athr_source")
+
+    assert supervisor._members["athr_source"].inspection == original
+    assert manager.stop_count == 0
+
+
+def test_targeted_listing_inspection_does_not_block_another_groups_status(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(
+        other,
+        [replace(_members()[0], thread_id=other.thread_id)],
+    )
+    inspect_entered = threading.Event()
+    allow_inspect = threading.Event()
+    status_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def inspect(container_name):
+        if container_name == _spec().container_name:
+            inspect_entered.set()
+            assert allow_inspect.wait(timeout=2)
+        return manager.items[container_name]
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    def targeted_listing():
+        try:
+            supervisor.list_for_thread("athr_source")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def other_status():
+        try:
+            supervisor.status(other.thread_id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            status_done.set()
+
+    listing_thread = threading.Thread(target=targeted_listing)
+    status_thread = threading.Thread(target=other_status)
+    listing_thread.start()
+    try:
+        assert inspect_entered.wait(timeout=1)
+        status_thread.start()
+        assert status_done.wait(timeout=0.5), "inspection held the supervisor-wide lock"
+    finally:
+        allow_inspect.set()
+        listing_thread.join(timeout=2)
+        if status_thread.ident is not None:
+            status_thread.join(timeout=2)
+
+    assert not listing_thread.is_alive()
+    assert not status_thread.is_alive()
+    assert errors == []
+
+
+def test_targeted_listing_rejects_a_stopped_observation_after_concurrent_start(monkeypatch):
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    original_generation = group.lifecycle_generation
+    inspect_entered = threading.Event()
+    allow_inspect = threading.Event()
+    errors: list[BaseException] = []
+
+    def inspect(container_name):
+        observed = manager.items[container_name]
+        if not inspect_entered.is_set():
+            inspect_entered.set()
+            assert allow_inspect.wait(timeout=2)
+        return observed
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    def targeted_listing():
+        try:
+            supervisor.list_for_thread(spec.thread_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    listing_thread = threading.Thread(target=targeted_listing)
+    listing_thread.start()
+    try:
+        assert inspect_entered.wait(timeout=1)
+        token, opened = supervisor.terminal_opened("athr_peer")
+        assert opened.running is True
+    finally:
+        allow_inspect.set()
+        listing_thread.join(timeout=2)
+
+    assert not listing_thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], SessionLeaseLost)
+    assert group.lifecycle_generation == original_generation
+    assert group.inspection.running is True
+    assert manager.items[spec.container_name].running is True
+    supervisor.terminal_closed("athr_peer", token)
+
+
+@pytest.mark.parametrize(
+    "changed_fence",
+    ["group_index", "member_index", "member", "lifecycle", "spec", "container"],
+)
+def test_targeted_listing_rejects_a_changed_fence_during_inspection(monkeypatch, changed_fence):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    group = supervisor._members["athr_source"]
+    original = group.inspection
+    stale = replace(original, running=False, status=ChatSandboxStatus.STOPPED)
+
+    def inspect(_container_name):
+        with supervisor._lock:
+            if changed_fence == "group_index":
+                supervisor._groups.pop(_spec().sandbox_id)
+            elif changed_fence == "member_index":
+                supervisor._members.pop("athr_source")
+            elif changed_fence == "member":
+                group.members["athr_source"] = replace(group.members["athr_source"])
+            elif changed_fence == "lifecycle":
+                group.lifecycle_generation += 1
+            elif changed_fence == "spec":
+                group.spec = replace(group.spec, generation=2)
+            else:
+                group.inspection = replace(original, container_id="container-successor")
+        return stale
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    with pytest.raises(SessionLeaseLost, match="lifecycle changed during observation"):
+        supervisor.list_for_thread("athr_source")
+
+    assert group.inspection.running is True
+    assert group.container_lost is False
+    assert manager.stop_count == 0
+
+
 def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)

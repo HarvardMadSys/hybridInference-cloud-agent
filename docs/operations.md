@@ -488,12 +488,16 @@ publication work, or a group with open terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
 When the terminal report is zero, missing, or older than 90 seconds, opening or
-refreshing details queries the owning workspace broker directly. Stop requests
-also verify terminal activity before closing admission: older brokers may report
-only the origin session's terminals even when another member is active. This also
-supports runners that omit terminal counts from their heartbeats. The report
-must match the reviewed container and generation; an unavailable broker or
-unknown activity keeps stopping disabled and shows the required recovery step.
+refreshing details queries the owning workspace broker for that group's census
+directly. This inspects only the selected container and counts terminals across
+all its members; unrelated containers and host-wide reconciliation do not delay
+the check. Full inventory reconciliation remains on the host heartbeat path.
+Stop requests also verify terminal activity before closing admission: older
+brokers may report only the origin session's terminals even when another member
+is active. This also supports runners that omit terminal counts from their
+heartbeats. The report must match the reviewed container and generation; an
+unavailable broker or unknown activity keeps stopping disabled and shows the
+required recovery step.
 Resource-stat failures do not discard an otherwise valid terminal report.
 The page shows the pending request until a host observation confirms the stop;
 an offline host cannot complete it. New turns wait while the stop is pending.

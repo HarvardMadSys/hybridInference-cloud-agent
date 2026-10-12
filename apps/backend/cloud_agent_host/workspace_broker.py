@@ -2769,19 +2769,26 @@ def create_app(
 
     @app.get("/sandboxes")
     async def list_chat_sandboxes(
+        thread_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        """Return Docker-observed state for host-heartbeat reconciliation.
+        """Return Docker-observed state for all groups or one member's group.
 
-        This is a complete observation, not an ownership mutation.  The
+        The full listing is a complete observation, not an ownership mutation. The
         control plane keeps the durable thread/container mapping and accepts
         only exact identity matches; the broker supplies the fact it alone
         can see: whether each retained Docker container is currently running.
         Reconciliation also makes a broker restart self-healing because it
         rebuilds the supervisor's in-memory index from Docker labels first.
+        A member query inspects only its known group without host reconciliation.
         """
         try:
-            shared_descriptors = await endpoint_calls.run(require_shared_supervisor().list)
+            owner = require_shared_supervisor()
+            shared_descriptors = (
+                await endpoint_calls.run(owner.list)
+                if thread_id is None
+                else await endpoint_calls.run(owner.list_for_thread, thread_id)
+            )
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
         rows: list[dict[str, Any]] = []
@@ -2814,9 +2821,10 @@ def create_app(
             ]
             rows.append(origin)
         resource_collector = app.state.sandbox_resource_collector
-        if resource_collector is not None:
+        if resource_collector is not None and thread_id is None:
             # The listing already proved each group's labels and exact ID.
             # Synchronization and cache reads perform no Docker stats I/O.
+            # A partial listing must not evict unrelated collection targets.
             resource_collector.sync_targets(rows)
         for row in rows:
             row["resource_usage"] = (

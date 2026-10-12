@@ -207,14 +207,20 @@ class WorkspaceBrokerClient:
         if response.is_error:
             raise self._response_error(response)
 
-    async def list_sandboxes(self, *, timeout: float = 10) -> list[dict[str, Any]]:
-        """Read the complete retained-container inventory, including stopped groups."""
+    async def list_sandboxes(
+        self, *, timeout: float = 10, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read retained-container inventory, optionally scoped to one shared group."""
+        selection: dict[str, Any] = (
+            {"params": {"thread_id": thread_id}} if thread_id is not None else {}
+        )
         try:
             async with self._http(timeout) as client:
                 response = await client.get(
                     f"{self._base_url}/sandboxes",
                     headers=self._headers,
                     timeout=timeout,
+                    **selection,
                 )
         except httpx.HTTPError:
             raise WorkspaceBrokerError(
