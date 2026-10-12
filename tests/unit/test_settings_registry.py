@@ -472,6 +472,63 @@ def test_existing_credential_encryption_keys_cannot_be_reset_or_replaced(key):
             settings.validate_settings_update(encoded, replacement)
 
 
+def _saved_gateway() -> dict[str, Any]:
+    return {
+        **settings.initial_settings(),
+        **settings.encode_changes(
+            {
+                "gateway_base_url": "https://gateway.example",
+                "gateway_dispatch_token": "gateway-dispatch-token-of-32-bytes",
+            }
+        ),
+    }
+
+
+def _moved(stored: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    return {**stored, **settings.encode_changes(changes)}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example",
+        "http://gateway.example",
+        "https://gateway.example:8443",
+    ],
+)
+def test_the_saved_dispatch_token_does_not_follow_the_gateway_url_to_another_origin(url):
+    """The token is write-only; an editor must not be able to send it elsewhere.
+
+    It authorizes minting grants for any user at the Gateway. Moving the URL it
+    is sent to, and leaving it saved, would deliver it to whoever owns the new
+    host, whatever the editor could read.
+    """
+    stored = _saved_gateway()
+    with pytest.raises(ValueError, match="Gateway dispatch token"):
+        settings.validate_settings_update(stored, _moved(stored, gateway_base_url=url))
+    # Nor in two steps, by clearing the URL and then naming a new one.
+    cleared = _moved(stored, gateway_base_url=None)
+    settings.validate_settings_update(stored, cleared)
+    with pytest.raises(ValueError, match="Gateway dispatch token"):
+        settings.validate_settings_update(cleared, _moved(cleared, gateway_base_url=url))
+
+
+def test_the_gateway_url_moves_when_its_token_is_reset_or_replaced_with_it():
+    stored = _saved_gateway()
+    # The same origin keeps the token: a path, a default port, the host's case.
+    for url in ("https://gateway.example/v2", "https://GATEWAY.example:443"):
+        settings.validate_settings_update(stored, _moved(stored, gateway_base_url=url))
+    for token in (None, "replacement-dispatch-token-of-32-bytes"):
+        settings.validate_settings_update(
+            stored,
+            _moved(stored, gateway_base_url="https://new.example", gateway_dispatch_token=token),
+        )
+    unbound = _moved(settings.initial_settings(), gateway_base_url="https://gateway.example")
+    settings.validate_settings_update(
+        unbound, _moved(unbound, gateway_base_url="https://new.example")
+    )
+
+
 async def test_public_site_settings_expose_only_display_allowlist():
     settings.apply_settings(
         1,

@@ -440,7 +440,7 @@ SETTINGS: tuple[Setting, ...] = (
         env="GATEWAY_GRANT_DISPATCH_TOKEN",
         secret=True,
         minimum_bytes=32,
-        description="A random credential of at least 32 bytes, the same value the Gateway holds.",
+        description="A random credential of at least 32 bytes, the same value the Gateway holds. Sent only to the Gateway API URL's origin: to move that URL elsewhere, reset this first and enter it again afterwards.",
     ),
     Setting(
         "gateway_grant_base_path",
@@ -1037,12 +1037,27 @@ def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
     _decode(encoded)
 
 
+#: A saved credential and the setting naming where it is sent. Saved
+#: credentials are write-only, so moving their destination to another origin
+#: while keeping them would deliver a value the editor cannot read to a host
+#: the editor chose: the Gateway dispatch token mints grants for any user.
+_CREDENTIAL_DESTINATIONS = (("gateway_dispatch_token", "gateway_base_url"),)
+
+
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    return scheme, parsed.hostname, parsed.port or {"http": 80, "https": 443}.get(scheme)
+
+
 def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, Any]) -> None:
     """Keep stored credential encryption keys stable while validating an atomic update.
 
     Only the changed keys are held to this registry. A value an earlier release
     saved and this one refuses must never block the update that repairs it,
-    and the editor saves one key at a time.
+    and the editor saves one key at a time. A saved credential stays with the
+    origin it is sent to: pointing that destination elsewhere requires
+    resetting the credential or replacing it in the same update.
     """
     changed = {key for key, value in encoded.items() if previous.get(key) != value}
     before, after = _decode(previous, []), _decode(encoded, [], changed=changed)
@@ -1050,6 +1065,20 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
         if before[key] and before[key] != after[key]:
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
+            )
+    for credential, destination in _CREDENTIAL_DESTINATIONS:
+        # Compared with whatever the destination was, unset included, so
+        # clearing the URL and then naming a new host is the same move.
+        if (
+            before[credential]
+            and credential not in changed
+            and after[destination]
+            and _origin(str(after[destination])) != _origin(str(before[destination]))
+        ):
+            raise ValueError(
+                f"{SETTINGS_BY_KEY[destination].label} cannot point at another origin while the "
+                f"saved {SETTINGS_BY_KEY[credential].label} is kept: reset the token first, "
+                "then enter it again after saving the URL"
             )
 
 

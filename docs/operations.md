@@ -58,6 +58,15 @@ a replacement to change one; **Reset** restores its built-in default. Missing
 required fields and partially configured optional integrations produce an
 **Administrator setup required** prompt with links to the fields to complete.
 
+Admin Settings is operator access, and `agent.admin` should be granted only to
+people trusted to operate the deployment. It edits the session and host
+signing keys and the Gateway public-key URL, so an administrator can sign in as
+any user, and the GitHub API URL that the App's, the publication token's and
+users' own GitHub credentials are sent to. Saved credentials stay write-only,
+and the Gateway dispatch token is bound to the Gateway API URL's origin: moving
+that URL to another origin is refused while the token is kept. Reset the token,
+save the URL, then enter the token again.
+
 For the first deployment of this release, run `alembic upgrade head` through
 `0042_sandbox_archive_settings`, then start the main control-plane listener with its
 existing complete environment. It imports registered environment settings once.
