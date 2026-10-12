@@ -264,3 +264,25 @@ def test_the_real_clone_and_archive_run_on_the_prefetch_thread(monkeypatch, remo
         names = archive.getnames()
     assert any(name.endswith("hello.py") for name in names)
     assert not any(name.endswith("second.txt") for name in names), "the pinned base, not the tip"
+
+
+def test_the_prefetch_clone_is_stopped_at_the_turns_import_limit(monkeypatch, remote):
+    """The limit is enforced while git writes the clone, not on the finished checkout.
+
+    It was checked only once the archive was built, after the whole repository
+    had been fetched and checked out onto the host's shared Docker data root.
+    """
+    base, repo, first, _head = remote
+    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_kwargs: base)
+    archived = Mock()
+    monkeypatch.setattr(runner_mod, "build_source_archive", archived)
+    prefetch = runner_mod._prefetch_retained_source(
+        job=replace(_JOB, repo=repo, base_sha=first), uid=1000, gid=1000, max_bytes=1
+    )
+    manager = Mock()
+
+    with pytest.raises(WorktreeError, match="retained import size limit"):
+        prefetch.import_into(manager, Mock())
+
+    archived.assert_not_called()
+    manager.import_archive.assert_not_called()

@@ -33,6 +33,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -192,6 +193,10 @@ _POLL_INTERVAL_S = 0.5
 # the turn stream gets the execution budget plus this drain window.
 _SHARED_TURN_INTERRUPT_DRAIN_S = 180.0
 _GIT_TIMEOUT_S = 300.0
+#: The shortest wait between two looks at how much a size-bounded clone has
+#: written. A look walks the whole checkout, so the wait also grows with what
+#: the last look cost, which keeps a large tree from being walked continuously.
+_CLONE_WATCH_INTERVAL_S = 0.5
 
 #: The root profiling operation covering one attempt's startup chain, from the
 #: claim request to the moment the prompt is handed to the resident CLI. It is
@@ -1014,6 +1019,89 @@ def _run_git(
     )
 
 
+def _checkout_bytes(workdir: str) -> int:
+    """Total size of the regular files under ``workdir``, as the import limit counts it."""
+    total = 0
+    for directory, _names, files in os.walk(workdir):
+        for name in files:
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except OSError:
+                # Git renames its temporary and lock files as it goes.
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _run_git_within(
+    args: list[str],
+    *,
+    cwd: str,
+    max_bytes: int,
+    env_extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one git command that writes into ``cwd``, stopping it past ``max_bytes``.
+
+    The import limit used to be checked only once the whole clone was on disk,
+    and that disk is the Docker data root every retained chat on this host
+    writes to. A repository far over the limit -- or a small pack that checks
+    out into a huge tree -- filled it first and was refused after. Here the
+    checkout is measured the way the archive is while git writes it, and git
+    is killed once it is over; a step that finished between two looks is
+    refused as soon as it ends. Anything refused here the archive would have
+    refused too: nothing git writes here is removed by a later step.
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
+    ended = threading.Event()
+    over = threading.Event()
+    # A process group of its own: a fetch writes through children it starts,
+    # the transport helper and index-pack, and stopping git must stop them too.
+    with subprocess.Popen(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as process:
+
+        def kill_group() -> None:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+        def watch() -> None:
+            while not ended.is_set():
+                started = time.monotonic()
+                if _checkout_bytes(cwd) > max_bytes:
+                    over.set()
+                    kill_group()
+                    return
+                ended.wait(max(_CLONE_WATCH_INTERVAL_S, 4 * (time.monotonic() - started)))
+
+        watcher = threading.Thread(target=watch, daemon=True, name="git-checkout-budget")
+        watcher.start()
+        try:
+            stdout, stderr = process.communicate(timeout=_GIT_TIMEOUT_S)
+        except BaseException:
+            # What subprocess.run does on a timeout or an interrupt, for the
+            # whole group; leaving the block then reaps git.
+            kill_group()
+            raise
+        finally:
+            ended.set()
+            watcher.join()
+    if over.is_set() or _checkout_bytes(cwd) > max_bytes:
+        raise WorktreeError(
+            f"source checkout exceeds this host's {max_bytes / (1 << 20):g} MiB retained "
+            "import size limit; the clone was stopped before it finished"
+        )
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
 def _auth_env(clone_token: str | None) -> dict[str, str]:
     """Carry the clone credential in git's environment, never in argv.
 
@@ -1083,6 +1171,7 @@ def prepare_worktree(
     clone_token: str | None = None,
     remote_base: str = "https://github.com",
     depth: int = 1,
+    max_bytes: int | None = None,
 ) -> str:
     """Materialize the job's repository in ``workdir`` and return its commit.
 
@@ -1095,6 +1184,10 @@ def prepare_worktree(
     the runner has no reason to offer the agent a push path it must not use.
     ``depth`` 2 also brings the commit's parent, for a caller that bundles only
     what the commit adds to it.
+
+    ``max_bytes`` is the import limit the checkout is about to be held to. The
+    fetch and the checkout are stopped once ``workdir`` holds more than that,
+    rather than being written out whole first.
     """
     if depth < 1:
         raise ValueError("fetch depth must be at least 1")
@@ -1111,6 +1204,13 @@ def prepare_worktree(
     url = f"{remote_base.rstrip('/')}/{repo}.git"
     auth = _auth_env(clone_token)
 
+    def run_writing(
+        args: list[str], env_extra: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if max_bytes is None:
+            return _run_git(args, cwd=workdir, env_extra=env_extra)
+        return _run_git_within(args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra)
+
     init = _run_git(["init", "--quiet", workdir])
     if init.returncode != 0:
         raise WorktreeError(f"git init failed: {init.stderr.strip()[:200]}")
@@ -1118,10 +1218,8 @@ def prepare_worktree(
     # `--end-of-options` so a ref that survived the shape check above still
     # cannot be parsed as an option by a git version we did not anticipate.
     ref = base_sha or "HEAD"
-    fetch = _run_git(
-        ["fetch", "--quiet", "--depth", str(depth), url, "--end-of-options", ref],
-        cwd=workdir,
-        env_extra=auth,
+    fetch = run_writing(
+        ["fetch", "--quiet", "--depth", str(depth), url, "--end-of-options", ref], auth
     )
     if fetch.returncode != 0:
         detail = (fetch.stderr or fetch.stdout).strip().splitlines()
@@ -1129,7 +1227,7 @@ def prepare_worktree(
             f"could not fetch {repo}@{ref}: {detail[-1] if detail else 'no output'}"
         )
 
-    checkout = _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=workdir)
+    checkout = run_writing(["checkout", "--quiet", "--detach", "FETCH_HEAD"])
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
@@ -1810,6 +1908,7 @@ class _SourcePrefetch:
                     base_sha=self._job.base_sha,
                     clone_token=self._job.clone_token,
                     remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+                    max_bytes=self._max_bytes,
                 )
                 checkout_output_branch(source, self._job.thread_id)
                 # Unnamed and outside the checkout: the archive is spooled to
