@@ -20,6 +20,7 @@ import {
   type SandboxObservation,
 } from './present';
 import { SandboxManagement } from './SandboxManagement';
+import { BatchSandboxManagement } from './BatchSandboxManagement';
 import {
   defaultSortDirection,
   selectSandboxes,
@@ -62,6 +63,9 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const autoRefreshRef = useRef(true);
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
+  const batchBusyRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => performance.now());
   const denyAccess = useCallback(() => {
     setSnapshot(null);
@@ -73,6 +77,13 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
     // Keep pending and confirmed stops visible while the host applies them.
     setStateFilter('all');
     setRevision((value) => value + 1);
+  }, []);
+  const setBatchRunning = useCallback((busy: boolean) => {
+    batchBusyRef.current = busy;
+    setBatchBusy(busy);
+  }, []);
+  const completedBatch = useCallback((ids: string[]) => {
+    setSelectedIds((current) => new Set([...current].filter((id) => !ids.includes(id))));
   }, []);
 
   useEffect(() => {
@@ -87,7 +98,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
     let request: AbortController | null = null;
 
     async function load() {
-      if (request || accessRevoked || disposed) return;
+      if (request || accessRevoked || disposed || batchBusyRef.current) return;
       const controller = new AbortController();
       request = controller;
       setLoading(true);
@@ -129,7 +140,8 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
             throw new Error('Unable to load the complete sandbox list.');
           if (cursor) cursors.add(cursor);
         } while (cursor);
-        setSnapshot({ sandboxes: [...sandboxes.values()], observedAt, appliedAtMs });
+        if (!batchBusyRef.current)
+          setSnapshot({ sandboxes: [...sandboxes.values()], observedAt, appliedAtMs });
       } catch (e) {
         if (controller.signal.aborted || disposed) return;
         if (accessDenied(e)) {
@@ -166,6 +178,34 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
       ),
     [snapshot, search, hostFilter, activityFilter, sort],
   );
+  const selectedSandboxes = useMemo(
+    () => visibleSandboxes.filter(({ sandbox }) => selectedIds.has(sandbox.id)),
+    [visibleSandboxes, selectedIds],
+  );
+  useEffect(() => {
+    // Selection belongs to the visible inventory, including the search and host
+    // filters. Hidden rows must never become accidental batch targets.
+    const visibleIds = new Set(visibleSandboxes.map(({ sandbox }) => sandbox.id));
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => visibleIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [visibleSandboxes]);
+
+  function selectSandbox(id: string, checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function selectAllVisible(checked: boolean) {
+    setSelectedIds(
+      checked ? new Set(visibleSandboxes.map(({ sandbox }) => sandbox.id)) : new Set(),
+    );
+  }
   const hasFilters = search !== '' || hostFilter !== '' || activityFilter !== 'all';
   const stateLabel = STATE_OPTIONS.find(({ value }) => value === stateFilter)?.label ?? stateFilter;
 
@@ -199,6 +239,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
             <select
               aria-label="Sandbox state"
               value={stateFilter}
+              disabled={batchBusy}
               className="ui-input ml-2 min-h-11"
               onChange={(event) => {
                 setSnapshot(null);
@@ -224,7 +265,12 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
             />
             Auto-refresh
           </label>
-          <button type="button" className={BUTTON} disabled={loading} onClick={refresh}>
+          <button
+            type="button"
+            className={BUTTON}
+            disabled={loading || batchBusy}
+            onClick={refresh}
+          >
             Refresh
           </button>
         </div>
@@ -239,6 +285,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
           <input
             type="search"
             value={search}
+            disabled={batchBusy}
             placeholder="Session, repository, owner, host or container…"
             onChange={(event) => setSearch(event.target.value)}
             className="mt-1 block w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
@@ -249,6 +296,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
           <select
             aria-label="Sandbox host"
             value={hostFilter}
+            disabled={batchBusy}
             onChange={(event) => setHostFilter(event.target.value)}
             className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
           >
@@ -268,6 +316,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
           <select
             aria-label="Sandbox activity"
             value={activityFilter}
+            disabled={batchBusy}
             onChange={(event) => setActivityFilter(event.target.value as SandboxActivityFilter)}
             className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
           >
@@ -306,6 +355,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
           <button
             type="button"
             className={BUTTON}
+            disabled={batchBusy}
             onClick={() => {
               setSearch('');
               setHostFilter('');
@@ -320,6 +370,7 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
         <input
           type="checkbox"
           checked={includeArchived}
+          disabled={batchBusy}
           onChange={(event) => {
             setSnapshot(null);
             setLoading(true);
@@ -356,6 +407,14 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
           nowMs={nowMs}
         />
       )}
+      <BatchSandboxManagement
+        selected={selectedSandboxes}
+        nowMs={nowMs}
+        onDenied={denyAccess}
+        onChanged={stopped}
+        onCompleted={completedBatch}
+        onBusyChange={setBatchRunning}
+      />
       {snapshot &&
         (snapshot.sandboxes.length === 0 ? (
           <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
@@ -375,6 +434,10 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
             nowMs={nowMs}
             onDenied={denyAccess}
             onChanged={stopped}
+            selectedIds={selectedIds}
+            selectionDisabled={batchBusy}
+            onSelect={selectSandbox}
+            onSelectAll={selectAllVisible}
           />
         ))}
     </>
@@ -430,6 +493,10 @@ function SandboxesTable({
   nowMs,
   onDenied,
   onChanged,
+  selectedIds,
+  selectionDisabled,
+  onSelect,
+  onSelectAll,
 }: {
   sandboxes: SandboxObservation[];
   sort: SandboxSort;
@@ -439,7 +506,13 @@ function SandboxesTable({
   nowMs: number;
   onDenied: () => void;
   onChanged: () => void;
+  selectedIds: Set<string>;
+  selectionDisabled: boolean;
+  onSelect: (id: string, checked: boolean) => void;
+  onSelectAll: (checked: boolean) => void;
 }) {
+  const allSelected = sandboxes.every(({ sandbox }) => selectedIds.has(sandbox.id));
+  const someSelected = sandboxes.some(({ sandbox }) => selectedIds.has(sandbox.id));
   const columns: { label: string; key?: SandboxSortKey }[] = [
     { label: 'Sandbox / session', key: 'name' },
     { label: 'Owner / host', key: 'owner' },
@@ -462,6 +535,18 @@ function SandboxesTable({
         <caption className="sr-only">Sandboxes across users and hosts</caption>
         <thead className="bg-surface-muted text-xs text-muted">
           <tr className="border-b border-border">
+            <th scope="col" className="px-3 py-3">
+              <input
+                type="checkbox"
+                aria-label="Select all visible sandboxes"
+                checked={allSelected}
+                disabled={selectionDisabled}
+                ref={(input) => {
+                  if (input) input.indeterminate = someSelected && !allSelected;
+                }}
+                onChange={(event) => onSelectAll(event.target.checked)}
+              />
+            </th>
             {columns.map(({ label, key }) => (
               <th
                 key={label}
@@ -504,6 +589,9 @@ function SandboxesTable({
               nowMs={nowMs}
               onDenied={onDenied}
               onChanged={onChanged}
+              selected={selectedIds.has(observation.sandbox.id)}
+              selectionDisabled={selectionDisabled}
+              onSelect={onSelect}
             />
           ))}
         </tbody>
@@ -519,6 +607,9 @@ function SandboxRow({
   nowMs,
   onDenied,
   onChanged,
+  selected,
+  selectionDisabled,
+  onSelect,
 }: {
   observation: SandboxObservation;
   autoRefresh: boolean;
@@ -526,6 +617,9 @@ function SandboxRow({
   nowMs: number;
   onDenied: () => void;
   onChanged: () => void;
+  selected: boolean;
+  selectionDisabled: boolean;
+  onSelect: (id: string, checked: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const { sandbox, observedAtMs } = observation;
@@ -540,6 +634,15 @@ function SandboxRow({
   return (
     <Fragment>
       <tr className="align-top hover:bg-gray-100 dark:hover:bg-gray-900">
+        <td className="px-3 py-3">
+          <input
+            type="checkbox"
+            aria-label={`Select sandbox ${sandbox.id}`}
+            checked={selected}
+            disabled={selectionDisabled}
+            onChange={(event) => onSelect(sandbox.id, event.target.checked)}
+          />
+        </td>
         <th scope="row" className="max-w-xs px-3 py-3 font-normal">
           <Link
             href={conversationHref(sandbox.origin_thread_id)}
@@ -678,7 +781,7 @@ function SandboxRow({
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={9} className="bg-gray-50 px-4 py-4 dark:bg-gray-900/60">
+          <td colSpan={10} className="bg-gray-50 px-4 py-4 dark:bg-gray-900/60">
             <div id={detailId}>
               <SandboxDetails
                 id={`${detailId}-resources`}

@@ -560,6 +560,20 @@ visibility control for stopped sandboxes. Use **Include removed sandboxes**
 with **All states**, then **Restore to inventory**, to inspect retained entries.
 Resuming a sandbox removed only from inventory makes it visible again.
 
+For batch operations, select individual inventory rows or **Select all visible
+sandboxes**, choose an action, then **Review selected sandboxes**. Selection
+applies only to the current state, search, host, and activity filters; hidden
+rows are excluded. The review reads current details for each selected sandbox
+and lists any blockers before a single confirmation applies the action to
+eligible entries. Stop, archive-and-delete, deletion without an archive,
+inventory removal, and inventory restoration use the same checks as individual
+controls. Up to four requests run at once, and each result is reported
+separately. A stop or deletion result means the request was accepted; host
+completion is still asynchronous. Failed or skipped entries remain selected
+for a new explicit review. Expired reviews and changed containers are refused,
+without automatically retrying a new container identity. No batch feature flag
+or additional migration is required.
+
 CPU is measured in occupied cores over the interval between Docker samples;
 memory is current usage with inactive file cache removed. Network and block
 I/O show cumulative container counters and interval rates. All measurements
