@@ -73,6 +73,14 @@ class PublishError(Exception):
     """Raised when publication fails; the message is safe to store as detail."""
 
 
+class PublishUnavailable(PublishError):
+    """GitHub or the remote could not be reached, and nothing was written to it.
+
+    Unlike the rest of :class:`PublishError`, not an answer about the patch or
+    the branch: the same step may simply be tried again.
+    """
+
+
 @dataclass
 class PublishResult:
     """Outcome of publishing one job's patch."""
@@ -143,14 +151,22 @@ class _StagedChangeSet:
     blobs: list[_StagedBlob]
 
 
+def _read_remote(args: list[str], *, repo: Path, auth_env: dict[str, str] | None) -> str:
+    """Run a command that only reads the remote; its failure wrote nothing there."""
+    try:
+        return _run_git(args, cwd=repo, env_extra=auth_env)
+    except PublishError as exc:
+        raise PublishUnavailable(str(exc)) from exc
+
+
 def _remote_branch_tip(
     repo: Path, branch: str, auth_env: dict[str, str] | None = None
 ) -> str | None:
     """Return the remote tip of ``branch``, or ``None`` when it does not exist."""
-    raw = _run_git(
+    raw = _read_remote(
         ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"],
-        cwd=repo,
-        env_extra=auth_env,
+        repo=repo,
+        auth_env=auth_env,
     ).strip()
     if not raw:
         return None
@@ -311,7 +327,8 @@ def publish_patch(
     for newly introduced credentials before committing or pushing.
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
-    violation or git failure.
+    violation or git failure; :class:`PublishUnavailable` when the remote could
+    not be read before anything was pushed, so the same call may be repeated.
     """
     if not _COMMIT_SHA.fullmatch(base_sha or ""):
         # base_sha reaches here from user input on the job. Anything that is
@@ -338,10 +355,10 @@ def publish_patch(
         # owner-supplied base_sha of `--upload-pack=/bin/sh -c ...` would run a
         # command *inside the trusted publisher*. Two independent stops,
         # because this process holds the GitHub credential.
-        _run_git(
+        _read_remote(
             ["fetch", "--quiet", "--depth", "1", "origin", "--end-of-options", base_sha],
-            cwd=repo,
-            env_extra=auth_env,
+            repo=repo,
+            auth_env=auth_env,
         )
         _run_git(["checkout", "--quiet", "-b", branch, "FETCH_HEAD"], cwd=repo)
 

@@ -39,6 +39,20 @@ def _entitled(monkeypatch):
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "o/n")
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch):
+    """Keep the pauses before a passing failure is retried, but make them instant."""
+    monkeypatch.setattr(
+        publish_worker,
+        "_TRANSIENT_RETRY_DELAYS_S",
+        tuple(0.0 for _ in publish_worker._TRANSIENT_RETRY_DELAYS_S),
+    )
+
+
+#: How many times a step that keeps failing for a passing reason is tried.
+_TRIES = len(publish_worker._TRANSIENT_RETRY_DELAYS_S) + 1
+
+
 _JOB = {
     "publication_kind": "shared_snapshot",
     "snapshot_id": 9,
@@ -74,6 +88,12 @@ class FakeStore(AllCapabilities):
         self.claims += 1
         job, self._job = self._job, None
         return job
+
+    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
+        # The fixture user connected no GitHub installation: a repository is
+        # theirs through the allowlist alone. Without this the lookup raised,
+        # which now reads as GitHub being unavailable rather than as a refusal.
+        return []
 
     async def touch_snapshot_publish(self, *, snapshot_id: int) -> bool:
         self.touched.append(snapshot_id)
@@ -516,7 +536,12 @@ async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
     ],
 )
 async def test_pr_api_failure_does_not_record_the_stale_url(monkeypatch, failure, response):
-    """Unknown PR state must neither create duplicates nor record a stale link."""
+    """Unknown PR state must neither create duplicates nor record a stale link.
+
+    A server error or a dropped connection is tried again a bounded number of
+    times first (each try looks the PR up before writing); an answer about the
+    PR itself is not.
+    """
     requests = []
 
     def handle(request):
@@ -546,7 +571,197 @@ async def test_pr_api_failure_does_not_record_the_stale_url(monkeypatch, failure
     assert store.snapshot_failed is not None
     if isinstance(response, httpx.Response) and response.status_code >= 400:
         assert str(response.status_code) in store.snapshot_failed[1]
-    assert requests == (["GET", "PATCH"] if failure == "update" else ["GET"])
+    passing = isinstance(response, Exception) or response.status_code >= 500
+    assert requests == (["GET", "PATCH"] if failure == "update" else ["GET"]) * (
+        _TRIES if passing else 1
+    )
+
+
+@pytest.mark.parametrize(
+    "first_answer",
+    [
+        httpx.Response(502, text="bad gateway"),
+        httpx.Response(429, headers={"retry-after": "1"}, json={"message": "slow down"}),
+        httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={"message": "limit"}),
+        httpx.ConnectError("unreachable"),
+    ],
+)
+async def test_a_passing_github_failure_after_the_push_opens_the_pr_on_a_retry(
+    monkeypatch, first_answer
+):
+    """One 502 after the push failed the snapshot, and the group's publication with it.
+
+    The PR call is repeated, never the push: each try looks the branch's PR
+    up before it writes, so a lost answer cannot become a second draft.
+    """
+    pushes: list[dict[str, Any]] = []
+
+    def fake_publish(**kwargs):
+        pushes.append(kwargs)
+        return PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
+
+    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
+    requests: list[str] = []
+
+    def handle(request):
+        requests.append(request.method)
+        if len(requests) == 1:
+            if isinstance(first_answer, Exception):
+                raise first_answer
+            return first_answer
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    store = FakeStore(dict(_JOB))
+
+    url = await publish_one(store, credential=GitHubCredential("t"))
+
+    assert url == "https://github.com/o/n/pull/8"
+    assert store.snapshot_failed is None
+    assert store.snapshot_recorded == (9, url, "next")
+    assert requests == ["GET", "GET", "POST"]
+    assert len(pushes) == 1
+
+
+async def test_a_refusal_that_is_not_about_load_is_not_retried(monkeypatch):
+    """A 403 without a rate limit is GitHub's answer, and asking again changes nothing."""
+    requests: list[str] = []
+
+    def handle(request):
+        requests.append(request.method)
+        return httpx.Response(403, json={"message": "Resource not accessible by integration"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
+    )
+    store = FakeStore(dict(_JOB))
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_failed is not None and "403" in store.snapshot_failed[1]
+    assert requests == ["GET"]
+
+
+@pytest.mark.parametrize("step", ["entitlement", "credential", "remote"])
+async def test_a_step_github_could_not_answer_is_tried_again_before_anything_is_pushed(
+    monkeypatch, step
+):
+    """Entitlement, the token and reading the remote all come before the push."""
+    from cloud_agent.entitlement import EntitlementUnavailable
+    from cloud_agent.github_app import GitHubAppError
+    from cloud_agent.publisher import PublishUnavailable
+
+    calls = {"entitlement": 0, "credential": 0, "remote": 0}
+
+    async def entitled(*_args: Any, **_kwargs: Any) -> None:
+        calls["entitlement"] += 1
+        if step == "entitlement" and calls["entitlement"] == 1:
+            raise EntitlementUnavailable("GitHub could not be asked just now")
+
+    class App:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            calls["credential"] += 1
+            if step == "credential" and calls["credential"] == 1:
+                raise GitHubAppError("GitHub POST access_tokens failed (502)", status=502)
+            return "ghs_fresh"
+
+    def fake_publish(**kwargs):
+        calls["remote"] += 1
+        if step == "remote" and calls["remote"] == 1:
+            raise PublishUnavailable("git ls-remote failed: Could not resolve host: github.com")
+        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+
+    monkeypatch.setattr(publish_worker, "require_entitled_repo", entitled)
+    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
+    _patch_pr(monkeypatch)
+    store = FakeStore(dict(_JOB))
+
+    assert await publish_one(store, app_credentials=App()) is not None
+    assert store.snapshot_failed is None
+    assert calls == {name: 2 if name == step else 1 for name in calls}
+
+
+@pytest.mark.parametrize("failure", ["not entitled", "not installed", "push", "gate"])
+async def test_a_settled_failure_is_recorded_without_asking_again(monkeypatch, failure):
+    """Only a passing failure is repeated: never a push whose outcome is unknown."""
+    from cloud_agent.entitlement import RepoNotAllowed
+    from cloud_agent.github_app import AppNotInstalled
+
+    calls: list[str] = []
+
+    async def entitled(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("entitlement")
+        if failure == "not entitled":
+            raise RepoNotAllowed("You have not connected 'o/n'")
+
+    class App:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            calls.append("credential")
+            if failure == "not installed":
+                raise AppNotInstalled("no App installation covers o/n", status=404)
+            return "ghs_fresh"
+
+    def fake_publish(**kwargs):
+        calls.append("push")
+        raise PublishError(
+            "git push failed: the remote end hung up unexpectedly"
+            if failure == "push"
+            else "patch rejected: secret"
+        )
+
+    monkeypatch.setattr(publish_worker, "require_entitled_repo", entitled)
+    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
+    pr_called = _patch_pr(monkeypatch)
+    store = FakeStore(dict(_JOB))
+
+    assert await publish_one(store, app_credentials=App()) is None
+    assert store.snapshot_failed is not None
+    assert pr_called == {}
+    assert (
+        calls
+        == {
+            "not entitled": ["entitlement"],
+            "not installed": ["entitlement", "credential"],
+            "push": ["entitlement", "credential", "push"],
+            "gate": ["entitlement", "credential", "push"],
+        }[failure]
+    )
+
+
+async def test_a_passing_failure_that_outlasts_the_retries_is_recorded_for_what_it_is(
+    monkeypatch,
+):
+    """GitHub unreachable throughout is recorded, but not as a withdrawn entitlement."""
+    from cloud_agent.entitlement import EntitlementUnavailable
+
+    asked: list[int] = []
+
+    async def unavailable(*_args: Any, **_kwargs: Any) -> None:
+        asked.append(1)
+        raise EntitlementUnavailable("GitHub could not be asked whether you may work on 'o/n'")
+
+    monkeypatch.setattr(publish_worker, "require_entitled_repo", unavailable)
+    pr_called = _patch_pr(monkeypatch)
+    store = FakeStore(dict(_JOB))
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert len(asked) == _TRIES
+    assert store.snapshot_failed is not None
+    assert "could not confirm" in store.snapshot_failed[1]
+    assert "no longer entitled" not in store.snapshot_failed[1]
+    assert pr_called == {}
 
 
 async def test_gate_rejection_fails_the_job_and_never_pushes(monkeypatch):

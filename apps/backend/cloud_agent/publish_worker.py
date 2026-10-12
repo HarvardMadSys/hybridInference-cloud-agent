@@ -24,7 +24,11 @@ Order of operations is load-bearing:
 
 A rejected patch marks the snapshot/group dirty without rewriting successful
 Agent turns. Gate violations are human-review situations, and a retry loop
-would either spam the repository or bury the rejection.
+would either spam the repository or bury the rejection. Only a step that
+failed for a passing reason is tried again, a few times while the claim is
+held: GitHub or the network unavailable before anything was pushed, or a pull
+request call after the push, which looks the PR up before it writes. A failed
+push is never repeated, since whether the branch moved is not known.
 """
 
 from __future__ import annotations
@@ -36,15 +40,21 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
 
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.entitlement import EntitlementUnavailable, RepoNotAllowed, require_entitled_repo
+from cloud_agent.github_app import GitHubAppError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title
-from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
+from cloud_agent.publisher import (
+    PublishError,
+    PublishUnavailable,
+    fetch_base_bundle,
+    publish_patch,
+)
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import SourceControlUnavailable
@@ -53,6 +63,8 @@ from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
         HostPoolRepository,
@@ -96,6 +108,13 @@ _PUBLISH_TOKEN_MIN_TTL_S = 1800.0
 #: How often a running publish renews its claim. The reaper fails a claim left
 #: unrenewed for fifteen minutes as a stopped publisher; a slow one is not.
 _PUBLISH_HEARTBEAT_S = 60.0
+#: The pauses before a publish step that failed for a passing reason is tried
+#: again. Few and short: the claim is held, and the queue behind it waits,
+#: meanwhile. A failure that outlasts them is recorded like any other — and
+#: that still ends the group's publication, so a blip must not.
+_TRANSIENT_RETRY_DELAYS_S = (10.0, 30.0, 90.0)
+
+_T = TypeVar("_T")
 
 # A PR base has to be a branch. `base_ref` is normally one (the composer offers
 # a branch picker), but the API accepts any ref it can resolve, and a caller
@@ -209,8 +228,9 @@ async def create_draft_pull_request(
             },
         )
     if response.status_code >= 400:
-        raise PublishError(
-            f"GitHub refused the draft PR ({response.status_code}): {response.text[:300]}"
+        raise _refused(
+            response,
+            f"GitHub refused the draft PR ({response.status_code}): {response.text[:300]}",
         )
     url = response.json().get("html_url")
     if not isinstance(url, str) or not url.strip():
@@ -254,7 +274,7 @@ async def ensure_draft_pull_request(
             params={"state": "open", "head": f"{repo.split('/')[0]}:{head_branch}"},
         )
         if response.status_code >= 400:
-            raise PublishError(f"GitHub refused the PR lookup ({response.status_code})")
+            raise _refused(response, f"GitHub refused the PR lookup ({response.status_code})")
         pulls = response.json()
         if not isinstance(pulls, list):
             raise PublishError("GitHub returned an invalid PR list")
@@ -270,7 +290,7 @@ async def ensure_draft_pull_request(
                 f"{endpoint}/{number}", headers=headers, json={"title": title, "body": body}
             )
             if updated.status_code >= 400:
-                raise PublishError(f"GitHub refused the PR update ({updated.status_code})")
+                raise _refused(updated, f"GitHub refused the PR update ({updated.status_code})")
             payload = updated.json()
             if not isinstance(payload, dict) or payload.get("state") not in {"open", "closed"}:
                 raise PublishError("GitHub returned an invalid PR update")
@@ -294,6 +314,29 @@ def _github_headers(credential: GitHubCredential) -> dict[str, str]:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def _refused(response: httpx.Response, message: str) -> PublishError:
+    """A refused PR call: :class:`PublishUnavailable` when GitHub only asked to wait.
+
+    A server error or a rate limit says nothing about the pull request. The
+    calls are repeated only through :func:`ensure_draft_pull_request`, which
+    looks the branch's PR up before it writes, so a create whose answer was
+    lost is found rather than made twice.
+    """
+    status = response.status_code
+    wait = (
+        status >= 500
+        or status == 429
+        or (
+            status == 403
+            and (
+                response.headers.get("x-ratelimit-remaining") == "0"
+                or "retry-after" in response.headers
+            )
+        )
+    )
+    return PublishUnavailable(message) if wait else PublishError(message)
 
 
 def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
@@ -547,6 +590,47 @@ async def _publish_due(
         )
 
 
+def _transient(exc: BaseException) -> bool:
+    """Whether a publish step failed for a passing reason, and may be repeated as is.
+
+    GitHub or the network unavailable, or an entitlement GitHub could not be
+    asked about: none of it is an answer about this publication.
+    """
+    if isinstance(exc, (EntitlementUnavailable, PublishUnavailable, httpx.TransportError)):
+        return True
+    return (
+        isinstance(exc, GitHubAppError)
+        and exc.status is not None
+        and (exc.status >= 500 or exc.status == 429)
+    )
+
+
+async def _retrying(step: Callable[[], Awaitable[_T]], *, job_id: str, what: str) -> _T:
+    """Run one publish step, again after a pause each time it fails for a passing reason.
+
+    Before this, one GitHub 502 or dropped connection anywhere in a publish
+    failed the snapshot, and with it every later publication of the group.
+    """
+    for delay in _TRANSIENT_RETRY_DELAYS_S:
+        try:
+            return await step()
+        except Exception as exc:
+            if not _transient(exc):
+                raise
+            logger.warning(
+                "agent_job_publish_retrying",
+                extra={
+                    "event": "agent_job_publish_retrying",
+                    "job_id": job_id,
+                    "step": what,
+                    "error_type": type(exc).__name__,
+                    "retry_in_s": delay,
+                },
+            )
+        await asyncio.sleep(delay)
+    return await step()
+
+
 async def _keep_publish_claim(store: PublishStorage, snapshot_id: int) -> None:
     """Renew one publishing claim until cancelled or no longer held.
 
@@ -620,12 +704,19 @@ async def _publish_held(
     # claim; without this the same deployment would block the read-only token
     # and still hand out the push token.
     try:
-        await require_entitled_repo(
-            job["repo"],
-            job.get("user_id", ""),
-            store=store.source_control,
-            app_credentials=app_credentials,
+        await _retrying(
+            lambda: require_entitled_repo(
+                job["repo"],
+                job.get("user_id", ""),
+                store=store.source_control,
+                app_credentials=app_credentials,
+            ),
+            job_id=job_id,
+            what="entitlement",
         )
+    except EntitlementUnavailable as exc:
+        await fail(f"could not confirm the entitlement to publish to {job['repo']}: {exc}")
+        return None
     except RepoNotAllowed as exc:
         await fail(f"no longer entitled to publish to {job['repo']}: {exc}")
         return None
@@ -634,6 +725,7 @@ async def _publish_held(
     # installation, valid an hour. A static token is the fallback for a
     # deployment that has not set the App up.
     if app_credentials is not None:
+        app = app_credentials
         try:
             # Scoped twice: to this one repository, and to the two permissions
             # publishing actually uses. An installation token inherits every
@@ -641,11 +733,15 @@ async def _publish_held(
             # `permissions` here handed the publisher whatever the App could
             # ever do — against a repository the *user* named.
             credential = GitHubCredential(
-                await app_credentials.token_for(
-                    job["repo"],
-                    permissions=_PUBLISH_SCOPE,
-                    repository_scoped=True,
-                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
+                await _retrying(
+                    lambda: app.token_for(
+                        job["repo"],
+                        permissions=_PUBLISH_SCOPE,
+                        repository_scoped=True,
+                        min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
+                    ),
+                    job_id=job_id,
+                    what="credential",
                 )
             )
         except Exception as exc:
@@ -657,30 +753,42 @@ async def _publish_held(
     if not base_sha:
         await fail("cannot publish: the job has no base_sha to apply the patch onto")
         return None
+    publish_credential = credential
 
     try:
         # Blocking git work: keep it off the event loop so a slow clone cannot
-        # stall the gateway's request handling.
-        result = await asyncio.to_thread(
-            publish_patch,
+        # stall the gateway's request handling. Repeated only when the remote
+        # could not be read, which is before anything was pushed.
+        result = await _retrying(
+            lambda: asyncio.to_thread(
+                publish_patch,
+                job_id=job_id,
+                branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
+                patch=job["patch"],
+                clone_url=publish_credential.clone_url(job["repo"]),
+                base_sha=base_sha,
+                commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
+                allow_workflow_changes=allow_workflow_changes,
+                include_base_bundle=True,
+                auth_env=publish_credential.git_auth_env(),
+            ),
             job_id=job_id,
-            branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
-            patch=job["patch"],
-            clone_url=credential.clone_url(job["repo"]),
-            base_sha=base_sha,
-            commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
-            allow_workflow_changes=allow_workflow_changes,
-            include_base_bundle=True,
-            auth_env=credential.git_auth_env(),
+            what="push",
         )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
-        pr_url = await ensure_draft_pull_request(
-            repo=job["repo"],
-            head_branch=result.branch,
-            base_branch=pr_base,
-            title=title or _pr_title(job, result.changed_files),
-            body=_pr_body(job, result.changed_files),
-            credential=credential,
+        # The branch is pushed. Repeating this cannot push again, and cannot
+        # open a second PR: each try looks the branch's open PR up first.
+        pr_url = await _retrying(
+            lambda: ensure_draft_pull_request(
+                repo=job["repo"],
+                head_branch=result.branch,
+                base_branch=pr_base,
+                title=title or _pr_title(job, result.changed_files),
+                body=_pr_body(job, result.changed_files),
+                credential=publish_credential,
+            ),
+            job_id=job_id,
+            what="pull request",
         )
     except PublishError as exc:
         logger.warning(

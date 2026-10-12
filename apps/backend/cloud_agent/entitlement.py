@@ -58,6 +58,16 @@ class GitHubReconnectRequired(RepoNotAllowed):
     """
 
 
+class EntitlementUnavailable(RepoNotAllowed):
+    """GitHub could not be asked, just now, whether the user may use the repository.
+
+    Still a refusal for every caller that handles :class:`RepoNotAllowed`, so
+    nothing opens while GitHub is unreachable. But not a settled one: asking
+    again later may succeed, so a caller with a queue — the publisher — waits
+    rather than giving up on its work.
+    """
+
+
 def allowed_repos(env: dict[str, str] | None = None) -> list[str]:
     """Return the configured allowlist, lowercased.
 
@@ -100,8 +110,8 @@ def require_allowed_repo(repo: str, env: dict[str, str] | None = None) -> None:
 
 async def _connected_repos(
     user_id: str, *, store: SourceControlRepository, app_credentials: Any
-) -> tuple[set[str], bool]:
-    """The repositories this user's GitHub connection reaches, and whether to reconnect.
+) -> tuple[set[str], bool, bool]:
+    """The repositories this user's connection reaches, whether to reconnect, and if complete.
 
     For each installation the user connected, GitHub is asked *as the user*
     which of its repositories they can push to. It used to be asked with the
@@ -109,17 +119,20 @@ async def _connected_repos(
     installation covers: GitHub reports an organization's installation to
     anyone with access to one of its repositories, so an outside collaborator
     on one repository was offered all the others the App could see.
+
+    The answer is incomplete when an installation could not be read: a
+    repository missing from it may only be missing for now.
     """
     grants = await store.list_repo_grants(user_id=user_id)
     if not grants:
-        return set(), False
+        return set(), False, True
     installation_ids = tuple(sorted(int(grant["installation_id"]) for grant in grants))
     cached = app_credentials.cached_user_repositories(user_id, installation_ids)
     if cached is not None:
-        return set(cached), False
+        return set(cached), False, True
     token = await user_access_token(user_id, store=store, app_credentials=app_credentials)
     if token is None:
-        return set(), True
+        return set(), True, True
     repos: set[str] = set()
     complete = True
     for installation_id in installation_ids:
@@ -129,7 +142,7 @@ async def _connected_repos(
             )
         except UserAuthorizationRevoked:
             await forget_revoked_token(user_id, token, store=store)
-            return set(), True
+            return set(), True, True
         except Exception:
             # One unreachable installation must not hide the others, and must
             # not widen anything either — it simply contributes nothing, and
@@ -143,7 +156,7 @@ async def _connected_repos(
         repos.update(name for name in names if _REPO_RE.match(name or ""))
     if complete:
         app_credentials.remember_user_repositories(user_id, installation_ids, sorted(repos))
-    return repos, False
+    return repos, False, complete
 
 
 async def repos_for_user(
@@ -175,7 +188,9 @@ async def repos_for_user(
     if store is None or app_credentials is None:
         return sorted(repos)
     try:
-        connected, _ = await _connected_repos(user_id, store=store, app_credentials=app_credentials)
+        connected, _, _ = await _connected_repos(
+            user_id, store=store, app_credentials=app_credentials
+        )
     except Exception:
         return sorted(repos)
     repos.update(connected)
@@ -190,7 +205,11 @@ async def require_entitled_repo(
     app_credentials: Any = None,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Raise :class:`RepoNotAllowed` unless this user may target ``repo``."""
+    """Raise :class:`RepoNotAllowed` unless this user may target ``repo``.
+
+    :class:`EntitlementUnavailable` when the answer could not be had from
+    GitHub just now, rather than a settled no.
+    """
     if not _REPO_RE.match(repo or ""):
         raise RepoNotAllowed(f"repo must be 'owner/name', got {repo!r}")
     # The allowlist half first, so an `owner/*` rule is honoured without needing
@@ -199,19 +218,25 @@ async def require_entitled_repo(
         return
     connected: set[str] = set()
     reconnect = False
+    complete = True
     if store is not None and app_credentials is not None:
         try:
-            connected, reconnect = await _connected_repos(
+            connected, reconnect, complete = await _connected_repos(
                 user_id, store=store, app_credentials=app_credentials
             )
         except Exception:
-            connected = set()
+            connected, complete = set(), False
     if any(entry.lower() == repo.lower() for entry in connected):
         return
     if reconnect:
         raise GitHubReconnectRequired(
             f"Reconnect GitHub to work on {repo!r}: repositories are now checked "
             "against your own GitHub access, which this connection cannot show."
+        )
+    if not complete:
+        raise EntitlementUnavailable(
+            f"GitHub could not be asked whether you may work on {repo!r} just now; "
+            "try again shortly."
         )
     raise RepoNotAllowed(
         f"You have not connected {repo!r} with access to push to it. Give the GitHub "
@@ -222,6 +247,7 @@ async def require_entitled_repo(
 
 __all__ = [
     "REPO_PATTERN",
+    "EntitlementUnavailable",
     "GitHubReconnectRequired",
     "RepoNotAllowed",
     "allowed_repos",
