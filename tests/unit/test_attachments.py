@@ -10,9 +10,13 @@ import pytest
 
 from cloud_agent.attachments.models import (
     MAX_ATTACHMENT_FILES,
+    MAX_ATTACHMENT_PATH_LENGTH,
+    MAX_THREAD_ATTACHMENT_BYTES,
+    MAX_THREAD_ATTACHMENT_FILES,
     SANDBOX_UPLOAD_DIR,
     AttachmentError,
     check_paths,
+    check_thread_total,
     current_uploads,
     safe_attachment_path,
 )
@@ -23,7 +27,10 @@ from cloud_agent.attachments.selection import (
 )
 from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, CHAT_WORKDIR
 from cloud_agent_shared.errors import SandboxError
-from cloud_agent_shared.git.source_archive import build_upload_archive
+from cloud_agent_shared.git.source_archive import (
+    DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
+    build_upload_archive,
+)
 
 
 class _Store:
@@ -170,6 +177,35 @@ def test_an_older_file_and_folder_clash_keeps_whatever_came_later(
     current = current_uploads(rows)
     assert [row["id"] for row in current] == kept
     build_upload_archive([(row["path"], b"x") for row in current])
+
+
+def test_a_conversation_is_bounded_by_what_the_host_will_import() -> None:
+    """Every turn's files are imported together, so their sum is what is bounded."""
+    check_thread_total([_row(1, "a.bin", size=MAX_THREAD_ATTACHMENT_BYTES)])
+    with pytest.raises(AttachmentError, match="Start a new chat"):
+        check_thread_total(
+            [_row(1, "a.bin", size=MAX_THREAD_ATTACHMENT_BYTES), _row(2, "b.bin", size=1)]
+        )
+    many = [_row(index, f"{index}.txt", size=1) for index in range(MAX_THREAD_ATTACHMENT_FILES)]
+    check_thread_total(many)
+    with pytest.raises(AttachmentError, match="Start a new chat"):
+        check_thread_total([*many, _row(MAX_THREAD_ATTACHMENT_FILES, "one-more.txt", size=1)])
+
+
+def test_the_conversation_cap_fits_the_host_archive_with_its_worst_headers() -> None:
+    """The cap must leave room for the tar headers of as many files as it allows.
+
+    One-byte members carry the most padding a member can have, and every file
+    here has the longest path, in a long-named folder of its own. Only folders
+    nested deeper than that would add header blocks this does not count.
+    """
+    folder = "d" * (MAX_ATTACHMENT_PATH_LENGTH // 2)
+    files = []
+    for index in range(MAX_THREAD_ATTACHMENT_FILES):
+        prefix = f"{folder}{index:04d}/"
+        files.append((prefix + "f" * (MAX_ATTACHMENT_PATH_LENGTH - len(prefix)), b"x"))
+    overhead = len(build_upload_archive(files)) - len(files)
+    assert MAX_THREAD_ATTACHMENT_BYTES + overhead <= DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES
 
 
 def test_the_server_bounds_the_selection_as_well_as_the_browser() -> None:

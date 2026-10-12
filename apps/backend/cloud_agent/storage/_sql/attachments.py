@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from cloud_agent.attachments.models import AttachmentError, check_paths, current_uploads
+from cloud_agent.attachments.models import (
+    AttachmentError,
+    check_paths,
+    check_thread_total,
+    current_uploads,
+)
 
 #: A conversation's uploads in the order its turns attached them, without the
 #: bytes: the order :func:`current_uploads` reads as "later replaces earlier".
@@ -43,9 +48,11 @@ async def claim_attachments(
     message naming a file its own turn can no longer have.
 
     The host rebuilds ``/uploads`` from the whole conversation, so the paths
-    are checked against it here, under the lock that orders the conversation's
-    turns: a path an earlier turn attached is replaced, but one that would be a
-    file and a folder at once is refused (see :func:`check_paths`).
+    and the total are checked against it here, under the lock that orders the
+    conversation's turns: a path an earlier turn attached is replaced, but one
+    that would be a file and a folder at once is refused (see
+    :func:`check_paths`), and so is a turn that would take the conversation
+    past what the host imports (see :func:`check_thread_total`).
     """
     ids = [int(item["id"]) for item in attachments or []]
     if not ids:
@@ -78,3 +85,4 @@ async def claim_attachments(
             for row in current_uploads([row for row in thread if row["id"] not in adding])
         ],
     )
+    check_thread_total(current_uploads(thread))

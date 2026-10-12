@@ -14,6 +14,7 @@ from tests.integration.storage.test_agent_job_store import (
     store,  # noqa: F401 - pytest fixture
 )
 
+from cloud_agent.attachments import models
 from cloud_agent.attachments.models import (
     MAX_ATTACHMENT_FILE_BYTES,
     AttachmentError,
@@ -215,6 +216,46 @@ async def test_a_later_turn_cannot_turn_a_file_into_a_folder_or_back(store, pool
         user_id="user-1", attachment_ids=[second["id"]]
     )
     assert [row["id"] for row in staged] == [second["id"]]
+
+
+async def test_a_conversation_cannot_attach_more_than_the_host_will_import(
+    store, pool, monkeypatch
+):
+    """Each turn fits its own limit; the conversation's sum is bounded as well.
+
+    The host imports every turn's files as one archive and refuses one over
+    its limit, which failed that turn and every later one on a fresh
+    container. A file attached again counts once, as it is imported once.
+    """
+    monkeypatch.setattr(models, "MAX_THREAD_ATTACHMENT_BYTES", 10)
+    first = await stage(store, "a.bin", content=b"x" * 6)
+    job = await _create_job(store, attachments=await manifest(store, first))
+    # The same path, replaced: still six bytes in the sandbox.
+    assert await attach(store, job, await stage(store, "a.bin", content=b"y" * 6)) is not None
+
+    over = await stage(store, "b.bin", content=b"z" * 5)
+    with pytest.raises(AttachmentError, match="must total no more than 10 bytes"):
+        await attach(store, job, over)
+
+    async with pool.acquire() as conn:
+        turns = await conn.fetchval(
+            "SELECT count(*) FROM agent_jobs WHERE thread_id = $1", job["thread_id"]
+        )
+    assert turns == 2
+    staged = await store.attachments.select_attachments(
+        user_id="user-1", attachment_ids=[over["id"]]
+    )
+    assert [row["id"] for row in staged] == [over["id"]]
+
+
+async def test_a_conversation_holds_a_bounded_number_of_files(store, monkeypatch):
+    monkeypatch.setattr(models, "MAX_THREAD_ATTACHMENT_FILES", 2)
+    job = await _create_job(
+        store,
+        attachments=await manifest(store, await stage(store, "a.md"), await stage(store, "b.md")),
+    )
+    with pytest.raises(AttachmentError, match="at most 2 uploaded files"):
+        await attach(store, job, await stage(store, "c.md"))
 
 
 async def test_deleting_the_conversation_takes_its_uploads_with_it(store, pool):

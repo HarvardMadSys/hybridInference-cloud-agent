@@ -7159,6 +7159,18 @@
             "title": "Max Path Length",
             "type": "integer"
           },
+          "max_thread_bytes": {
+            "default": 62914560,
+            "description": "Bytes one conversation's turns may hold together.",
+            "title": "Max Thread Bytes",
+            "type": "integer"
+          },
+          "max_thread_files": {
+            "default": 200,
+            "description": "Files one conversation's turns may hold together.",
+            "title": "Max Thread Files",
+            "type": "integer"
+          },
           "max_total_bytes": {
             "title": "Max Total Bytes",
             "type": "integer"

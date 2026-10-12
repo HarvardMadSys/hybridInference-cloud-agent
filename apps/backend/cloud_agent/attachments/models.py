@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.settings import integer_setting
+from cloud_agent_shared.git.source_archive import DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -20,6 +21,15 @@ MAX_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_ATTACHMENT_FILES = 50
 MAX_ATTACHMENT_PATH_LENGTH = 512
 MAX_CONTENT_TYPE_LENGTH = 255
+
+#: What one conversation's ``/uploads`` may hold, every turn's files together.
+#: The host rebuilds that directory from all of them as one archive and
+#: refuses one over ``DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES``, which would fail that
+#: turn and every later one on a fresh container; the difference leaves room
+#: for the archive's own headers. Not admin settings, for the same reason: the
+#: host's limit is not one either.
+MAX_THREAD_ATTACHMENT_BYTES = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES - 4 * 1024 * 1024
+MAX_THREAD_ATTACHMENT_FILES = 200
 
 #: Where the sandbox sees them. Outside the worktree on purpose: the publish
 #: path stages the workspace with ``git add -A -N``, so an upload written into
@@ -44,6 +54,14 @@ class AttachmentLimits(BaseModel):
     max_file_bytes: int = Field(default_factory=lambda: attachment_max_file_bytes())
     max_total_bytes: int = Field(default_factory=lambda: attachment_max_total_bytes())
     max_path_length: int = MAX_ATTACHMENT_PATH_LENGTH
+    max_thread_files: int = Field(
+        default=MAX_THREAD_ATTACHMENT_FILES,
+        description="Files one conversation's turns may hold together.",
+    )
+    max_thread_bytes: int = Field(
+        default=MAX_THREAD_ATTACHMENT_BYTES,
+        description="Bytes one conversation's turns may hold together.",
+    )
 
 
 def attachment_max_files() -> int:
@@ -143,6 +161,27 @@ def check_paths(paths: list[str], *, held: Iterable[str] = ()) -> None:
             raise AttachmentError(
                 f"{clash} cannot be both a file and a folder under {SANDBOX_UPLOAD_DIR}."
             )
+
+
+def check_thread_total(rows: list[dict[str, Any]]) -> None:
+    """Bound what a conversation's ``/uploads`` holds, every turn's files together.
+
+    ``rows`` are what it would hold with a new turn's files in (see
+    :func:`current_uploads`): a file attached again counts once, as the host
+    imports it once.
+    """
+    if len(rows) > MAX_THREAD_ATTACHMENT_FILES:
+        raise AttachmentError(
+            f"A conversation can hold at most {MAX_THREAD_ATTACHMENT_FILES} uploaded "
+            "files. Start a new chat to attach more."
+        )
+    total = sum(int(row["size_bytes"]) for row in rows)
+    if total > MAX_THREAD_ATTACHMENT_BYTES:
+        raise AttachmentError(
+            "A conversation's uploaded files must total no more than "
+            f"{attachment_size_label(MAX_THREAD_ATTACHMENT_BYTES)}. "
+            "Start a new chat to attach more."
+        )
 
 
 def current_uploads(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
