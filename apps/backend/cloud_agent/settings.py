@@ -129,6 +129,16 @@ class Setting:
                         "sandbox_archive.endpoint",
                     }:
                         valid = valid and parsed.scheme == "https" and not parsed.query
+                    # The code that uses these refuses anything else, so the
+                    # editor asks it rather than keeping a second copy of the rule.
+                    if self.key == "github_app_install_url":
+                        from cloud_agent.source_control import github_install_url_is_usable
+
+                        valid = valid and github_install_url_is_usable(value)
+                    elif self.key == "gitlab_redirect_uri":
+                        from cloud_agent.source_control import gitlab_redirect_uri_is_usable
+
+                        valid = valid and gitlab_redirect_uri_is_usable(value)
                 except (ValueError, ValidationError):
                     valid = False
         if not valid:
@@ -503,6 +513,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITHUB_APP_INSTALL_URL",
         url=True,
+        description="An https://github.com URL, normally https://github.com/apps/<app-slug>/installations/new.",
     ),
     Setting(
         "github_api_url",
@@ -534,6 +545,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITLAB_OAUTH_REDIRECT_URI",
         url=True,
+        description="The exact callback registered with GitLab. HTTPS, except http://localhost for development.",
     ),
     Setting(
         "github_publish_token",

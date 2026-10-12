@@ -292,6 +292,54 @@ def test_https_integrations_refuse_unusable_urls(key, url):
 
 
 @pytest.mark.parametrize(
+    ("key", "url"),
+    [
+        ("github_app_install_url", "https://example.com/apps/agent/installations/new"),
+        ("github_app_install_url", "http://github.com/apps/agent/installations/new"),
+        ("github_app_install_url", "https://github.com:8443/apps/agent/installations/new"),
+        ("gitlab_redirect_uri", "http://agents.example.org/api/v1/agent/gitlab/callback"),
+    ],
+)
+def test_source_control_urls_their_flows_refuse_cannot_be_saved(key, url):
+    """Saved, then reported as configured, then refused when a user clicks Connect."""
+    with pytest.raises(ValueError, match="Invalid value for"):
+        settings.encode_changes({key: url})
+
+
+@pytest.mark.parametrize(
+    ("key", "url"),
+    [
+        ("github_app_install_url", "https://github.com/apps/agent/installations/new"),
+        ("gitlab_redirect_uri", "https://agents.example.org/api/v1/agent/gitlab/callback"),
+        ("gitlab_redirect_uri", "http://localhost:3001/api/v1/agent/gitlab/callback"),
+    ],
+)
+def test_source_control_urls_their_flows_accept_can_be_saved(key, url):
+    assert settings.encode_changes({key: url}) == {key: url}
+
+
+def test_a_stored_install_url_the_connect_flow_refuses_reads_as_unconfigured():
+    """Saved before the rule existed: setup asks for it instead of claiming it works."""
+    stored = {
+        **settings.initial_settings(),
+        **settings.encode_changes(
+            {
+                "github_app_id": "12345",
+                "github_app_client_id": "Iv1.client",
+                "github_app_client_secret": "test-client-secret",
+                "github_app_private_key": "test-private-key",
+                "source_control_encryption_key": "test-user-credential-key-of-32-bytes",
+            }
+        ),
+        "github_app_install_url": "https://example.com/apps/agent/installations/new",
+    }
+    view = settings.settings_response(1, stored)
+    github = next(group for group in view["setup"]["groups"] if group["key"] == "github")
+    assert github["configured"] is False
+    assert {field["key"] for field in github["missing"]} == {"github_app_install_url"}
+
+
+@pytest.mark.parametrize(
     "key", [definition.key for definition in settings.SETTINGS if definition.url]
 )
 @pytest.mark.parametrize(
