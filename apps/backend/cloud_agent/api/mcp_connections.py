@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -61,6 +61,7 @@ from cloud_agent.mcp.models import (
     HeaderAuth,
     InvocationStatus,
     LaunchSpec,
+    Mount,
     ToolPolicy,
     Transport,
 )
@@ -2536,8 +2537,13 @@ def _validate_target(
     location: ExecutionLocation,
     url: str | None,
     launch: Mapping[str, Any] | None,
+    mounts: Sequence[Mount] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Check a connection's target and return its storable form."""
+    """Check a connection's target and return its storable form.
+
+    ``mounts`` are the ones the platform derived and the owner was shown; a
+    submitted launch document's own ``mounts`` are never read.
+    """
     if location is ExecutionLocation.REMOTE:
         if transport is Transport.STDIO:
             raise _bad_request("a remote connection cannot use the stdio transport")
@@ -2559,6 +2565,7 @@ def _validate_target(
             args=tuple(str(arg) for arg in launch.get("args") or ()),
             env={str(k): str(v) for k, v in (launch.get("env") or {}).items()},
             cwd=str(launch["cwd"]) if launch.get("cwd") else None,
+            mounts=tuple(mounts),
         )
         plan = build_launch_plan(
             spec, connection_id="draft", location=location, policy=ManagedLaunchPolicy()
@@ -2670,13 +2677,20 @@ def _prepare_import_draft(
             "args": list(draft.launch.args),
             "env": dict(draft.launch.env),
             "cwd": draft.launch.cwd,
-            "mounts": [
-                {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-                for mount in config_import.mounts_for(draft.paths)
-            ]
-            if parsed_location is ExecutionLocation.MANAGED_WORKER
-            else [],
         }
+    # The checks create applies, and only the form they render is stored: the
+    # run location must fit the transport, an address must pass the egress
+    # policy and a command must build a launch plan. The local paths a command
+    # names become a managed worker's mounts under that plan's mount rules.
+    url, launch_spec = _validate_target(
+        transport=draft.transport,
+        location=parsed_location,
+        url=draft.url,
+        launch=launch_spec,
+        mounts=config_import.mounts_for(draft.paths)
+        if parsed_location is ExecutionLocation.MANAGED_WORKER
+        else (),
+    )
     auth_config: dict[str, Any] = {}
     if draft.auth_kind is AuthKind.STATIC and draft.secrets:
         header_name = draft.secrets[0].name
@@ -2707,7 +2721,7 @@ def _prepare_import_draft(
         "label": draft.label,
         "transport": draft.transport.value,
         "location": parsed_location.value,
-        "url": draft.url,
+        "url": url,
         "launch_spec": launch_spec,
         "auth_kind": draft.auth_kind.value,
         "auth_config": auth_config,

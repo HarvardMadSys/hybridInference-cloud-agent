@@ -2208,6 +2208,70 @@ class TestImport:
         assert store.connections == {}
         assert store.created == []
 
+    @pytest.mark.parametrize(
+        ("entry", "locations", "refusal"),
+        [
+            ({"url": "http://wiki.example.com/mcp"}, {}, "http is not allowed"),
+            ({"url": "https://wiki.example.com/mcp"}, {"wiki": "managed-worker"}, "stdio"),
+            ({"command": "npx", "args": ["-y", "@scope/wiki@1.0.0"]}, {"wiki": "remote"}, "stdio"),
+            ({"command": "npx", "args": ["-y", "@scope/wiki"]}, {}, "pin"),
+            ({"command": "bash", "args": ["-c", "npx -y @scope/wiki@1.0.0"]}, {}, "shell"),
+            (
+                {"command": "npx", "args": ["-y", "@scope/wiki@1.0.0", "~/notes"]},
+                {"wiki": "managed-worker"},
+                "absolute path",
+            ),
+        ],
+    )
+    def test_a_draft_that_create_would_refuse_saves_nothing(
+        self, entry: dict[str, Any], locations: dict[str, str], refusal: str
+    ) -> None:
+        """Saving checks each draft the way adding one by hand does.
+
+        The import used to store whatever the paste and the chosen locations
+        said -- a cleartext address, an address saved as a worker process, an
+        unpinned package, a shell, a home-relative mount -- which are rows the
+        connection form refuses and a future runner would trust.
+        """
+        store = FakeStore()
+        paste = {"mcpServers": {"public": {"url": "https://public.example.com/mcp"}, "wiki": entry}}
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={"text": json.dumps(paste), "save": True, "locations": locations},
+            )
+        assert response.status_code == 400
+        assert refusal in response.json()["detail"]["error"]["message"]
+        assert store.connections == {}
+        assert store.created == []
+
+    def test_a_saved_draft_is_stored_in_the_form_create_stores(self) -> None:
+        """The address normalised, and a worker's mounts the ones its plan accepts."""
+        store = FakeStore()
+        paste = {
+            "mcpServers": {
+                "wiki": {"url": "https://Wiki.Example.com/mcp#tools"},
+                "files": {"command": "npx", "args": ["-y", "@scope/files@1.2.3", "/srv/data"]},
+            }
+        }
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={
+                    "text": json.dumps(paste),
+                    "save": True,
+                    "locations": {"files": "managed-worker"},
+                },
+            )
+        assert response.status_code == 200, response.text
+        stored = {row["label"]: row for row in store.connections.values()}
+        assert stored["wiki"]["url"] == "https://wiki.example.com/mcp"
+        assert stored["files"]["location"] == "managed-worker"
+        assert stored["files"]["launch_spec"]["args"] == ["-y", "@scope/files@1.2.3", "/srv/data"]
+        assert stored["files"]["launch_spec"]["mounts"] == [
+            {"source": "/srv/data", "target": "/workspace/mcp/0", "read_only": True}
+        ]
+
 
 class TestBindings:
     """A session's capability selection."""
