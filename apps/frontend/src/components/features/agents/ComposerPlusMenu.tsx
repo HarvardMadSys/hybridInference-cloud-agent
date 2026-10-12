@@ -126,6 +126,8 @@ export function ComposerPlusMenu({
   onOpenGoal,
   mcp,
   mcpBlockedReason,
+  onOpenPlugins,
+  pluginSummary,
   onOpen,
   disabled = false,
 }: {
@@ -145,6 +147,8 @@ export function ComposerPlusMenu({
     toggle: (connection: McpChoice['connection'], on: boolean) => void;
   };
   mcpBlockedReason?: string;
+  onOpenPlugins?: () => void;
+  pluginSummary?: string;
   onOpen?: () => void;
   disabled?: boolean;
 }) {
@@ -241,7 +245,7 @@ export function ComposerPlusMenu({
           if (!open) onOpen?.();
           setOpen(true);
         }}
-        className={`ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
+        className={`ui-focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
           open
             ? 'bg-gray-100 text-gray-900 dark:bg-white/10 dark:text-gray-100'
             : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200'
@@ -380,6 +384,24 @@ export function ComposerPlusMenu({
                       {mcpBlockedReason ?? (mcp.count ? mcp.count : '')}
                     </span>
                     {mcpBlockedReason ? null : <ChevronIcon />}
+                  </button>
+                ) : null}
+                {onOpenPlugins ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    aria-haspopup="dialog"
+                    className={COMPOSER_MENU_ROW}
+                    onClick={() => {
+                      close();
+                      onOpenPlugins();
+                    }}
+                  >
+                    <McpIcon />
+                    <span className="shrink-0">{t('plugins.title')}</span>
+                    <span className={COMPOSER_MENU_DETAIL}>{pluginSummary}</span>
+                    <ChevronIcon />
                   </button>
                 ) : null}
               </div>

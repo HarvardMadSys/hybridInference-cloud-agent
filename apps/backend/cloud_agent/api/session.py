@@ -436,6 +436,11 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
         claims = await asyncio.to_thread(identity.verify_identity_token, identity_token)
     except identity.IdentityNotConfigured:
         raise AgentConfigurationError() from None
+    except identity.IdentityUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot verify identity with the gateway; try again shortly.",
+        ) from None
     except identity.IdentityError:
         # Deliberately not echoing the reason. "Signed by an unknown key" and
         # "expired" are the same answer to a browser, and the difference is

@@ -17,9 +17,6 @@ vi.mock('@/components/providers', async () => {
       translate('en', key, vars),
   };
 });
-vi.mock('@/components/features/settings/SettingsLauncher', () => ({
-  SettingsLauncher: () => null,
-}));
 vi.mock('@/lib/api/agents', () => ({
   listAgentConversations: api.list,
   listAgentProjects: api.projects,

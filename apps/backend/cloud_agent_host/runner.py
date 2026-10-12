@@ -5,11 +5,12 @@ streams the member Agent CLI's output through the workspace broker. Its shape
 follows from the adjudicated security model rather than convenience:
 
 - **Narrow credentials.** The enrolled host claims with its own identity. Only
-  a member-scoped inference grant and an attempt-fenced MCP token enter the
-  sandbox; worker-control and repository credentials stay in this process.
+  a member-scoped inference grant, an attempt-fenced MCP token, and a
+  short-lived repository-scoped GitHub App write token enter the sandbox.
+  Worker-control, account and service credentials stay outside.
 - **Snapshot-out, not push.** The runner never pushes. The trusted publisher
   captures and validates a quiescent shared-workspace snapshot, then pushes it.
-  That is why neither the runner nor the sandbox needs a git write credential.
+  The sandbox may also publish directly using its repository-scoped token.
 - **Heartbeats are how cancellation arrives.** A background thread renews the
   lease and watches the reply for ``cancel_requested``; the agent is killed on
   the next beat. Losing the lease (409) is fatal by design — a runner whose
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.chat_sandbox import (
     CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
@@ -118,6 +120,7 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
@@ -131,6 +134,7 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
@@ -351,10 +355,13 @@ class ClaimedJob:
     # Optional, so it carries a default rather than forcing every caller to
     # pass one.
     setup_script: str | None = None
-    # Read-only, single-repo, short-lived: what the runner clones with. Stays
-    # in the runner — it is never put in .git/config and never enters the
-    # sandbox environment. ``None`` for a public repository.
+    # Explicit CLI plugins installed in this chat's private member state.
+    plugins: list[dict[str, str]] = field(default_factory=list)
+    # Read-only, single-repo, short-lived: what the runner clones with. Never
+    # put in .git/config or the sandbox environment.
     clone_token: str | None = None
+    # A separate repository-scoped contents/PR write token for sandbox gh.
+    github_token: str | None = field(default=None, repr=False)
     parent_job_id: str | None = None
     turn_no: int = 1
     # MCP connection aliases this job was granted. Aliases only: the runner
@@ -384,6 +391,10 @@ class ClaimedJob:
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
         """Build from the claim endpoint's response."""
+        raw_plugins = body.get("plugins", [])
+        if not isinstance(raw_plugins, list) or len(raw_plugins) > MAX_SANDBOX_PLUGINS:
+            raise ValueError("claim plugins must be a bounded list")
+        plugins = validate_sandbox_plugins(body["runtime"], raw_plugins)
         return cls(
             job_id=body["job_id"],
             thread_id=body["thread_id"],
@@ -395,6 +406,7 @@ class ClaimedJob:
             base_sha=body.get("base_sha"),
             task_prompt=body["task_prompt"],
             setup_script=body.get("setup_script"),
+            plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],
             execution_profile=body.get("execution_profile") or "trusted-v1",
@@ -405,6 +417,7 @@ class ClaimedJob:
             sandbox_token=body["sandbox_token"],
             mcp_token=body.get("mcp_token") or "",
             clone_token=body.get("clone_token") or None,
+            github_token=body.get("github_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(
@@ -630,6 +643,7 @@ class ControlPlane:
         *,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         process_generation: int,
     ) -> None:
         """Record a CLI process rotation inside the same chat container."""
@@ -638,6 +652,7 @@ class ControlPlane:
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
+                "residency_generation": residency_generation,
                 "process_generation": process_generation,
             },
         )
@@ -664,6 +679,7 @@ class ControlPlane:
         *,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
     ) -> None:
         """Reserve this job before its prompt may reach Agent CLI stdin."""
         self._post(
@@ -671,6 +687,7 @@ class ControlPlane:
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
+                "residency_generation": residency_generation,
             },
             timeout=10.0,
         )
@@ -680,6 +697,7 @@ class ControlPlane:
         *,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         context_status: str,
         native_session_id: str | None,
         idle_timeout_seconds: float,
@@ -691,6 +709,7 @@ class ControlPlane:
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
+                "residency_generation": residency_generation,
                 "context_status": context_status,
                 "native_session_id": native_session_id,
                 "base_sha": base_sha,
@@ -1140,10 +1159,10 @@ def _basic_credential(clone_token: str) -> str:
 def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
-    No repository credential may reach the sandbox, and this tree is about to
-    be streamed into it. Asserting the property beats assuming it: git writes
-    several files during a fetch, and a future authentication change could
-    quietly start recording the token in one of them.
+    No repository credential may be stored in the source tree, which is about
+    to be streamed into the sandbox. Asserting the property beats assuming it:
+    git writes several files during a fetch, and a future authentication change
+    could quietly start recording the token in one of them.
     """
     if not clone_token:
         return
@@ -1325,45 +1344,39 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     until the enclosing ``finally``, the attempt never expires, the reaper
     never takes it, and this runner claims nothing further. One hostile
     repository would take a runner out permanently.
-
-    Read in bounded pieces rather than lines, so the byte cap holds before
-    anything is buffered: a line is only complete at a newline, and output
-    that never writes one would otherwise be held whole first.
     """
     chunks: list[str] = []
     total = 0
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def _pump() -> None:
-        try:
-            for chunk in process.chunks():
-                lines.put(chunk)
-        finally:
-            lines.put(None)
-
-    threading.Thread(target=_pump, daemon=True, name="agent-patch").start()
+    output = OutputPump(getattr(process, "chunks", process.lines)(), name="agent-patch")
     deadline = time.monotonic() + deadline_s
-    while True:
-        if time.monotonic() > deadline:
-            process.kill()
-            raise WorktreeError(
-                f"building the patch exceeded {deadline_s:.0f}s; the working tree's git "
-                "configuration is agent-controlled and may be hostile"
-            )
-        try:
-            line = lines.get(timeout=_POLL_INTERVAL_S)
-        except queue.Empty:
-            continue
-        if line is None:
-            break
-        total += len(line.encode())
-        if total > max_bytes:
-            process.kill()
-            raise WorktreeError(
-                f"the patch exceeded {max_bytes} bytes while being read; refusing to "
-                "buffer unbounded agent output"
-            )
-        chunks.append(line)
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise WorktreeError(
+                    f"building the patch exceeded {deadline_s:.0f}s; the working tree's git "
+                    "configuration is agent-controlled and may be hostile"
+                )
+            try:
+                chunk = output.get(timeout=_POLL_INTERVAL_S)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            total += len(chunk.encode())
+            if total > max_bytes:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise WorktreeError(
+                    f"the patch exceeded {max_bytes} bytes while being read; refusing to "
+                    "buffer unbounded agent output"
+                )
+            chunks.append(chunk)
+    finally:
+        output.close()
 
     exit_code = process.wait()
     if exit_code != 0:
@@ -2226,20 +2239,9 @@ def _stream_shared_agent_turn(
     # grace period, which the endpoint correctly refuses.
     if measurement is not None and on_frozen is not None:
         on_frozen(measurement)
-    frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for frame in stream.frames():
-                frames.put(frame)
-        except Exception as exc:
-            frames.put({"kind": "client_error", "detail": str(exc)[:1000]})
-        finally:
-            frames.put(None)
-
-    reader = threading.Thread(target=pump, daemon=True, name="shared-agent-stream")
+    frames: OutputPump[dict[str, Any]] | None = None
     deadline = time.monotonic() + timeout_s
-    tail: list[str] = []
+    tail = TextTail()
     tool_errors: list[str] = []
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
@@ -2249,7 +2251,7 @@ def _stream_shared_agent_turn(
         # response stream. Resident follow-ups need not emit a native init
         # event, so report this shared boundary before waiting for CLI output.
         control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
-        reader.start()
+        frames = OutputPump(stream.frames(), name="shared-agent-stream")
         while True:
             if heart.lease_lost:
                 with contextlib.suppress(Exception):
@@ -2271,11 +2273,15 @@ def _stream_shared_agent_turn(
                 forced_exit_code = 124
                 interrupt_deadline = now + _SHARED_TURN_INTERRUPT_DRAIN_S
             if interrupt_deadline is not None and now > interrupt_deadline:
-                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+                return forced_exit_code or 1, tail.text(), tool_errors, result_frame
             try:
                 frame = frames.get(timeout=_POLL_INTERVAL_S)
             except queue.Empty:
                 continue
+            except Exception as exc:
+                if result_frame is not None:
+                    break
+                raise SessionSupervisorError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
             kind = frame.get("kind")
@@ -2283,7 +2289,6 @@ def _stream_shared_agent_turn(
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):
                     tail.append(raw_line)
-                    del tail[:-40]
                 event_type = str(frame.get("event_type") or "")
                 payload = frame.get("payload")
                 if not isinstance(payload, dict):
@@ -2313,7 +2318,7 @@ def _stream_shared_agent_turn(
                 result_frame = frame
                 detail = str(frame.get("detail") or "shared turn failed")
                 tail.append(detail[-2000:])
-                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+                return forced_exit_code or 1, tail.text(), tool_errors, result_frame
             if kind == "client_error":
                 # The result may already have crossed the wire before the
                 # transport failed. Preserve that terminal frame rather than
@@ -2325,7 +2330,7 @@ def _stream_shared_agent_turn(
         if result_frame is None:
             raise SessionSupervisorError(502, "shared turn ended without a result")
         if forced_exit_code is not None:
-            return forced_exit_code, "".join(tail), tool_errors, result_frame
+            return forced_exit_code, tail.text(), tool_errors, result_frame
         status = str(result_frame.get("status") or "failed")
         exit_code = int(result_frame.get("exit_code") or 0)
         if status == "cancelled":
@@ -2342,8 +2347,10 @@ def _stream_shared_agent_turn(
                     },
                 )
             )
-        return exit_code, "".join(tail), tool_errors, result_frame
+        return exit_code, tail.text(), tool_errors, result_frame
     finally:
+        if frames is not None:
+            frames.close()
         stream.close()
 
 
@@ -2957,6 +2964,9 @@ def _run_shared_live_attempt(
             reasoning_effort=job.reasoning_effort,
             gateway_base_url=gateway_base_url,
             credential=None,
+            github_token=job.github_token,
+            github_repo=job.repo,
+            plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
             # The MCP relay token is attempt-fenced. It is process-fixed only
             # when this turn actually exposes MCP endpoints; carrying an
@@ -3041,6 +3051,7 @@ def _run_shared_live_attempt(
         control.record_chat_process(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
+            residency_generation=launch.residency_generation,
             process_generation=process_generation,
         )
         if context_status == "live":
@@ -3060,6 +3071,7 @@ def _run_shared_live_attempt(
             lambda: control.admit_chat_turn(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
+                residency_generation=launch.residency_generation,
             ),
         )
         turn_admitted = True
@@ -3185,6 +3197,7 @@ def _run_shared_live_attempt(
             lambda: control.settle_chat_sandbox(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
+                residency_generation=launch.residency_generation,
                 context_status=context_status,
                 native_session_id=settled_session_id,
                 base_sha=base_sha,
@@ -3579,6 +3592,28 @@ def _run_turn(
         backend = build_backend_from_env()
         backend.preflight()
 
+    storage_error = _new_sandbox_storage_error(job, host_settings)
+    if storage_error:
+        logger.warning(
+            "agent_storage_admission_declined",
+            extra={
+                "event": "agent_storage_admission_declined",
+                "job_id": job.job_id,
+                "detail": storage_error,
+            },
+        )
+        operation_profiling.discard(measurement)
+        return (
+            0
+            if release_turn(
+                base_url=base_url,
+                worker_token=job.worker_token,
+                job_id=job.job_id,
+                reason="storage_pressure",
+            )
+            else 2
+        )
+
     print(f"claimed {job.job_id} attempt {job.attempt_no} runtime={job.runtime}")
     logger.info(
         "agent_attempt_claimed job_id=%s attempt_id=%s worker_id=%s host=%s",
@@ -3814,10 +3849,9 @@ def _spawn_turn(
     block the turn it was waiting for.
 
     Every path that returns ``LAUNCH_NOT_STARTED`` has shown the child never
-    had the turn: the spawn itself failed, delivery failed, or the child closed
-    its answer without giving one, which is what exiting does for it. A child
-    that answered owns the turn, and a child that answered nothing and is still
-    alive is not evidence of anything — the turn stays claimed and its lease
+    had the turn: no process was created or the child explicitly declined it.
+    Silence, EOF, an unexpected answer, and any failure after spawn are
+    ambiguous: the turn stays claimed, the child stays tracked, and its lease
     remains the backstop.
     """
     child = _child_turn_payload(payload)
@@ -3826,7 +3860,20 @@ def _spawn_turn(
         # Added after the claim's own underscore keys were stripped: only this
         # host, which proved the runtime itself, can spare the child the probe.
         child[VERDICT_KEY] = verdict
-    read_fd, write_fd = os.pipe()
+    try:
+        encoded_child = encode_turn(child)
+    except (TypeError, ValueError) as exc:
+        return LaunchResult(
+            outcome=LAUNCH_NOT_STARTED,
+            detail=f"the turn payload could not be encoded: {type(exc).__name__}: {exc}",
+        )
+    try:
+        read_fd, write_fd = os.pipe()
+    except OSError as exc:
+        return LaunchResult(
+            outcome=LAUNCH_NOT_STARTED,
+            detail=f"could not create the turn handover pipe: {exc}",
+        )
     argv = [
         sys.executable,
         "-m",
@@ -3859,48 +3906,88 @@ def _spawn_turn(
         return LaunchResult(
             outcome=LAUNCH_NOT_STARTED, detail=f"could not start a turn process: {exc}"
         )
-    # This process's copy, closed so the read below ends at end-of-file when
-    # the child exits rather than waiting out the handover deadline.
-    os.close(write_fd)
+    read_open = True
+    write_open = True
     try:
+        # This process's copy, closed so the read below ends at end-of-file
+        # when the child exits rather than waiting out the deadline.
+        os.close(write_fd)
+        write_open = False
         assert process.stdin is not None
         # Most underscore-prefixed keys are parent bookkeeping. Profiling is
         # the one intentional child handoff: stripping it makes the deployed
         # multi-process path silently measure nothing.
-        process.stdin.write(encode_turn(child))
+        process.stdin.write(encoded_child)
         process.stdin.close()
-    except OSError as exc:
-        os.close(read_fd)
-        _reap_unstarted(process)
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED, detail=f"the turn could not be delivered: {exc}"
-        )
-
-    answer = read_handover(read_fd)
-    if answer is None:
+        # read_handover owns and always closes this descriptor, including when
+        # it raises. Mark it transferred before entering the call so cleanup
+        # never closes a descriptor number that another thread could reuse.
+        read_open = False
+        answer = read_handover(read_fd)
+    except KeyboardInterrupt:
+        # Ctrl-C means immediate shutdown. This child is not in TurnPool until
+        # this function returns, so reap it here rather than orphaning it in
+        # the handover window.
+        if read_open:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+        if write_open:
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
+        if process.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                process.stdin.close()
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=10)
+        raise
+    except Exception as exc:
+        # The process exists and may already have accepted the turn. Losing
+        # the handover transport is not proof that it is safe to requeue or
+        # omit this child from graceful shutdown accounting.
+        if read_open:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+        if write_open:
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
+        if process.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                process.stdin.close()
         return LaunchResult(
             outcome=LAUNCH_UNCERTAIN,
             handle=process,
             detail=(
-                f"no answer within {HANDOVER_TIMEOUT_S:.0f}s; the turn stays claimed "
-                "because silence is not proof that it did not start"
+                f"handover failed ({type(exc).__name__}); the turn stays claimed "
+                "because the spawned child may already own it"
             ),
         )
-    if answer.split(" ", 1)[0] == HANDOVER_ACCEPTED:
+    prefix = answer.split(" ", 1)[0] if answer else ""
+    if prefix == HANDOVER_ACCEPTED:
         return LaunchResult(outcome=LAUNCH_STARTED, handle=process)
-    _reap_unstarted(process)
-    detail = answer or "the turn process exited without taking delivery"
-    if answer.split(" ", 1)[0] == HANDOVER_DECLINED:
-        detail = answer
-    return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=detail)
+    if prefix == HANDOVER_DECLINED:
+        _reap_unstarted(process)
+        return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=answer or HANDOVER_DECLINED)
+    if answer is None:
+        detail = f"no answer within {HANDOVER_TIMEOUT_S:.0f}s"
+    elif not answer:
+        detail = "the handover closed without a trustworthy answer"
+    else:
+        detail = f"the child returned an unexpected handover answer: {answer!r}"
+    return LaunchResult(
+        outcome=LAUNCH_UNCERTAIN,
+        handle=process,
+        detail=f"{detail}; the turn stays claimed because silence is not proof it did not start",
+    )
 
 
 def _reap_unstarted(process: subprocess.Popen[bytes]) -> None:
     """Collect a child that never took its turn, without waiting on it forever.
 
-    It has already answered — or closed its answer — so it is on its way out.
-    A child that somehow is not gets killed: it holds no turn, so there is
-    nothing for it to finish, and leaving it would leak a process per failure.
+    It explicitly declined, so it is on its way out. A child that somehow is
+    not gets killed: it holds no turn, so there is nothing for it to finish,
+    and leaving it would leak a process per failure.
     """
     try:
         process.wait(timeout=10)
@@ -3924,16 +4011,23 @@ def _serve_turn(
 
     The answer is sent **after everything that can still be declined and
     before anything that cannot**. That ordering is the whole contract in both
-    directions: the host treats a child that exits without answering as one
-    that never had the turn and requeues it unspent, so everything this
-    process could fail at without consequence belongs above the answer, and
-    everything a user or an operator could notice belongs below it.
+    directions: only a child that explicitly declines is requeued unspent, so
+    everything this process could fail at without consequence belongs above
+    the answer, and everything a user or an operator could notice belongs
+    below it. Exiting without a trustworthy answer remains ambiguous.
 
     Preflight is above it for exactly that reason. It checks Docker, the
     image and the network without running the turn, so failing it means the
     turn has not begun — and answering first would instead strand that turn behind
     a lease it will never use, having spent one of its attempts.
     """
+    # Install before reading the payload or probing the runtime. The parent
+    # does not signal children during a graceful drain, but this also protects
+    # a child from an out-of-band process-group signal while its handover is
+    # still ambiguous. Once a child exists, deployment waits for its natural
+    # exit rather than guessing whether it accepted the turn.
+    _drain_on_sigterm()
+
     # Drained first, and before anything slow, so the host is never left
     # blocked writing a long prompt into a pipe this process has not read yet.
     raw = sys.stdin.read()
@@ -3983,12 +4077,12 @@ def _serve_turn(
         write_handover(handover_fd, f"{HANDOVER_DECLINED} unusable turn ({type(exc).__name__})")
         return 0
 
-    # Installed before the answer, so there is no window in which this process
-    # owns a turn and SIGTERM would still kill it outright. From here the turn
-    # is this process's: SIGTERM means the container is being replaced, the
-    # turn still runs to its end, and supported activation has no forced-kill
-    # deadline.
-    _drain_on_sigterm()
+    host_settings = _turn_host_settings(payload.get("_host_settings"))
+    storage_error = _new_sandbox_storage_error(job, host_settings)
+    if storage_error:
+        operation_profiling.discard(measurement)
+        write_handover(handover_fd, f"{HANDOVER_DECLINED} {storage_error}")
+        return 2
     write_handover(handover_fd, f"{HANDOVER_ACCEPTED} {job.job_id}")
     # Only an accepted turn can finish and deliver the inherited measurement,
     # now including the preflight the user waited through before this answer.
@@ -3996,7 +4090,6 @@ def _serve_turn(
     # admin's values over the host's own. Fixed for the turn from here, so a
     # change on the admin page applies to the next turn, never halfway
     # through this one.
-    host_settings = _turn_host_settings(payload.get("_host_settings"))
     return run_turn(
         job,
         base_url=base_url,
@@ -4838,6 +4931,16 @@ def _sandbox_mcp_url() -> str:
     return (os.environ.get("AGENT_SANDBOX_MCP_URL") or "").strip()
 
 
+def _new_sandbox_storage_error(job: ClaimedJob, settings: Mapping[str, float] | None) -> str | None:
+    if job.thread_sandbox:
+        return None
+    definition = HOST_SETTINGS_BY_KEY["storage_min_available_mib"]
+    minimum = (settings or {}).get("storage_min_available_mib")
+    if minimum is None:
+        minimum = _env_float(definition.env, float(definition.default))
+    return new_sandbox_storage_error(minimum_mib=minimum)
+
+
 def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
     """This host's own value for each setting the runner applies.
 
@@ -4849,6 +4952,10 @@ def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
         "agent_timeout_s": agent_timeout_s,
         "chat_idle_timeout_s": _chat_idle_timeout_s(),
         "source_import_max_mib": source_import_max_bytes() // (1024 * 1024),
+        "storage_min_available_mib": _env_float(
+            "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+            float(HOST_SETTINGS_BY_KEY["storage_min_available_mib"].default),
+        ),
         "shared_resident_capacity": int(
             os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
             or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default

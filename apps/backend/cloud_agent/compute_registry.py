@@ -323,6 +323,19 @@ def build_registry(
                         "deployment_only": True,
                     },
                     {
+                        "key": "ssh_public_key",
+                        "label": "SSH public key",
+                        "section": "access",
+                        "type": "textarea",
+                        "description": (
+                            "Installed for the CloudLab SSH user on new experiments. "
+                            "Leave blank to use keys already on the CloudLab account."
+                        ),
+                        "deployment_only": True,
+                        "modes": ["provision"],
+                        "max_length": 8192,
+                    },
+                    {
                         "key": "host_key_source",
                         "label": "SSH host-key checking",
                         "section": "access",

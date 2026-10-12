@@ -250,7 +250,14 @@ def fake_tool(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def boot_once(tmp_path: Path, status: str) -> subprocess.CompletedProcess[str]:
+def boot_once(
+    tmp_path: Path,
+    status: str,
+    *,
+    keygen_status: int = 0,
+    write_keys: bool = True,
+    restart_status: int = 0,
+) -> subprocess.CompletedProcess[str]:
     profile = run_profile({"registrationUrl": URL, "registrationToken": TOKEN})
     tools = tmp_path / "bin"
     tools.mkdir(exist_ok=True)
@@ -258,21 +265,32 @@ def boot_once(tmp_path: Path, status: str) -> subprocess.CompletedProcess[str]:
     ssh_dir = root / "etc" / "ssh"
     ssh_dir.mkdir(parents=True, exist_ok=True)
     # ssh-keygen -A -f <root>: write one key of each type under <root>/etc/ssh.
+    generated_keys = (
+        f'printf "%s\\n" "{ED25519} root@x" > "$prefix/ssh_host_ed25519_key.pub"\n'
+        f'printf "%s\\n" "{RSA} root@x" > "$prefix/ssh_host_rsa_key.pub"\n'
+        'printf private > "$prefix/ssh_host_ed25519_key"\n'
+        'printf private > "$prefix/ssh_host_rsa_key"\n'
+    )
     fake_tool(
         tools,
         "ssh-keygen",
         'echo "$@" >> "$TOOL_LOG"\n'
         'prefix="${@: -1}/etc/ssh"\n'
-        f'printf "%s\\n" "{ED25519} root@x" > "$prefix/ssh_host_ed25519_key.pub"\n'
-        f'printf "%s\\n" "{RSA} root@x" > "$prefix/ssh_host_rsa_key.pub"\n',
+        + (generated_keys if write_keys and keygen_status == 0 else "")
+        + f"exit {keygen_status}\n",
     )
-    fake_tool(tools, "systemctl", 'echo systemctl "$@" >> "$TOOL_LOG"\n')
+    fake_tool(
+        tools,
+        "systemctl",
+        'echo systemctl "$@" >> "$TOOL_LOG"\n' + f"exit {restart_status}\n",
+    )
     fake_tool(
         tools,
         "curl",
         f'echo curl "$@" >> "$TOOL_LOG"\ncat > "$BODY_FILE"\nprintf "{status}"\n',
     )
-    (ssh_dir / "ssh_host_ed25519_key.pub").write_text("ssh-ed25519 STALE image-key\n")
+    if not (tmp_path / "tools.log").exists():
+        (ssh_dir / "ssh_host_ed25519_key.pub").write_text("ssh-ed25519 STALE image-key\n")
     environment = {
         **os.environ,
         "PATH": f"{tools}:{os.environ['PATH']}",
@@ -307,6 +325,37 @@ def test_boot_script_registers_fresh_keys_once_over_https(tmp_path):
     again = boot_once(tmp_path, "200")
     assert again.returncode == 0
     assert (tmp_path / "tools.log").read_text().count("-A -f") == 1  # keys stay the same
+    assert json.loads((tmp_path / "body.json").read_text()) == body
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [{"keygen_status": 1}, {"write_keys": False}, {"restart_status": 1}],
+    ids=["generation-failed", "generation-created-no-keys", "sshd-restart-failed"],
+)
+def test_failed_host_key_setup_leaves_registration_retryable(tmp_path, failure):
+    first = boot_once(tmp_path, "200", **failure)
+    assert first.returncode == 1
+    assert not (tmp_path / "state/host-keys-regenerated").exists()
+    assert not (tmp_path / "body.json").exists(), "unverified keys must not be registered"
+
+    retried = boot_once(tmp_path, "200")
+    assert retried.returncode == 0, retried.stderr
+    assert (tmp_path / "state/host-keys-regenerated").exists()
+    assert (tmp_path / "tools.log").read_text().count("-A -f") == 2
+    assert json.loads((tmp_path / "body.json").read_text())["host_keys"] == [ED25519, RSA]
+
+
+def test_legacy_success_marker_without_keys_does_not_prevent_repair(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "host-keys-regenerated").touch()
+
+    failed = boot_once(tmp_path, "200", keygen_status=1)
+    assert failed.returncode == 1
+    assert not (state / "host-keys-regenerated").exists()
+    assert boot_once(tmp_path, "200").returncode == 0
+    assert (tmp_path / "tools.log").read_text().count("-A -f") == 2
 
 
 @pytest.mark.parametrize("status", ["404", "409", "422"])

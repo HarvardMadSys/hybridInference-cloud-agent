@@ -78,11 +78,42 @@ class SnapshotRepository(Protocol):
         preparation: a group snapshot may capture a succeeded boundary or a
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
+        Deferred publications are eligible only after their ``retry_at``.
+        """
+        ...
+
+    async def renew_snapshot_publish_claim(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int
+    ) -> bool:
+        """Keep a live publisher's fenced claim out of stalled recovery.
+
+        The attempt count is the ownership generation: a publisher whose
+        claim was reclaimed cannot renew the replacement's heartbeat.
+        """
+        ...
+
+    async def defer_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> bool:
+        """Spend one durable retry after a transient publication failure.
+
+        The deterministic branch and PR are reconciled on replay, including
+        after uncertain remote effects. Retains the immutable artifact and its
+        included turns. Exhaustion makes the snapshot terminal and deliberately
+        preserves the lineage block for manual review rather than publishing a
+        later workspace epoch out of order. The expected attempt count fences a
+        publisher whose stalled claim was already reclaimed. Returns ``False``
+        unless this exact claim is still ``publishing``.
         """
         ...
 
     async def record_snapshot_publish(
-        self, *, snapshot_id: int, pr_url: str, commit_sha: str
+        self,
+        *,
+        snapshot_id: int,
+        expected_publish_attempt_count: int,
+        pr_url: str,
+        commit_sha: str,
     ) -> bool:
         """Advance one group lineage and wait for object-only base import.
 
@@ -92,8 +123,10 @@ class SnapshotRepository(Protocol):
         """
         ...
 
-    async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
-        """Retain a rejected group artifact without failing included turns."""
+    async def fail_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> None:
+        """Retain a rejected group artifact if this publisher still owns its claim."""
         ...
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
@@ -116,6 +149,14 @@ class SnapshotRepository(Protocol):
 
         ``None`` when none waits. Everything else that makes a capture due is
         announced by a notification.
+        """
+        ...
+
+    async def next_snapshot_publish_retry_due(self) -> datetime | None:
+        """When the earliest deferred publication may be claimed again.
+
+        ``None`` when no captured snapshot waits for a future retry. Capture
+        completion announces other publication work through a notification.
         """
         ...
 

@@ -655,16 +655,25 @@ function SandboxRow({
           {stale && <span className="mt-1 block text-amber-700 dark:text-amber-400">Stale</span>}
         </td>
         <td className="px-3 py-3">
-          <button
-            type="button"
-            aria-expanded={expanded}
-            aria-controls={detailId}
-            aria-label={`${expanded ? 'Hide' : 'Show'} details for ${name}`}
-            className={BUTTON}
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {expanded ? 'Hide' : 'Details'}
-          </button>
+          <div className="flex flex-col items-start gap-2">
+            <Link
+              href={`/admin/sandboxes/${encodeURIComponent(sandbox.id)}`}
+              className={BUTTON}
+              aria-label={`View trajectory for ${name}`}
+            >
+              Trajectory
+            </Link>
+            <button
+              type="button"
+              aria-expanded={expanded}
+              aria-controls={detailId}
+              aria-label={`${expanded ? 'Hide' : 'Show'} details for ${name}`}
+              className={BUTTON}
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? 'Hide' : 'Details'}
+            </button>
+          </div>
         </td>
       </tr>
       {expanded && (

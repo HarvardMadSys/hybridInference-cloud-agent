@@ -20,14 +20,16 @@ slot and a lease; handing it to a process that never ran it would strand the
 user's message until the lease expired. So the child says, once, on a pipe of
 its own, whether it accepted the turn — before it does anything else at all:
 
-* the spawn failed, or the child exited before answering — it provably never
-  began, so the claim is handed back to the queue and no attempt is spent;
+* no process was created, or the child explicitly answered ``declined`` — it
+  provably never began, so the claim is handed back to the queue and no
+  attempt is spent;
 * the child answered ``accepted`` — it owns the turn from that moment. Whatever
   happens next is the lease's business and the retained-session recovery rules'
   business, never this module's. It does not get requeued from here;
-* the child answered nothing and is still alive past the handover deadline —
-  ambiguous, and ambiguity is not proof. The turn stays claimed, the child
-  stays counted, and the lease remains the backstop.
+* the descriptor reached EOF, stayed silent through the deadline, returned an
+  unexpected answer, or failed — all are ambiguous, and ambiguity is not
+  proof. The turn stays claimed, the child stays counted, and the lease
+  remains the backstop.
 
 The pipe rather than stdout because the child's stdout is the container log and
 a reader that stops draining it would block the child; a dedicated descriptor
@@ -182,10 +184,10 @@ def read_handover(
 ) -> str | None:
     """Read the child's answer, or ``None`` when the deadline passes first.
 
-    An empty string means the child closed the descriptor without answering —
-    which is what exiting does, and therefore how "it never began" arrives
-    here. ``None`` is the genuinely ambiguous case and the only one that is
-    not a decision.
+    An empty string means the child closed the descriptor without answering;
+    it is only a transport observation, not proof that the child never accepted
+    the turn. ``None`` is silence through the deadline. A transport error is
+    allowed to propagate because it cannot prove whether the child accepted.
 
     The descriptor is always closed. Leaking it would keep this host's own
     write end open and make the next read wait for a deadline instead of an
@@ -203,7 +205,7 @@ def read_handover(
             except OSError as exc:
                 if exc.errno == errno.EINTR:
                     continue
-                return ""
+                raise
             if not ready:
                 return None
             try:
@@ -211,7 +213,7 @@ def read_handover(
             except OSError as exc:
                 if exc.errno == errno.EINTR:
                     continue
-                return ""
+                raise
             if not chunk:
                 # End of file: the child closed this descriptor, which exiting
                 # does for it. Whatever arrived before is the whole answer.
@@ -393,19 +395,19 @@ class TurnPool:
     ) -> list[FinishedTurn]:
         """Stop claiming and wait for every child, or stop them now.
 
-        Graceful by default: each child already treats SIGTERM as "finish the
-        turn in hand, then exit", and this waits for exactly that. Supported
-        deployment asks Docker Engine to wait indefinitely; the configured
-        ``stop_grace_period`` is only the ceiling for direct, out-of-band
-        Compose operations. ``immediate`` is Ctrl-C.
+        Graceful by default: a child is one turn and already exits when that
+        turn finishes, so do not signal it at all. This protects an ambiguous
+        child even during interpreter startup, before its signal handler can be
+        installed. Supported deployment asks Docker Engine to wait
+        indefinitely. Once installed, the early child handler is defense
+        against later direct or process-group signals; ``immediate`` is Ctrl-C
+        and still kills at once.
         """
         self._stopping = True
         finished: list[FinishedTurn] = []
-        for turn in self._turns:
-            if immediate:
+        if immediate:
+            for turn in self._turns:
                 turn.handle.kill()
-            else:
-                turn.handle.terminate()
         while True:
             finished.extend(self.reap())
             if not self._turns:

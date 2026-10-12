@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useModalDialog } from '@/components/ui/useModalDialog';
+import { Markdown } from '@/components/ui/Markdown';
+
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentQuestionRequestApi } from '@/lib/api/questions';
 import { useNativeQuestions } from './useNativeQuestions';
-
-const FOCUSABLE =
-  'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]';
 
 interface QuestionAnswer {
   selected: string[];
@@ -41,14 +41,12 @@ function QuestionDialog({
     })),
   );
 
-  useEffect(() => {
-    if (!open) return;
-    const previous = document.activeElement as HTMLElement | null;
-    panel.current?.querySelector<HTMLElement>('input, textarea, button')?.focus();
-    return () => {
-      if (previous?.isConnected) previous.focus();
-    };
-  }, [open]);
+  useModalDialog(panel, {
+    open,
+    busy: submitting,
+    onClose: onDismiss,
+    initialFocus: 'input, textarea',
+  });
 
   function update(index: number, value: Partial<QuestionAnswer>) {
     setAnswers((previous) =>
@@ -72,56 +70,20 @@ function QuestionDialog({
     if (submitting || !complete) return;
     onAnswer(
       Object.fromEntries(request.questions.map((question, index) => [question.id, values[index]])),
+      request.questions.some(
+        (question, index) => question.kind === 'plan_approval' && answers[index].custom,
+      ),
     );
-  }
-
-  function onKeyDown(event: KeyboardEvent) {
-    // The conversation's Escape shortcut stops a run. A question popup owns
-    // its keys, so dismissing it must never stop the agent waiting behind it.
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!submitting) onDismiss();
-    }
-    if (event.key === 'Tab') {
-      const controls = Array.from(
-        panel.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [],
-      ).sort((left, right) =>
-        left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
-      );
-      const tabbable = controls.filter((control) => {
-        if (!(control instanceof HTMLInputElement) || control.type !== 'radio') return true;
-        const group = controls.filter(
-          (item): item is HTMLInputElement =>
-            item instanceof HTMLInputElement && item.type === 'radio' && item.name === control.name,
-        );
-        return control === (group.find((item) => item.checked) ?? group[0]);
-      });
-      const first = tabbable[0];
-      const last = tabbable.at(-1);
-      if (!first || !last) {
-        event.preventDefault();
-        panel.current?.focus();
-      } else if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
   }
 
   if (!open) return null;
   return createPortal(
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-      onKeyDown={onKeyDown}
-    >
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-gray-900/25 backdrop-blur-[2px] dark:bg-black/50" />
       <div
         ref={panel}
         role="dialog"
+        lang="en"
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
@@ -144,11 +106,24 @@ function QuestionDialog({
                   className={index ? 'mt-6' : undefined}
                 >
                   <legend className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {question.header ? <span className="mb-1 block">{question.header}</span> : null}
-                    <span className="block whitespace-pre-wrap break-words">
-                      {question.question}
-                    </span>
+                    {question.kind === 'plan_approval' ? (
+                      question.header || 'Plan approval'
+                    ) : (
+                      <>
+                        {question.header ? (
+                          <span className="mb-1 block">{question.header}</span>
+                        ) : null}
+                        <span className="block whitespace-pre-wrap break-words">
+                          {question.question}
+                        </span>
+                      </>
+                    )}
                   </legend>
+                  {question.kind === 'plan_approval' ? (
+                    <div className="mt-3 max-h-[50vh] overflow-y-auto rounded-lg border border-gray-200 px-4 py-3 text-gray-900 dark:border-white/10 dark:text-gray-100">
+                      <Markdown text={question.question} />
+                    </div>
+                  ) : null}
                   {question.multiple && question.options.length ? (
                     <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                       Select all that apply.
@@ -217,12 +192,12 @@ function QuestionDialog({
                             })
                           }
                         />
-                        Other
+                        {question.kind === 'plan_approval' ? 'Request changes' : 'Other'}
                       </label>
                     ) : null}
                     {question.allow_custom && answer.custom ? (
                       <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">
-                        Your answer
+                        {question.kind === 'plan_approval' ? 'Your feedback' : 'Your answer'}
                         <textarea
                           value={answer.text}
                           onChange={(event) => update(index, { text: event.target.value })}

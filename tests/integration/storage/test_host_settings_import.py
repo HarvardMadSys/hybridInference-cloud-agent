@@ -126,7 +126,9 @@ async def test_delayed_report_with_an_old_credential_cannot_import_environment_s
         settings_local={**default_values(RUNNER_SETTING_KEYS), "agent_timeout_s": 7200},
     )
 
-    assert row["settings_desired"] == {}
+    # The whole beat is refused for the replaced credential, import included.
+    assert row is None
+    assert (await hosts.get_host(host="runner-a"))["settings_desired"] == {}
     assert not await _imported(store, "runner-a")
 
 

@@ -7,6 +7,7 @@ are paused, what is released — is read back from Postgres.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -20,6 +21,7 @@ from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
+from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
@@ -362,6 +364,64 @@ async def test_host_moves_to_a_staged_replacement_and_the_old_node_is_released(
     assert old["release_committed_at"] is not None and old["observed_state"] == "terminated"
     assert r.cloud.released == [old["external_id"]]
     assert target["release_committed_at"] is None
+
+
+async def test_autoscaling_ownership_blocks_rotation_even_with_a_compatible_spare(
+    db, store, hosts, monkeypatch
+):
+    r = await rig(store, hosts, monkeypatch)
+    source, _ = await ready_slot(r, db)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_members
+               (allocation_id,deployment_profile,state) VALUES ($1,'slot-a','active')""",
+            r.allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot,allocation_id)
+               VALUES ('slot-a',$1::jsonb,$2)""",
+            json.dumps(_profile("slot-a").model_dump(mode="json")),
+            r.allocation_id,
+        )
+
+    source = await r.repo.get_allocation(r.allocation_id)
+    assert source["autoscaling_owned"] is True
+    spare = await r.worker.reconciler.rotation._free_profile(exclude=source["deployment_profile"])
+    assert spare is not None and spare.id == "slot-b"
+
+    with pytest.raises(ComputeRefusal) as refused:
+        await r.commands.update_policy(
+            r.allocation_id,
+            UpdateComputePolicy(expected_revision=source["revision"], policy=RenewalPolicy()),
+        )
+    assert refused.value.code == "autoscaling_managed"
+
+    with pytest.raises(ComputeRefusal) as refused:
+        await r.commands.rotate(
+            r.allocation_id,
+            RotateComputeRequest(request_id="owned-move", expected_revision=source["revision"]),
+            actor="admin",
+        )
+    assert refused.value.code == "autoscaling_managed"
+    assert not await r.repo.list_operations(allocation_id=r.allocation_id, kinds=["rotate"])
+
+    parameters = {"allocation_id": r.allocation_id, "trigger": "manual"}
+    await r.repo.create_operation(
+        request_id="legacy-owned-move",
+        fingerprint="legacy-owned-move",
+        kind="rotate",
+        allocation_id=r.allocation_id,
+        parameters=parameters,
+        requested_by="admin",
+    )
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "blocked"
+    assert rotation["result"]["blocked_reasons"][0]["code"] == "autoscaling_managed"
+    assert await successor_of(db, r.allocation_id) == []
+    assert r.cloud.created == ["first"]
 
 
 async def test_failed_node_type_is_released_and_the_next_type_takes_over(

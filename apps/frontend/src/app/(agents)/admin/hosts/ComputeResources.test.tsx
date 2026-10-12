@@ -40,6 +40,10 @@ vi.mock('@/lib/api/compute', () => ({
   resolveComputeOperation: vi.fn(),
 }));
 
+vi.mock('./CloudLabAutoscaling', () => ({
+  default: () => <p>CloudLab auto-scaling controls</p>,
+}));
+
 const catalog: ComputeCatalog = {
   secret_store_configured: true,
   deployment_profiles: [{ id: 'secure-kata', label: 'Kata isolation' }],
@@ -1061,6 +1065,18 @@ describe('resource management', () => {
 });
 
 describe('resource dashboard', () => {
+  it('opens auto-scaling without replacing the manual allocation flow', async () => {
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add server' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-scaling' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab auto-scaling' });
+    expect(within(dialog).getByText('CloudLab auto-scaling controls')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close panel' }));
+    expect(screen.getByRole('button', { name: 'Add server' })).toBeEnabled();
+  });
+
   it('shows only the newest periodic inspection for each server', async () => {
     vi.mocked(api.getComputeOperations).mockResolvedValue({
       operations: [
@@ -1083,11 +1099,8 @@ describe('resource dashboard', () => {
     });
 
     render(<ComputeResources onHostsChanged={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
-
-    expect(
-      screen.getAllByRole('button', { name: /inspect · CloudLab experiment · blocked/ }),
-    ).toHaveLength(1);
+    fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
+    expect(screen.getByText('No active operations.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show recent operations' }));
     expect(
       screen.getAllByRole('button', { name: /inspect · CloudLab experiment · blocked/ }),
@@ -1097,7 +1110,26 @@ describe('resource dashboard', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows actual retained locations separately and recovers ongoing operations on page open', async () => {
+  it('keeps failed operations with recovery actions in the default Activity view', async () => {
+    vi.mocked(api.getComputeOperations).mockResolvedValue({
+      operations: [
+        operation({
+          state: 'failed',
+          message: 'CloudLab had no matching capacity',
+          allowed_actions: ['retry', 'cancel'],
+        }),
+      ],
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
+
+    expect(
+      screen.getByRole('button', { name: /acquire · CloudLab experiment · failed/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps settled non-actionable operations in recent Activity only', async () => {
     vi.mocked(api.getComputeOperations).mockResolvedValue({
       operations: [
         operation({
@@ -1111,7 +1143,9 @@ describe('resource dashboard', () => {
     const oldServer = await screen.findByRole('listitem', { name: /old-host/ });
     expect(within(oldServer).getByText('3 sandboxes')).toBeInTheDocument();
     expect(within(oldServer).getByText('draining')).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
+    expect(screen.getByText('No active operations.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show recent operations' }));
     fireEvent.click(
       await screen.findByRole('button', { name: /acquire · CloudLab experiment · unknown/ }),
     );
@@ -1182,6 +1216,104 @@ describe('resource dashboard', () => {
     expect(within(cloudRow).queryByText('Current target')).not.toBeInTheDocument();
     expect(within(cloudRow).getByText('5 sandboxes')).toBeInTheDocument();
     expect(within(oldRow).getByText('3 sandboxes')).toBeInTheDocument();
+  });
+
+  it('hides released resources without letting their old host bindings conceal live inventory', async () => {
+    const staleObservation = {
+      code: 'observation_stale',
+      message: 'Resource observation needs refresh.',
+    };
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({
+          id: 'current-resource',
+          name: 'Current CloudLab',
+          external_id: 'current-experiment',
+          expires_at: '2099-10-05T08:00:00Z',
+        }),
+        allocation({
+          id: 'released-resource',
+          name: 'Released CloudLab',
+          state: 'terminated',
+          external_id: 'released-experiment',
+          expires_at: '2000-10-05T08:00:00Z',
+          blocked_reasons: [staleObservation],
+          nodes: [{ id: 'released-node', name: 'old node', hosts: ['old-host'] }],
+        }),
+        allocation({
+          id: 'absent-resource',
+          name: 'Absent CloudLab',
+          state: 'absent',
+          external_id: 'absent-experiment',
+          expires_at: '2000-10-05T08:00:00Z',
+          blocked_reasons: [staleObservation],
+          nodes: [],
+        }),
+      ],
+      hosts: [
+        {
+          host: 'old-host',
+          status: 'online',
+          retained_groups: 3,
+          allocation_id: null,
+          compute_node_id: null,
+        },
+      ],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+
+    const table = await screen.findByRole('list', { name: 'Server inventory' });
+    expect(within(table).getAllByRole('listitem')).toHaveLength(2);
+    expect(screen.getByRole('listitem', { name: 'Current CloudLab' })).toBeInTheDocument();
+    expect(screen.getByRole('listitem', { name: 'old-host' })).toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'Released CloudLab' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'Absent CloudLab' })).not.toBeInTheDocument();
+
+    const showReleased = screen.getByRole('button', { name: 'Show released (2)' });
+    expect(showReleased).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(showReleased);
+
+    const released = screen.getByRole('listitem', { name: 'Released CloudLab' });
+    const absent = screen.getByRole('listitem', { name: 'Absent CloudLab' });
+    expect(within(released).getByText('Released')).toBeInTheDocument();
+    expect(within(absent).getByText('Disconnected')).toBeInTheDocument();
+    expect(screen.queryByText(staleObservation.message)).not.toBeInTheDocument();
+    expect(screen.queryByText('Deadline passed')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hide released' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide released' }));
+    expect(screen.queryByRole('listitem', { name: 'Released CloudLab' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'Absent CloudLab' })).not.toBeInTheDocument();
+  });
+
+  it('describes an empty active inventory when every resource is released', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({
+          id: 'released-resource',
+          name: 'Released CloudLab',
+          state: 'terminated',
+        }),
+      ],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+
+    expect(
+      await screen.findByText('No active servers. Released servers are hidden.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Add your first server to run sandboxes.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show released (1)' }));
+    expect(screen.getByRole('listitem', { name: 'Released CloudLab' })).toBeInTheDocument();
   });
 
   it('opens one management panel for all enrollments of the selected machine', async () => {

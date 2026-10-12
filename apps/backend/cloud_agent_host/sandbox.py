@@ -6,8 +6,9 @@ selected by configuration, so the same runner code serves dogfooding on CI,
 self-hosted machines, and a multi-tenant fleet.
 
 The production topology is runner outside, retained container per chat group
-(``container`` / ``kata``). Only scoped inference/MCP credentials cross into
-the sandbox; control-plane and repository credentials remain outside. The
+(``container`` / ``kata``). Scoped inference/MCP credentials and a short-lived
+repository-scoped GitHub App token cross into the sandbox; control-plane,
+account and service credentials remain outside. The
 ``process`` backend exists only as a deterministic test seam and cannot attest
 or claim a retained job.
 
@@ -28,32 +29,17 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host.bounded_output import TextTail, protocol_lines, text_chunks
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from typing import IO
 
     from cloud_agent_host.network_guard import HostNetworkGuard
 
 logger = get_logger(__name__)
-
-#: The most characters one read of a sandbox process's output returns. A line
-#: longer than this arrives in pieces instead of being buffered whole: the
-#: output is written by code the sandbox runs, and a stream that never ends a
-#: line would otherwise grow the trusted reader until it ran out of memory.
-#: The 200 pieces a stderr tail keeps still cover the largest command output
-#: the workspace broker returns.
-OUTPUT_CHUNK_CHARS = 16 * 1024
-
-
-def read_chunks(stream: IO[str]) -> Iterator[str]:
-    """Yield ``stream`` line by line, splitting any line over :data:`OUTPUT_CHUNK_CHARS`."""
-    while chunk := stream.readline(OUTPUT_CHUNK_CHARS):
-        yield chunk
-
 
 # Run inside one ephemeral preflight probe on the relay discovery network,
 # with $1 = the URL to probe and $2 = its hostname. Prints exactly one verdict.
@@ -230,13 +216,9 @@ class SandboxProcess(ABC):
     def lines(self) -> Iterator[str]:
         """Yield the agent's stdout, line by line, as it is produced."""
 
-    @abstractmethod
     def chunks(self) -> Iterator[str]:
-        """Yield stdout like :meth:`lines`, splitting lines over :data:`OUTPUT_CHUNK_CHARS`.
-
-        For bounded commands whose output is only joined or tailed: output
-        with no newline is never buffered whole before a limit is checked.
-        """
+        """Yield bounded stdout chunks; line-only test adapters may reuse lines."""
+        yield from self.lines()
 
     @abstractmethod
     def kill(self) -> None:
@@ -413,7 +395,7 @@ class _PopenProcess(SandboxProcess):
     def __init__(self, process: subprocess.Popen[str], *, container: str | None = None) -> None:
         self._process = process
         self._container = container
-        self._stderr_chunks: list[str] = []
+        self._stderr_tail = TextTail()
         self._stderr_thread: threading.Thread | None = None
         if process.stderr is not None:
             self._stderr_thread = threading.Thread(
@@ -429,11 +411,8 @@ class _PopenProcess(SandboxProcess):
     def _drain_stderr(self) -> None:
         """Read stderr to EOF, keeping a bounded tail."""
         assert self._process.stderr is not None
-        for line in read_chunks(self._process.stderr):
-            self._stderr_chunks.append(line)
-            # Bounded: a runaway agent must not turn its own noise into an
-            # out-of-memory on the runner.
-            del self._stderr_chunks[:-200]
+        for chunk in text_chunks(self._process.stderr):
+            self._stderr_tail.append(chunk)
 
     def write_line(self, text: str) -> None:
         """Write one line to the child's stdin, flushed immediately."""
@@ -456,13 +435,15 @@ class _PopenProcess(SandboxProcess):
 
     def lines(self) -> Iterator[str]:
         """Yield stdout lines from the child process."""
-        assert self._process.stdout is not None
-        yield from self._process.stdout
+        try:
+            yield from protocol_lines(self.chunks())
+        except SandboxError:
+            self.kill()
+            raise
 
     def chunks(self) -> Iterator[str]:
-        """Yield stdout from the child process in bounded pieces."""
         assert self._process.stdout is not None
-        yield from read_chunks(self._process.stdout)
+        yield from text_chunks(self._process.stdout)
 
     def kill(self) -> None:
         """Kill the child process."""
@@ -477,7 +458,7 @@ class _PopenProcess(SandboxProcess):
         """Return the child's stderr tail, collected by the drain thread."""
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
-        return "".join(self._stderr_chunks)
+        return self._stderr_tail.text()
 
 
 class ProcessBackend(SandboxBackend):

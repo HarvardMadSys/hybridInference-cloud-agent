@@ -158,7 +158,7 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = _fake_bin(tmp_path)
     install_root = tmp_path / "root"
-    install_root.mkdir(exist_ok=True)
+    install_root.mkdir(mode=0o755, exist_ok=True)
     link_dir = tmp_path / "usr-local-bin"
     link_dir.mkdir(exist_ok=True)
 

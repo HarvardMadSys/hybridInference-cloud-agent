@@ -29,6 +29,7 @@ _QUESTION = {
                 {"label": "Development", "description": "Use the development environment."}
             ],
             "allow_custom": True,
+            "kind": None,
         }
     ],
 }

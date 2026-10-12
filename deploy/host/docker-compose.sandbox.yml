@@ -50,7 +50,8 @@ services:
       # Read-only, and its own key: this one may open a single forwarded port
       # and nothing else. Restrict it on the gateway host's authorized_keys
       # with command="" plus permitopen — a shell on the gateway is not part of
-      # what a runner host needs.
+      # what a runner host needs — and give its account the Match block in
+      # deploy/host/sshd-tunnels.conf.example, which refuses remote forwards.
       - ${AGENT_TUNNEL_SSH_KEY:?path to the tunnel's ssh private key}:/etc/agent-tunnel/id:ro
       - ${AGENT_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the gateway host}:/etc/agent-tunnel/known_hosts:ro
     networks:
@@ -157,7 +158,9 @@ services:
       TUNNEL_REVERSE_TARGET_PORT: ${AGENT_BROKER_REVERSE_TARGET_PORT:-8092}
     volumes:
       # Its own key again. One key that opens both this and the MCP tunnel
-      # would let anything holding it reach 8000 from the sandbox's side.
+      # would let anything holding it reach 8000 from the sandbox's side. It
+      # is the only key whose authorized_keys line carries permitlisten, for
+      # exactly the reverse bind address and port above.
       - ${AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY:?path to the control-plane tunnel's ssh private key}:/etc/agent-tunnel/id:ro
       - ${AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the control-plane host}:/etc/agent-tunnel/known_hosts:ro
     networks:

@@ -9,6 +9,11 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent_host.bounded_output import (
+    MAX_PROTOCOL_LINE_BYTES,
+    protocol_lines,
+)
+
 if TYPE_CHECKING:
     import builtins
     from collections.abc import Iterator
@@ -25,8 +30,13 @@ class SharedTurnStream:
 
     def frames(self) -> Iterator[dict[str, Any]]:
         """Yield validated object frames until result/error."""
-        for line in self._response.iter_lines():
-            if not line:
+        # Frames include both normalized content and the raw CLI record, plus
+        # JSON escaping. Keep HTTP framing bounded before JSON parsing too.
+        for line in protocol_lines(
+            self._response.iter_text(),
+            max_bytes=MAX_PROTOCOL_LINE_BYTES * 4,
+        ):
+            if not line.strip():
                 continue
             try:
                 value = json.loads(line)
@@ -300,6 +310,8 @@ class SessionSupervisorClient:
             thread_id,
             "resident",
             payload={"token": token, "launch": asdict(launch), "profiling": profiling},
+            # Native package installation runs before the resident is ready.
+            timeout=960.0 if launch.plugins else None,
         )
 
     def capture_initial_archive(

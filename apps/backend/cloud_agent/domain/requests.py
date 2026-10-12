@@ -26,7 +26,7 @@ def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
     payload = {
         key: value
         for key, value in payload.items()
-        if (key not in {"skill_ids", "expected_latest_job_id"} or value is not None)
+        if (key not in {"skill_ids", "plugins", "expected_latest_job_id"} or value is not None)
         and (key != "require_idle" or value is not False)
     }
     canonical = json.dumps(

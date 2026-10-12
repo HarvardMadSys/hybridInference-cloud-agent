@@ -11,20 +11,15 @@ into.
 from __future__ import annotations
 
 import queue
-import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.sandbox import SandboxSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-#: How much of the setup output's end a failure reports. Output is read in
-#: bounded pieces and only this much of it is held, however much the script
-#: writes and whether or not it ever ends a line.
-_TAIL_CHARS = 500
 
 
 @dataclass(frozen=True)
@@ -63,43 +58,39 @@ def run_setup(
             env={},
         )
     )
-    output: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for chunk in process.chunks():
-                output.put(chunk)
-        finally:
-            output.put(None)
-
-    threading.Thread(target=pump, daemon=True, name="retained-setup-output").start()
+    output = OutputPump(getattr(process, "chunks", process.lines)(), name="retained-setup-output")
     deadline = time.monotonic() + timeout_s
-    tail = ""
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            process.kill()
-            process.wait()
-            return SetupResult(
-                ran=True,
-                exit_code=124,
-                detail=f"setup exceeded {timeout_s:.0f}s",
-            )
-        if stop is not None and stop():
-            process.kill()
-            process.wait()
-            return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
-        try:
-            chunk = output.get(timeout=min(0.25, remaining))
-        except queue.Empty:
-            continue
-        if chunk is None:
-            break
-        tail = (tail + chunk)[-_TAIL_CHARS:]
+    tail = TextTail()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                return SetupResult(
+                    ran=True,
+                    exit_code=124,
+                    detail=f"setup exceeded {timeout_s:.0f}s",
+                )
+            if stop is not None and stop():
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
+            try:
+                chunk = output.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            tail.append(chunk)
+    finally:
+        output.close()
 
     exit_code = process.wait()
     if exit_code != 0:
-        return SetupResult(ran=True, exit_code=exit_code, detail=tail)
+        return SetupResult(ran=True, exit_code=exit_code, detail=tail.text()[-500:])
     return SetupResult(ran=True, detail="setup completed")
 
 

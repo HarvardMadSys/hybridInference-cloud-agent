@@ -313,6 +313,8 @@ export interface AgentJob {
   /** Complete current-turn prompt. Older fixtures may only have `title`. */
   prompt?: string;
   state: AgentJobState;
+  /** A cancelled live turn must no longer request an answer or approval. */
+  cancelRequested?: boolean;
   /** Authoritative activity across all turns, including when viewing a historical job. */
   conversationState?: ConversationState;
   /** Short badge text next to the title, e.g. gate hold or failure reason. */

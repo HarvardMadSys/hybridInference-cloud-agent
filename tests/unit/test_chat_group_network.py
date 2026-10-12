@@ -709,8 +709,28 @@ def test_the_guest_check_expects_the_resolver_each_runtime_really_uses(monkeypat
         seen.clear()
         monkeypatch.setattr(manager, "exec_capture", capture)
         manager._verify_guest_network(_spec())
-        assert seen[0][3] == resolver
-        assert json.loads(seen[0][4]) == [["agent-gateway", 8080], ["agent-mcp", 8000]]
+        assert seen[0][4] == resolver
+        assert json.loads(seen[0][5]) == [["agent-gateway", 8080], ["agent-mcp", 8000]]
+
+
+def test_the_guest_check_never_imports_modules_from_the_workspace(monkeypatch):
+    # The workspace is writable by the repository and the agent: a planted
+    # socket.py or json.py there must not replace the standard library and
+    # spoof or stall the check.
+    seen: list[tuple[list[str], dict[str, Any]]] = []
+
+    def capture(_spec, argv, **kwargs):
+        seen.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, b"[]", b"")
+
+    manager, docker, _ = _world(monkeypatch)
+    docker.add_sandbox(_spec(), running=True)
+    monkeypatch.setattr(manager, "exec_capture", capture)
+    manager._verify_guest_network(_spec())
+
+    argv, kwargs = seen[0]
+    assert argv[:4] == ["/usr/bin/python3", "-I", "-c", _GUEST_NETWORK_CHECK]
+    assert kwargs.get("workdir") == "/"
 
 
 def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):

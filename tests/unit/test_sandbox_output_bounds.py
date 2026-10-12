@@ -17,6 +17,7 @@ import tracemalloc
 import pytest
 
 from cloud_agent_host import chat_sandbox as chat_sandbox_mod, runner as runner_mod
+from cloud_agent_host.bounded_output import OUTPUT_CHUNK_BYTES, STDERR_TAIL_BYTES
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -24,17 +25,16 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
 )
 from cloud_agent_host.sandbox import (
-    OUTPUT_CHUNK_CHARS,
     ContainerBackend,
     ProcessBackend,
     SandboxSpec,
 )
 from cloud_agent_host.setup import run_setup
 
-#: Larger than every bound involved, including 200 retained stderr pieces.
+#: Larger than every bound involved, the retained stderr tail included.
 _FLOOD_CHARS = 16 * 1024 * 1024
-#: Half the flood, and more than twice the stderr tail's own bound: reading a
-#: line whole holds all of it at once, bounded reading never comes close.
+#: Half the flood, and far above the stderr tail's own bound: reading a line
+#: whole holds all of it at once, bounded reading never comes close.
 _PEAK_BYTES = 8 * 1024 * 1024
 
 
@@ -86,8 +86,8 @@ def test_a_setup_flood_with_no_newline_is_never_held_whole(tmp_path):
     assert result.exit_code == 7
     assert result.detail == "x" * 500
     assert peak < _PEAK_BYTES
-    # The stderr drain kept a bounded tail of pieces, not one endless line.
-    assert len(backend.processes[0].stderr_text()) <= 200 * OUTPUT_CHUNK_CHARS
+    # The stderr drain kept a byte-bounded tail, not one endless line.
+    assert len(backend.processes[0].stderr_text().encode()) <= STDERR_TAIL_BYTES
 
 
 def test_the_patch_reader_cap_holds_before_anything_is_buffered(tmp_path):
@@ -132,9 +132,9 @@ def test_the_retained_exec_reads_both_streams_in_bounded_pieces(monkeypatch, tmp
     monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", flood)
     process = manager.spawn(spec, ["git", "diff"])
 
-    sizes = [len(chunk) for chunk in process.chunks()]
+    sizes = [len(chunk.encode()) for chunk in process.chunks()]
 
     assert process.wait() == 0
     assert sum(sizes) == _FLOOD_CHARS
-    assert max(sizes) <= OUTPUT_CHUNK_CHARS
-    assert len(process.stderr_text()) <= 200 * OUTPUT_CHUNK_CHARS
+    assert max(sizes) <= OUTPUT_CHUNK_BYTES
+    assert len(process.stderr_text().encode()) <= STDERR_TAIL_BYTES

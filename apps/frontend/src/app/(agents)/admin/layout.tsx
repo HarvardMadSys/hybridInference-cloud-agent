@@ -11,7 +11,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   // handles sign-in and session errors; this gate handles admin permission.
   if (state.loading) return null;
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
-    return <AdminRequired />;
+    return (
+      <div lang="en">
+        <AdminRequired />
+      </div>
+    );
   }
-  return <div className="flex min-h-full min-w-0 flex-col bg-surface-muted/50">{children}</div>;
+  return (
+    <div lang="en" className="admin-canvas flex min-h-full min-w-0 flex-col">
+      {children}
+    </div>
+  );
 }

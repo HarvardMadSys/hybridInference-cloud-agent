@@ -200,7 +200,8 @@ async def test_a_hot_residency_carries_a_lease(pool, store: Storage) -> None:
         pool,
         store,
         asyncpg.CheckViolationError,
-        "UPDATE agent_thread_sandbox_memberships SET residency_status = 'hot' WHERE thread_id = $1",
+        "UPDATE agent_thread_sandbox_memberships "
+        "SET residency_status = 'hot', residency_lease_expires_at = NULL WHERE thread_id = $1",
         job["thread_id"],
     )
 
