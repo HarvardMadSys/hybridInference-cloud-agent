@@ -2189,7 +2189,11 @@ async def _authorized(store: Storage, auth_kind: str) -> dict[str, Any]:
         token_endpoint="https://issuer.example.com/token" if oauth else None,
         revocation_endpoint="https://issuer.example.com/revoke" if oauth else None,
         registration_endpoint="https://issuer.example.com/register" if oauth else None,
-        auth_config_patch={"client_id": "old-target-client"} if oauth else {"hint": "olet"},
+        auth_config_patch=(
+            {"client_id": "old-target-client", "managed_github_oauth": True}
+            if oauth
+            else {"hint": "olet"}
+        ),
     )
     stored = await store.mcp.get_mcp_connection(connection_id=row["id"])
     assert stored is not None
@@ -2239,6 +2243,7 @@ async def test_a_new_target_does_not_inherit_the_old_targets_credential(store, a
     assert edited["scopes"] == []
     assert edited["refresh_rotates"] is False
     assert "client_id" not in edited["auth_config"]
+    assert "managed_github_oauth" not in edited["auth_config"]
     assert "hint" not in edited["auth_config"]
     assert edited["credential_version"] == before["credential_version"] + 1
     assert edited["oauth_generation"] == before["oauth_generation"] + 1

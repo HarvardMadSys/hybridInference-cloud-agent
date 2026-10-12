@@ -462,7 +462,8 @@ class PostgresMcpConnectionRepository:
                     auth_kind = COALESCE($10, auth_kind),
                     auth_config = CASE
                         WHEN $11::boolean THEN $12::jsonb
-                        WHEN {retargeted} THEN auth_config - 'client_id' - 'hint'
+                        WHEN {retargeted}
+                            THEN auth_config - 'client_id' - 'managed_github_oauth' - 'hint'
                         ELSE auth_config END,
                     account_label = COALESCE($13, account_label),
                     request_timeout_s = COALESCE($17, request_timeout_s),
