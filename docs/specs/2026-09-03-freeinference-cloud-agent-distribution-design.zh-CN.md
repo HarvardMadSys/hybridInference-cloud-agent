@@ -211,7 +211,7 @@ distribution revision         哪套配置与部署策略选择了这些代码
    publisher 和 reaper 角色；
 2. `web-root`——以空 base path 编译的 Next.js Web 服务；
 3. `web-agents`——同一份源码以 `/agents` 编译的 Web 服务；
-4. `host`——runner、workspace broker 和 supervisor 共用的 Python image；
+4. `host`——runner、sandbox manager 和 supervisor 共用的 Python image；
 5. `sandbox`——固定 Agent CLI runtime 的 image；
 6. `egress-proxy` 和 `tunnel`——两个小型基础设施 image。
 
@@ -359,7 +359,7 @@ FreeInference bump bot 的 fail-closed verdict 模型。
 ```text
 hybridInference-cloud-agent/
   cloud_agent/                  application and API
-  cloud_agent_host/             host, supervisor, drivers, broker
+  cloud_agent_host/             host, supervisor, drivers, sandbox manager
   contracts/                    gateway-facing HTTP schemas
   migrations/                   agent database migrations
   web/                          neutral web application
@@ -426,7 +426,7 @@ freeInference/
 两个 Git 仓库都不拥有：
 
 - 数据库密码或 DSN；
-- session、control、dispatcher、enrollment、broker、MCP 或 grant-dispatch secret；
+- session、control、dispatcher、enrollment、sandbox manager、MCP 或 grant-dispatch secret；
 - GitHub App/GitLab OAuth 私有 credential；
 - SSH private key 或私有 `known_hosts` inventory；
 - live `.env`、数据库内容、Docker data root、workspace 或 retained sandbox state。
@@ -674,7 +674,7 @@ services:
     image: ${CLOUD_AGENT_WEB_IMAGE:?resolved from cloud-agent.lock}
   runner:
     image: ${CLOUD_AGENT_HOST_IMAGE:?resolved from cloud-agent.lock}
-  workspace-broker:
+  sandbox-manager:
     image: ${CLOUD_AGENT_HOST_IMAGE:?resolved from cloud-agent.lock}
 ```
 

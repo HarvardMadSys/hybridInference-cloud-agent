@@ -11,7 +11,7 @@ store's policy. It never dies on an error, because a transient database blip
 must not permanently stop reaping — a stopped reaper is invisible until jobs
 start hanging.
 
-**The snapshot coordinator** asks an owning workspace broker for short,
+**The snapshot coordinator** asks an owning sandbox manager for short,
 quiescent Git captures. It has its own schedule so a slow Docker/Git operation
 cannot delay grant renewal or attempt recovery.
 

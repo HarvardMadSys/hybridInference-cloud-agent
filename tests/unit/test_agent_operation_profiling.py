@@ -844,7 +844,7 @@ def test_a_substage_observer_records_against_the_current_stage(monkeypatch, capl
 
 
 def test_a_stage_recorder_collects_durations_without_a_measurement(monkeypatch):
-    """The broker's recorder is the same protocol without a local timeline."""
+    """The sandbox manager's recorder is the same protocol without a local timeline."""
     live = {
         "run_id": "run-1",
         "measurement_id": "msm_x",
@@ -867,7 +867,7 @@ def test_a_stage_recorder_collects_durations_without_a_measurement(monkeypatch):
 
 
 def test_a_recorder_inherits_the_callers_selection(monkeypatch, clock):
-    """The broker does not decide for itself whether an attempt was selected."""
+    """The sandbox manager does not decide for itself whether an attempt was selected."""
     _enable(monkeypatch, run_id="run-1")
     live = {
         "run_id": "run-1",
@@ -892,7 +892,7 @@ def test_a_recorder_inherits_the_callers_selection(monkeypatch, clock):
 
 
 def test_a_recorder_stops_at_the_deadline_it_inherited(monkeypatch, clock):
-    """A broker must not measure past the experiment the runner stopped."""
+    """A sandbox manager must not measure past the experiment the runner stopped."""
     _enable(monkeypatch)
     recorder = profiling.start_stage_recording(
         {
@@ -981,7 +981,7 @@ def test_a_missing_producer_makes_the_record_incomplete(monkeypatch, caplog):
 
 
 def test_an_answered_producer_completes_the_record(monkeypatch, caplog):
-    """The same path, with the broker answering, is complete."""
+    """The same path, with the sandbox manager answering, is complete."""
     _enable(monkeypatch)
     caplog.set_level(logging.INFO, logger=profiling.__name__)
     measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
@@ -1009,7 +1009,7 @@ def test_an_answered_producer_completes_the_record(monkeypatch, caplog):
 
 
 def test_an_expired_measurement_offers_no_selection_to_inherit(monkeypatch, clock):
-    """A lapsed measurement must not hand the broker something to record under."""
+    """A lapsed measurement must not hand the sandbox manager something to record under."""
     _enable(monkeypatch, expires_at=_expiry(minutes=1))
     measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
     assert measurement is not None
@@ -1075,7 +1075,7 @@ def test_one_answered_fragment_does_not_cover_a_missing_one(monkeypatch, caplog)
 def test_a_truncated_remote_fragment_is_not_a_complete_record(monkeypatch, caplog):
     """The producer's truncation has to survive the process boundary.
 
-    Regression: the broker stopped at its deadline, the runner dropped the
+    Regression: the sandbox manager stopped at its deadline, the runner dropped the
     flag, and the record still claimed completeness.
     """
     _enable(monkeypatch)
@@ -1126,7 +1126,7 @@ def test_a_truncated_local_span_is_not_a_complete_record(monkeypatch, caplog, cl
 def test_an_over_long_run_id_disables_profiling_instead_of_failing_a_startup(monkeypatch, caplog):
     """A measurement setting must never be able to reject a sandbox request.
 
-    Regression: the descriptor accepted a 129 character run id while the broker
+    Regression: the descriptor accepted a 129 character run id while the sandbox manager
     request model capped it at 128, so the same acquire returned 422 once the
     runner attached its selection.
     """
@@ -1237,7 +1237,7 @@ def test_an_exporter_that_cannot_start_drops_measurements_without_failing(monkey
 def test_an_answer_with_no_stages_is_a_complete_fragment(monkeypatch, caplog):
     """A call that legitimately did no timed work still answered.
 
-    Regression: an empty stage list was read as "never heard from the broker",
+    Regression: an empty stage list was read as "never heard from the sandbox manager",
     which marked every normal CLI reuse incomplete.
     """
     _enable(monkeypatch)
@@ -1297,7 +1297,7 @@ def test_a_recorder_that_lapses_mid_call_reports_that_it_stopped(monkeypatch, cl
     """A skipped stage leaves no trace, so the recorder has to say so itself.
 
     Regression: `profiling_recorded` only meant "a recorder existed". When the
-    broker's deadline passed while it waited for the member lock, every later
+    sandbox manager's deadline passed while it waited for the member lock, every later
     `substage` was skipped silently and the answer looked like a call that had
     nothing to time.
     """
@@ -1437,26 +1437,26 @@ def test_a_file_read_is_never_reported_as_a_startup(monkeypatch, caplog):
 
 
 def test_a_root_producer_can_time_its_own_sub_stages(monkeypatch, caplog):
-    """A control-plane stage is reported in the broker's own shape and source."""
+    """A control-plane stage is reported in the sandbox manager's own shape and source."""
     caplog.set_level(logging.INFO, logger=profiling.__name__)
     _enable(monkeypatch, operations=["files.list"])
     measurement = profiling.start_operation(operation="files.list", producer="control-plane")
     assert profiling.bind(measurement, job_id="ajob_1")
 
     profiling.mark(measurement, "list")
-    with profiling.attributed_stage(measurement, "list", "broker_call"):
+    with profiling.attributed_stage(measurement, "list", "sandbox_manager_call"):
         pass
     profiling.finish(measurement, outcome="completed")
 
     record = _records(caplog)[0]
     children = record["stages"][0]["children"]
-    assert [child["stage"] for child in children] == ["broker_call"]
+    assert [child["stage"] for child in children] == ["sandbox_manager_call"]
     assert children[0]["source"] == "control-plane"
     assert children[0]["outcome"] == "ok"
 
 
 def test_a_local_sub_stage_is_attributed_to_its_own_producer(monkeypatch, caplog):
-    """A shared observer must not file a broker's work under the runner."""
+    """A shared observer must not file a sandbox manager's work under the runner."""
     caplog.set_level(logging.INFO, logger=profiling.__name__)
     _enable(monkeypatch, operations=["files.list"])
     measurement = profiling.start_operation(operation="files.list", producer="control-plane")

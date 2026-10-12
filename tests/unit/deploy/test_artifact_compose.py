@@ -145,7 +145,7 @@ def test_supported_services_receive_the_opt_in_profiling_descriptor() -> None:
     The mode is part of the same set and for the same reason: it decides whether
     an administrator's Start and Stop can reach a producer at all, so a producer
     that never receives it stays on the legacy environment switch no matter what
-    the operator sets. The broker needs it as much as the runner does -- it is a
+    the operator sets. The sandbox manager needs it as much as the runner does -- it is a
     different container, and a selection it is handed is only honoured while its
     own mode says a control plane may decide.
     """
@@ -160,7 +160,7 @@ def test_supported_services_receive_the_opt_in_profiling_descriptor() -> None:
 
     assert names <= set(control)
     assert names <= set(host["runner"]["environment"])
-    assert names <= set(host["workspace-broker"]["environment"])
+    assert names <= set(host["sandbox-manager"]["environment"])
 
 
 @pytest.mark.parametrize(

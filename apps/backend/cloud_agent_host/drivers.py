@@ -772,7 +772,7 @@ class _ProtocolReply:
 
 
 class _InputReceipt:
-    """One turn-local message-ID receipt shared by concurrent broker retries."""
+    """One turn-local message-ID receipt shared by concurrent sandbox manager retries."""
 
     def __init__(self) -> None:
         self._settled = threading.Event()
@@ -822,7 +822,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         # the stream reports the message taken whenever its answer arrives.
         self._steers: dict[str, PendingInput] = {}
         self._replies_lock = threading.Lock()
-        # The control plane may lose the broker's accepted response and replay
+        # The control plane may lose the sandbox manager's accepted response and replay
         # the same durable handoff after its lease expires.  One message ID is
         # one native steer for this exact turn, including concurrent retries.
         self._input_receipts: dict[str, _InputReceipt] = {}
@@ -1008,7 +1008,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
         self._live_turn: _JsonResidentTurn[_LiveRuntimeT] | None = None
         self._request_sequence = 0
         self._prefetched: list[str] = []
-        # A mid-turn message is written from the broker's request thread while
+        # A mid-turn message is written from the sandbox manager's request thread while
         # the turn's own thread may be interrupting: one line at a time.
         self._request_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -1043,7 +1043,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
             # Keep enough local diagnostics to distinguish a protocol crash
             # from an ordinary EOF.  The sandbox process already retains only
             # a bounded stderr tail; cap it again here because this exception
-            # crosses the broker boundary.  Agent credentials are supplied in
+            # crosses the sandbox manager boundary.  Agent credentials are supplied in
             # environment variables, never in the CLI's argv; the host's
             # ``docker exec`` names them without their values, which reach
             # the Docker client through its environment, not its argv (see
@@ -2094,7 +2094,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         # calls a tool, then written, then taken once the CLI echoes them.
         self._held: list[PendingInput] = []
         self._written: list[PendingInput] = []
-        # An accepted broker response can be lost after the CLI takes the
+        # An accepted sandbox manager response can be lost after the CLI takes the
         # message and removes it from ``_written``. Keep its ID for this turn
         # so a later durable replay returns the same receipt without writing it
         # to the native process a second time.
@@ -2450,7 +2450,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         if context.state_dir is None:
             raise DriverError("a resident session needs a state mount")
         # Hook installation is an observability upgrade and must never cost a
-        # user their turn. The retained broker writes into the container's
+        # user their turn. The retained sandbox manager writes into the container's
         # Docker-owned state; tests and non-observing embeddings omit the seam.
         if context.install_tool_hooks is not None:
             try:
@@ -2655,7 +2655,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # successful answer, then parent the next user to that error.
             # Resume follows that branch and loses the successful answer.
             # EOF at the result boundary prevents the stale parent update.
-            # Request EOF after broker settlement has recorded the native id.
+            # Request EOF after sandbox manager settlement has recorded the native id.
             # The supervisor then restores that id on the next turn; ordinary
             # turns keep their resident process.
             self.retire_after_turn = True

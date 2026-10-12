@@ -80,7 +80,7 @@
 Trusted Computing Base 包括：
 
 - control plane 与数据库；
-- runner、Session Supervisor 与 workspace broker；
+- runner、Session Supervisor 与 sandbox manager；
 - Docker daemon / 目标隔离 runtime；
 - source preparer、gateway/MCP relay 与 publisher；
 - sandbox base image、runtime pins、seccomp/capability 配置；
@@ -97,7 +97,7 @@ Trusted Computing Base 包括：
                            │                         │
                            │                         ├── Docker Engine
                            │                         ├── source preparer
-                           │                         └── workspace broker
+                           │                         └── sandbox manager
                            │
                            ├── gateway: identity/model catalog/grants
                            ├── MCP registry + per-user encrypted connections
@@ -135,7 +135,7 @@ Relay 是固定目的地转发器，不是让 caller 自选目标的通用 HTTP 
 | MCP upstream credential | Cloud Agent encrypted store / relay | 否 | Relay 代为调用 upstream |
 | Publish/push/PR | Trusted publisher | 否 | Patch gate、secret scan、目标校验后使用短期 token |
 | Docker lifecycle | Host Supervisor | 否 | Generation-fenced Docker API |
-| Terminal/file/Git operation | Workspace broker | 不持有 broker authority | Membership auth + operation fence |
+| Terminal/file/Git operation | Sandbox manager | 不持有 sandbox manager authority | Membership auth + operation fence |
 
 模型 grant 与 MCP token 必须是两个 audience。泄露 inference grant 不能调用工具；泄露 MCP token 不能调用模型或 control-plane API。
 
@@ -216,7 +216,7 @@ Source preparer 的临时目录不是 checkpoint，也不能作为恢复或 Fork
 
 ### 8.2 宿主规则
 
-规则是本部署自己的 nftables 表（`inet` 与 `bridge` 两个 family，表名 `cloud_agent_<前缀>`，由 `AGENT_SANDBOX_NAMESPACE` 派生）。runner 与 broker 不持有 `NET_ADMIN`，通过短时 helper 安装：同一镜像，host 网络命名空间，runc，只加 `NET_ADMIN`，只读根文件系统。沙盒不获得 `NET_ADMIN`、Docker socket 或其他特权通道。
+规则是本部署自己的 nftables 表（`inet` 与 `bridge` 两个 family，表名 `cloud_agent_<前缀>`，由 `AGENT_SANDBOX_NAMESPACE` 派生）。runner 与 sandbox manager 不持有 `NET_ADMIN`，通过短时 helper 安装：同一镜像，host 网络命名空间，runc，只加 `NET_ADMIN`，只读根文件系统。沙盒不获得 `NET_ADMIN`、Docker socket 或其他特权通道。
 
 | 类别 | 规则 |
 |---|---|
@@ -234,7 +234,7 @@ Source preparer 的临时目录不是 checkpoint，也不能作为恢复或 Fork
 
 ### 8.3 Guest 自检与失败行为
 
-每次冷启动后，以沙盒用户在 guest 内检查默认路由、解析器配置并实际查询一次（根域 NS，3 秒内应答）、两个中继的 TCP 端口，以及两个受控边界探针：宿主（UDP）与元数据地址（TCP）必须被本部署规则以 ICMP“管理禁止”立即拒绝；宿主自己回“端口不可达”或无应答，说明该 guest 的流量没有经过规则。公网可达性不作为启动条件，外部故障不等于边界失效。全部通过后才执行仓库代码或安装脚本；失败则停止沙盒、保留工作区，本 turn 失败。有组在运行时，broker 至多每分钟回读一次宿主规则并补装缺失部分；连续两次仍无法证明规则时，停止本部署所有运行中的组（保留工作区与 native session），规则恢复前不再唤醒。运行中的沙盒不会在其下改接网络。旧网络拓扑留下的容器与网桥不被采用，只报告需要一次性清理。
+每次冷启动后，以沙盒用户在 guest 内检查默认路由、解析器配置并实际查询一次（根域 NS，3 秒内应答）、两个中继的 TCP 端口，以及两个受控边界探针：宿主（UDP）与元数据地址（TCP）必须被本部署规则以 ICMP“管理禁止”立即拒绝；宿主自己回“端口不可达”或无应答，说明该 guest 的流量没有经过规则。公网可达性不作为启动条件，外部故障不等于边界失效。全部通过后才执行仓库代码或安装脚本；失败则停止沙盒、保留工作区，本 turn 失败。有组在运行时，sandbox manager 至多每分钟回读一次宿主规则并补装缺失部分；连续两次仍无法证明规则时，停止本部署所有运行中的组（保留工作区与 native session），规则恢复前不再唤醒。运行中的沙盒不会在其下改接网络。旧网络拓扑留下的容器与网桥不被采用，只报告需要一次性清理。
 
 ### 8.4 接受的限制与前置条件
 
@@ -413,7 +413,7 @@ Prompt admission 前取消可以安全释放 attempt。Prompt admission 后，�
 
 ## 13. File、Terminal 与 Git API
 
-这些 API 必须通过 workspace broker，而不是 host filesystem：
+这些 API 必须通过 sandbox manager，而不是 host filesystem：
 
 - 路由先授权 `user -> thread -> membership -> sandbox`；
 - 每个 mutation 创建 generation-fenced operation token；
@@ -423,7 +423,7 @@ Prompt admission 前取消可以安全释放 attempt。Prompt admission 后，�
 - command/PTY 具有 idle timeout 与 hard lifetime；
 - terminal 没有 inference/MCP credential；
 - terminal ownership 与 cancellation per membership；
-- Git view 可共享，但 publisher authority 不在 broker 内。
+- Git view 可共享，但 publisher authority 不在 sandbox manager 内。
 
 Read-only operation 可在 sibling turn 期间继续；writer operation 必须被 snapshot quiescence census 计入。
 
@@ -536,7 +536,7 @@ Publisher 不能信任沙盒声明的目标 repository、branch 或 base；必�
 | Source setup/import | `cloud_agent_host/setup.py` |
 | Supervisor、slot 与 process cleanup | `cloud_agent_host/shared_session_supervisor.py` |
 | Runtime credential/config | `cloud_agent_host/runtimes.py`、`cloud_agent_host/resident_transport.py` |
-| Workspace broker | `cloud_agent_host/workspace_broker.py` |
+| Sandbox manager | `cloud_agent_host/sandbox_manager.py` |
 | MCP registry/relay/proxy | `cloud_agent/mcp_registry.py`、`cloud_agent/api/mcp_relay.py`、`cloud_agent/mcp_proxy.py` |
 | Inference grant client | `cloud_agent/grants.py`、`cloud_agent/gateway.py` |
 | Publisher | `cloud_agent/publisher.py`、`cloud_agent/publish_worker.py` |

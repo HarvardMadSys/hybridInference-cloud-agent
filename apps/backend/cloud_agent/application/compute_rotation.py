@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 from pydantic import SecretStr
 
 from cloud_agent.application.host_commands import HostCommands
-from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.domain.compute import ComputeRefusal, discard_request_id, fingerprint
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.operational_health import deliver_event
@@ -33,8 +32,9 @@ from cloud_agent.ports.external.host_bootstrap import (
     DeploymentProfile,
     default_namespace,
 )
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
 from cloud_agent.schemas_compute import RenewalPolicy, RetireComputeRequest
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_reconcile import ComputeReconciler
@@ -529,7 +529,7 @@ class ComputeRotation:
             ):
                 if exclude.get("sandbox_storage_path") is not None:
                     # Storage belongs to the Host and survives a change of the
-                    # tunnel/broker profile used by its replacement node.
+                    # tunnel/sandbox manager profile used by its replacement node.
                     return profile.model_copy(
                         update={"sandbox_storage_path": exclude["sandbox_storage_path"]}
                     )
@@ -827,7 +827,7 @@ class ComputeRotation:
         *,
         since: datetime,
     ) -> bool:
-        """Whether this node runs the Host: ready, enrolled since ``since``, broker reachable."""
+        """Whether this node runs the Host: ready, enrolled since ``since``, sandbox manager reachable."""
         try:
             readiness = await self.bootstrap.readiness(node, profile, intent)
         except ProviderError:
@@ -844,12 +844,12 @@ class ComputeRotation:
             or heartbeat < since - _CLOCK_TOLERANCE
         ):
             return False
-        broker = broker_for_host(row)
-        if broker is None:
+        sandbox_manager = sandbox_manager_for_host(row)
+        if sandbox_manager is None:
             return False
         try:
-            await broker.health()
-        except WorkspaceBrokerError:
+            await sandbox_manager.health()
+        except SandboxManagerError:
             return False
         return True
 

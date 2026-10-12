@@ -565,7 +565,7 @@ def test_stop_halts_the_runner_first_then_every_container_then_the_daemons(
     root.mkdir()
     (root / ".compute-identity.json").write_text(json.dumps(IDENTITY))
     machine.runner = ["runner-1"]
-    machine.containers = ["runner-1", "chat-1", "broker-1"]
+    machine.containers = ["runner-1", "chat-1", "sandbox-manager-1"]
     params = {"root": str(root), "project": "ca-nodea", "identity": IDENTITY}
     result = run_remote(_STOP, params, monkeypatch, capsys)
     assert result == {"stopped": True, "reason": None}
@@ -574,7 +574,7 @@ def test_stop_halts_the_runner_first_then_every_container_then_the_daemons(
     ]
     assert stops == [
         ["docker", "stop", "-t", "60", "runner-1"],
-        ["docker", "stop", "chat-1", "broker-1"],
+        ["docker", "stop", "chat-1", "sandbox-manager-1"],
         ["systemctl", "stop", "docker.socket", "docker", "containerd"],
     ]
     runner_query = next(

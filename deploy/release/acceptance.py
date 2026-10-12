@@ -19,7 +19,7 @@ and compares that with the manifest. The comparison itself lives in
 **The host fence is expected to refuse, and that is not a workaround.**
 `deploy_readiness` waits for a heartbeat from an execution host running this
 exact commit. CI has no such host, and faking one would mean standing up a
-runner, a broker and an enrollment — at which point the check would be proving
+runner, a sandbox manager and an enrollment — at which point the check would be proving
 something about the fixture. So the deploy is expected to get *to* the fence and
 stop there, which is itself worth asserting: reaching it means the images
 pulled, Alembic migrated a real database from the control image, the identity

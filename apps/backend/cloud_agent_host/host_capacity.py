@@ -3,7 +3,7 @@
 The admin Servers page has to answer three questions side by side: how loaded
 the machine is, how much execution quota is left, and how many sandboxes are
 still retained. The last two already have sources — ``slots_total/slots_used``
-in the database and the broker's own Docker view — but the first has none, so
+in the database and the sandbox manager's own Docker view — but the first has none, so
 an operator sees a host taking work with no idea whether it is anywhere near
 its ceiling.
 
@@ -22,7 +22,7 @@ file therefore mounts exactly three files read-only under
 reported as a missing measurement; it is never replaced by reading an
 unscoped ``/proc``.
 
-**Why the inventory is its own Docker call.** The broker's
+**Why the inventory is its own Docker call.** The sandbox manager's
 ``ChatSandboxManager.list()`` reconciles: it stops orphan containers, prunes
 networks and inspects each container in turn. Running it on a 30-second timer
 would make monitoring a lifecycle writer. This module makes one ``container

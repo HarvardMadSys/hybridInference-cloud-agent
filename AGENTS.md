@@ -24,7 +24,7 @@ apps/
 ├── backend/
 │   ├── cloud_agent/           control plane (FastAPI): API, auth adapter,
 │   │                          scheduler, publishing, storage
-│   ├── cloud_agent_host/      host agent: runner, sandbox, runtimes, workspace broker
+│   ├── cloud_agent_host/      host agent: runner, sandbox, runtimes, sandbox manager
 │   └── cloud_agent_shared/    vocabulary both images ship: capability strings,
 │       │                      protocol versions, pins, sandbox network, shared errors,
 │       │                      and the operation-profiling collector both sides run

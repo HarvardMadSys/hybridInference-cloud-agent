@@ -14,21 +14,21 @@
 位置：[routes.py:3154](../../cloud_agent/api/routes.py#L3154)。
 
 `_measured_call(..., stage="read")` 包围真实 RPC，时间挂在 read 下。但响应回来后才
-`mark(files.open/files.list)`，并用一个空的 `with ...: pass` 重新生成 broker_call。
+`mark(files.open/files.list)`，并用一个空的 `with ...: pass` 重新生成 sandbox_manager_call。
 最终 `_stages()` 只输出后打的 mark；先前 read 的真实本地计时因此消失。
 
-真实 CP HTTP 路由配合耗时约 50 ms 的 broker 替身，输出：
+真实 CP HTTP 路由配合耗时约 50 ms 的 sandbox manager 替身，输出：
 
 ```text
 duration_us = 50647
 collection_complete = true
 stage files.open: start_offset_us=50563, duration_us=84
-  control-plane broker_call: duration_us=1
-  broker exec: duration_us=50484
+  control-plane sandbox_manager_call: duration_us=1
+  sandbox manager exec: duration_us=50484
 ```
 
 总时长仍在，但“时间花在哪里”这项核心功能错误：父阶段仅 84 µs，却挂了约 50 ms
-的 broker exec，CP 的 RPC 包围区间反而显示 1 µs。
+的 sandbox manager exec，CP 的 RPC 包围区间反而显示 1 µs。
 
 修复建议：候选操作进入时就 mark 固定的 read 阶段，真实 RPC 与应答都挂在该阶段。
 读取结果只用于确定根 operation，不必重新命名时间轴；删除读后空 span。若要改名，
@@ -79,9 +79,9 @@ same_interaction = false
 
 settle 只检查当时是否过期，没有冻结结束边界或最终完整性。响应生成 metadata 后，
 JSON 编码/响应构建仍可跨过截止点，随后 finish 再检查时钟，改成 partial。
-因此上一轮的 broker 截断透传已修，但公共响应与记录的一致性还未完全解决。
+因此上一轮的 sandbox manager 截断透传已修，但公共响应与记录的一致性还未完全解决。
 
-可控时钟复现，所有 broker 片段均正常应答：
+可控时钟复现，所有 sandbox manager 片段均正常应答：
 
 ```text
 deadline = 101

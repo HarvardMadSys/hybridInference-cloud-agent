@@ -54,7 +54,7 @@ def test_a_complete_environment_is_one_network() -> None:
 
 
 def test_a_configuration_error_is_a_sandbox_error() -> None:
-    """Runner and broker startup already refuse on SandboxError; no new type."""
+    """Runner and sandbox manager startup already refuse on SandboxError; no new type."""
     assert issubclass(SandboxNetworkError, SandboxError)
 
 

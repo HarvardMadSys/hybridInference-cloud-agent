@@ -1,4 +1,4 @@
-"""Gateway-side client for the private agent workspace broker."""
+"""Gateway-side client for the private agent sandbox manager."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
 
 
 @dataclass
-class WorkspaceBrokerError(RuntimeError):
-    """A bounded, owner-safe failure returned by the internal broker."""
+class SandboxManagerError(RuntimeError):
+    """A bounded, owner-safe failure returned by the internal sandbox manager."""
 
     status_code: int
     message: str
@@ -38,19 +38,19 @@ class WorkspaceBrokerError(RuntimeError):
 
 
 @dataclass
-class WorkspaceBrokerStream:
-    """An already-authorized broker response that the gateway must close."""
+class SandboxManagerStream:
+    """An already-authorized sandbox manager response that the gateway must close."""
 
     _client: httpx.AsyncClient
     _response: httpx.Response
-    #: The broker's measurement answer for a streaming route, read from the
+    #: The sandbox manager's measurement answer for a streaming route, read from the
     #: response headers because the body is the terminal's own bytes. ``None``
-    #: when the broker was not collecting, which leaves the caller's fragment
+    #: when the sandbox manager was not collecting, which leaves the caller's fragment
     #: unanswered rather than inventing an answer it never received.
     profiling_answer: dict[str, Any] | None = None
 
     def __aiter__(self) -> AsyncIterator[bytes]:
-        """Stream the broker's raw body."""
+        """Stream the sandbox manager's raw body."""
         return self._response.aiter_raw()
 
     async def aclose(self) -> None:
@@ -61,17 +61,17 @@ class WorkspaceBrokerStream:
             await self._client.aclose()
 
 
-class WorkspaceBrokerClient:
-    """Talk to the broker without exposing its credential to the browser."""
+class SandboxManagerClient:
+    """Talk to the sandbox manager without exposing its credential to the browser."""
 
     def __init__(
         self, base_url: str, token: str, *, client: httpx.AsyncClient | None = None
     ) -> None:
-        """Address one broker.
+        """Address one sandbox manager.
 
         Args:
-            base_url: The broker's origin, as its host reported it.
-            token: The pool's shared broker credential.
+            base_url: The sandbox manager's origin, as its host reported it.
+            token: The pool's shared sandbox manager credential.
             client: A client to borrow for request-shaped calls. These objects
                 are built per request — one per file read, per terminal
                 keystroke — so the pool cannot live on the instance; the
@@ -103,8 +103,8 @@ class WorkspaceBrokerClient:
             yield client
 
     @staticmethod
-    def _response_error(response: httpx.Response) -> WorkspaceBrokerError:
-        """Read a bounded, owner-safe error from a completed broker response."""
+    def _response_error(response: httpx.Response) -> SandboxManagerError:
+        """Read a bounded, owner-safe error from a completed sandbox manager response."""
         message = "The live workspace request failed."
         try:
             body = response.json()
@@ -113,7 +113,7 @@ class WorkspaceBrokerClient:
                 message = detail
         except ValueError:
             pass
-        return WorkspaceBrokerError(response.status_code, message)
+        return SandboxManagerError(response.status_code, message)
 
     async def _request(
         self,
@@ -137,14 +137,14 @@ class WorkspaceBrokerClient:
                     timeout=timeout,
                 )
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(
+            raise SandboxManagerError(
                 503, "The live workspace is temporarily unavailable."
             ) from exc
         if response.is_error:
             raise self._response_error(response)
         body = response.json()
         if not isinstance(body, dict):
-            raise WorkspaceBrokerError(502, "The live workspace returned an invalid response.")
+            raise SandboxManagerError(502, "The live workspace returned an invalid response.")
         return body
 
     async def _shared_sandbox_request(
@@ -173,18 +173,18 @@ class WorkspaceBrokerClient:
                     timeout=timeout,
                 )
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(
+            raise SandboxManagerError(
                 503, "The shared chat supervisor is temporarily unavailable."
             ) from exc
         if response.is_error:
             raise self._response_error(response)
         body = response.json()
         if not isinstance(body, dict):
-            raise WorkspaceBrokerError(502, "The shared chat supervisor returned invalid data.")
+            raise SandboxManagerError(502, "The shared chat supervisor returned invalid data.")
         return body
 
     async def health(self, *, timeout: float = 3) -> None:
-        """Reach the broker and be recognised by it, or raise.
+        """Reach the sandbox manager and be recognised by it, or raise.
 
         Not part of a job's path — this is what lets the control plane find out
         at enrolment whether the address a host reported is one it can actually
@@ -195,7 +195,7 @@ class WorkspaceBrokerClient:
         ways this was misconfigured on the first remote host. An unauthenticated
         endpoint would have said everything was fine while the token was wrong.
 
-        Deliberately short: a hanging broker must not hold up a heartbeat.
+        Deliberately short: a hanging sandbox manager must not hold up a heartbeat.
         """
         try:
             async with self._http(timeout) as client:
@@ -203,7 +203,7 @@ class WorkspaceBrokerClient:
                     f"{self._base_url}/health", headers=self._headers, timeout=timeout
                 )
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(503, f"unreachable: {exc}") from exc
+            raise SandboxManagerError(503, f"unreachable: {exc}") from exc
         if response.is_error:
             raise self._response_error(response)
 
@@ -223,27 +223,27 @@ class WorkspaceBrokerClient:
                     **selection,
                 )
         except httpx.HTTPError:
-            raise WorkspaceBrokerError(
-                503, "The workspace broker inventory is unavailable."
+            raise SandboxManagerError(
+                503, "The sandbox manager inventory is unavailable."
             ) from None
         if response.is_error:
-            raise WorkspaceBrokerError(503, "The workspace broker refused the inventory request.")
+            raise SandboxManagerError(503, "The sandbox manager refused the inventory request.")
         try:
             body = response.json()
         except ValueError:
-            raise WorkspaceBrokerError(502, "The workspace broker inventory is invalid.") from None
+            raise SandboxManagerError(502, "The sandbox manager inventory is invalid.") from None
         if not isinstance(body, dict) or not isinstance(body.get("sandboxes"), list):
-            raise WorkspaceBrokerError(502, "The workspace broker inventory is incomplete.")
+            raise SandboxManagerError(502, "The sandbox manager inventory is incomplete.")
         rows = body["sandboxes"]
         if not all(isinstance(row, dict) and row.get("sandbox_id") for row in rows):
-            raise WorkspaceBrokerError(502, "The workspace broker inventory is invalid.")
+            raise SandboxManagerError(502, "The sandbox manager inventory is invalid.")
         return rows
 
     def _profiling_headers(self, context: Mapping[str, Any] | None) -> dict[str, str]:
         """Return this request's headers, carrying the inherited selection.
 
         The selection is measurement metadata, never an authorization token: the
-        broker validates it against its own switch, run and deadline and treats
+        sandbox manager validates it against its own switch, run and deadline and treats
         it as absent when it cannot. It travels as one header rather than as a
         query parameter so it cannot end up in an access log or a cache key.
         """
@@ -350,7 +350,7 @@ class WorkspaceBrokerClient:
         *,
         after: int,
         profiling: Mapping[str, Any] | None = None,
-    ) -> WorkspaceBrokerStream:
+    ) -> SandboxManagerStream:
         """Open and validate a terminal SSE stream before public headers are sent."""
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
@@ -370,13 +370,13 @@ class WorkspaceBrokerClient:
                 await response.aread()
                 raise self._response_error(response)
             ownership_transferred = True
-            return WorkspaceBrokerStream(
+            return SandboxManagerStream(
                 client, response, profiling_answer=answer_from_headers(response.headers)
             )
-        except WorkspaceBrokerError:
+        except SandboxManagerError:
             raise
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(
+            raise SandboxManagerError(
                 503, "The live workspace is temporarily unavailable."
             ) from exc
         finally:
@@ -462,7 +462,7 @@ class WorkspaceBrokerClient:
         )
 
     async def register_shared_sandbox(self, sandbox: dict[str, Any]) -> dict[str, Any]:
-        """Rehydrate durable member aliases after a broker process restart.
+        """Rehydrate durable member aliases after a sandbox manager process restart.
 
         Docker labels identify the group and its origin chat, but forked chat
         aliases live in the control-plane ledger.  Workspace operations can
@@ -488,7 +488,7 @@ class WorkspaceBrokerClient:
                     {key: value for key, value in raw.items() if key in allowed_member_fields}
                 )
         if not origin_thread_id or not members:
-            raise WorkspaceBrokerError(502, "The shared sandbox manifest is incomplete.")
+            raise SandboxManagerError(502, "The shared sandbox manifest is incomplete.")
         return await self._shared_sandbox_request(
             "POST",
             origin_thread_id,
@@ -686,7 +686,7 @@ class WorkspaceBrokerClient:
 
 
 __all__ = [
-    "WorkspaceBrokerClient",
-    "WorkspaceBrokerError",
-    "WorkspaceBrokerStream",
+    "SandboxManagerClient",
+    "SandboxManagerError",
+    "SandboxManagerStream",
 ]

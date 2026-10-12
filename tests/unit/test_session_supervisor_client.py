@@ -31,11 +31,11 @@ def _spec() -> ChatSandboxSpec:
 
 
 def _client(handler) -> SessionSupervisorClient:
-    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(
         transport=httpx.MockTransport(handler),
-        headers={"X-Agent-Workspace-Token": "broker-secret"},
+        headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
     )
     return client
 
@@ -65,7 +65,7 @@ def test_initial_archive_sends_the_exact_sandbox_identity_with_a_long_timeout():
     [request] = seen
     assert request.method == "POST"
     assert request.url.raw_path == b"/shared-sandboxes/athr%2Fcurrent/archive-initial"
-    assert request.headers["X-Agent-Workspace-Token"] == "broker-secret"
+    assert request.headers["X-Agent-Workspace-Token"] == "sandbox-manager-secret"
     assert request.extensions["timeout"] == {
         "connect": 900.0,
         "read": 900.0,
@@ -93,7 +93,7 @@ def test_initial_archive_sends_the_exact_sandbox_identity_with_a_long_timeout():
     assert answer == {"enabled": True, "stored": True}
 
 
-def test_initial_archive_preserves_a_broker_refusal():
+def test_initial_archive_preserves_a_sandbox_manager_refusal():
     client = _client(
         lambda _request: httpx.Response(409, json={"detail": "initial archive is too late"})
     )

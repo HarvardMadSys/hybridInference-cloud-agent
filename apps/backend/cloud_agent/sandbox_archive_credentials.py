@@ -1,6 +1,6 @@
 """Encrypt the optional sandbox-archive access key at rest.
 
-The broker needs the secret in memory. The database stores only ciphertext
+The sandbox manager needs the secret in memory. The database stores only ciphertext
 under the settings encryption key. Plaintext never stays in the JSONB column,
 and a missing key fails closed instead of writing the secret unprotected.
 """
@@ -84,8 +84,8 @@ def archive_settings_payload(
     updated_at: Any,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Return the shared read model: broker fields plus the admin configured flag."""
-    payload = policy.as_broker_dict()
+    """Return the shared read model: sandbox manager fields plus the admin configured flag."""
+    payload = policy.as_sandbox_manager_dict()
     payload["aws_secret_access_key_configured"] = bool(policy.aws_secret_access_key)
     payload["updated_at"] = updated_at
     payload.update(extra)

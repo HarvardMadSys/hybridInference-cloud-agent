@@ -56,7 +56,7 @@ const hostDefinition: HostSettingDefinition = {
   default: 77,
   minimum: 1,
   maximum: 100,
-  scope: 'broker',
+  scope: 'sandbox_manager',
 };
 
 function items(over: Partial<Parameters<typeof buildSettingsSearchItems>[0]> = {}) {

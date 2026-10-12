@@ -185,7 +185,8 @@ describe('names', () => {
 
   it('turns a recorded stage name into words', () => {
     expect(stageName('supervisor_acquire')).toBe('Supervisor acquire');
-    expect(stageName('broker.fetch')).toBe('Broker fetch');
+    expect(stageName('sandbox_manager.fetch')).toBe('Sandbox Manager fetch');
+    expect(stageName('broker.fetch')).toBe('Sandbox Manager fetch');
     expect(stageName('claim')).toBe('Claim');
   });
 
@@ -246,8 +247,8 @@ describe('outcome and completeness', () => {
         outcome: 'failed',
         failure_stage: 'sandbox.start',
         truncated: true,
-        truncated_fragments: ['broker:call-1'],
-        missing_fragments: ['broker:call-2:sandbox.start'],
+        truncated_fragments: ['sandbox_manager:call-1'],
+        missing_fragments: ['sandbox_manager:call-2:sandbox.start'],
         missing_producers: ['broker'],
         dropped_spans: 2,
       }),
@@ -255,9 +256,9 @@ describe('outcome and completeness', () => {
     expect(reasons.join('\n')).toMatch(/Collection did not close/);
     expect(reasons.join('\n')).toMatch(/Failed at stage “sandbox.start”/);
     expect(reasons.join('\n')).toMatch(/floors/);
-    expect(reasons.join('\n')).toMatch(/broker:call-1/);
-    expect(reasons.join('\n')).toMatch(/broker:call-2:sandbox.start/);
-    expect(reasons.join('\n')).toMatch(/never reported: broker/);
+    expect(reasons.join('\n')).toMatch(/sandbox_manager:call-1/);
+    expect(reasons.join('\n')).toMatch(/sandbox_manager:call-2:sandbox.start/);
+    expect(reasons.join('\n')).toMatch(/never reported: Sandbox Manager/);
     expect(reasons.join('\n')).toMatch(/2 span\(s\) were dropped/);
   });
 });

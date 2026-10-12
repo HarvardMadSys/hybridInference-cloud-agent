@@ -5,7 +5,7 @@ Two things are pinned here, and neither is "the numbers are right": the
 one-second upload, and the runner's discipline when it forwards a snapshot.
 The second is mostly about refusals. A report is fenced on the attempt's live
 lease, it is never retried, a structurally broken snapshot is dropped rather
-than posted, and a turn the broker did not measure is left absent instead of
+than posted, and a turn the sandbox manager did not measure is left absent instead of
 being filled with zeros that a reader could not tell from a measured zero.
 """
 
@@ -43,7 +43,7 @@ _JOB = ClaimedJob(
 
 
 def _snapshot(**overrides: Any) -> dict[str, Any]:
-    """Return one complete cumulative snapshot as the broker frames it."""
+    """Return one complete cumulative snapshot as the sandbox manager frames it."""
     snapshot: dict[str, Any] = {
         "schema_version": 1,
         "measurement_id": "00000000-0000-4000-8000-000000000001",
@@ -306,7 +306,7 @@ def test_an_unpostable_snapshot_is_not_released_for_posting(payload):
     assert runner_mod._reportable_turn_resources(payload) is None
 
 
-def test_the_reported_snapshot_is_the_broker_payload_unchanged():
+def test_the_reported_snapshot_is_the_sandbox_manager_payload_unchanged():
     payload = _snapshot(state="collecting", report_seq=4)
     assert runner_mod._reportable_turn_resources(payload) is payload
 
@@ -317,7 +317,7 @@ def test_the_terminal_frame_snapshot_is_posted_before_the_lease_is_finished(monk
     payload = _snapshot()
     run = _run_terminal_turn(
         monkeypatch,
-        # The broker nests the summary inside `resources`; a top-level key is
+        # The sandbox manager nests the summary inside `resources`; a top-level key is
         # a shape it never produces, and reading that was the bug.
         {"kind": "result", "status": "completed", "resources": {"turn_resources": payload}},
     )
@@ -335,7 +335,7 @@ def test_the_terminal_frame_snapshot_is_posted_before_the_lease_is_finished(monk
     ]
 
 
-def test_a_turn_the_broker_did_not_measure_posts_nothing(monkeypatch):
+def test_a_turn_the_sandbox_manager_did_not_measure_posts_nothing(monkeypatch):
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     run = _run_terminal_turn(
         monkeypatch, {"kind": "result", "status": "completed", "resources": {}}
@@ -395,7 +395,7 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
         ]
     )
 
-    class Broker:
+    class SandboxManager:
         def frames(self):
             return frames
 
@@ -403,7 +403,7 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
             return None
 
     supervisor = Mock()
-    supervisor.start_shared_turn.return_value = Broker()
+    supervisor.start_shared_turn.return_value = SandboxManager()
     # The heartbeat thread is not the subject here, and a no-op keeps the
     # stream from reaching a control plane that does not exist on the wire.
     monkeypatch.setattr(runner_mod, "Heartbeater", Mock())
@@ -429,18 +429,18 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
     assert bodies[0]["window"]["observed_through_ms"] == 0
 
 
-def test_the_broker_and_the_runner_agree_about_where_the_summary_lives(monkeypatch):
+def test_the_sandbox_manager_and_the_runner_agree_about_where_the_summary_lives(monkeypatch):
     """The frame contract between the two host modules, pinned by both sides.
 
-    The broker nests the summary under ``resources``; the runner used to read
+    The sandbox manager nests the summary under ``resources``; the runner used to read
     the frame's top level, so every real turn reported nothing while a
     hand-built fixture kept the test green. This asserts the producer's actual
     key path and the consumer's read of it in one place.
     """
     from cloud_agent_host.guest_observer import GuestObservation
+    from cloud_agent_host.sandbox_manager import build_turn_resources
     from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
     from cloud_agent_host.tool_windows import ToolWindowTracker
-    from cloud_agent_host.workspace_broker import build_turn_resources
 
     payload = _snapshot()
     telemetry = SharedTurnTelemetry(

@@ -1,4 +1,4 @@
-"""Regression tests for the gateway's private workspace-broker client."""
+"""Regression tests for the gateway's private sandbox-manager client."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import base64
 import httpx
 import pytest
 
-from cloud_agent import workspace_broker_client
-from cloud_agent.workspace_broker_client import WorkspaceBrokerClient, WorkspaceBrokerError
+from cloud_agent import sandbox_manager_client
+from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 
 
 @pytest.mark.asyncio
@@ -23,8 +23,8 @@ async def test_sandbox_inventory_selection_is_encoded_without_changing_authentic
         return httpx.Response(200, json={"sandboxes": rows})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(inventory)) as client:
-        broker = WorkspaceBrokerClient("http://broker/", "secret", client=client)
-        assert await broker.list_sandboxes(thread_id=thread_id, timeout=5) == rows
+        sandbox_manager = SandboxManagerClient("http://sandbox_manager/", "secret", client=client)
+        assert await sandbox_manager.list_sandboxes(thread_id=thread_id, timeout=5) == rows
         assert client.is_closed is False
 
     request = requests[0]
@@ -33,7 +33,7 @@ async def test_sandbox_inventory_selection_is_encoded_without_changing_authentic
     assert request.headers["X-Agent-Workspace-Token"] == "secret"
     assert request.extensions["timeout"]["read"] == 5
     if thread_id is None:
-        assert str(request.url) == "http://broker/sandboxes"
+        assert str(request.url) == "http://sandbox_manager/sandboxes"
     else:
         assert list(request.url.params.multi_items()) == [("thread_id", thread_id)]
         assert request.url.fragment == ""
@@ -60,9 +60,9 @@ async def test_sandbox_inventory_selection_preserves_fail_closed_validation(
         return httpx.Response(status, json=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(inventory)) as client:
-        broker = WorkspaceBrokerClient("http://broker", "secret", client=client)
-        with pytest.raises(WorkspaceBrokerError) as failure:
-            await broker.list_sandboxes(thread_id=thread_id)
+        sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret", client=client)
+        with pytest.raises(SandboxManagerError) as failure:
+            await sandbox_manager.list_sandboxes(thread_id=thread_id)
 
     assert failure.value.status_code == error_status
     assert "PRIVATE" not in failure.value.message
@@ -112,10 +112,10 @@ def _shared_snapshot() -> dict:
         ("abort_sandbox_deletion", "abort", 120),
     ],
 )
-async def test_archive_delete_calls_stay_on_the_authenticated_shared_broker(
+async def test_archive_delete_calls_stay_on_the_authenticated_shared_sandbox_manager(
     monkeypatch, method_name, suffix, timeout
 ):
-    broker = WorkspaceBrokerClient("http://broker", "secret")
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
     calls = []
     payload = {
         "request_id": "delete-one",
@@ -128,8 +128,8 @@ async def test_archive_delete_calls_stay_on_the_authenticated_shared_broker(
         calls.append((method, thread_id, action, json, timeout))
         return {"request_id": "delete-one"}
 
-    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
-    assert await getattr(broker, method_name)("origin/thread", payload) == {
+    monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
+    assert await getattr(sandbox_manager, method_name)("origin/thread", payload) == {
         "request_id": "delete-one"
     }
     assert calls == [("POST", "origin/thread", f"admin-delete/{suffix}", payload, timeout)]
@@ -137,22 +137,22 @@ async def test_archive_delete_calls_stay_on_the_authenticated_shared_broker(
 
 @pytest.mark.asyncio
 async def test_native_question_client_keeps_read_and_response_scoped_to_the_owner(monkeypatch):
-    broker = WorkspaceBrokerClient("http://broker", "secret")
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
     calls: list[tuple] = []
 
     async def request(method, thread_id, action, *, params=None, json=None, timeout=None):
         calls.append((method, thread_id, action, params, json, timeout))
         return {"questions": []} if method == "GET" else {"accepted": True, "reason": None}
 
-    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
+    monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
     answers = {"approach": ["First", "Custom answer"]}
-    assert await broker.pending_shared_questions("athr_source", owner="attempt:4") == {
+    assert await sandbox_manager.pending_shared_questions("athr_source", owner="attempt:4") == {
         "questions": []
     }
-    assert await broker.answer_shared_question(
+    assert await sandbox_manager.answer_shared_question(
         "athr_source", owner="attempt:4", request_id="request-one", answers=answers
     ) == {"accepted": True, "reason": None}
-    await broker.answer_shared_question(
+    await sandbox_manager.answer_shared_question(
         "athr_source", owner="attempt:4", request_id="request-two", answers={}, reject=True
     )
     assert calls == [
@@ -208,9 +208,9 @@ async def test_cancelled_terminal_connect_closes_its_dedicated_http_client(monke
         created.append(client)
         return client
 
-    monkeypatch.setattr(workspace_broker_client.httpx, "AsyncClient", make_client)
-    broker = WorkspaceBrokerClient("http://broker", "secret")
-    task = asyncio.create_task(broker.stream_terminal("ajob_test", "term_test", after=0))
+    monkeypatch.setattr(sandbox_manager_client.httpx, "AsyncClient", make_client)
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
+    task = asyncio.create_task(sandbox_manager.stream_terminal("ajob_test", "term_test", after=0))
     await asyncio.sleep(0)
     await created[0].started.wait()
 
@@ -223,18 +223,18 @@ async def test_cancelled_terminal_connect_closes_its_dedicated_http_client(monke
 
 @pytest.mark.asyncio
 async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkeypatch):
-    broker = WorkspaceBrokerClient("http://broker", "secret")
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
     calls: list[tuple] = []
 
     async def request(method, thread_id, action, *, json=None, timeout=None):
         calls.append((method, thread_id, action, json, timeout))
         return {"ok": True}
 
-    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
+    monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
     snapshot = _shared_snapshot()
 
-    assert await broker.capture_shared_snapshot(snapshot) == {"ok": True}
-    assert await broker.import_shared_base(
+    assert await sandbox_manager.capture_shared_snapshot(snapshot) == {"ok": True}
+    assert await sandbox_manager.import_shared_base(
         snapshot,
         commit_sha="b" * 40,
         bundle=b"bundle",
@@ -257,16 +257,16 @@ async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkey
 @pytest.mark.asyncio
 @pytest.mark.parametrize("plugins, timeout", [([], 180), ([{"plugin": "example"}], 960)])
 async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins, timeout):
-    broker = WorkspaceBrokerClient("http://broker", "secret")
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
     calls: list[tuple] = []
 
     async def request(method, thread_id, action, *, json=None, timeout=None):
         calls.append((method, thread_id, action, json, timeout))
         return {"ok": True}
 
-    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
+    monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
 
-    result = await broker.fork_shared_session(
+    result = await sandbox_manager.fork_shared_session(
         "athr_source",
         sandbox_id="asbx_shared",
         generation=2,
@@ -302,15 +302,17 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins
 
 
 @pytest.mark.asyncio
-async def test_shared_registration_projects_db_manifest_before_broker_recovery(monkeypatch):
-    broker = WorkspaceBrokerClient("http://broker", "secret")
+async def test_shared_registration_projects_db_manifest_before_sandbox_manager_recovery(
+    monkeypatch,
+):
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
     calls: list[tuple] = []
 
     async def request(method, thread_id, action, *, json=None, timeout=None):
         calls.append((method, thread_id, action, json, timeout))
         return {"ok": True}
 
-    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
+    monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
     snapshot = _shared_snapshot()
     sandbox = {
         **snapshot,
@@ -324,7 +326,7 @@ async def test_shared_registration_projects_db_manifest_before_broker_recovery(m
         ],
     }
 
-    assert await broker.register_shared_sandbox(sandbox) == {"ok": True}
+    assert await sandbox_manager.register_shared_sandbox(sandbox) == {"ok": True}
     call = calls[0]
     assert call[:3] == ("POST", "athr_origin", "register")
     assert call[3]["expected_container_id"] == "container-shared"
@@ -335,26 +337,26 @@ async def test_shared_registration_projects_db_manifest_before_broker_recovery(m
 
 @pytest.mark.asyncio
 async def test_terminal_coordination_identifies_the_turn_owning_each_suspension(monkeypatch):
-    broker = WorkspaceBrokerClient("http://broker", "secret")
+    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
     calls: list[tuple] = []
 
     async def request(method, workspace_id, action, *, params=None, json=None, timeout=30):
         calls.append((method, workspace_id, action, params, json, timeout))
         return {"ok": True}
 
-    monkeypatch.setattr(broker, "_request", request)
+    monkeypatch.setattr(sandbox_manager, "_request", request)
 
-    await broker.suspend_terminals(
+    await sandbox_manager.suspend_terminals(
         "athr_shared",
         lease_generation=2,
         job_id="ajob_parent",
     )
-    await broker.resume_terminals(
+    await sandbox_manager.resume_terminals(
         "athr_shared",
         lease_generation=2,
         job_id="ajob_parent",
     )
-    await broker.resume_settled_terminals(
+    await sandbox_manager.resume_settled_terminals(
         "athr_shared",
         job_id="ajob_parent",
     )

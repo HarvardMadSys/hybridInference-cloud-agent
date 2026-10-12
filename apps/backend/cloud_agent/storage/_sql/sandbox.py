@@ -77,7 +77,7 @@ THREAD_SANDBOX_SOURCE = f"""
         g.workspace_epoch,
         {NATIVE_FORK_CAPABLE} AS native_fork_capable,
         -- The host holding this group can hand a message to a running turn of
-        -- the group's runtime: its broker and driver say so, per runtime, and
+        -- the group's runtime: its sandbox_manager and driver say so, per runtime, and
         -- the driver speaks the CLI version this container runs. No helper in
         -- the container takes part; the message goes to the CLI itself.
         EXISTS (

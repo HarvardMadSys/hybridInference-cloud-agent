@@ -3,7 +3,7 @@
 The rules themselves are :mod:`cloud_agent_shared.egress`. This module puts
 them on the host and keeps the per-group relay exceptions current.
 
-**Who can touch the host's rules.** The runner and the workspace broker run in
+**Who can touch the host's rules.** The runner and the sandbox manager run in
 containers with the Docker socket, not in the host's network namespace, and
 hold no ``NET_ADMIN``. They change host rules through a short-lived helper:
 this process's own image, started in the host's network namespace under plain

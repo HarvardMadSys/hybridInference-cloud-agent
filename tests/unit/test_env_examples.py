@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from cloud_agent_shared.sandbox_manager_compat import LEGACY_ENV_NAMES
+
 REPO = Path(__file__).resolve().parents[2]
 
 #: (compose file, its example) — one pair per machine in the deployment.
@@ -76,7 +78,9 @@ def _assigned(example: Path) -> set[str]:
 @pytest.mark.parametrize(("compose", "example"), STACKS)
 def test_every_required_variable_is_in_the_example(compose: Path, example: Path) -> None:
     """An operator copying the example gets a file that names every blocker."""
-    required = set(_REQUIRED.findall(compose.read_text()))
+    # Nested legacy fallbacks still require a documented canonical setting.
+    canonical_names = {legacy: current for current, legacy in LEGACY_ENV_NAMES.items()}
+    required = {canonical_names.get(name, name) for name in _REQUIRED.findall(compose.read_text())}
     assert required, f"no required variables found in {compose.name} — regex drift?"
     missing = required - _assigned(example)
     assert not missing, (

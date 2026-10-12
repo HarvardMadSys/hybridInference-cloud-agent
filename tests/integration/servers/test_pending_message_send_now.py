@@ -1,7 +1,7 @@
 """Sending a waiting message into the live turn, over the real store and routes.
 
 The owner's route, the store, the worker's event and finish routes are real;
-only the host's broker is a stand-in, answering the way the broker does: the
+only the host's sandbox manager is a stand-in, answering the way the sandbox manager does: the
 turn has the message, or it cannot have it and says why. The host's report of
 where the turn took it arrives as the runner sends it, a ``user_message`` event.
 What these cases pin is what the platform does with each — where the message
@@ -28,7 +28,7 @@ from tests.integration.servers.test_pending_message_queue import (
 
 from cloud_agent.api import turns
 from cloud_agent.application import send_now as send_now_delivery
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared.shared_protocol import (
     SHARED_SANDBOX_CAPABILITY,
     mid_turn_input_capability,
@@ -37,7 +37,7 @@ from cloud_agent_shared.shared_protocol import (
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
-class _Broker:
+class _SandboxManager:
     """The host's answer to one hand-over, and a record of what it was asked."""
 
     def __init__(self, answer: Any = None, *, during: Any = None) -> None:
@@ -57,7 +57,7 @@ class _Broker:
         return self.answer
 
 
-class _ResponseLossBroker:
+class _ResponseLossSandboxManager:
     """A host receipt survives the control plane losing its first response."""
 
     def __init__(self) -> None:
@@ -72,15 +72,15 @@ class _ResponseLossBroker:
         if message_id not in self._accepted:
             self._accepted.add(message_id)
             self.native_steers.append(f"{owner}:{message_id}:{text}")
-            raise WorkspaceBrokerError(503, "response lost after acceptance")
+            raise SandboxManagerError(503, "response lost after acceptance")
         return {"accepted": True, "reason": None}
 
 
-def _route_input_to(monkeypatch, broker: Any | None) -> None:
+def _route_input_to(monkeypatch, sandbox_manager: Any | None) -> None:
     async def resolve(_host_pool: Any, _attempt_id: int) -> Any | None:
-        return broker
+        return sandbox_manager
 
-    monkeypatch.setattr(send_now_delivery, "broker_for_attempt", resolve)
+    monkeypatch.setattr(send_now_delivery, "sandbox_manager_for_attempt", resolve)
 
 
 async def _steerable(api: Api) -> None:
@@ -142,8 +142,8 @@ async def test_the_turn_takes_it_before_its_next_tool_call_and_it_is_not_sent_ag
     api, monkeypatch
 ):
     await _steerable(api)
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     polled = await api.client.get(f"/v1/agent/threads/{thread_id}/messages")
     assert polled.json()["mid_turn_input_supported"] is True
@@ -162,7 +162,7 @@ async def test_the_turn_takes_it_before_its_next_tool_call_and_it_is_not_sent_ag
         None,
     )
     # Given to the attempt that was running, and to nobody else.
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "also check the docs")
     ]
     async with api.pool.acquire() as conn:
@@ -211,7 +211,7 @@ async def test_the_turn_takes_it_before_its_next_tool_call_and_it_is_not_sent_ag
 
 async def test_a_turn_that_answers_without_taking_it_sends_it_as_the_next_turn(api, monkeypatch):
     await _steerable(api)
-    _route_input_to(monkeypatch, _Broker())
+    _route_input_to(monkeypatch, _SandboxManager())
     job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     assert (await _send_now(api, thread_id, waiting)).json()["pending"]["state"] == "sending"
 
@@ -229,30 +229,30 @@ async def test_a_turn_that_answers_without_taking_it_sends_it_as_the_next_turn(a
 
 
 @pytest.mark.parametrize(
-    ("broker", "state", "reason", "revision_delta"),
+    ("sandbox_manager", "state", "reason", "revision_delta"),
     [
         (None, "queued", "unreachable", 3),
         (
-            _Broker(WorkspaceBrokerError(503, "The shared chat supervisor is unavailable.")),
+            _SandboxManager(SandboxManagerError(503, "The shared chat supervisor is unavailable.")),
             "sending",
             None,
             2,
         ),
     ],
-    ids=["no-broker", "broker-down"],
+    ids=["no-sandbox-manager", "sandbox-manager-down"],
 )
 async def test_a_host_out_of_reach_leaves_it_waiting(
-    api, monkeypatch, broker, state, reason, revision_delta
+    api, monkeypatch, sandbox_manager, state, reason, revision_delta
 ):
     await _steerable(api)
-    _route_input_to(monkeypatch, broker)
+    _route_input_to(monkeypatch, sandbox_manager)
     _job, thread_id, _running, waiting = await _waiting_behind_a_running_turn(api)
 
     sent = await _send_now(api, thread_id, waiting)
 
     assert sent.status_code == 200, sent.text
     assert sent.json()["not_delivered_reason"] == reason
-    # No route means no side effect and can requeue. A lost broker response is
+    # No route means no side effect and can requeue. A lost sandbox manager response is
     # uncertain and stays leased until recovery can replay its message ID.
     (message,) = (await api.queue(thread_id))["messages"]
     assert (message["state"], message["revision"]) == (
@@ -267,8 +267,8 @@ async def test_a_host_out_of_reach_leaves_it_waiting(
 
 async def test_send_now_with_nothing_running_is_an_ordinary_send(api, monkeypatch):
     await _steerable(api)
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api, "after the stop")
     await api.client.post(f"/v1/agent/jobs/{job['id']}/cancel")
     await api.finish(running, "cancelled")
@@ -280,15 +280,15 @@ async def test_send_now_with_nothing_running_is_an_ordinary_send(api, monkeypatc
     body = sent.json()
     # Nothing to steer: it is the next turn, and the owner's "now" lifted the pause.
     assert body["job"]["task_prompt"] == "after the stop"
-    assert broker.calls == []
+    assert sandbox_manager.calls == []
     assert (await api.queue(thread_id))["queue_paused_reason"] is None
 
 
 async def test_a_turn_no_host_has_taken_yet_gets_it_once_one_has(api, monkeypatch):
     monkeypatch.setattr(send_now_delivery, "HAND_OVER_POLL_S", 0.05)
     await _steerable(api)
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     first = await api.create()
     thread_id = first["thread_id"]
     await api.run(first)
@@ -301,12 +301,12 @@ async def test_a_turn_no_host_has_taken_yet_gets_it_once_one_has(api, monkeypatc
     assert sent.status_code == 200, sent.text
     assert sent.json()["pending"]["state"] == "sending"
     await asyncio.sleep(0.2)
-    assert broker.calls == []
+    assert sandbox_manager.calls == []
 
     running = await api.start(second)
     await asyncio.wait_for(asyncio.gather(*list(turns._hand_overs)), 10)
 
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "and mind the tests")
     ]
     assert [row["state"] for row in (await api.queue(thread_id))["messages"]] == ["sending"]
@@ -314,8 +314,8 @@ async def test_a_turn_no_host_has_taken_yet_gets_it_once_one_has(api, monkeypatc
 
 async def test_restart_recovers_a_handoff_committed_before_the_target_was_claimed(api, monkeypatch):
     await _steerable(api)
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     first = await api.create()
     thread_id = first["thread_id"]
     await api.run(first)
@@ -335,7 +335,7 @@ async def test_restart_recovers_a_handoff_committed_before_the_target_was_claime
     recovered = await send_now_delivery.recover_handoffs(api.store)
 
     assert recovered == {"claimed": 1, "accepted": 1, "requeued": 0}
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "and mind the tests")
     ]
     async with api.pool.acquire() as conn:
@@ -351,13 +351,13 @@ async def test_restart_recovers_a_handoff_committed_before_the_target_was_claime
         "accepted": 0,
         "requeued": 0,
     }
-    assert len(broker.calls) == 1
+    assert len(sandbox_manager.calls) == 1
 
 
 async def test_competing_workers_have_one_revision_lease_winner(api, monkeypatch):
     await _steerable(api)
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     _job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     began = await api.store.pending_messages.begin_send_now(
         thread_id=thread_id,
@@ -374,7 +374,7 @@ async def test_competing_workers_have_one_revision_lease_winner(api, monkeypatch
 
     assert sum(outcome.claimed for outcome in outcomes) == 1
     assert sum(outcome.accepted for outcome in outcomes) == 1
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "also check the docs")
     ]
 
@@ -425,8 +425,8 @@ async def test_response_loss_replays_the_host_receipt_without_a_second_native_st
     api, monkeypatch
 ):
     await _steerable(api)
-    broker = _ResponseLossBroker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _ResponseLossSandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     _job, thread_id, _running, waiting = await _waiting_behind_a_running_turn(api)
 
     sent = await _send_now(api, thread_id, waiting)
@@ -434,7 +434,7 @@ async def test_response_loss_replays_the_host_receipt_without_a_second_native_st
     assert sent.status_code == 200, sent.text
     assert sent.json()["not_delivered_reason"] is None
     assert sent.json()["pending"]["state"] == "sending"
-    assert len(broker.native_steers) == 1
+    assert len(sandbox_manager.native_steers) == 1
     async with api.pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_pending_messages "
@@ -446,8 +446,8 @@ async def test_response_loss_replays_the_host_receipt_without_a_second_native_st
     recovered = await send_now_delivery.recover_handoffs(api.store)
 
     assert recovered == {"claimed": 1, "accepted": 1, "requeued": 0}
-    assert broker.calls == [waiting["id"], waiting["id"]]
-    assert len(broker.native_steers) == 1
+    assert sandbox_manager.calls == [waiting["id"], waiting["id"]]
+    assert len(sandbox_manager.native_steers) == 1
     async with api.pool.acquire() as conn:
         request_marker, handed_off = await conn.fetchrow(
             "SELECT send_now_requested_at, send_now_handed_off "
@@ -491,8 +491,8 @@ async def test_recovery_requeues_a_target_that_never_acquired_a_host_with_status
 
 async def test_an_expired_unreaped_attempt_is_never_given_the_message(api, monkeypatch):
     await _steerable(api)
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
     _job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     async with api.pool.acquire() as conn:
         await conn.execute(
@@ -510,7 +510,7 @@ async def test_an_expired_unreaped_attempt_is_never_given_the_message(api, monke
 
     assert sent.status_code == 200, sent.text
     assert sent.json()["pending"]["state"] == "sending"
-    assert broker.calls == []
+    assert sandbox_manager.calls == []
     recovered = await send_now_delivery.recover_handoffs(api.store)
     assert recovered == {"claimed": 0, "accepted": 0, "requeued": 1}
     (message,) = (await api.queue(thread_id))["messages"]
@@ -613,8 +613,10 @@ async def test_send_now_authority_rechecks_expiry_after_a_plain_attempt_row_lock
     assert handed_off is False
 
 
-async def test_attempt_expiry_during_broker_io_leaves_recovery_the_receipt(api, monkeypatch):
-    """A broker answer after attempt expiry cannot acknowledge durable delivery."""
+async def test_attempt_expiry_during_sandbox_manager_io_leaves_recovery_the_receipt(
+    api, monkeypatch
+):
+    """A sandbox manager answer after attempt expiry cannot acknowledge durable delivery."""
     await _steerable(api)
     _job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
 
@@ -626,14 +628,14 @@ async def test_attempt_expiry_during_broker_io_leaves_recovery_the_receipt(api, 
                 running["attempt_id"],
             )
 
-    broker = _Broker(during=expire_attempt)
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager(during=expire_attempt)
+    _route_input_to(monkeypatch, sandbox_manager)
 
     sent = await _send_now(api, thread_id, waiting)
 
     assert sent.status_code == 200, sent.text
     assert sent.json()["pending"]["state"] == "sending"
-    assert len(broker.calls) == 1
+    assert len(sandbox_manager.calls) == 1
     # Neither an accepted nor refused response from an expired attempt is a
     # durable receipt. Once the handoff lease is reclaimable, recovery treats
     # that attempt as ended without replaying to it.
@@ -646,7 +648,7 @@ async def test_attempt_expiry_during_broker_io_leaves_recovery_the_receipt(api, 
     recovered = await send_now_delivery.recover_handoffs(api.store)
 
     assert recovered == {"claimed": 0, "accepted": 0, "requeued": 1}
-    assert len(broker.calls) == 1
+    assert len(sandbox_manager.calls) == 1
     (message,) = (await api.queue(thread_id))["messages"]
     assert message["state"] == "queued"
     assert "target turn ended" in message["last_error"]
@@ -655,8 +657,8 @@ async def test_attempt_expiry_during_broker_io_leaves_recovery_the_receipt(api, 
 async def test_send_now_refuses_what_it_cannot_do_and_leaves_the_message_as_it_was(
     api, monkeypatch
 ):
-    broker = _Broker()
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
 
     # A live turn whose host cannot take a message mid-turn.
     job = await api.create()
@@ -698,7 +700,7 @@ async def test_send_now_refuses_what_it_cannot_do_and_leaves_the_message_as_it_w
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "not_running"
 
-    assert broker.calls == []
+    assert sandbox_manager.calls == []
     queue = await api.queue(thread_id)
     assert [(row["prompt"], row["state"]) for row in queue["messages"]] == [
         ("too early", "held"),
@@ -712,8 +714,8 @@ async def test_a_turn_ending_while_the_message_is_handed_over_sends_it_next_once
     job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     # The turn ends on the host while the hand-over is in flight, without
     # having taken it: its ending's settlement puts it back in line and sends it.
-    broker = _Broker(during=lambda: api.finish(running))
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager(during=lambda: api.finish(running))
+    _route_input_to(monkeypatch, sandbox_manager)
 
     sent = await _send_now(api, thread_id, waiting)
 
@@ -742,8 +744,8 @@ async def test_a_message_taken_before_the_target_finishes_is_never_dispatched_ag
         assert reported.status_code == 201, reported.text
         await api.finish(running)
 
-    broker = _Broker(during=take_then_finish)
-    _route_input_to(monkeypatch, broker)
+    sandbox_manager = _SandboxManager(during=take_then_finish)
+    _route_input_to(monkeypatch, sandbox_manager)
 
     sent = await _send_now(api, thread_id, waiting)
 
@@ -757,7 +759,7 @@ async def test_a_message_taken_before_the_target_finishes_is_never_dispatched_ag
         ("fix it", False),
         ("also check the docs", True),
     ]
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "also check the docs")
     ]
 
@@ -767,7 +769,9 @@ async def test_a_turn_that_ended_before_taking_it_sends_it_next_at_once(api, mon
     _job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     _route_input_to(
         monkeypatch,
-        _Broker({"accepted": False, "reason": "turn_ended"}, during=lambda: api.finish(running)),
+        _SandboxManager(
+            {"accepted": False, "reason": "turn_ended"}, during=lambda: api.finish(running)
+        ),
     )
 
     sent = await _send_now(api, thread_id, waiting)

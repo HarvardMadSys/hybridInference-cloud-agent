@@ -41,7 +41,7 @@ def _deployment_environment(monkeypatch):
     would look like a goal bug and is not one.
     """
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "api-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _MCP_ENCRYPTION_KEY)

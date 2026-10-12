@@ -1,4 +1,4 @@
-"""Optional whole-container resource readings shared by broker and control plane."""
+"""Optional whole-container resource readings shared by sandbox manager and control plane."""
 
 from __future__ import annotations
 

@@ -25,7 +25,7 @@ from cloud_agent.api._job_views import (
     _job_response,
 )
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
-from cloud_agent.api._workspace_access import _workspace_broker_for_job, _workspace_id
+from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspace_id
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
@@ -95,7 +95,7 @@ class _JobsStorage(Protocol):
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
-    store to `_workspace_access._workspace_broker_for_job`, and `create_agent_job`
+    store to `_workspace_access._sandbox_manager_for_job`, and `create_agent_job`
     hands it to `application.job_admission._create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
@@ -274,11 +274,11 @@ async def cancel_agent_job(
     if state in TERMINAL_STATES:
         resumed = True
         if owned.get("thread_sandbox") is not None:
-            settled_broker = await _workspace_broker_for_job(job_store, owned)
+            settled_sandbox_manager = await _sandbox_manager_for_job(job_store, owned)
             resumed = await resume_settled_terminal(
                 _workspace_id(owned),
                 job_id=job_id,
-                broker=settled_broker,
+                sandbox_manager=settled_sandbox_manager,
             )
         if resumed:
             await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)

@@ -66,13 +66,15 @@ async def _run_readiness(
         AsyncMock(side_effect=AssertionError("Readiness must not wait for a settings writer")),
     )
 
-    async def probe(store, *, broker_token, expected_deployment_sha, not_before):
+    async def probe(store, *, sandbox_manager_token, expected_deployment_sha, not_before):
         assert store is host_pool
-        assert broker_token == expected_token
-        assert settings.setting_env("AGENT_WORKSPACE_BROKER_TOKEN") == expected_token
+        assert sandbox_manager_token == expected_token
+        assert settings.setting_env("AGENT_SANDBOX_MANAGER_TOKEN") == expected_token
         assert expected_deployment_sha == "target-sha"
         assert not_before.tzinfo is not None
-        return deploy_readiness.SharedLiveReadiness(True, "target host and broker are ready")
+        return deploy_readiness.SharedLiveReadiness(
+            True, "target host and sandbox manager are ready"
+        )
 
     readiness = AsyncMock(side_effect=probe)
     monkeypatch.setattr(deploy_readiness, "shared_live_readiness", readiness)
@@ -89,33 +91,38 @@ async def _run_readiness(
 
 
 async def test_preactivation_bootstraps_settings_before_the_new_api_starts(monkeypatch):
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "legacy-broker-token")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "legacy-sandbox-manager-token")
     monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "legacy-gateway-token")
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "legacy-branch")
     repository = _SettingsRepository()
 
-    await _run_readiness(monkeypatch, repository, expected_token="legacy-broker-token")
+    await _run_readiness(monkeypatch, repository, expected_token="legacy-sandbox-manager-token")
 
     assert len(repository.seeds) == 1
     assert repository.revision == 1
-    assert all(definition.key in repository.values for definition in settings.MIGRATED_SETTINGS)
+    assert all(
+        definition.storage_key in repository.values for definition in settings.MIGRATED_SETTINGS
+    )
     assert settings.setting_env("GATEWAY_GRANT_DISPATCH_TOKEN") == "legacy-gateway-token"
     assert settings.text_setting("publish_base_branch") == "legacy-branch"
-    assert repository.values["workspace_broker_token"] != "legacy-broker-token"
+    assert repository.values["workspace_broker_token"] != "legacy-sandbox-manager-token"
 
 
 async def test_preactivation_preserves_complete_saved_settings_over_stale_env(monkeypatch):
     values = settings.initial_settings()
     values.update(
         settings.encode_changes(
-            {"workspace_broker_token": "saved-broker-token", "publish_base_branch": "saved-branch"}
+            {
+                "sandbox_manager_token": "saved-sandbox-manager-token",
+                "publish_base_branch": "saved-branch",
+            }
         )
     )
     repository = _SettingsRepository(revision=7, values=values)
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "stale-broker-token")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "stale-sandbox-manager-token")
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-branch")
 
-    await _run_readiness(monkeypatch, repository, expected_token="saved-broker-token")
+    await _run_readiness(monkeypatch, repository, expected_token="saved-sandbox-manager-token")
 
     assert repository.seeds == []
     assert repository.revision == 7
@@ -125,23 +132,28 @@ async def test_preactivation_preserves_complete_saved_settings_over_stale_env(mo
 
 async def test_preactivation_imports_missing_fields_without_replacing_saved_values(monkeypatch):
     saved = settings.encode_changes(
-        {"workspace_broker_token": "saved-broker-token", "publish_base_branch": "saved-branch"}
+        {
+            "sandbox_manager_token": "saved-sandbox-manager-token",
+            "publish_base_branch": "saved-branch",
+        }
     )
-    migrated = {definition.key for definition in settings.MIGRATED_SETTINGS}
+    migrated = {definition.storage_key for definition in settings.MIGRATED_SETTINGS}
     legacy = {
         key: value for key, value in settings.initial_settings().items() if key not in migrated
     }
     repository = _SettingsRepository(revision=7, values={**legacy, **saved})
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "stale-broker-token")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "stale-sandbox-manager-token")
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-branch")
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "newly-imported-control-token")
 
-    await _run_readiness(monkeypatch, repository, expected_token="saved-broker-token")
+    await _run_readiness(monkeypatch, repository, expected_token="saved-sandbox-manager-token")
 
     assert len(repository.seeds) == 1
     assert not repository.seeds[0].keys() & saved.keys()
     assert repository.revision == 8
     assert repository.values.items() >= saved.items()
-    assert all(definition.key in repository.values for definition in settings.MIGRATED_SETTINGS)
+    assert all(
+        definition.storage_key in repository.values for definition in settings.MIGRATED_SETTINGS
+    )
     assert settings.text_setting("publish_base_branch") == "saved-branch"
     assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "newly-imported-control-token"

@@ -27,10 +27,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
-from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
+)
+from cloud_agent.sandbox_manager_routing import (
+    SandboxManagerUrlRefused,
+    probe_sandbox_manager,
+    validate_sandbox_manager_url,
 )
 from cloud_agent.schemas import (
     HostHeartbeatRequest,
@@ -137,21 +141,21 @@ async def authenticate_host(
     return {**host, "credential_hash": hash_secret(token)}
 
 
-def _checked_broker_url(url: str | None) -> str | None:
-    """Refuse a broker address this deployment will not send its token to.
+def _checked_sandbox_manager_url(url: str | None) -> str | None:
+    """Refuse a sandbox manager address this deployment will not send its token to.
 
-    The control plane sends the pool's shared workspace-broker token to
+    The control plane sends the pool's shared sandbox-manager token to
     whatever address a host reports, so accepting one is handing over a
-    credential good for every broker in the pool. Refused with a 400 rather
+    credential good for every sandbox manager in the pool. Refused with a 400 rather
     than dropped: a host whose address was silently ignored looks enrolled and
     then never serves a workspace.
     """
     try:
-        return validate_broker_url(url)
-    except BrokerUrlRefused as exc:
+        return validate_sandbox_manager_url(url)
+    except SandboxManagerUrlRefused as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"type": "invalid_broker_url", "message": str(exc)}},
+            detail={"error": {"type": "invalid_sandbox_manager_url", "message": str(exc)}},
         ) from exc
 
 
@@ -181,10 +185,10 @@ async def register_host(
     """
     job_store = _require_store(store)
     # Validate every retryable, machine-supplied configuration field before
-    # spending the one-time token. A refused broker address is a 400 the
+    # spending the one-time token. A refused sandbox manager address is a 400 the
     # operator can correct; consuming the token first turns that typo into a
     # second privileged admin operation for no security benefit.
-    broker_url = _checked_broker_url(body.broker_url)
+    sandbox_manager_url = _checked_sandbox_manager_url(body.sandbox_manager_url)
     if not await job_store.host_pool.consume_enroll_token(
         token_hash=hash_secret(body.enroll_token), host=body.name
     ):
@@ -209,7 +213,7 @@ async def register_host(
             credential_hash=hash_secret(credential),
             capabilities=body.capabilities,
             slots_total=body.slots_total,
-            broker_url=broker_url,
+            sandbox_manager_url=sandbox_manager_url,
             runner_version=body.runner_version,
             labels=dict(body.labels),
         )
@@ -247,7 +251,9 @@ async def register_host(
         # Forced: enrolment is the one moment an operator is watching, and the
         # answer costs one request. Everything downstream of a wrong address
         # here is a job failing minutes later with `503` as its only clue.
-        broker_error=await _probed_broker_error(host["host"], body.broker_url, force=True),
+        sandbox_manager_error=await _probed_sandbox_manager_error(
+            host["host"], body.sandbox_manager_url, force=True
+        ),
     )
 
 
@@ -279,7 +285,7 @@ async def heartbeat_host(
         slots_total=body.slots_total,
         launch_error=body.launch_error,
         runner_version=body.runner_version,
-        broker_url=_checked_broker_url(body.broker_url),
+        sandbox_manager_url=_checked_sandbox_manager_url(body.sandbox_manager_url),
         capabilities=body.capabilities,
         sandbox_runtime=body.sandbox_runtime,
         sandbox_image_digest=body.sandbox_image_digest,
@@ -327,7 +333,7 @@ async def heartbeat_host(
             lost.append(residency_beat)
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
-    # views without treating absence as deletion. In particular, a broker's
+    # views without treating absence as deletion. In particular, a sandbox manager's
     # settled idle sweep can stop Docker after the worker token that settled
     # the turn has expired, so host authentication is the durable path for
     # recording that STOPPED transition.
@@ -428,17 +434,19 @@ async def heartbeat_host(
         # probing only at enrolment would never catch a credential that was
         # already wrong when the host enrolled — which is how the first remote
         # host was misconfigured, and it stayed invisible for a day.
-        broker_error=await _probed_broker_error(updated["host"], body.broker_url),
+        sandbox_manager_error=await _probed_sandbox_manager_error(
+            updated["host"], body.sandbox_manager_url
+        ),
     )
 
 
 from cloud_agent.application.residency import residency_ttl_s
 
 
-async def _probed_broker_error(
-    host: str, broker_url: str | None, *, force: bool = False
+async def _probed_sandbox_manager_error(
+    host: str, sandbox_manager_url: str | None, *, force: bool = False
 ) -> str | None:
-    """Probe the reported broker, log a failure, and hand it back to the host.
+    """Probe the reported sandbox manager, log a failure, and hand it back to the host.
 
     Two audiences, because they notice different things. The log is where an
     operator looks after something is already wrong. The response is what the
@@ -446,18 +454,18 @@ async def _probed_broker_error(
     up` tails, so a misconfigured deploy says so while somebody is still
     watching it.
 
-    Never raises and never refuses the registration. A broker that is slow to
+    Never raises and never refuses the registration. A sandbox manager that is slow to
     start is normal — compose brings it up beside the runner — and a control
     plane that rejected a host for it would turn a warning into an outage.
     """
-    error = await probe_broker(host, broker_url, force=force)
+    error = await probe_sandbox_manager(host, sandbox_manager_url, force=force)
     if error is not None:
         logger.warning(
-            "agent_host_broker_unreachable",
+            "agent_host_sandbox_manager_unreachable",
             extra={
-                "event": "agent_host_broker_unreachable",
+                "event": "agent_host_sandbox_manager_unreachable",
                 "host": host,
-                "broker_error": error,
+                "sandbox_manager_error": error,
             },
         )
     return error

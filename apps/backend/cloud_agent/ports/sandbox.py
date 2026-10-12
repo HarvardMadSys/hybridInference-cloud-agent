@@ -27,7 +27,7 @@ class SandboxRepository(Protocol):
         last_activity_at: datetime,
         actor_id: str,
         admin_ip: str,
-        broker_confirmed_stopped: bool = False,
+        sandbox_manager_confirmed_stopped: bool = False,
         discard: bool = False,
     ) -> str:
         """Fence an idle stopped sandbox for deletion.
@@ -171,8 +171,8 @@ class SandboxRepository(Protocol):
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
 
-        The broker's in-memory suspension is the immediate barrier. This
-        durable copy closes broker-restart and old-turn-URL gaps: an active
+        The sandbox manager's in-memory suspension is the immediate barrier. This
+        durable copy closes sandbox-manager-restart and old-turn-URL gaps: an active
         attempt must have published ``workspace_ready``.
         """
         ...
@@ -182,11 +182,11 @@ class SandboxRepository(Protocol):
         ...
 
     async def list_terminal_resumes_pending(self, *, limit: int = 100) -> list[str]:
-        """List settled workspaces whose broker resume still needs confirmation."""
+        """List settled workspaces whose sandbox manager resume still needs confirmation."""
         ...
 
     async def mark_terminal_resume_complete(self, *, job_id: str) -> bool:
-        """Clear durable recovery state after the broker confirms a resume."""
+        """Clear durable recovery state after the sandbox manager confirms a resume."""
         ...
 
     async def reserve_thread_sandbox(

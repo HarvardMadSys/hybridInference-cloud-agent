@@ -120,7 +120,7 @@ flowchart TD
     Web --> Control[Control plane: API, scheduling, publication]
     Control --> Database[(Agent-owned PostgreSQL)]
     Control <-->|HTTP contracts| Gateway[HybridInference gateway]
-    Host[Enrolled host: runner and workspace broker] <-->|Claims, heartbeats, workspace| Control
+    Host[Enrolled host: runner and sandbox manager] <-->|Claims, heartbeats, workspace| Control
     Host -->|Container lifecycle| Sandbox[Retained sandbox group: shared workspace, native CLI sessions]
     Sandbox -->|Scoped inference credential via relay| Gateway
     Sandbox -->|Scoped tool credential via relay| MCP[Control plane MCP-only listener]
@@ -128,7 +128,7 @@ flowchart TD
 ```
 
 The web app, control plane, and host pool are deployed separately. Each host
-runs the runner, workspace broker, group supervisor, and the tunnels needed to
+runs the runner, sandbox manager, group supervisor, and the tunnels needed to
 reach the control plane and relays. A host enrolls once, then reports its
 capacity and capabilities through heartbeats.
 
@@ -241,7 +241,7 @@ read the [security guidance](SECURITY.md) and the
 
 ```text
 apps/backend/cloud_agent/         FastAPI control plane and PostgreSQL storage
-apps/backend/cloud_agent_host/    Host runner, sandboxes, workspace broker, CLI adapters
+apps/backend/cloud_agent_host/    Host runner, sandboxes, sandbox manager, CLI adapters
 apps/backend/cloud_agent_shared/  Shared protocols, pins, errors, Git and archive helpers
 apps/frontend/                    Next.js user interface and admin dashboard
 gateway_contracts/                Gateway contract mirrors and control-plane API snapshot

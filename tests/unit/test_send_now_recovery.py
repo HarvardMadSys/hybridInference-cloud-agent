@@ -26,7 +26,7 @@ class _Pending:
         return []
 
 
-async def test_recovery_bounds_concurrent_broker_calls(monkeypatch):
+async def test_recovery_bounds_concurrent_sandbox_manager_calls(monkeypatch):
     pending = _Pending(7)
     store = SimpleNamespace(pending_messages=pending)
     active = maximum = 0
@@ -51,7 +51,7 @@ async def test_recovery_bounds_concurrent_broker_calls(monkeypatch):
     assert pending.expired_called
 
 
-async def test_recovery_deadline_cancels_broker_calls_before_the_next_pass(monkeypatch):
+async def test_recovery_deadline_cancels_sandbox_manager_calls_before_the_next_pass(monkeypatch):
     pending = _Pending(3)
     store = SimpleNamespace(pending_messages=pending)
     cancelled = 0

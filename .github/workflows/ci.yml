@@ -1492,11 +1492,11 @@ jobs:
           # behaviour being checked: a required variable that stopped being
           # required would silently weaken the deployment.
           cat > .env <<'ENVFILE'
-          # Broker authorization is distinct from enrollment-issued host
+          # Sandbox Manager authorization is distinct from enrollment-issued host
           # credentials. The latter are persisted after one-time enrollment
           # and therefore are not a Compose secret.
           COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-ci
-          AGENT_WORKSPACE_BROKER_TOKEN=ci-placeholder-broker-token
+          AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
           AGENT_SANDBOX_IMAGE=cloud-agent-sandbox:ci
           AGENT_GATEWAY_URL=http://agent-gateway:8080
           AGENT_TUNNEL_SSH_DESTINATION=ci@gateway.invalid
@@ -1541,7 +1541,7 @@ jobs:
           AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=ci-placeholder-value-not-real
           AGENT_DEPLOYMENT_SHA=ci-deployment-sha
           AGENT_POSTGRES_PASSWORD=ci-placeholder
-          AGENT_WORKSPACE_BROKER_TOKEN=ci-placeholder-broker-token
+          AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
           # Sign-in is assembled server-side now, so the control plane needs
           # the consent page, its own callback as the gateway must see it
           # (byte-identical to an IDENTITY_ALLOWED_REDIRECTS entry there),
@@ -1584,7 +1584,7 @@ jobs:
           for required in AGENT_DATABASE_URL AGENT_POSTGRES_PASSWORD AGENT_DEPLOYMENT_SHA; do
             check "$CP" .env.control-plane "$required"
           done
-          for required in AGENT_WORKSPACE_BROKER_TOKEN AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
+          for required in AGENT_SANDBOX_MANAGER_TOKEN AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
             check "$HOST" .env "$required"
           done
 
@@ -1592,7 +1592,7 @@ jobs:
         run: |
           set -euo pipefail
           cp .env.control-plane .env.setup
-          for imported in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_WORKSPACE_BROKER_TOKEN GATEWAY_ISSUER GATEWAY_JWKS_URL; do
+          for imported in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_SANDBOX_MANAGER_TOKEN GATEWAY_ISSUER GATEWAY_JWKS_URL; do
             sed -i "/^${imported}=/d" .env.setup
           done
           docker compose -f deploy/control-plane/docker-compose.yml \
@@ -1603,7 +1603,7 @@ jobs:
           for name in ("control-plane", "mcp-relay"):
               env = stack["services"][name]["environment"]
               for key in ("AGENT_SESSION_SECRET", "AGENT_CONTROL_TOKEN_SECRET",
-                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_WORKSPACE_BROKER_TOKEN",
+                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_SANDBOX_MANAGER_TOKEN",
                           "GATEWAY_ISSUER", "GATEWAY_JWKS_URL"):
                   assert not env.get(key), f"{name} supplied a default for {key}"
               assert env["AGENT_SETTINGS_ENCRYPTION_KEY"]
@@ -1640,12 +1640,12 @@ jobs:
           # Either process may build or wake a group, so both must build the
           # same network, and find the relays where Compose put them.
           runner = stack["services"]["runner"]["environment"]
-          broker = stack["services"]["workspace-broker"]["environment"]
+          sandbox_manager = stack["services"]["sandbox-manager"]["environment"]
           for key in ("AGENT_SANDBOX_NAMESPACE", "AGENT_RELAY_NETWORK",
                       "AGENT_EGRESS_CHAT_NETWORK_POOL", "AGENT_EGRESS_DNS_SERVER",
                       "AGENT_EGRESS_PROTECTED_CIDRS"):
-              if runner.get(key) != broker.get(key):
-                  failures.append(f"runner and broker disagree on {key}")
+              if runner.get(key) != sandbox_manager.get(key):
+                  failures.append(f"runner and sandbox_manager disagree on {key}")
           if runner.get("AGENT_RELAY_NETWORK") != relays.get("name"):
               failures.append("the runner looks for its relays on a network Compose does not create")
 

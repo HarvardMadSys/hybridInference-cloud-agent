@@ -4,7 +4,7 @@
 terminal is the exec's PTY; ``pty.fork`` reproduces exactly that, so the
 wrapper ``ChatSandboxManager.spawn_terminal`` builds can be exercised here
 without Docker. These are the behaviours a person at the terminal notices:
-line editing, Ctrl-C and Ctrl-Z, the exit status, and -- for the broker's
+line editing, Ctrl-C and Ctrl-Z, the exit status, and -- for the sandbox manager's
 suspend and kill -- every command staying in the process group the pidfile
 names.
 """
@@ -168,7 +168,7 @@ def test_bash_runs_every_command_in_the_group_the_pidfile_names(terminal):
     assert kind.group(1) == "bash"
     assert int(kind.group(2)) == leader == shell.pid
     # bash turns job control on at startup; a command in a group of its own
-    # would escape the broker's suspend and kill.
+    # would escape the sandbox manager's suspend and kill.
     assert int(child.group(1)) == leader
 
 

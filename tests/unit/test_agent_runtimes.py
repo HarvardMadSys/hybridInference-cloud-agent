@@ -949,7 +949,7 @@ def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
     assert "mcp-secret-must-not-leak" not in str(raised.value)
 
 
-def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
+def test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credential():
     """The same rule, for the adapter that does resolve servers.
 
     "Fails closed" was only ever a stand-in for this: a requested server must
@@ -1263,7 +1263,7 @@ def test_suppression_does_not_leak_between_jobs():
 # out a repository's own servers when a job requests none, the one-normalisation
 # of the gateway base url, and which runtimes may claim MCP at all. The other
 # three cases in that section were already covered here under different names
-# (``test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential``,
+# (``test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credential``,
 # ``test_runtime_credentials_stay_out_of_process_arguments``,
 # ``test_mcp_config_fails_closed_without_an_isolated_relay``) and were not
 # duplicated.

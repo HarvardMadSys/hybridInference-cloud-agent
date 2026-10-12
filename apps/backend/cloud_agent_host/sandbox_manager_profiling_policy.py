@@ -1,23 +1,23 @@
-"""The workspace broker's own copy of the deployment's profiling policy.
+"""The sandbox manager's own copy of the deployment's profiling policy.
 
-The broker is a separate container from the runner. It shares no memory with it
+The sandbox manager is a separate container from the runner. It shares no memory with it
 and holds no host credential, so it cannot learn the deployment's control state
 the way the runner does -- and it must not be given a credential to try, because
 the design keeps the host credential out of the sandbox side entirely.
 
 So the runner tells it. This module is the receiving half: it accepts a policy
-message over the broker's existing authenticated channel, validates it, and
-publishes it into the broker's own policy store. That store is what
+message over the sandbox manager's existing authenticated channel, validates it, and
+publishes it into the sandbox manager's own policy store. That store is what
 ``start_stage_recording`` reads, so a fragment is only ever contributed for a
 selection this deployment is currently collecting for.
 
-Three rules, and each closes a way the broker could keep measuring after a Stop:
+Three rules, and each closes a way the sandbox manager could keep measuring after a Stop:
 
 **A policy only ever comes from the runner.** The route sits behind the same
-shared-token guard as every other broker route, and the message is bounded and
+shared-token guard as every other sandbox manager route, and the message is bounded and
 re-parsed rather than trusted. A browser or a sandbox that forges the profiling
 *header* on a file read changes nothing: the header states a selection, and the
-selection is only honoured when the broker's own policy already says that run is
+selection is only honoured when the sandbox manager's own policy already says that run is
 in force.
 
 **Revisions only move forwards.** A lower revision is refused rather than
@@ -28,7 +28,7 @@ the control plane, and it is the only ordering this channel needs.
 
 **Everything is bounded.** The message crosses a process boundary and is not
 trusted: a bounded number of operations, bounded strings, and a deadline that
-can only ever be earlier than the one stated. A broker is not allowed to extend
+can only ever be earlier than the one stated. A sandbox manager is not allowed to extend
 an experiment on its own.
 """
 
@@ -54,12 +54,13 @@ from cloud_agent_shared.operation_profiling import (
     parse_run,
     policy_store,
 )
+from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
 logger = logging.getLogger(__name__)
 
-#: Producer name the broker reports under. Declared here because the policy
-#: endpoint is where the broker learns which experiment it may collect for.
-PRODUCER = "broker"
+#: Producer name the sandbox manager reports under. Declared here because the policy
+#: endpoint is where the sandbox manager learns which experiment it may collect for.
+PRODUCER = SANDBOX_MANAGER_PRODUCER
 
 #: Bounds on an incoming policy message. It crosses a container boundary.
 MAX_OPERATIONS = 32
@@ -67,11 +68,11 @@ MAX_TARGET_FIELDS = 8
 MAX_ID_CHARS = 128
 MAX_DETAIL_CHARS = 200
 
-#: Serializes policy application inside one broker process. Two pushes must not
+#: Serializes policy application inside one sandbox manager process. Two pushes must not
 #: race each other into two different answers about which revision is applied.
 _POLICY_LOCK = threading.Lock()
 
-#: What this broker has applied. Local state, read back by the runner that
+#: What this sandbox manager has applied. Local state, read back by the runner that
 #: pushed it; nothing upstream depends on it and it is not an acknowledgement
 #: anybody waits for.
 _APPLIED: dict[str, Any] = {
@@ -82,7 +83,7 @@ _APPLIED: dict[str, Any] = {
 
 
 def applied_state() -> dict[str, Any]:
-    """Return what this broker has applied, for the runner's own diagnostics."""
+    """Return what this sandbox manager has applied, for the runner's own diagnostics."""
     return {
         "revision": int(_APPLIED["revision"]),
         "run_id": _APPLIED["run_id"],
@@ -96,11 +97,11 @@ def reset_applied_state() -> None:
 
 
 def install_policy_provider() -> None:
-    """Make this broker's collector read through the pushed policy store.
+    """Make this sandbox manager's collector read through the pushed policy store.
 
-    Called once, when the broker application is built. Until a policy arrives
+    Called once, when the sandbox manager application is built. Until a policy arrives
     the store holds nothing, which reads as "not collecting" -- the safe
-    direction, and the reason a broker that starts before its runner does not
+    direction, and the reason a sandbox manager that starts before its runner does not
     briefly measure for an experiment it has not been told about.
     """
     from cloud_agent_shared.operation_profiling import install_policy_provider as install
@@ -109,7 +110,7 @@ def install_policy_provider() -> None:
         """Serves the collector from the store the policy endpoint writes."""
 
         def snapshot(self) -> ControlState:
-            """Return the last policy this broker accepted."""
+            """Return the last policy this sandbox manager accepted."""
             published = policy_store().published()
             if published is None:
                 return ControlState(mode=MODE_ADMIN)
@@ -125,8 +126,8 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
     and a lower one is refused. That is what makes a retried push harmless and a
     delayed one unable to undo a Stop.
 
-    Authentication happens at the route, which is the broker's own
-    ``authenticate`` dependency -- the same shared-token check every other broker
+    Authentication happens at the route, which is the sandbox manager's own
+    ``authenticate`` dependency -- the same shared-token check every other sandbox manager
     route uses. This function is deliberately about the message, so the two
     cannot drift into different ideas of who may send one.
     """
@@ -139,7 +140,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
     with _POLICY_LOCK:
         current = int(_APPLIED["revision"])
         if revision < current:
-            # A push that is behind what this broker already applied. Refusing
+            # A push that is behind what this sandbox manager already applied. Refusing
             # rather than applying is the difference between a Stop that holds
             # and a Stop an out-of-order retry can undo.
             raise HTTPException(
@@ -155,7 +156,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
             _publish(revision=revision, run=run)
         else:
             # A deployment not under Admin control is not this channel's to
-            # configure: the broker keeps its own environment's answer, and a
+            # configure: the sandbox manager keeps its own environment's answer, and a
             # policy that said otherwise would be the runner overruling a
             # deployment setting.
             policy_store().publish(ControlState(mode=mode, config_version=revision))
@@ -170,7 +171,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _publish(*, revision: int, run: ProfilingRun | None) -> None:
-    """Publish one accepted policy into the broker's store."""
+    """Publish one accepted policy into the sandbox manager's store."""
     store = policy_store()
     if run is None:
         # A configuration with no run means "stop selecting". It carries the
@@ -199,7 +200,7 @@ def _publish(*, revision: int, run: ProfilingRun | None) -> None:
 def _parse_run_payload(value: Any) -> ProfilingRun | None:
     """Return the run descriptor a policy message states, or ``None``.
 
-    Rebuilt through the collector's own parser so a broker validates a policy
+    Rebuilt through the collector's own parser so a sandbox manager validates a policy
     with exactly the code that validates a deployment's static descriptor. The
     message was already bounded here, but the parser is what decides whether the
     result is an experiment at all.

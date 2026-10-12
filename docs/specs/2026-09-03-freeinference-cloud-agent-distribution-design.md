@@ -231,7 +231,7 @@ The artifact set is:
    from the existing shared Python image;
 2. `web-root` — Next.js web service compiled for an empty base path;
 3. `web-agents` — the same source compiled for `/agents`;
-4. `host` — runner, workspace broker, and supervisor Python image;
+4. `host` — runner, sandbox manager, and supervisor Python image;
 5. `sandbox` — pinned Agent CLI runtime image;
 6. `egress-proxy` and `tunnel` — two small infrastructure images.
 
@@ -403,7 +403,7 @@ The terminal upstream shape is:
 ```text
 hybridInference-cloud-agent/
   cloud_agent/                  application and API
-  cloud_agent_host/             host, supervisor, drivers, broker
+  cloud_agent_host/             host, supervisor, drivers, sandbox manager
   contracts/                    gateway-facing HTTP schemas
   migrations/                   agent database migrations
   web/                          neutral web application
@@ -475,7 +475,7 @@ Cloud Agent web service.
 Neither Git repository owns:
 
 - database passwords or DSNs;
-- session, control, dispatcher, enrollment, broker, MCP, or grant-dispatch
+- session, control, dispatcher, enrollment, sandbox manager, MCP, or grant-dispatch
   secrets;
 - GitHub App/GitLab OAuth private credentials;
 - SSH private keys or private `known_hosts` inventories;
@@ -744,7 +744,7 @@ services:
     image: ${CLOUD_AGENT_WEB_IMAGE:?resolved from cloud-agent.lock}
   runner:
     image: ${CLOUD_AGENT_HOST_IMAGE:?resolved from cloud-agent.lock}
-  workspace-broker:
+  sandbox-manager:
     image: ${CLOUD_AGENT_HOST_IMAGE:?resolved from cloud-agent.lock}
 ```
 

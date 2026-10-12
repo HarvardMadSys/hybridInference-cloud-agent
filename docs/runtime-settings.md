@@ -2,8 +2,8 @@
 
 Admin Settings defines defaults for every host; an individual server's settings
 can override them. The effective values arrive on its next heartbeat. The runner
-hands each turn a validated snapshot, and pushes broker settings to its separate
-workspace broker. Clearing an admin override restores the built-in default.
+hands each turn a validated snapshot, and pushes sandbox manager settings to its separate
+sandbox manager. Clearing an admin override restores the built-in default.
 Environment variables supply bootstrap values only until the first settings
 answer arrives.
 

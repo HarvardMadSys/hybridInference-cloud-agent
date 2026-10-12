@@ -2,7 +2,7 @@
 
 This is intentionally a command run from a one-off control-plane container,
 not a public HTTP endpoint.  The answer needs both of the control plane's
-trusted views: the host row in Postgres and the ability to dial the broker with
+trusted views: the host row in Postgres and the ability to dial the sandbox manager with
 the pool credential.  A runner checking either from its own network would be
 answering a different question.
 
@@ -10,7 +10,7 @@ The deploy runs this command *before* replacing the live control-plane
 container. Host and control jobs start in parallel; this runtime check is the
 ordering edge between them. A control plane cannot replace the current API
 until every new-chat placement host has heartbeated at the exact target commit
-and every online retained owner has proved its compatible broker path. There
+and every online retained owner has proved its compatible sandbox manager path. There
 is no alternate executor to enable or fall back to.
 """
 
@@ -27,8 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from cloud_agent.broker_routing import ENV_BROKER_TOKEN, probe_broker
 from cloud_agent.host_pool import HOST_DRAINING, HOST_ONLINE
+from cloud_agent.sandbox_manager_routing import ENV_SANDBOX_MANAGER_TOKEN, probe_sandbox_manager
 from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import HostPoolRepository
 
-    BrokerProbe = Callable[..., Awaitable[str | None]]
+    SandboxManagerProbe = Callable[..., Awaitable[str | None]]
 
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 
@@ -97,8 +97,8 @@ def _host_rejection(
         return "host has never heartbeated"
     if heartbeat_at < not_before:
         return "host has not heartbeated since this deployment check began"
-    if not str(row.get("broker_url") or "").strip():
-        return "host reported no control-plane-reachable broker URL"
+    if not str(row.get("sandbox_manager_url") or "").strip():
+        return "host reported no control-plane-reachable sandbox manager URL"
     return None
 
 
@@ -106,12 +106,12 @@ async def shared_live_readiness(
     store: HostPoolRepository,
     *,
     not_before: datetime,
-    broker_token: str,
+    sandbox_manager_token: str,
     expected_deployment_sha: str,
     draining_host: str | None = None,
-    broker_probe: BrokerProbe = probe_broker,
+    sandbox_manager_probe: SandboxManagerProbe = probe_sandbox_manager,
 ) -> SharedLiveReadiness:
-    """Require a fresh capability heartbeat and an authoritative broker dial.
+    """Require a fresh capability heartbeat and an authoritative sandbox manager dial.
 
     ``not_before`` is load-bearing.  Merely finding a recent database row can
     accept the previous runner generation during a rolling deploy.  Requiring
@@ -121,10 +121,10 @@ async def shared_live_readiness(
     expected_deployment_sha = expected_deployment_sha.strip()
     if not expected_deployment_sha:
         return SharedLiveReadiness(False, "target deployment SHA is empty")
-    if not broker_token.strip():
+    if not sandbox_manager_token.strip():
         return SharedLiveReadiness(
             False,
-            f"control plane has no {ENV_BROKER_TOKEN}; broker operations cannot authenticate",
+            f"control plane has no {ENV_SANDBOX_MANAGER_TOKEN}; sandbox manager operations cannot authenticate",
         )
     if draining_host is not None:
         draining_host = draining_host.strip()
@@ -205,7 +205,7 @@ async def shared_live_readiness(
     # longer eligible to materialize a new chat. It need not carry this target
     # SHA or the v2 historical-fork capability (v1 retained containers may
     # serve ordinary follow-ups), but the new control plane must prove a fresh
-    # compatible heartbeat and that it can still authenticate to that broker.
+    # compatible heartbeat and that it can still authenticate to that sandbox manager.
     probe_rows = list(placement_rows)
     probed_hosts = {str(row.get("host")) for row in probe_rows}
     for owner in sorted(retained_hosts):
@@ -235,10 +235,12 @@ async def shared_live_readiness(
     ready_hosts: list[str] = []
     for row in probe_rows:
         host = str(row.get("host") or "unknown")
-        broker_url = str(row["broker_url"]).strip()
-        broker_error = await broker_probe(host, broker_url, force=True)
-        if broker_error is not None:
-            rejected.append(f"{host}: control plane cannot use its broker: {broker_error}")
+        sandbox_manager_url = str(row["sandbox_manager_url"]).strip()
+        sandbox_manager_error = await sandbox_manager_probe(host, sandbox_manager_url, force=True)
+        if sandbox_manager_error is not None:
+            rejected.append(
+                f"{host}: control plane cannot use its sandbox manager: {sandbox_manager_error}"
+            )
             continue
         ready_hosts.append(host)
 
@@ -253,7 +255,7 @@ async def shared_live_readiness(
         )
     placement_host_names = [str(row["host"]) for row in placement_rows]
 
-    # Broker probes are network awaits outside the database read. Re-read the
+    # Sandbox Manager probes are network awaits outside the database read. Re-read the
     # pool before declaring success so a runner that invalidated its marker,
     # went offline, or changed placement while those probes ran cannot satisfy
     # the deployment with a stale snapshot. Claim admission independently
@@ -268,7 +270,7 @@ async def shared_live_readiness(
     if current_active_host != active_host or set(current_retained_hosts) != set(retained_hosts):
         return SharedLiveReadiness(
             False,
-            "host placement or retained ownership changed while brokers were probed",
+            "host placement or retained ownership changed while sandbox managers were probed",
         )
     if active_host is not None:
         current_placement_names = {
@@ -294,14 +296,14 @@ async def shared_live_readiness(
     if current_placement_names != set(placement_host_names):
         return SharedLiveReadiness(
             False,
-            "new-chat placement changed while brokers were probed",
+            "new-chat placement changed while sandbox managers were probed",
         )
     for row in probe_rows:
         host = str(row["host"])
         current = current_by_host.get(host)
         if current is None:
             return SharedLiveReadiness(
-                False, f"host {host} disappeared while its broker was probed"
+                False, f"host {host} disappeared while its sandbox manager was probed"
             )
         placement = host in current_placement_names
         reason = _host_rejection(
@@ -317,12 +319,15 @@ async def shared_live_readiness(
         if reason is not None:
             return SharedLiveReadiness(
                 False,
-                f"host {host} changed while its broker was probed: {reason}",
+                f"host {host} changed while its sandbox manager was probed: {reason}",
             )
-        if str(current.get("broker_url") or "").strip() != str(row.get("broker_url") or "").strip():
+        if (
+            str(current.get("sandbox_manager_url") or "").strip()
+            != str(row.get("sandbox_manager_url") or "").strip()
+        ):
             return SharedLiveReadiness(
                 False,
-                f"host {host} changed broker URL while its previous broker was probed",
+                f"host {host} changed sandbox manager URL while its previous sandbox manager was probed",
             )
 
     placement_hosts = ", ".join(placement_host_names)
@@ -336,7 +341,7 @@ async def shared_live_readiness(
         True,
         f"new-chat placement hosts {placement_hosts} completed target deployment "
         f"{expected_deployment_sha}, sent fresh {SHARED_SANDBOX_CAPABILITY} and "
-        f"{NATIVE_FORK_AT_ANCHOR_CAPABILITY} heartbeats, and their brokers answered"
+        f"{NATIVE_FORK_AT_ANCHOR_CAPABILITY} heartbeats, and their sandbox_managers answered"
         f"{retained_detail}",
         host=ready_hosts[0],
     )
@@ -349,7 +354,7 @@ async def wait_for_shared_live(
     expected_deployment_sha: str,
     draining_host: str | None = None,
 ) -> bool:
-    """Poll until a post-start heartbeat and broker probe both succeed."""
+    """Poll until a post-start heartbeat and sandbox manager probe both succeed."""
     dsn = (os.environ.get(ENV_DATABASE_URL) or "").strip()
     if not dsn:
         print(f"[deploy-readiness] ERROR: {ENV_DATABASE_URL} is not configured", file=sys.stderr)
@@ -378,10 +383,10 @@ async def wait_for_shared_live(
         # to seed them would deadlock activation. Saved values remain
         # authoritative; the MCP listener still never seeds its partial env.
         await initialize_settings(storage.settings, seed=True)
-        broker_token = (setting_env(ENV_BROKER_TOKEN) or "").strip()
-        if not broker_token:
+        sandbox_manager_token = (setting_env(ENV_SANDBOX_MANAGER_TOKEN) or "").strip()
+        if not sandbox_manager_token:
             print(
-                "[deploy-readiness] ERROR: set the workspace broker credential in Admin Settings",
+                "[deploy-readiness] ERROR: set the sandbox manager credential in Admin Settings",
                 file=sys.stderr,
             )
             return False
@@ -393,7 +398,7 @@ async def wait_for_shared_live(
                 verdict = await shared_live_readiness(
                     store,
                     not_before=not_before,
-                    broker_token=broker_token,
+                    sandbox_manager_token=sandbox_manager_token,
                     expected_deployment_sha=expected_deployment_sha,
                     **readiness_kwargs,
                 )

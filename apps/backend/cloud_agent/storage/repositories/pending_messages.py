@@ -729,7 +729,7 @@ class PostgresPendingMessageRepository:
     async def recoverable_send_now_handoffs(
         self, *, lease_seconds: float, limit: int = 50
     ) -> list[dict[str, Any]]:
-        """Candidates a process may claim without holding a lock over broker I/O."""
+        """Candidates a process may claim without holding a lock over sandbox manager I/O."""
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be finite and positive")
         if limit <= 0:
@@ -921,8 +921,8 @@ class PostgresPendingMessageRepository:
         message the queue has moved on from since — taken by the turn, or
         already back in line — is left alone. ``last_error`` persists a
         recovery status for a request whose original HTTP response is gone.
-        ``attempt_id`` additionally fences a live broker answer to the exact
-        live, unexpired attempt it addressed. If it expires during broker I/O,
+        ``attempt_id`` additionally fences a live sandbox manager answer to the exact
+        live, unexpired attempt it addressed. If it expires during sandbox manager I/O,
         the row stays leased for target-ended recovery. Returns the message as
         it now is, or ``None`` when it is gone.
         """

@@ -361,7 +361,7 @@ HELD_INPUT_TTL_S = 15 * 60.0
 
 @dataclass(frozen=True)
 class _HeldInput:
-    """A message for an owner's turn that has not started on this broker yet."""
+    """A message for an owner's turn that has not started on this sandbox manager yet."""
 
     owner: str
     pending: PendingInput
@@ -661,9 +661,9 @@ class SharedChatSessionSupervisor:
                 turn_lock.release()
 
     def stop_all_for_shutdown(self, *, include_running: bool = True) -> None:
-        """Cleanly stop and archive every running group during broker shutdown.
+        """Cleanly stop and archive every running group during sandbox manager shutdown.
 
-        The broker calls this only when final archival is configured, after
+        The sandbox manager calls this only when final archival is configured, after
         :meth:`quiesce` has stopped background admission but before
         :meth:`close` detaches native transports. A failed archive remains
         pending and is reported after the other groups have also had a chance
@@ -1081,7 +1081,7 @@ class SharedChatSessionSupervisor:
             with self._lock:
                 group = self._groups.get(spec.sandbox_id)
                 if group is None:
-                    # A replacement broker cannot reattach the old docker-exec
+                    # A replacement sandbox manager cannot reattach the old docker-exec
                     # pipes. Stop only a newly discovered orphan before
                     # adopting it; list() also calls reconcile(), so stopping a
                     # group already managed by this process would race every
@@ -1106,7 +1106,7 @@ class SharedChatSessionSupervisor:
                     except BaseException:
                         # A marker read is an authority check, not optional
                         # observability. Keep the adopted group fenced if its
-                        # broker-private lifecycle record is unreadable, but do
+                        # sandbox-manager-private lifecycle record is unreadable, but do
                         # not let one damaged orphan prevent healthy groups from
                         # reconciling and receiving the network guard.
                         group.orphan_finalization_pending = True
@@ -1494,10 +1494,10 @@ class SharedChatSessionSupervisor:
                     continue
                 member = group.members.get(manifest.thread_id)
                 if member is None:
-                    # A durable observation that the previous broker owned a
+                    # A durable observation that the previous sandbox manager owned a
                     # live process is not an attachable local transport. Docker
                     # preserves the native session files, but the replacement
-                    # broker has no stdin/stdout pipes and must resume it before
+                    # sandbox manager has no stdin/stdout pipes and must resume it before
                     # claiming a HOT hit.
                     resident_state: ResidentState = manifest.resident_state
                     if resident_state == "live":
@@ -1761,7 +1761,7 @@ class SharedChatSessionSupervisor:
                 if begin_observation is None:
                     observer_cursor = GuestObserverCursor.unavailable(
                         MEMBER_UID_BASE + member.resident_slot_id,
-                        "workspace broker has no guest observer client",
+                        "sandbox manager has no guest observer client",
                     )
                 else:
                     # The window opens on the same fence as the turn: the
@@ -1918,7 +1918,7 @@ class SharedChatSessionSupervisor:
             finish_observation = getattr(self._manager, "finish_guest_observation", None)
             if finish_observation is None:
                 observation = GuestObservation.unavailable(
-                    "workspace broker has no guest observer client",
+                    "sandbox manager has no guest observer client",
                     source=GUEST_OBSERVER_SOURCE,
                 )
             else:
@@ -1935,7 +1935,7 @@ class SharedChatSessionSupervisor:
                         )
                     else:
                         observation = GuestObservation.unavailable(
-                            "workspace broker returned invalid process telemetry",
+                            "sandbox manager returned invalid process telemetry",
                             source=GUEST_OBSERVER_SOURCE,
                         )
                 except Exception as exc:
@@ -2208,7 +2208,7 @@ class SharedChatSessionSupervisor:
         The checkpoint is parked on the member for whoever forwards it, and the
         optional hook is an extra observer rather than the delivery mechanism.
         Gating this on a hook meant that a supervisor built without one -- which
-        is how the broker builds it -- produced no checkpoints at all, so a
+        is how the sandbox manager builds it -- produced no checkpoints at all, so a
         crashed turn kept nothing.
         """
         with self._lock:
@@ -2400,7 +2400,7 @@ class SharedChatSessionSupervisor:
         ``owner`` is the lease owner the control plane expects — ``attempt:<id>``
         — so a message meant for one attempt never reaches a later one that
         re-leased the member. The runner's lease token is not needed: this is
-        the control plane's request, authenticated by the broker, and the owner
+        the control plane's request, authenticated by the sandbox manager, and the owner
         string is its fence. Siblings are untouched. A turn that has not
         started here yet (its sandbox is still being prepared) is given the
         message when it starts; one that never does leaves it to the control
@@ -2477,7 +2477,7 @@ class SharedChatSessionSupervisor:
         token: str,
         turn: ResidentTurn[DialectRuntime],
     ) -> SharedTurnTelemetry:
-        """Fence a turn whose broker stream disappeared before its result.
+        """Fence a turn whose sandbox manager stream disappeared before its result.
 
         An HTTP client can vanish while the CLI is quiet. Merely closing the
         response generator would otherwise leave both the native turn and the
@@ -2976,7 +2976,7 @@ class SharedChatSessionSupervisor:
 
         The metadata lock is held only while installing/removing the barrier.
         Docker exec and Git work happen outside it, so status/read paths stay
-        responsive.  New turns, forks, terminals, and mutating broker
+        responsive.  New turns, forks, terminals, and mutating sandbox manager
         operations observe ``snapshotting`` and wait/retry.  A normal idle
         stop is not a reason to abandon publication: start that exact retained
         container, capture it, and arm its ordinary idle deadline again.

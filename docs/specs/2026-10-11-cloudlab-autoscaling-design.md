@@ -43,7 +43,7 @@ action.
 ## Profile ownership
 
 Each live Host needs an exclusive deployment profile because the profile owns
-its broker route and Host inputs. Policy saves reserve the selected profiles in
+its sandbox manager route and Host inputs. Policy saves reserve the selected profiles in
 the database under the compute-topology lock. Manual implicit selection skips
 reserved profiles, and an explicit attempt to use one is refused.
 

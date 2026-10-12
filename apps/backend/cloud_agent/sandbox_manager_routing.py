@@ -1,19 +1,19 @@
-"""Resolve the workspace broker that owns a retained chat group.
+"""Resolve the sandbox manager that owns a retained chat group.
 
 Every executable attempt belongs to an enrolled host. The attempt records that
-host and the host heartbeat records its broker URL, so files, terminals, Git,
+host and the host heartbeat records its sandbox manager URL, so files, terminals, Git,
 fork, snapshots, and native-session operations all route through the same
 durable ownership record. There is deliberately no process-global fallback:
 using one would make a missing host fence silently address another machine's
 container.
 
 **The token is still global.** Host rows carry a URL, not a credential; every
-broker in the pool authenticates the same `AGENT_WORKSPACE_BROKER_TOKEN`. That
-is what the phase-G task asked for and no more: per-host broker credentials are
+sandbox manager in the pool authenticates the same `AGENT_SANDBOX_MANAGER_TOKEN`. That
+is what the phase-G task asked for and no more: per-host sandbox manager credentials are
 a secret-distribution design (issue one at enrollment, rotate it, get it onto
 the machine) rather than a routing change, and doing half of it here would look
-like the problem was solved. Until then, a compromised host's broker token
-opens every other host's broker.
+like the problem was solved. Until then, a compromised host's sandbox manager token
+opens every other host's sandbox manager.
 """
 
 from __future__ import annotations
@@ -27,38 +27,38 @@ from urllib.parse import urlparse
 import httpx
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.settings import setting_env
-from cloud_agent.workspace_broker_client import (
-    WorkspaceBrokerClient,
-    WorkspaceBrokerError,
+from cloud_agent.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
+from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository
 
 logger = get_logger(__name__)
 
-#: Hosts a broker URL may name. Empty means "any", which is the shape a
+#: Hosts a sandbox manager URL may name. Empty means "any", which is the shape a
 #: single-host deployment runs in and the shape this had before the check.
-ENV_BROKER_HOSTS = "AGENT_BROKER_URL_ALLOWED_HOSTS"
+ENV_SANDBOX_MANAGER_HOSTS = "AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS"
 
 
-class BrokerUrlRefused(ValueError):
-    """A host reported a broker address this deployment will not talk to."""
+class SandboxManagerUrlRefused(ValueError):
+    """A host reported a sandbox manager address this deployment will not talk to."""
 
 
-def validate_broker_url(url: str | None) -> str | None:
-    """Return ``url`` if this deployment may send its broker token there.
+def validate_sandbox_manager_url(url: str | None) -> str | None:
+    """Return ``url`` if this deployment may send its sandbox manager token there.
 
-    **A host proposes its own broker address, and the control plane then sends
+    **A host proposes its own sandbox manager address, and the control plane then sends
     the pool's shared token to it.** So an address accepted here is an address
-    that receives a credential good for every broker in the pool — a
+    that receives a credential good for every sandbox manager in the pool — a
     compromised host, or one with a typo, could name anything and be handed it.
 
     Two checks, both structural:
 
     * **Scheme.** `http`/`https` only. A `file:` or `gopher:` URL is not a
-      broker, and the client would do something surprising with it.
+      sandbox manager, and the client would do something surprising with it.
     * **Host allowlist**, when configured. Names, not patterns: a pattern is a
       thing to get subtly wrong, and the set of machines in a pool is small
       and known. Unconfigured means any host, which is what this did before —
@@ -66,7 +66,7 @@ def validate_broker_url(url: str | None) -> str | None:
       rather than something that breaks every existing pool on upgrade.
 
     Raises:
-        BrokerUrlRefused: If the URL is unusable or names a host outside the
+        SandboxManagerUrlRefused: If the URL is unusable or names a host outside the
             allowlist. Refused rather than dropped: a host whose address is
             ignored looks enrolled and silently never serves a workspace.
     """
@@ -76,67 +76,76 @@ def validate_broker_url(url: str | None) -> str | None:
     try:
         parsed = urlparse(candidate)
     except ValueError:
-        raise BrokerUrlRefused("broker_url must be a valid http(s) URL") from None
+        raise SandboxManagerUrlRefused("sandbox_manager_url must be a valid http(s) URL") from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise BrokerUrlRefused(f"broker_url must be an http(s) URL, got {candidate!r}")
+        raise SandboxManagerUrlRefused(
+            f"sandbox_manager_url must be an http(s) URL, got {candidate!r}"
+        )
 
     allowed = [
-        entry.strip() for entry in (setting_env(ENV_BROKER_HOSTS) or "").split(",") if entry.strip()
+        entry.strip()
+        for entry in (setting_env(ENV_SANDBOX_MANAGER_HOSTS) or "").split(",")
+        if entry.strip()
     ]
+    # Both names resolve to the same Compose service during its rename.
+    if "workspace-broker" in allowed:
+        allowed.append("sandbox-manager")
     if allowed and parsed.hostname not in allowed:
-        raise BrokerUrlRefused(f"broker_url host {parsed.hostname!r} is not in {ENV_BROKER_HOSTS}")
+        raise SandboxManagerUrlRefused(
+            f"sandbox_manager_url host {parsed.hostname!r} is not in {ENV_SANDBOX_MANAGER_HOSTS}"
+        )
     return candidate
 
 
-ENV_BROKER_TOKEN = "AGENT_WORKSPACE_BROKER_TOKEN"
+ENV_SANDBOX_MANAGER_TOKEN = "AGENT_SANDBOX_MANAGER_TOKEN"
 
 
-def broker_configuration_error(host: dict[str, Any] | None) -> str | None:
-    """Describe an unusable broker configuration without exposing URLs or secrets."""
+def sandbox_manager_configuration_error(host: dict[str, Any] | None) -> str | None:
+    """Describe an unusable sandbox manager configuration without exposing URLs or secrets."""
     if host is None:
         return (
             "The owning host is no longer registered. Restore that host's registration "
-            "and workspace broker before retrying deletion."
+            "and sandbox manager before retrying deletion."
         )
     try:
-        url = validate_broker_url(host.get("broker_url"))
-    except BrokerUrlRefused:
+        url = validate_sandbox_manager_url(host.get("sandbox_manager_url"))
+    except SandboxManagerUrlRefused:
         return (
-            "The owning host's workspace broker URL is invalid or refused by the host allowlist. "
-            "Check its advertised URL and the Workspace broker host allowlist in Admin Settings."
+            "The owning host's sandbox manager URL is invalid or refused by the host allowlist. "
+            "Check its advertised URL and the Sandbox manager host allowlist in Admin Settings."
         )
     if not url:
         return (
-            "The owning host has not advertised a workspace broker URL. Configure its "
+            "The owning host has not advertised a sandbox manager URL. Configure its "
             "advertised URL and send a new host heartbeat before retrying deletion."
         )
-    if not (setting_env(ENV_BROKER_TOKEN) or "").strip():
+    if not (setting_env(ENV_SANDBOX_MANAGER_TOKEN) or "").strip():
         return (
-            "The control plane has no workspace broker credential. Configure Workspace broker "
-            "credential in Admin Settings to match the owning host's broker."
+            "The control plane has no sandbox manager credential. Configure Sandbox manager "
+            "credential in Admin Settings to match the owning host's sandbox manager."
         )
     return None
 
 
-#: `{host: (url, pool)}` — one connection pool per enrolled host. A broker
+#: `{host: (url, pool)}` — one connection pool per enrolled host. A sandbox manager
 #: client is built per request — one per file read, one per terminal keystroke
 #: — so a pool on the instance would be a pool of one; it has to outlive the
 #: object that uses it.
 #:
 #: **Keyed by host, not by URL.** A heartbeat overwrites the address
-#: (`host_pool.py`: `broker_url = EXCLUDED.broker_url`), so a rebuilt machine
+#: (`host_pool.py`: `sandbox_manager_url = EXCLUDED.sandbox_manager_url`), so a rebuilt machine
 #: that comes back on a different one would leave its old pool in a URL-keyed
 #: dictionary for the life of the process — and with
-#: `AGENT_BROKER_URL_ALLOWED_HOSTS` unset, `validate_broker_url` accepts any
+#: `AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` unset, `validate_sandbox_manager_url` accepts any
 #: host, which makes the URL a value the far side chooses. Growth keyed on
 #: that is not growth this deployment controls. The host set is. This mirrors
 #: `_PROBE_CACHE` below, which keys by host and re-checks when the URL moves,
 #: for the same reason.
 #:
 #: **This is not the process-global fallback the module docstring refuses.**
-#: That rule is about *which* broker a request reaches, and the host row still
+#: That rule is about *which* sandbox manager a request reaches, and the host row still
 #: decides that: nothing is looked up here without a URL that resolution
-#: already produced. What this removes is the TCP connect in front of a broker
+#: already produced. What this removes is the TCP connect in front of a sandbox manager
 #: the row had already named.
 _POOLS: dict[str, tuple[str, httpx.AsyncClient]] = {}
 
@@ -182,11 +191,11 @@ def _pool_for(host: str, url: str) -> httpx.AsyncClient:
     return pool
 
 
-async def close_broker_clients() -> None:
-    """Close every broker pool this process opened; called at shutdown.
+async def close_sandbox_manager_clients() -> None:
+    """Close every sandbox manager pool this process opened; called at shutdown.
 
     Failures are swallowed deliberately: this runs while the application is
-    already going away, and a broker that has stopped answering must not turn
+    already going away, and a sandbox manager that has stopped answering must not turn
     shutdown into a traceback.
     """
     retiring = list(_RETIRING)
@@ -199,12 +208,12 @@ async def close_broker_clients() -> None:
         await asyncio.gather(*retiring, return_exceptions=True)
 
 
-def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
+def _client_for(host: dict[str, Any]) -> SandboxManagerClient | None:
     """Apply current address policy before lending a credential or cached pool."""
     name = str(host.get("host") or "").strip()
     try:
-        url = validate_broker_url(host.get("broker_url"))
-    except BrokerUrlRefused:
+        url = validate_sandbox_manager_url(host.get("sandbox_manager_url"))
+    except SandboxManagerUrlRefused:
         # Host rows can predate an administrator narrowing the allowlist.
         # Refusing new clients is not enough if a pooled connection remains
         # available for that same host; retire it and its cached health proof.
@@ -213,32 +222,32 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
             _retire(existing[1])
         _PROBE_CACHE.pop(name, None)
         logger.warning(
-            "agent_workspace_broker_policy_refused",
-            extra={"event": "agent_workspace_broker_policy_refused", "host": name},
+            "agent_sandbox_manager_policy_refused",
+            extra={"event": "agent_sandbox_manager_policy_refused", "host": name},
         )
         return None
     if not url:
         return None
-    token = (setting_env(ENV_BROKER_TOKEN) or "").strip()
+    token = (setting_env(ENV_SANDBOX_MANAGER_TOKEN) or "").strip()
     if not token:
         return None
     if not name:
         # Nothing to bound a pool by, so this row does not get one: a
         # connection per call is what it had before, and that is better than a
         # dictionary keyed on whatever happened to be in the row.
-        return WorkspaceBrokerClient(url, token)
-    return WorkspaceBrokerClient(url, token, client=_pool_for(name, url))
+        return SandboxManagerClient(url, token)
+    return SandboxManagerClient(url, token, client=_pool_for(name, url))
 
 
-def broker_for_host(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
+def sandbox_manager_for_host(host: dict[str, Any]) -> SandboxManagerClient | None:
     """Reach a registered Host for administrative readiness and inventory checks."""
     return _client_for(host)
 
 
-async def broker_for_attempt(
+async def sandbox_manager_for_attempt(
     store: HostPoolRepository | None, attempt_id: int | None
-) -> WorkspaceBrokerClient | None:
-    """Resolve the enrolled host broker holding ``attempt_id``'s container."""
+) -> SandboxManagerClient | None:
+    """Resolve the enrolled host sandbox manager holding ``attempt_id``'s container."""
     if store is not None and attempt_id is not None:
         host = await store.host_for_attempt(attempt_id=attempt_id)
         if host is not None:
@@ -246,10 +255,10 @@ async def broker_for_attempt(
     return None
 
 
-async def broker_for_job(
+async def sandbox_manager_for_job(
     store: HostPoolRepository | None, job_id: str | None
-) -> WorkspaceBrokerClient | None:
-    """Resolve the broker for a job, via its current attempt's host."""
+) -> SandboxManagerClient | None:
+    """Resolve the sandbox manager for a job, via its current attempt's host."""
     if store is not None and job_id:
         host = await store.host_for_job(job_id=job_id)
         if host is not None:
@@ -257,12 +266,12 @@ async def broker_for_job(
     return None
 
 
-async def hydrate_shared_broker(
-    job: dict[str, Any], broker: WorkspaceBrokerClient | None
-) -> WorkspaceBrokerClient | None:
+async def hydrate_shared_sandbox_manager(
+    job: dict[str, Any], sandbox_manager: SandboxManagerClient | None
+) -> SandboxManagerClient | None:
     """Restore a shared group's aliases before a generic workspace request.
 
-    The broker can reconstruct a Docker group from immutable labels after a
+    The sandbox manager can reconstruct a Docker group from immutable labels after a
     restart, but forked thread ids are database-owned aliases.  Re-registering
     the current bounded manifest makes Files/Terminal/Git work for a child even
     when no subsequent Agent turn has happened yet.
@@ -270,9 +279,9 @@ async def hydrate_shared_broker(
     sandbox = job.get("thread_sandbox")
     if not isinstance(sandbox, dict) or sandbox.get("shared_live") is not True:
         return None
-    if broker is not None:
-        await broker.register_shared_sandbox(sandbox)
-    return broker
+    if sandbox_manager is not None:
+        await sandbox_manager.register_shared_sandbox(sandbox)
+    return sandbox_manager
 
 
 #: How long a probe result is reused before the next heartbeat re-checks.
@@ -280,7 +289,7 @@ async def hydrate_shared_broker(
 #: control plane's liveness path depend on a second service's, and probing only
 #: at enrolment would never notice a token that was already wrong when the host
 #: enrolled — which is how the first remote host was misconfigured.
-BROKER_PROBE_INTERVAL_S = 60.0
+SANDBOX_MANAGER_PROBE_INTERVAL_S = 60.0
 
 #: `{host: (monotonic_deadline, url_probed)}`. In-process and deliberately not
 #: persisted: a control plane that restarts should re-probe, and the answer is
@@ -288,8 +297,10 @@ BROKER_PROBE_INTERVAL_S = 60.0
 _PROBE_CACHE: dict[str, tuple[float, str]] = {}
 
 
-async def probe_broker(host: str, broker_url: str | None, *, force: bool = False) -> str | None:
-    """Check that this deployment can actually use ``broker_url``.
+async def probe_sandbox_manager(
+    host: str, sandbox_manager_url: str | None, *, force: bool = False
+) -> str | None:
+    """Check that this deployment can actually use ``sandbox_manager_url``.
 
     Returns ``None`` when it can, or a short reason when it cannot.
 
@@ -298,23 +309,23 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
     this machine. On the first remote host it did not — a compose service name
     that resolved nowhere — and the way that surfaced was a job failing at its
     first terminal call, three attempts, six minutes, with `503` as the only
-    clue. The same probe also catches a broker token that does not match,
+    clue. The same probe also catches a sandbox manager token that does not match,
     because `/health` is authenticated.
 
-    Re-probes at most every ``BROKER_PROBE_INTERVAL_S`` per host, and always
+    Re-probes at most every ``SANDBOX_MANAGER_PROBE_INTERVAL_S`` per host, and always
     when the reported URL changes — a changed address is exactly when the
     answer is most likely to be different.
     """
-    url = (broker_url or "").strip()
+    url = (sandbox_manager_url or "").strip()
     if not url:
-        return "host did not advertise a workspace broker URL"
+        return "host did not advertise a sandbox manager URL"
 
     # Revalidate even a cached successful probe after a live policy change.
-    client = _client_for({"host": host, "broker_url": url})
+    client = _client_for({"host": host, "sandbox_manager_url": url})
     if client is None:
-        if not (setting_env(ENV_BROKER_TOKEN) or "").strip():
-            return "control plane has no workspace broker credential"
-        return "workspace broker is unavailable under the current configuration"
+        if not (setting_env(ENV_SANDBOX_MANAGER_TOKEN) or "").strip():
+            return "control plane has no sandbox manager credential"
+        return "sandbox manager is unavailable under the current configuration"
 
     now = time.monotonic()
     cached = _PROBE_CACHE.get(host)
@@ -323,12 +334,12 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
 
     try:
         await client.health()
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         _PROBE_CACHE.pop(host, None)
         return f"{exc.message} ({url})"
     except Exception as exc:  # pragma: no cover - defensive
         _PROBE_CACHE.pop(host, None)
         return f"{type(exc).__name__}: {exc} ({url})"
 
-    _PROBE_CACHE[host] = (now + BROKER_PROBE_INTERVAL_S, url)
+    _PROBE_CACHE[host] = (now + SANDBOX_MANAGER_PROBE_INTERVAL_S, url)
     return None

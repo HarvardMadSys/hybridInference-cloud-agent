@@ -123,7 +123,7 @@ class FakeStore(AllCapabilities):
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
         # No durable import is outstanding: these scenarios publish from a
-        # broker that answered. The publisher used to reach for this through
+        # sandbox manager that answered. The publisher used to reach for this through
         # `getattr` on the store, so a fake missing it read as "nothing
         # pending" instead of as a fake that had drifted from its port.
         return None
@@ -340,7 +340,7 @@ async def test_title_generation_failure_publishes_a_meaningful_fallback(monkeypa
 
 
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
-    from cloud_agent import broker_routing
+    from cloud_agent import sandbox_manager_routing
 
     snapshot = {
         **_JOB,
@@ -364,20 +364,20 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
     )
     captured_pr = _patch_pr(monkeypatch)
 
-    class Broker:
+    class SandboxManager:
         def __init__(self) -> None:
             self.imported: tuple[dict[str, Any], str, bytes] | None = None
 
         async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
             self.imported = (row, commit_sha, bundle)
 
-    broker = Broker()
+    sandbox_manager = SandboxManager()
 
     async def route(_store, job_id: str):
         assert job_id == "ajob_2"
-        return broker
+        return sandbox_manager
 
-    monkeypatch.setattr(broker_routing, "broker_for_job", route)
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
 
     url = await publish_one(store, credential=GitHubCredential("t"))
 
@@ -385,7 +385,7 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
     assert store.snapshot_recorded == (9, url, "b" * 40)
     assert store.snapshot_failed is None and store.import_failed is None
     assert store.import_completed == (9, "b" * 40)
-    assert broker.imported == (snapshot, "b" * 40, b"bundle")
+    assert sandbox_manager.imported == (snapshot, "b" * 40, b"bundle")
     assert "group snapshot" in captured_pr["body"]
     assert "ajob_1" in captured_pr["body"] and "ajob_2" in captured_pr["body"]
 

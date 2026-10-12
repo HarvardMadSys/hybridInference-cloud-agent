@@ -93,7 +93,7 @@ class NormalizedEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Bound the report before it crosses the broker or worker transport."""
+        """Bound the report before it crosses the sandbox manager or worker transport."""
         object.__setattr__(self, "payload", bound_event_payload(self.payload))
 
 
