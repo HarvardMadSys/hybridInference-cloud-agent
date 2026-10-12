@@ -725,7 +725,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
         )}
 
-        <div className="flex min-w-0 flex-wrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
+        <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
           {disconnected ? (
             <span
               aria-live="polite"
@@ -770,51 +770,55 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                 }
                 pluginSummary={String(plugins.length)}
               />
-              <span aria-hidden="true" className="mx-0.5 h-4 w-px bg-border" />
-              <RepositoryPicker
-                repos={config?.repos ?? []}
-                value={repo}
-                onChange={chooseRepository}
-                open={repoPickerOpen}
-                onOpenChange={(next) => {
-                  if (next) openRepositoryPicker(false);
-                  else setRepoPickerOpen(false);
-                }}
-                onRefresh={() => void refreshRepositories()}
-                refreshing={refreshing}
-                onConfigure={
-                  config?.github_install_url ? () => void goToGitHub('manage') : undefined
-                }
-                onCreate={() => {
-                  if (!rewriting && !submitting) setCreateRepositoryOpen(true);
-                }}
-                createDisabled={rewriting || submitting}
-                returnFocusTo={repoPickerFromTask ? taskBox : undefined}
-              />
-              <Picker
-                label={t('composer.branch')}
-                value={branch}
-                options={branches}
-                onChange={setBranch}
-              />
-              <Picker
-                label={t('composer.agent')}
-                value={runtime}
-                options={config?.runtimes ?? []}
-                onChange={setRuntime}
-              />
-              <Picker
-                label={t('composer.model')}
-                value={model}
-                options={models}
-                onChange={setModel}
-              />
-              <Picker
-                label={t('composer.reasoning')}
-                value={effort}
-                options={efforts}
-                onChange={setEffort}
-              />
+              <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+              {/* Leave the scroller unpositioned so the repository menu anchors
+                  to the composer and can extend outside the scroll area. */}
+              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
+                <RepositoryPicker
+                  repos={config?.repos ?? []}
+                  value={repo}
+                  onChange={chooseRepository}
+                  open={repoPickerOpen}
+                  onOpenChange={(next) => {
+                    if (next) openRepositoryPicker(false);
+                    else setRepoPickerOpen(false);
+                  }}
+                  onRefresh={() => void refreshRepositories()}
+                  refreshing={refreshing}
+                  onConfigure={
+                    config?.github_install_url ? () => void goToGitHub('manage') : undefined
+                  }
+                  onCreate={() => {
+                    if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+                  }}
+                  createDisabled={rewriting || submitting}
+                  returnFocusTo={repoPickerFromTask ? taskBox : undefined}
+                />
+                <Picker
+                  label={t('composer.branch')}
+                  value={branch}
+                  options={branches}
+                  onChange={setBranch}
+                />
+                <Picker
+                  label={t('composer.agent')}
+                  value={runtime}
+                  options={config?.runtimes ?? []}
+                  onChange={setRuntime}
+                />
+                <Picker
+                  label={t('composer.model')}
+                  value={model}
+                  options={models}
+                  onChange={setModel}
+                />
+                <Picker
+                  label={t('composer.reasoning')}
+                  value={effort}
+                  options={efforts}
+                  onChange={setEffort}
+                />
+              </div>
             </>
           )}
 
