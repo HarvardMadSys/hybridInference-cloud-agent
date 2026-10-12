@@ -25,6 +25,7 @@ configuration, and nothing else. The default is public-only.
 from __future__ import annotations
 
 import ipaddress
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -448,6 +449,31 @@ def sanitize_headers(headers: Mapping[str, str], *, max_bytes: int = 8192) -> di
     return cleaned
 
 
+#: An RFC 9110 field name: one ``token``, nothing else.
+_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+def validate_header_name(name: str) -> str:
+    """Refuse a header a connection's credential may not be sent as.
+
+    The credential header is attached after every other header, so it can
+    replace any of them. :func:`sanitize_headers` drops a forbidden name
+    silently, which suits extra headers but not this one: a credential sent as
+    ``Host`` re-targets the request on a shared ingress, and one that vanished
+    would leave a connection authenticating with nothing. So this raises, at
+    the form and again before dispatch. A name must also be a single token;
+    anything else is not a header an HTTP client can send as written.
+    """
+    lowered = name.lower()
+    if not _HEADER_NAME.fullmatch(name):
+        raise EndpointRejected(f"{name!r} is not a valid HTTP header name")
+    if lowered in FORBIDDEN_HEADER_NAMES or any(
+        lowered.startswith(prefix) for prefix in FORBIDDEN_HEADER_PREFIXES
+    ):
+        raise EndpointRejected(f"a credential cannot be sent as the {name!r} header")
+    return name
+
+
 def resource_covers(resource: str | None, target: str) -> bool:
     """Whether an OAuth ``resource`` value covers the URL being dialled.
 
@@ -534,5 +560,6 @@ __all__ = [
     "resource_covers",
     "sanitize_headers",
     "validate_endpoint",
+    "validate_header_name",
     "validate_redirect",
 ]

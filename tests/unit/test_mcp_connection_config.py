@@ -263,6 +263,35 @@ class TestNetPolicy:
         with pytest.raises(net_policy.EndpointRejected):
             net_policy.sanitize_headers({"X-Test": "a\r\nX-Other: b"})
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Host",
+            "host",
+            "Transfer-Encoding",
+            "Content-Length",
+            "Cookie",
+            "Proxy-Authorization",
+            "X-Forwarded-For",
+            "X-Forwarded-Host",
+            "X-Real-IP",
+            "Forwarded",
+            "Bad Name",
+            " Authorization",
+            "Authorization:",
+            "X-Api-Key\r\nX-Evil",
+            "",
+        ],
+    )
+    def test_a_credential_cannot_be_sent_as_a_control_header(self, name: str) -> None:
+        """Refused rather than dropped: the credential header overrides every other."""
+        with pytest.raises(net_policy.EndpointRejected):
+            net_policy.validate_header_name(name)
+
+    @pytest.mark.parametrize("name", ["Authorization", "X-API-Key", "PRIVATE-TOKEN", "api_key"])
+    def test_an_ordinary_credential_header_is_accepted(self, name: str) -> None:
+        assert net_policy.validate_header_name(name) == name
+
     def test_resource_must_cover_the_url_being_dialled(self) -> None:
         """A token minted for one resource is not valid at another."""
         assert net_policy.resource_covers(

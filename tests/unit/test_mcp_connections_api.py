@@ -1288,6 +1288,83 @@ class TestTheClientSecretIsNotACredential:
         )
 
 
+class TestTheCredentialHeader:
+    """A static credential is never sent as a header that steers the request.
+
+    The credential header is applied after every other one, so a name like
+    ``Host`` would send the request to the URL's address while naming another
+    virtual host on a shared ingress. The check used to call a sanitizer that
+    drops such names silently, so it refused nothing and the name was stored.
+    """
+
+    @pytest.mark.parametrize(
+        "header", ["Host", "Transfer-Encoding", "Cookie", "X-Forwarded-For", "Bad Name"]
+    )
+    def test_the_form_refuses_a_control_header(self, header: str) -> None:
+        store = FakeStore()
+        existing = _seed(store)
+        with _client(store) as client:
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Docs",
+                    "url": "https://docs.example.com/mcp",
+                    "auth_kind": "static",
+                    "secret": "s3cret-token",
+                    "header_name": header,
+                },
+            )
+            replaced = client.post(
+                f"/v1/agent/mcp/connections/{existing}/secret",
+                json={
+                    "expected_authorization_epoch": 1,
+                    "secret": "s3cret-token",
+                    "header_name": header,
+                },
+            )
+        assert created.status_code == 400
+        assert replaced.status_code == 400
+        assert store.created == []
+        assert store.connections[existing]["auth_config"]["header_name"] == "Authorization"
+        assert store.credential_writes == []
+
+    def test_an_import_with_a_control_header_saves_nothing(self) -> None:
+        """Including the servers in the same paste that were fine on their own."""
+        store = FakeStore()
+        paste = {
+            "mcpServers": {
+                "wiki": {
+                    "url": "https://wiki.example.com/mcp",
+                    "headers": {"Authorization": "Bearer wiki-token"},
+                },
+                "tracker": {
+                    "url": "https://tracker.example.com/mcp",
+                    "headers": {"Cookie": "session=tracker-session"},
+                },
+            }
+        }
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={"text": json.dumps(paste), "save": True},
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"]["message"].startswith("tracker: ")
+        assert store.created == []
+        assert store.credential_writes == []
+
+    async def test_a_stored_control_header_is_refused_before_anything_is_sent(self) -> None:
+        """A row saved before the form refused it must not reach the relay or a test."""
+        from cloud_agent.mcp.registry import resolve_connection, server_for
+
+        store = FakeStore()
+        connection_id = _seed(store, auth_config={"header_name": "Host", "scheme": ""})
+        resolved = await resolve_connection(store, row=store._row(connection_id))
+        assert not resolved.usable
+        assert resolved.error is not None and "'Host'" in resolved.error
+        assert server_for(resolved, _binding(connection_id)).headers == {}
+
+
 def _binding(connection_id: int) -> Any:
     """A default selection for one connection, as a new conversation gets."""
     from cloud_agent.mcp.registry import binding_from_row

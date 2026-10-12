@@ -63,6 +63,7 @@ from cloud_agent.mcp.net_policy import (
     EndpointRejected,
     policy_from_environment,
     validate_endpoint,
+    validate_header_name,
 )
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
@@ -718,43 +719,20 @@ async def import_connections(
             dialect=result.dialect,
         )
 
-    saved: list[ConnectionView] = []
+    # Every draft is checked before any is stored, so a refusal leaves the
+    # paste unsaved rather than half saved, and names the server it is about.
+    prepared: list[tuple[config_import.ImportDraft, dict[str, Any]]] = []
     for draft in result.drafts:
-        location = body.locations.get(draft.label, draft.location)
-        parsed_location = _parse_location(location)
-        launch_spec = None
-        if draft.launch is not None:
-            launch_spec = {
-                "command": draft.launch.command,
-                "args": list(draft.launch.args),
-                "env": dict(draft.launch.env),
-                "cwd": draft.launch.cwd,
-                "mounts": [
-                    {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-                    for mount in config_import.mounts_for(draft.paths)
-                ]
-                if parsed_location is ExecutionLocation.MANAGED_WORKER
-                else [],
-            }
-        auth_kind = draft.auth_kind
-        auth_config: dict[str, Any] = {}
-        if auth_kind is AuthKind.STATIC and draft.secrets:
-            header_name = draft.secrets[0].name
-            auth_config = {
-                "header_name": header_name,
-                "scheme": draft.header_auth.scheme
-                if header_name == draft.header_auth.header_name
-                else "",
-            }
+        try:
+            prepared.append((draft, _import_values(draft, body.locations)))
+        except HTTPException as exc:
+            raise _about(draft.label, exc) from exc
+
+    saved: list[ConnectionView] = []
+    for draft, values in prepared:
         row = await job_store.mcp.create_mcp_connection(
             user_id=user["user_id"],
-            label=draft.label,
-            transport=draft.transport.value,
-            location=parsed_location.value,
-            url=draft.url,
-            launch_spec=launch_spec,
-            auth_kind=auth_kind.value,
-            auth_config=auth_config,
+            **values,
             template=None,
             reuse_pending=not draft.secrets,
         )
@@ -2361,15 +2339,66 @@ def _build_auth(
             if header_scheme is not None
             else ("Bearer" if name.lower() == "authorization" else "")
         ).strip()
-        from cloud_agent.mcp.net_policy import sanitize_headers
-
-        # Validated here rather than at dispatch time, so a header the platform
+        # Validated here as well as at dispatch time, so a header the platform
         # would refuse is reported while the user is still on the form.
-        sanitize_headers({name: "x"})
+        try:
+            validate_header_name(name)
+        except EndpointRejected as exc:
+            raise _bad_request(str(exc)) from exc
         return kind, {"header_name": name, "scheme": scheme}
     if kind is AuthKind.OAUTH:
         return kind, {}
     return kind, {}
+
+
+def _import_values(
+    draft: config_import.ImportDraft, locations: Mapping[str, str]
+) -> dict[str, Any]:
+    """The stored form of one imported draft, refused where create would refuse it."""
+    location = _parse_location(locations.get(draft.label, draft.location))
+    launch_spec = None
+    if draft.launch is not None:
+        launch_spec = {
+            "command": draft.launch.command,
+            "args": list(draft.launch.args),
+            "env": dict(draft.launch.env),
+            "cwd": draft.launch.cwd,
+            "mounts": [
+                {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
+                for mount in config_import.mounts_for(draft.paths)
+            ]
+            if location is ExecutionLocation.MANAGED_WORKER
+            else [],
+        }
+    auth_config: dict[str, Any] = {}
+    if draft.auth_kind is AuthKind.STATIC and draft.secrets:
+        header_name = draft.secrets[0].name
+        scheme = draft.header_auth.scheme if header_name == draft.header_auth.header_name else ""
+        if draft.transport is not Transport.STDIO:
+            # As pasted, not trimmed: the secret is looked up under this name,
+            # and a name that is not a header is refused rather than repaired.
+            try:
+                validate_header_name(header_name)
+            except EndpointRejected as exc:
+                raise _bad_request(str(exc)) from exc
+        auth_config = {"header_name": header_name, "scheme": scheme}
+    return {
+        "label": draft.label,
+        "transport": draft.transport.value,
+        "location": location.value,
+        "url": draft.url,
+        "launch_spec": launch_spec,
+        "auth_kind": draft.auth_kind.value,
+        "auth_config": auth_config,
+    }
+
+
+def _about(label: str, refusal: HTTPException) -> HTTPException:
+    """Name the imported server a refusal is about."""
+    detail = refusal.detail if isinstance(refusal.detail, Mapping) else {}
+    error = detail.get("error")
+    message = error.get("message") if isinstance(error, Mapping) else None
+    return _bad_request(f"{label}: {message or 'this server cannot be added'}")
 
 
 def _validate_target(
