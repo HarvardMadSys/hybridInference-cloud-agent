@@ -324,6 +324,99 @@ def test_a_broker_that_never_answers_costs_the_host_beat_only_its_observation(mo
         listener.close()
 
 
+def test_residency_cleanup_waits_on_a_silent_broker_no_longer_than_the_beat(monkeypatch):
+    """The cleanup a beat's answer asks for runs on the same heartbeat thread.
+
+    It still used the 180-second broker client, so a broker that never
+    answered held the next beat for three minutes and the host went offline.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    monkeypatch.setenv(
+        "AGENT_WORKSPACE_BROKER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}"
+    )
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+    monkeypatch.setattr(runner_mod, "_HOST_BEAT_BROKER_TIMEOUT_S", 0.2)
+    beat = threading.Thread(
+        target=runner_mod._handle_host_residencies_lost,
+        args=([{"thread_id": "athr_1", "generation": 3}],),
+        daemon=True,
+    )
+    try:
+        beat.start()
+        beat.join(timeout=10)
+        assert not beat.is_alive(), "the host beat waited on the broker"
+    finally:
+        listener.close()
+
+
+def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spent(
+    monkeypatch,
+):
+    """A slow broker gets one call per beat, not one ceiling per lost member.
+
+    Each verdict is named again by every beat while the broker still reports
+    the member live, so nothing is lost by stopping; waiting out one ceiling
+    per member would hold the next beat past the host's offline threshold.
+    """
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
+    members = [{"thread_id": f"athr_{index}"} for index in range(3)]
+    fenced: list[tuple[str, int]] = []
+
+    class Broker:
+        def list(self):
+            return [{"members": members}]
+
+        def shared_residency_lost(self, thread_id, *, generation):
+            fenced.append((thread_id, generation))
+            # A call that used the whole ceiling before it was answered.
+            clock.now += runner_mod._HOST_BEAT_BROKER_TIMEOUT_S
+            raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
+
+        def close(self):
+            pass
+
+    timeouts: list[float | None] = []
+
+    def broker(*, timeout=None):
+        timeouts.append(timeout)
+        return Broker()
+
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", broker)
+
+    runner_mod._handle_host_residencies_lost(
+        [{"thread_id": f"athr_{index}", "generation": index + 1} for index in range(3)]
+    )
+
+    assert timeouts == [runner_mod._HOST_BEAT_BROKER_TIMEOUT_S]
+    assert fenced == [("athr_0", 1)]
+
+
+def test_residency_cleanup_fences_every_named_member_a_prompt_broker_holds(monkeypatch):
+    fenced: list[tuple[str, int]] = []
+    broker = SimpleNamespace(
+        list=lambda: [{"members": [{"thread_id": "athr_1"}, {"thread_id": "athr_2"}]}],
+        shared_residency_lost=lambda thread_id, *, generation: fenced.append(
+            (thread_id, generation)
+        ),
+        close=Mock(),
+    )
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: broker)
+
+    runner_mod._handle_host_residencies_lost(
+        [
+            {"thread_id": "athr_1", "generation": 4},
+            {"thread_id": "athr_gone", "generation": 1},
+            {"thread_id": "athr_2", "generation": 7},
+        ]
+    )
+
+    assert fenced == [("athr_1", 4), ("athr_2", 7)]
+    broker.close.assert_called_once()
+
+
 def test_resume_requires_the_exact_native_session():
     assert (
         runner_mod._verified_native_session_id(

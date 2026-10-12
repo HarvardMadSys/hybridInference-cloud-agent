@@ -1464,10 +1464,12 @@ def _claim_attestation(
     return stamp
 
 
-#: How long a host heartbeat waits for the broker's Docker observation. The
-#: beat is the host's liveness signal, and the control plane counts a host
-#: offline after three missed intervals: a broker that is restarting, or whose
-#: request workers are all busy, costs one beat its observation, never the beat.
+#: How long the host-heartbeat thread waits on the broker: for the Docker
+#: observation a beat carries, and for the residency cleanup its answer asks
+#: for. The beat is the host's liveness signal, and the control plane counts a
+#: host offline after three missed intervals: a broker that is restarting, or
+#: whose request workers are all busy, costs one beat its observation or its
+#: cleanup, never the beat.
 _HOST_BEAT_BROKER_TIMEOUT_S = 10.0
 
 
@@ -1719,10 +1721,18 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
 
 
 def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
-    """Fence supervisor-owned shared members whose renewable grant was lost."""
+    """Fence supervisor-owned shared members whose renewable grant was lost.
+
+    This runs on the host-heartbeat thread, between one beat and the next, so
+    it waits on the broker no longer than the beat's own observation does and
+    starts no further call once that much time is spent. A member left for now
+    is named again by a later beat, for as long as the broker still reports it
+    live under the generation the control plane refused.
+    """
     client: SessionSupervisorClient | None = None
+    deadline = time.monotonic() + _HOST_BEAT_BROKER_TIMEOUT_S
     try:
-        client = _session_supervisor_from_env()
+        client = _session_supervisor_from_env(timeout=_HOST_BEAT_BROKER_TIMEOUT_S)
         shared_members = {
             str(member.get("thread_id"))
             for row in client.list()
@@ -1734,6 +1744,8 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
             generation = item.get("generation")
             if thread_id not in shared_members or not isinstance(generation, int):
                 continue
+            if time.monotonic() >= deadline:
+                break
             with contextlib.suppress(SessionSupervisorError):
                 client.shared_residency_lost(thread_id, generation=generation)
     except (SandboxError, SessionSupervisorError) as exc:
