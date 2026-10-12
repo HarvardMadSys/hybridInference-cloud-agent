@@ -88,12 +88,8 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedTurnBoundaryError,
     SharedTurnTelemetry,
 )
-from cloud_agent_host.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
-from cloud_agent_host.workspace_browser import (
-    WorkspacePathError,
-    normalize_workspace_path,
-)
+from cloud_agent_shared.git.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
 from cloud_agent_shared.host_settings import (
     BROKER_SETTING_KEYS,
     HOST_SETTINGS_BY_KEY,
@@ -103,6 +99,10 @@ from cloud_agent_shared.host_settings import (
 )
 from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
+from cloud_agent_shared.workspace_browser import (
+    WorkspacePathError,
+    normalize_workspace_path,
+)
 
 logger = get_logger(__name__)
 

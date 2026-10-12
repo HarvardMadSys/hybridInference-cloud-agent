@@ -93,7 +93,6 @@ from cloud_agent_host.measurement_delivery import (
     classify_exception,
     classify_response,
 )
-from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
@@ -118,19 +117,12 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
-from cloud_agent_host.shared_protocol import (
-    GOAL_REPORT_CAPABILITY,
-    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-    PROFILING_CONTROL_CAPABILITY,
-    SHARED_SANDBOX_CAPABILITY,
-    SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_RUNTIME_PINS,
-    shared_deployment_capability,
-)
-from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
+    build_base_bundle,
+    build_source_archive,
     build_upload_archive,
 )
 from cloud_agent_shared.host_settings import (
@@ -142,8 +134,15 @@ from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILI
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
+    GOAL_REPORT_CAPABILITY,
     HOST_SETTINGS_CAPABILITY,
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    PROFILING_CONTROL_CAPABILITY,
+    SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
+    SHARED_SANDBOX_RUNTIME_PINS,
     mid_turn_input_capability,
+    shared_deployment_capability,
 )
 
 DEFAULT_LEASE_TTL_S = 120.0

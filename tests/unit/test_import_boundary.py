@@ -59,6 +59,58 @@ HOST_IMPORT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+#: The host's re-exports of modules that moved to ``cloud_agent_shared``. Each
+#: stays only while something still imports it, and is deleted after.
+HOST_SHIMS = frozenset(
+    {
+        "cloud_agent_host.patch_gate",
+        "cloud_agent_host.shared_protocol",
+        "cloud_agent_host.source_archive",
+    }
+)
+
+#: Where a shim may still be imported from: every tree a Python import can
+#: start in, the ``cloud_agent_host`` package included.
+SHIM_SCAN_ROOTS = ("apps/backend", "scripts", "tests")
+
+#: Who still imports a shim, as ``(file, shim)``. Another transition allowlist
+#: that may only shrink: new code imports the shared module, and an importer
+#: that moves deletes its entry here. No ``cloud_agent_host`` module is on it.
+SHIM_IMPORT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("scripts/bench_operation_overhead.py", "cloud_agent_host.shared_protocol"),
+        (
+            "tests/integration/servers/test_agent_jobs_lifecycle.py",
+            "cloud_agent_host.shared_protocol",
+        ),
+        (
+            "tests/integration/servers/test_measurement_acceptance_db.py",
+            "cloud_agent_host.shared_protocol",
+        ),
+        (
+            "tests/integration/servers/test_pending_message_queue.py",
+            "cloud_agent_host.shared_protocol",
+        ),
+        (
+            "tests/integration/storage/test_agent_grant_store.py",
+            "cloud_agent_host.shared_protocol",
+        ),
+        ("tests/integration/storage/test_agent_job_store.py", "cloud_agent_host.shared_protocol"),
+        (
+            "tests/integration/storage/test_host_pool_store.py",
+            "cloud_agent_host.shared_protocol",
+        ),
+        ("tests/integration/test_agent_publisher.py", "cloud_agent_host.patch_gate"),
+        ("tests/unit/test_agent_patch_gate.py", "cloud_agent_host.patch_gate"),
+        ("tests/unit/test_candidate_check.py", "cloud_agent_host.shared_protocol"),
+        ("tests/unit/test_cross_artifact_contracts.py", "cloud_agent_host.shared_protocol"),
+        ("tests/unit/test_deploy_readiness.py", "cloud_agent_host.shared_protocol"),
+        ("tests/unit/test_execution_profiles.py", "cloud_agent_host.shared_protocol"),
+        ("tests/unit/test_source_archive.py", "cloud_agent_host.source_archive"),
+    }
+)
+
+
 def _parse(path: Path) -> ast.Module:
     """Parse one source file; ``TYPE_CHECKING`` blocks are ordinary AST nodes."""
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -241,3 +293,70 @@ def test_host_package_imports_no_control_plane_package() -> None:
     assert offenders == set(), "cloud_agent_host imports the control plane:\n" + "\n".join(
         sorted(offenders)
     )
+
+
+def _shim_imports(path: Path) -> set[str]:
+    """The host shims one file imports, in every form an import can take."""
+    shims: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Import):
+            shims.update(alias.name for alias in node.names if alias.name in HOST_SHIMS)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module in HOST_SHIMS:
+                shims.add(node.module)
+            elif node.module == HOST_PACKAGE:
+                # ``from cloud_agent_host import shared_protocol``
+                shims.update(
+                    f"{HOST_PACKAGE}.{alias.name}"
+                    for alias in node.names
+                    if f"{HOST_PACKAGE}.{alias.name}" in HOST_SHIMS
+                )
+    return shims
+
+
+def test_host_shim_importers_are_the_transition_allowlist() -> None:
+    """The host's re-exports of moved modules may only lose importers.
+
+    Each shim's docstring used to list its callers by hand, and those lists
+    went stale as new tests imported the old path -- the shims were gaining
+    importers instead of losing them, and ``runner.py`` imported one module
+    through both paths. Equality, as for the control plane's allowlist above:
+    a new importer fails, and so does an entry left behind by one that moved.
+    """
+    names = {shim.rsplit(".", 1)[1] for shim in HOST_SHIMS}
+    scanned: set[tuple[str, str]] = set()
+    for root in SHIM_SCAN_ROOTS:
+        for path in sorted((REPO_ROOT / root).rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            # Parsing every file is most of this test's time; a file that never
+            # spells a shim's name cannot import it in any form.
+            if HOST_PACKAGE not in text or not any(name in text for name in names):
+                continue
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            scanned.update((relative, shim) for shim in _shim_imports(path))
+
+    allowlist = set(SHIM_IMPORT_ALLOWLIST)
+    assert scanned == allowlist, (
+        "import the cloud_agent_shared module instead of the host shim:\n"
+        f"new shim imports: {sorted(scanned - allowlist)}\n"
+        f"stale allowlist entries to delete: {sorted(allowlist - scanned)}"
+    )
+    shimmed = {shim for _path, shim in allowlist}
+    assert shimmed == set(HOST_SHIMS), (
+        f"nothing imports {sorted(set(HOST_SHIMS) - shimmed)} any more: delete the module "
+        "and its entry in HOST_SHIMS"
+    )
+
+
+def test_the_shim_scanner_sees_every_import_form(tmp_path: Path) -> None:
+    """The negative case for the check above, one line per import form."""
+    importer = tmp_path / "importer.py"
+    importer.write_text(
+        "import cloud_agent_host.patch_gate\n"
+        "from cloud_agent_host import shared_protocol, sandbox\n"
+        "from cloud_agent_host.source_archive import build_source_archive\n"
+        "from cloud_agent_shared.shared_protocol import FORK_HELPER\n",
+        encoding="utf-8",
+    )
+
+    assert _shim_imports(importer) == set(HOST_SHIMS)

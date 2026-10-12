@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.shared_protocol import SHARED_MEMBER_ACCOUNTING_VERSION
+from cloud_agent_shared.shared_protocol import SHARED_MEMBER_ACCOUNTING_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Callable
