@@ -14,7 +14,8 @@ Two questions are kept apart on purpose:
 * **How much may pile up before we drop?** Both a count and a total payload
   size, because a queue bounded only by count can still hold hundreds of
   megabytes, and one bounded only by bytes can still hold an unbounded number
-  of tiny records.
+  of tiny records. This module states both bounds; the runner applies them,
+  in one place, to the deliveries it has in flight.
 
 Dropping is always reported by count. A measurement lost to a full queue is
 indistinguishable, later, from one that was never taken -- so the count is the
@@ -24,7 +25,7 @@ only thing that keeps the gap honest, and it is never silently a zero.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -135,61 +136,6 @@ def attempts_exhausted(attempts: int) -> bool:
     return attempts >= DELIVERY_ATTEMPTS_MAX
 
 
-@dataclass
-class DeliveryQueue:
-    """A bounded queue of finished measurements waiting to be sent.
-
-    Not a transport: it holds records and accounts for what it had to drop, so
-    the caller that owns the destination can drain it. Both bounds are enforced
-    on offer, and neither is allowed to block the producer -- a diagnostic that
-    can stall the thing it measures is worse than no diagnostic.
-    """
-
-    max_items: int = DELIVERY_QUEUE_MAX
-    max_bytes: int = DELIVERY_BYTES_MAX
-    _items: list[tuple[str, bytes]] = field(default_factory=list)
-    _bytes: int = 0
-    dropped_items: int = 0
-    dropped_bytes: int = 0
-
-    def offer(self, line: bytes) -> bool:
-        """Queue one already-serialized record. Returns whether it was kept."""
-        if len(line) > self.max_bytes:
-            # A single record larger than the whole budget would evict
-            # everything else and still not fit, so it is refused outright.
-            self.dropped_items += 1
-            self.dropped_bytes += len(line)
-            return False
-        if len(self._items) >= self.max_items or self._bytes + len(line) > self.max_bytes:
-            self.dropped_items += 1
-            self.dropped_bytes += len(line)
-            return False
-        self._items.append(("", line))
-        self._bytes += len(line)
-        return True
-
-    def take(self) -> tuple[str, bytes] | None:
-        """Remove and return the oldest record, or ``None`` when empty."""
-        if not self._items:
-            return None
-        _, line = self._items.pop(0)
-        self._bytes -= len(line)
-        return ("", line)
-
-    def __len__(self) -> int:
-        """Return how many records are waiting."""
-        return len(self._items)
-
-    @property
-    def pending_bytes(self) -> int:
-        """Return how many payload bytes are waiting."""
-        return self._bytes
-
-    def dropped(self) -> dict[str, int]:
-        """Return the drop counters, for the experiment's diagnostics."""
-        return {"items": self.dropped_items, "bytes": self.dropped_bytes}
-
-
 __all__ = [
     "DELIVERY_ATTEMPTS_MAX",
     "DELIVERY_BYTES_MAX",
@@ -199,7 +145,6 @@ __all__ = [
     "DELIVERY_TIMEOUT_S",
     "RETRYABLE_STATUS",
     "DeliveryOutcome",
-    "DeliveryQueue",
     "attempts_exhausted",
     "classify_exception",
     "classify_response",

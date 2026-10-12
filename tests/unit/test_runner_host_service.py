@@ -2245,6 +2245,39 @@ def test_delivery_byte_budget_drops_before_starting_a_thread(startup_measurement
     assert runner_mod._DELIVERY_PENDING_BYTES == 0
 
 
+def test_a_full_delivery_set_drops_before_starting_a_thread(startup_measurement, monkeypatch):
+    """Delivery that cannot keep up is dropped and counted, never queued without bound.
+
+    The count bound was pinned only on a second copy of these limits that
+    nothing ran; this is the one the runner applies.
+    """
+    import threading
+
+    starts: list[str] = []
+    monkeypatch.setattr(runner_mod, "DELIVERY_QUEUE_MAX", 1)
+    monkeypatch.setattr(
+        runner_mod,
+        "_deliver_in_background",
+        lambda **_kwargs: starts.append("started"),
+    )
+    # One earlier send still in flight fills the set.
+    monkeypatch.setitem(
+        runner_mod._IN_FLIGHT_DELIVERIES, "msm_earlier", threading.Thread(target=lambda: None)
+    )
+
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=0,
+    )
+
+    assert starts == []
+    assert runner_mod._DELIVERY_DROPPED_COUNT == 1
+    assert runner_mod._DELIVERY_PENDING_BYTES == 0
+    assert startup_measurement.measurement_id in runner_mod._DELIVERED_MEASUREMENT_IDS
+
+
 def test_delivery_client_startup_failure_releases_its_queue_bytes(startup_measurement, monkeypatch):
     """A client constructor failure cannot permanently consume the byte bound."""
 
