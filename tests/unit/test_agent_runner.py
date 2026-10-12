@@ -885,6 +885,62 @@ def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
 
 
+def test_a_stop_during_the_container_start_prepares_nothing_more(monkeypatch):
+    """A Stop seen once the container is up is honoured before the workspace work.
+
+    The heartbeat now keeps renewing after a Stop, so a turn that only looked
+    for it right before admission went through every remaining startup step
+    first, and the owner waited for all of them to see the cancel.
+    """
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+
+    def configure(_control, supervisor, _finish):
+        acquire = supervisor.acquire_shared.side_effect
+
+        def stopped_while_starting(*args, **kwargs):
+            heart.cancel_requested = True
+            return acquire(*args, **kwargs)
+
+        supervisor.acquire_shared.side_effect = stopped_while_starting
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure, heart=heart
+    )
+
+    assert result == 0
+    control.suspend_terminals.assert_not_called()
+    supervisor.ensure_shared_resident.assert_not_called()
+    control.admit_chat_turn.assert_not_called()
+    assert supervisor.abandon_shared.call_args.kwargs["lost"] is False
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    finish.assert_called_once()
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+
+
+def test_a_stop_during_the_resident_start_is_honoured_right_before_admission(monkeypatch):
+    """The last startup step can carry the Stop too; the prompt is still never admitted."""
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+
+    def configure(_control, supervisor, _finish):
+        start = supervisor.ensure_shared_resident.side_effect
+
+        def stopped_while_launching(*args, **kwargs):
+            heart.cancel_requested = True
+            return start(*args, **kwargs)
+
+        supervisor.ensure_shared_resident.side_effect = stopped_while_launching
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure, heart=heart
+    )
+
+    assert result == 0
+    supervisor.ensure_shared_resident.assert_called_once()
+    control.admit_chat_turn.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+
+
 @pytest.mark.parametrize(
     ("error", "expected_code"),
     [(httpx.ReadTimeout("completion notice unavailable"), 0), (LeaseLost("expired"), 3)],

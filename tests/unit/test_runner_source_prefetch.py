@@ -29,6 +29,7 @@ from cloud_agent_host.runner import WorktreeError
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.setup import SetupResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -74,6 +75,8 @@ def _run_turn(
     *,
     has_context: bool = False,
     before_acquire: Callable[[], None] | None = None,
+    setup_script: str | None = None,
+    heart: Any = None,
 ) -> SimpleNamespace:
     """Drive one shared turn with the clone scripted and everything else mocked."""
     monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
@@ -146,9 +149,9 @@ def _run_turn(
     finish = Mock()
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB),
+        job=replace(_JOB, setup_script=setup_script),
         control=control,
-        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
         gateway_base_url="http://gateway",
@@ -156,7 +159,9 @@ def _run_turn(
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},
     )
-    return SimpleNamespace(result=result, finish=finish, imported=imported, supervisor=supervisor)
+    return SimpleNamespace(
+        result=result, finish=finish, imported=imported, supervisor=supervisor, control=control
+    )
 
 
 def test_a_new_chat_clones_while_its_container_starts(monkeypatch):
@@ -286,3 +291,30 @@ def test_the_prefetch_clone_is_stopped_at_the_turns_import_limit(monkeypatch, re
 
     archived.assert_not_called()
     manager.import_archive.assert_not_called()
+
+
+def test_a_stop_during_setup_stops_it_and_cancels_before_the_baseline(monkeypatch):
+    """A setup script can run for many minutes; a Stop must not wait for it to end.
+
+    The heartbeat now keeps renewing after a Stop, so a first turn that looked
+    for it only right before admission ran the owner's whole setup script,
+    and captured its baseline, before releasing the chat.
+    """
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+    stopped: list[bool | None] = []
+
+    def setup(*, stop=None, **_kwargs: Any) -> SetupResult:
+        heart.cancel_requested = True  # the Stop arrives while the script runs
+        stopped.append(stop() if stop is not None else None)
+        return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
+
+    monkeypatch.setattr(runner_mod, "run_setup", setup)
+
+    turn = _run_turn(monkeypatch, Source(), setup_script="npm ci", heart=heart)
+
+    assert stopped == [True], "the setup was not told to stop"
+    assert turn.result == 0
+    assert turn.finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+    turn.supervisor.capture_initial_archive.assert_not_called()
+    turn.control.admit_chat_turn.assert_not_called()
+    assert turn.control.abandon_chat_sandbox.call_args.kwargs["lost"] is False

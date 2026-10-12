@@ -2610,6 +2610,25 @@ def _run_shared_live_attempt(
         except Exception as exc:
             _log_control_failure("finish", job.job_id, exc)
 
+    def stopped_before_admission(base_sha: str | None) -> bool:
+        # Nothing has reached the CLI yet, so a Stop costs nothing here: the
+        # activation is released with the conversation intact and the job is
+        # finished cancelled. Admitting anyway would spend the prompt only to
+        # interrupt it, and an interrupted turn leaves its native context
+        # lost. The heartbeat may carry the Stop, or a lost lease, at any time
+        # while the turn starts, so this is asked after the container starts,
+        # around the setup script, and once more right before admission.
+        nonlocal failure_detail
+        if heart.lease_lost:
+            raise LeaseLost("lease lost before prompt admission")
+        if not heart.cancel_requested:
+            return False
+        failure_detail = "cancelled by owner before prompt admission"
+        operation_profiling.finish(measurement, outcome="cancelled", failure_stage=stage)
+        abandon_before_finish(lost=False, detail=failure_detail)
+        finish_decided("cancelled", "cancelled by owner", base_sha)
+        return True
+
     try:
         if not has_context:
             # Clone into a host-local temporary archive while the activation
@@ -2695,6 +2714,8 @@ def _run_shared_live_attempt(
                 },
             )
         )
+        if stopped_before_admission(None):
+            return 0
         stage = _stage(measurement, "terminal_suspend")
         control.suspend_terminals("workspace_preparing")
         terminals_suspended = True
@@ -2751,10 +2772,13 @@ def _run_shared_live_attempt(
                 reused_workspace = False
                 if job.setup_script:
                     stage = _stage(measurement, "setup")
+                    if stopped_before_admission(base_sha):
+                        return 0
                     setup = run_setup(
                         script=job.setup_script,
                         workdir=CHAT_WORKDIR,
                         backend=retained,
+                        stop=lambda: heart.cancel_requested or heart.lease_lost,
                     )
                     control.append_event(
                         NormalizedEvent(
@@ -2762,6 +2786,8 @@ def _run_shared_live_attempt(
                             {"phase": "setup", "cached": False, "ran": setup.ran},
                         )
                     )
+                    if stopped_before_admission(base_sha):
+                        return 0
                     if setup.exit_code != 0:
                         failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
                         abandon_before_finish(lost=False, detail=failure_detail)
@@ -3006,18 +3032,8 @@ def _run_shared_live_attempt(
             control.report_context_status("new")
 
         stage = _stage(measurement, "prompt_admission")
-        # The last point at which a Stop costs nothing. The heartbeat may have
-        # carried it at any time during the startup above; admitting anyway
-        # would spend the prompt only to interrupt it, and an interrupted turn
-        # leaves its native context lost. Nothing has reached the CLI yet, so
-        # the activation is released with the conversation intact.
-        if heart.lease_lost:
-            raise LeaseLost("lease lost before prompt admission")
-        if heart.cancel_requested:
-            failure_detail = "cancelled by owner before prompt admission"
-            operation_profiling.finish(measurement, outcome="cancelled", failure_stage=stage)
-            abandon_before_finish(lost=False, detail=failure_detail)
-            finish_decided("cancelled", "cancelled by owner", base_sha)
+        # The last point at which a Stop costs nothing.
+        if stopped_before_admission(base_sha):
             return 0
         _retry_lifecycle_receipt(
             "prompt_admission_retry",
