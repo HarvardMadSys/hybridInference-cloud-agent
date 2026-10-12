@@ -435,6 +435,54 @@ async def test_a_publication_record_takes_its_turns_before_their_group(pool, sto
     assert published is not None and published["published_pr_url"] == pr_url
 
 
+async def test_an_idle_only_message_refuses_while_a_publication_holds_its_newest_turn(
+    pool, store: Storage
+):
+    """An idle-only message does not wait under the group for a turn a publication holds.
+
+    A publication records its included turns before their group, and the
+    idle-only submit locks the group before the newest turn. That is safe only
+    because the submit locks the turn once the group's newest snapshot reads
+    published, which a publication still in flight has not committed.
+    """
+    job, sandbox, publication = await _claimed_for_publication(store)
+    async with pool.acquire() as publisher, publisher.transaction():
+        # ``record_snapshot_publish`` up to its group: the snapshot, then its turns.
+        await publisher.execute(
+            "UPDATE agent_sandbox_snapshots SET state = 'published', published_pr_url = $2, "
+            "published_commit_sha = $3, published_at = NOW() WHERE id = $1",
+            publication["snapshot_id"],
+            "https://github.com/example-org/example-repo/pull/3",
+            "d" * 40,
+        )
+        await publisher.fetch(
+            "SELECT id FROM agent_jobs WHERE id IN ("
+            "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1) "
+            "ORDER BY id FOR NO KEY UPDATE",
+            publication["snapshot_id"],
+        )
+        refused = await asyncio.wait_for(
+            store.pending_messages.submit_message(
+                thread_id=job["thread_id"],
+                user_id=job["user_id"],
+                prompt="Watch the PR and merge",
+                skill_ids=None,
+                attachment_ids=None,
+                model=None,
+                reasoning_effort=None,
+                require_idle=True,
+                expected_latest_job_id=job["id"],
+            ),
+            timeout=10,
+        )
+        assert refused == {"error": "conversation_changed"}
+        # The submit gave the group back, so the publication goes on.
+        await publisher.execute(
+            "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
+            sandbox["sandbox_id"],
+        )
+
+
 async def _close_a_cycle(rival, statement: str, *args) -> None:
     """Wait for a row the waiting writer holds, which makes it a deadlock's victim.
 
