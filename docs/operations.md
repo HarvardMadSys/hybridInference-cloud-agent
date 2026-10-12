@@ -614,9 +614,12 @@ not define a deployment-wide registry or server catalogue.
 MCP OAuth uses `AGENT_MCP_PUBLIC_BASE_URL` for the public API callback and
 `AGENT_WEB_BASE_URL` for the browser's return to `/integrations`. For a shared
 hostname deployment these can be `https://example.com/agents/api` and
-`https://example.com/agents` respectively. The page reports the authorization
-result, verifies a stored credential before showing success, and directs the
-user to Test to discover the connection's tools.
+`https://example.com/agents` respectively. The callback redeems the code only
+when the browser presents the session of the account that started the
+authorization; a link opened in another browser or by another account is
+refused, so the callback host must receive the session cookie. The page reports
+the authorization result, verifies a stored credential before showing success,
+and directs the user to Test to discover the connection's tools.
 
 The relay, connection API, discovery path and all five coding-agent adapters
 are implemented and tested for remote MCP. The remaining stdio and optional

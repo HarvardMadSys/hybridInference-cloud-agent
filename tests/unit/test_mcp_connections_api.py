@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from tests.support.storage import AllCapabilities, OneFake
 
+from cloud_agent import identity
 from cloud_agent.api import mcp_connections
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
@@ -37,12 +38,20 @@ from cloud_agent.mcp.registry import mcp_cipher
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _ENCRYPTION_KEY = "mcp-api-test-encryption-key"
+_SESSION_SECRET = "mcp-api-test-session-secret-long-enough-for-hs256"
 
 
 @pytest.fixture(autouse=True)
 def _key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give the deployment a key, so a credential can be stored at all."""
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _ENCRYPTION_KEY)
+
+
+def _session(monkeypatch: pytest.MonkeyPatch, user_id: str = _OWNER) -> str:
+    """The session cookie a browser signed in as ``user_id`` carries."""
+    monkeypatch.setenv(identity.ENV_SESSION_SECRET, _SESSION_SECRET)
+    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    return identity.mint_session(user_id=user_id)
 
 
 class FakeStore(AllCapabilities):
@@ -914,6 +923,9 @@ class TestAuthorization:
         monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
         expected = f"{expected_base}/v1/agent/mcp/oauth/callback/{connection_id}"
         with _client(store) as client:
+            # The browser that started the flow is signed in as its owner, and
+            # it is the one the authorization server sends back.
+            client.cookies.set(identity.SESSION_COOKIE, _session(monkeypatch))
             response = client.post(
                 f"/v1/agent/mcp/connections/{connection_id}/authorize",
                 headers={"Host": "untrusted.example", "X-Forwarded-Host": "untrusted.example"},
@@ -1030,6 +1042,7 @@ class TestTheDynamicClientIdentity:
         from cloud_agent.mcp.registry import oauth_cipher
 
         return {
+            "user_id": _OWNER,
             "connection_id": str(connection_id),
             "config_revision": 1,
             "authorization_epoch": 1,
@@ -1050,14 +1063,25 @@ class TestTheDynamicClientIdentity:
         }
 
     async def _complete(
-        self, store: FakeStore, connection_id: int, monkeypatch: pytest.MonkeyPatch
+        self,
+        store: FakeStore,
+        connection_id: int,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        cookie: str | None = "owner",
     ) -> str:
-        """Drive the real callback with a stub token exchange, and return its target."""
+        """Drive the real callback with a stub token exchange, and return its target.
+
+        ``cookie`` is what the arriving browser holds: by default the session
+        of the owner who started the flow, which is the ordinary case.
+        """
         from cloud_agent.mcp import oauth
 
         store.oauth_state_hash = oauth.state_hash(self._STATE)
+        self.exchanges: list[Any] = []
 
         async def token_exchange(request: Any, *, policy: Any) -> dict[str, Any]:
+            self.exchanges.append(request)
             return {
                 "access_token": "dynamic-access",
                 "refresh_token": "dynamic-refresh",
@@ -1065,9 +1089,12 @@ class TestTheDynamicClientIdentity:
             }
 
         monkeypatch.setattr(mcp_connections, "_post_form", token_exchange)
+        if cookie == "owner":
+            cookie = _session(monkeypatch)
+        headers = [(b"cookie", f"{identity.SESSION_COOKIE}={cookie}".encode())] if cookie else []
         response = await mcp_connections.oauth_callback(
             str(connection_id),
-            Request({"type": "http"}),
+            Request({"type": "http", "headers": headers}),
             state=self._STATE,
             code="the-code",
             error="",
@@ -1167,6 +1194,47 @@ class TestTheDynamicClientIdentity:
         monkeypatch.setattr(store, "set_mcp_credential", write_then_test)
         assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
         assert store.connections[connection_id]["status"] == "active"
+
+    @pytest.mark.parametrize("browser", ["another account", "signed out", "unverifiable"])
+    async def test_a_state_completed_in_another_browser_redeems_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, browser: str
+    ) -> None:
+        """The state travels in a link, and a link can be sent to somebody else.
+
+        The authorization server redirects whichever browser approved the URL.
+        Before the callback checked the session, the owner of a flow could send
+        its link to another person, and their consent stored *their* token on
+        the owner's connection -- whose jobs then acted as them upstream.
+        """
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={},
+            access_token_ciphertext=None,
+            oauth_generation=1,
+        )
+        store.oauth_flow = self._flow(
+            connection_id=connection_id, client_id="client", secret_ciphertext=None
+        )
+        cookie = {
+            "another account": _session(monkeypatch, _OTHER),
+            "signed out": None,
+            "unverifiable": "not-a-session",
+        }[browser]
+
+        target = await self._complete(store, connection_id, monkeypatch, cookie=cookie)
+
+        query = parse_qs(urlsplit(target).query)
+        assert query["mcp_authorized"] == ["0"]
+        assert query["mcp_connection"] == [str(connection_id)]
+        assert self.exchanges == []
+        assert store.credential_writes == []
+        assert store.connections[connection_id]["access_token_ciphertext"] is None
+        # Spent, not left for a second try: the state has been disclosed.
+        assert store.oauth_flow is None
+        assert "mcp_authorized=0" in await self._complete(store, connection_id, monkeypatch)
+        assert self.exchanges == []
 
 
 class TestImport:

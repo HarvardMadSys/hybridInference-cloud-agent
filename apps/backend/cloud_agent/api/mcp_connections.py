@@ -34,6 +34,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent import identity
+
 # The owner guard lives beside the other agent routes. Imported rather than
 # reimplemented, and deliberately one-directional: this module depends on
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
@@ -1352,10 +1354,15 @@ async def oauth_callback(
 ) -> Response:
     """Complete a browser authorization, fenced to the flow that started it.
 
-    Unauthenticated by design: the browser arriving here carries a session
-    cookie it may or may not still have, and the *state* is the credential that
-    identifies the flow. The user is taken from the flow row, which was written
-    by an authenticated request, rather than from whatever this request claims.
+    There is no owner dependency here, because every refusal has to be a
+    redirect the app can display rather than a 401 a browser shows raw. The
+    check is made inline instead: the browser must present the session of the
+    account that started the flow. The *state* alone is not enough. It travels
+    in the authorization URL, and the authorization server redirects whichever
+    browser approves that URL -- so a user who sends their link to somebody
+    else would otherwise receive that person's token on their own connection.
+    The session cookie is ``SameSite=Lax``, which a top-level redirect back
+    from the authorization server still carries.
     """
     job_store = _require_store(store)
     if error:
@@ -1373,8 +1380,30 @@ async def oauth_callback(
         return _callback_redirect(
             provider, ok=False, message="this authorization is not for that connection"
         )
+    user_id = _browser_user(request)
+    if user_id is None or user_id != str(flow.get("user_id") or ""):
+        # Checked before the code is redeemed, and the flow stays consumed: a
+        # state that reached the wrong browser has been disclosed. Which of the
+        # two it was -- no session, or another account's -- is not said.
+        logger.warning(
+            "agent_mcp_oauth_browser_mismatch",
+            extra={
+                "event": "agent_mcp_oauth_browser_mismatch",
+                "connection_id": flow["connection_id"],
+            },
+        )
+        return _callback_redirect(
+            provider,
+            ok=False,
+            message=(
+                "finish signing in from the browser and account that started it; "
+                "start again from this page"
+            ),
+        )
 
-    row = await job_store.mcp.get_mcp_connection(connection_id=int(flow["connection_id"]))
+    row = await job_store.mcp.get_mcp_connection(
+        connection_id=int(flow["connection_id"]), user_id=user_id
+    )
     if row is None or row.get("deleted_at") is not None:
         return _callback_redirect(provider, ok=False, message="that connection was removed")
     for key, message in (
@@ -1582,6 +1611,24 @@ def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
         result["mcp_message"] = message
     target = f"{base}/integrations?{urlencode(result)}"
     return RedirectResponse(url=target, status_code=302)
+
+
+def _browser_user(request: Request) -> str | None:
+    """The account this browser's session cookie names, or ``None``.
+
+    The cookie only, never a bearer: what is being checked is the browser the
+    authorization server redirected, and a top-level navigation carries no
+    ``Authorization`` header. A session that does not verify -- expired,
+    forged, minted for another Gateway -- names nobody.
+    """
+    token = request.cookies.get(identity.SESSION_COOKIE)
+    if not token:
+        return None
+    try:
+        claims = identity.verify_session(token)
+    except identity.IdentityError:
+        return None
+    return str(claims.get("sub") or "") or None
 
 
 # --------------------------------------------------------------------------
