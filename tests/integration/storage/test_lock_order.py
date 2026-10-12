@@ -678,6 +678,61 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
     assert saved is not None and saved["title"] == "Flaky test fix"
 
 
+async def test_abandoning_an_activation_takes_its_attempt_before_its_membership(
+    pool, store: Storage
+):
+    """A lost activation's attempt is locked first, as the reaper locks it.
+
+    Abandoning a lost activation wrote its membership and group and only then
+    marked the attempt's context lost. The reaper takes an expired attempt and
+    then its membership, as reservation and residency take a live one, so an
+    expired runner abandoning its activation while the reaper reached it
+    deadlocked with the reaper.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    abandon = None
+    async with pool.acquire() as reaper:
+        try:
+            async with reaper.transaction():
+                # The reaper's first lock: the expired attempt, with its job and
+                # conversation, in ``_reap_attempt``'s one statement.
+                await reaper.execute(
+                    "SELECT a.id FROM agent_attempts a "
+                    "JOIN agent_jobs j ON j.id = a.job_id "
+                    "JOIN agent_threads t ON t.id = j.thread_id "
+                    "WHERE a.id = $1 FOR UPDATE OF a, j, t",
+                    claim["attempt_id"],
+                )
+                abandon = asyncio.create_task(
+                    store.sandbox.abandon_thread_sandbox(
+                        thread_id=job["thread_id"],
+                        attempt_id=claim["attempt_id"],
+                        lease_generation=claim["lease_generation"],
+                        sandbox_generation=sandbox["generation"],
+                        activation_generation=sandbox["activation_generation"],
+                        lost=True,
+                        detail="the runner lost its Agent CLI mid-turn",
+                        idle_timeout_seconds=1800,
+                    )
+                )
+                await _blocked_by(pool, await reaper.fetchval("SELECT pg_backend_pid()"))
+                # Its next two, which the waiting abandon must not be holding.
+                await reaper.execute(
+                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE NOWAIT",
+                    job["thread_id"],
+                )
+                await reaper.execute(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
+                    sandbox["sandbox_id"],
+                )
+            abandoned = await asyncio.wait_for(abandon, timeout=10)
+        finally:
+            await _settle(abandon)
+    assert abandoned is not None and abandoned["context_status"] == "lost"
+
+
 @pytest.mark.parametrize("sibling", ["claim", "finish"])
 async def test_the_attempt_reaper_gives_a_slot_back_after_writing_the_group(
     pool, store: Storage, sibling: str

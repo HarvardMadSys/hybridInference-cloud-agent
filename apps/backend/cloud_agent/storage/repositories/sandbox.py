@@ -1388,6 +1388,13 @@ class PostgresSandboxRepository:
     ) -> dict[str, Any] | None:
         """Release a failed shared-member activation without replaying it."""
         async with self._pool.acquire() as conn, conn.transaction():
+            if lost:
+                # Marking the attempt's context lost writes the attempt, so it
+                # is taken before its membership and group, as the reaper,
+                # reservation and residency take it.
+                await conn.execute(
+                    "SELECT id FROM agent_attempts WHERE id = $1 FOR NO KEY UPDATE", attempt_id
+                )
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m
