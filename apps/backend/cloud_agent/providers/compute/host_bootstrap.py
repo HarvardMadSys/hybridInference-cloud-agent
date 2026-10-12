@@ -527,7 +527,7 @@ with open(lock_path, 'a') as lock:
         if credential.is_symlink():
             blocked('host_deployment_failed')
         credential.unlink(missing_ok=True)
-    # This invokes the existing Kata, relay, sandbox_manager, observer, network-guard
+    # This invokes the existing Kata, relay, sandbox manager, observer, network-guard
     # and retained-state checks, then writes the actual shared-ready marker.
     run('host_deployment_failed', ['bash', 'deploy/host/sandbox_host.sh', 'up'])
     run('host_readiness_failed', ['bash', 'deploy/host/sandbox_host.sh', 'check'])
@@ -974,9 +974,14 @@ class SshHostBootstrap:
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> None:
         """Stop the Host stack, its sandboxes and the container daemons, keeping all state."""
-        params = self._params(profile, intent)
+        params = {
+            **self._params(profile, intent),
+            "sandbox_manager_drain_seconds": _SANDBOX_MANAGER_DRAIN_SECONDS,
+        }
         script = "sudo -n python3 -c " + shlex.quote(_STOP) + " " + shlex.quote(json.dumps(params))
-        result = self._json(await self._transport.run(self._connection(node), script, timeout=900))
+        result = self._json(
+            await self._transport.run(self._connection(node), script, timeout=_STOP_TIMEOUT_SECONDS)
+        )
         if result.get("stopped") is not True:
             raise ProviderError(
                 str(result.get("reason") or "host_stop_failed"),
@@ -1094,6 +1099,11 @@ class SshHostBootstrap:
 _TRANSFER_STREAMS = 6
 _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
 
+# The sandbox manager's drain must end early enough inside the stop's SSH deadline to
+# leave time for the runner, the remaining containers and the daemons.
+_STOP_TIMEOUT_SECONDS = 900
+_SANDBOX_MANAGER_DRAIN_SECONDS = 600
+
 _STOP = r"""
 import json, subprocess, sys
 from pathlib import Path
@@ -1106,12 +1116,22 @@ quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
 def running(*filters):
     result = subprocess.run(['docker', 'ps', '-q', *filters], capture_output=True, text=True)
     return result.stdout.split() if result.returncode == 0 else []
+def service(name):
+    return running('--filter', 'label=com.docker.compose.project=' + params['project'],
+                   '--filter', 'label=com.docker.compose.service=' + name)
 if subprocess.run(['systemctl', 'is-active', '--quiet', 'docker'], **quiet).returncode == 0:
     # The runner first: nothing may claim or resume while the state is moving.
-    runner = running('--filter', 'label=com.docker.compose.project=' + params['project'],
-                     '--filter', 'label=com.docker.compose.service=runner')
+    runner = service('runner')
     if runner:
         subprocess.run(['docker', 'stop', '-t', '60', *runner], **quiet)
+    # Then the sandbox manager, alone: its shutdown stops each running sandbox cleanly.
+    # While lifecycle archives are enabled, the next node's sandbox manager quarantines
+    # a sandbox that Docker stopped behind the sandbox manager's back.
+    # Retained source nodes may still run the service under its previous name.
+    sandbox_manager = service('sandbox-manager') + service('workspace-broker')
+    if sandbox_manager:
+        drain = str(params['sandbox_manager_drain_seconds'])
+        subprocess.run(['docker', 'stop', '-t', drain, *sandbox_manager], **quiet)
     # Explicitly stopped containers stay stopped when a daemon starts again,
     # including on the node that receives this state. The CLI stops them in
     # parallel, each with its own configured grace period.
