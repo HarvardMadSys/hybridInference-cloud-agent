@@ -1040,6 +1040,7 @@ def _run_git_within(
     cwd: str,
     max_bytes: int,
     env_extra: dict[str, str] | None = None,
+    stop: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one git command that writes into ``cwd``, stopping it past ``max_bytes``.
 
@@ -1051,10 +1052,15 @@ def _run_git_within(
     is killed once it is over; a step that finished between two looks is
     refused as soon as it ends. Anything refused here the archive would have
     refused too: nothing git writes here is removed by a later step.
+
+    Its own process group keeps a terminal's Ctrl-C from reaching git, so the
+    caller's ``stop`` is what ends a clone nobody will use any more: once it is
+    set, git is killed the same way.
     """
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
     ended = threading.Event()
     over = threading.Event()
+    abandoned = threading.Event()
     # A process group of its own: a fetch writes through children it starts,
     # the transport helper and index-pack, and stopping git must stop them too.
     with subprocess.Popen(
@@ -1076,6 +1082,10 @@ def _run_git_within(
         def watch() -> None:
             while not ended.is_set():
                 started = time.monotonic()
+                if stop is not None and stop.is_set():
+                    abandoned.set()
+                    kill_group()
+                    return
                 if _checkout_bytes(cwd) > max_bytes:
                     over.set()
                     kill_group()
@@ -1094,6 +1104,8 @@ def _run_git_within(
         finally:
             ended.set()
             watcher.join()
+    if abandoned.is_set():
+        raise WorktreeError("the clone was abandoned before it finished")
     if over.is_set() or _checkout_bytes(cwd) > max_bytes:
         raise WorktreeError(
             f"source checkout exceeds this host's {max_bytes / (1 << 20):g} MiB retained "
@@ -1172,6 +1184,7 @@ def prepare_worktree(
     remote_base: str = "https://github.com",
     depth: int = 1,
     max_bytes: int | None = None,
+    stop: threading.Event | None = None,
 ) -> str:
     """Materialize the job's repository in ``workdir`` and return its commit.
 
@@ -1187,7 +1200,7 @@ def prepare_worktree(
 
     ``max_bytes`` is the import limit the checkout is about to be held to. The
     fetch and the checkout are stopped once ``workdir`` holds more than that,
-    rather than being written out whole first.
+    rather than being written out whole first, or once ``stop`` is set.
     """
     if depth < 1:
         raise ValueError("fetch depth must be at least 1")
@@ -1209,7 +1222,9 @@ def prepare_worktree(
     ) -> subprocess.CompletedProcess[str]:
         if max_bytes is None:
             return _run_git(args, cwd=workdir, env_extra=env_extra)
-        return _run_git_within(args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra)
+        return _run_git_within(
+            args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra, stop=stop
+        )
 
     init = _run_git(["init", "--quiet", workdir])
     if init.returncode != 0:
@@ -1882,6 +1897,7 @@ class _SourcePrefetch:
 
     The thread is not a daemon: a turn that ends while the clone is still
     running waits for it at exit, so its temporary directory is always removed.
+    Discarding stops a clone still running, so that wait is short.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1891,6 +1907,7 @@ class _SourcePrefetch:
         self._max_bytes = source_import_max_bytes() if max_bytes is None else max_bytes
         self._lock = threading.Lock()
         self._done = threading.Event()
+        self._stop = threading.Event()
         self._discarded = False
         self._base_sha = ""
         self._archive: Any = None
@@ -1909,6 +1926,7 @@ class _SourcePrefetch:
                     clone_token=self._job.clone_token,
                     remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
                     max_bytes=self._max_bytes,
+                    stop=self._stop,
                 )
                 checkout_output_branch(source, self._job.thread_id)
                 # Unnamed and outside the checkout: the archive is spooled to
@@ -1963,7 +1981,8 @@ class _SourcePrefetch:
         return self._base_sha
 
     def discard(self) -> None:
-        """Release the archive now, or as soon as a clone still running finishes."""
+        """Release the archive now, and stop a clone that is still running."""
+        self._stop.set()
         with self._lock:
             self._discarded = True
             archive, self._archive = self._archive, None

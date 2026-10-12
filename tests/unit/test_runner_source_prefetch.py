@@ -318,3 +318,25 @@ def test_a_stop_during_setup_stops_it_and_cancels_before_the_baseline(monkeypatc
     turn.supervisor.capture_initial_archive.assert_not_called()
     turn.control.admit_chat_turn.assert_not_called()
     assert turn.control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+
+
+def test_discarding_stops_a_clone_that_is_still_running(monkeypatch):
+    """A turn that gives up does not wait at exit for a clone it will never import."""
+    started = threading.Event()
+    stopped_in_time: list[bool] = []
+
+    def clone(*, stop: threading.Event | None = None, **_kwargs: Any) -> str:
+        started.set()
+        stopped_in_time.append(stop is not None and stop.wait(5))
+        raise WorktreeError("the clone was abandoned before it finished")
+
+    monkeypatch.setattr(runner_mod, "prepare_worktree", clone)
+    prefetch = runner_mod._prefetch_retained_source(job=_JOB, uid=1000, gid=1000, max_bytes=1)
+    assert started.wait(5)
+
+    prefetch.discard()
+    for thread in _prefetch_threads():
+        thread.join(10)
+
+    assert stopped_in_time == [True]
+    assert _prefetch_threads() == []
