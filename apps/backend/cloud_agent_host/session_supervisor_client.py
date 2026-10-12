@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import threading
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -118,6 +120,54 @@ class SessionSupervisorClient:
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token}
         self._client = httpx.Client(timeout=timeout, headers=self._headers)
+
+    def prepare_environment(
+        self,
+        thread_id: str,
+        environment: Any,
+        *,
+        activation_owner: str | None = None,
+        cancelled: Any = None,
+    ) -> dict[str, Any]:
+        """Verify broker capability and prepare the exact bound workspace."""
+        health = self._client.get(f"{self._base_url}/health")
+        health.raise_for_status()
+        if "environment-v1" not in health.json().get("capabilities", []):
+            raise SessionSupervisorError(
+                503, "Workspace broker does not support environment configuration"
+            )
+        stop = threading.Event()
+
+        def monitor() -> None:
+            while not stop.wait(0.5):
+                if cancelled is not None and cancelled():
+                    with contextlib.suppress(Exception):
+                        self._client.post(
+                            f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/environment/cancel",
+                            params={"activation_owner": activation_owner},
+                            timeout=10,
+                        )
+                    return
+
+        watcher = threading.Thread(target=monitor, daemon=True)
+        watcher.start()
+        try:
+            response = self._client.post(
+                f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/environment/prepare",
+                json={
+                    "environment": environment.model_dump(mode="json"),
+                    "activation_owner": activation_owner,
+                },
+                timeout=1050,
+            )
+        finally:
+            stop.set()
+            watcher.join(timeout=11)
+        if response.is_error:
+            raise SessionSupervisorError(
+                response.status_code, _error_detail(response, "Environment preparation failed")
+            )
+        return response.json()
 
     def close(self) -> None:
         """Close the reusable private HTTP connection pool."""
@@ -309,7 +359,16 @@ class SessionSupervisorClient:
             "POST",
             thread_id,
             "resident",
-            payload={"token": token, "launch": asdict(launch), "profiling": profiling},
+            payload={
+                "token": token,
+                "launch": {
+                    **asdict(launch),
+                    "environment": launch.environment.model_dump(mode="json")
+                    if launch.environment
+                    else None,
+                },
+                "profiling": profiling,
+            },
             # Native package installation runs before the resident is ready.
             timeout=960.0 if launch.plugins else None,
         )

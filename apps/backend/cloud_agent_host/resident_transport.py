@@ -46,6 +46,8 @@ from cloud_agent_shared.plugins import validate_sandbox_plugins
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from cloud_agent_shared.environment import BoundEnvironment
+
 #: The dialect a resident transport is speaking; the transport only reads the
 #: session it was handed, so the parameter stays covariant and a caller that
 #: knows a narrower runtime can still hand it one.
@@ -78,9 +80,9 @@ _PRIVATE_MEMBER_HOME_PROLOGUE = (
     'collection=${target%/*}; (umask 0007; mkdir -p -- "$collection"); '
     'umask 0077; mkdir -p -- "$target"; '
     'if test -L "$target" || test ! -d "$target" '
-    '|| test "$(stat -c %u -- "$target")" != "$(id -u)"; then '
+    '|| test "$(stat -c %u -- "$target" 2>/dev/null || stat -f %u "$target")" != "$(id -u)"; then '
     'echo "member provider home is not owned by this member" >&2; exit 1; fi; '
-    'chmod u=rwx,go=,g-s -- "$target"; '
+    'chmod u=rwx,go=,g-s "$target"; '
 )
 
 # Host-owned exactly-once receipts must not live inside a provider home. Some
@@ -113,6 +115,7 @@ class ResidentLaunch:
     # this member's environment, never in shared workspace or image config.
     github_token: str | None = field(default=None, repr=False)
     github_repo: str = ""
+    environment: BoundEnvironment | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
@@ -263,6 +266,7 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             and same_mcp
             and self.launch.github_token == launch.github_token
             and self.launch.github_repo == launch.github_repo
+            and self.launch.environment == launch.environment
             and self.launch.slot_id == launch.slot_id
         )
 
@@ -652,6 +656,8 @@ class ResidentTransportFactory:
         activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
+        if launch.environment is not None:
+            base_env.update(launch.environment.values("runtime"))
         base_env.update(
             {
                 "HOME": home,
@@ -1114,9 +1120,9 @@ print(json.dumps(sorted(children), separators=(",", ":")))
         payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         script = (
             'set -eu; directory="$1"; target="$2"; '
-            'umask 077; mkdir -p -- "$directory"; chmod 0700 -- "$directory"; '
+            'umask 077; mkdir -p -- "$directory"; chmod 0700 "$directory"; '
             'tmp="$target.tmp.$$"; trap \'rm -f -- "$tmp"\' EXIT; '
-            'cat > "$tmp"; chmod 0600 -- "$tmp"; mv -f -- "$tmp" "$target"; '
+            'cat > "$tmp"; chmod 0600 "$tmp"; mv -f -- "$tmp" "$target"; '
             "trap - EXIT"
         )
         result = self._manager.exec_capture(

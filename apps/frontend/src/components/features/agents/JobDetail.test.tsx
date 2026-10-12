@@ -1588,9 +1588,9 @@ describe('JobDetail', () => {
       within(within(workspace).getByRole('tablist', { name: 'Workspace views' }))
         .getAllByRole('tab')
         .map((tab) => tab.textContent?.replace(/\d+$/, '').trim());
-    expect(names()).toEqual(['Git', 'Terminal', 'Files']);
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment']);
     addSideChat();
-    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Side Chat']);
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment', 'Side Chat']);
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
     fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
       key: 'Escape',
@@ -2111,6 +2111,8 @@ describe('JobDetail', () => {
     fireEvent.click(trigger);
     expect(screen.queryByRole('menuitem', { name: 'Run details' })).not.toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Rename' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'Edit saved configuration' })).toHaveFocus();
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(screen.getByRole('menuitem', { name: 'Pin' })).toHaveFocus();
     expect(screen.getByRole('menuitem', { name: 'Fork' })).toBeDisabled();

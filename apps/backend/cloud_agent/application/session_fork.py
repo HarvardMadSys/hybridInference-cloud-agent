@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         ResidencyRepository,
         SessionForkRepository,
     )
+    from cloud_agent.ports.environments import EnvironmentRepository
 
 
 class _ForkMaterializationStorage(Protocol):
@@ -54,6 +55,7 @@ class _ForkMaterializationStorage(Protocol):
     host_pool: HostPoolRepository
     residency: ResidencyRepository
     session_fork: SessionForkRepository
+    environments: EnvironmentRepository
 
 
 # Keep a short recovery margin past the host request's deadline so a second API
@@ -153,6 +155,12 @@ async def materialize_session_fork(
         "mcp_base_url": "",
         "mcp_credential": "",
     }
+    if source_job.get("environment_binding_id"):
+        environment = await job_store.environments.get_environment_binding(
+            source_job["user_id"], source_job["environment_binding_id"]
+        )
+        launch_common["environment"] = environment.model_dump(mode="json")
+        await broker.prepare_environment(source_thread_id, environment)
     coordinator_token = secrets.token_urlsafe(32)
     claimed = await job_store.session_fork.claim_session_fork_materialization(
         operation_id=operation_id,

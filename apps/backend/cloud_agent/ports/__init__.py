@@ -16,6 +16,7 @@ from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
+from cloud_agent.ports.environments import EnvironmentRepository
 from cloud_agent.ports.execution_queries import ExecutionQueries
 from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
@@ -51,6 +52,7 @@ __all__ = [
     "ConversationCommands",
     "ConversationQueries",
     "CredentialQueries",
+    "EnvironmentRepository",
     "ExecutionQueries",
     "GoalRepository",
     "GoalWakeupRepository",

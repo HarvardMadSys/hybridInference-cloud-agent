@@ -78,7 +78,9 @@ if TYPE_CHECKING:
     from cloud_agent.source_control_runtime import GitHubAppSource
 
 
-router = APIRouter(prefix="/v1/agent")
+from cloud_agent.api.environments import CredentialSafeRoute
+
+router = APIRouter(prefix="/v1/agent", route_class=CredentialSafeRoute)
 
 #: The moved handlers keep logging under the aggregator's logger name: the
 #: deployment's log pipeline selects on ``cloud_agent.api.routes``, and a

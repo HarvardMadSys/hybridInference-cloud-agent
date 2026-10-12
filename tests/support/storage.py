@@ -32,6 +32,14 @@ CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__ini
 class AllCapabilities:
     """Mixin: answer every capability name with the fake itself."""
 
+    async def get_job_environment(self, job_id: str):
+        """Legacy fixtures have no configured environment unless overridden."""
+        return None
+
+    async def maintain_environments(self) -> None:
+        """Legacy fixtures have no archived environments or test leases to reap."""
+        return None
+
     def __getattr__(self, name: str) -> Any:
         """Resolve a capability name to this object; anything else is an error."""
         if name in CAPABILITIES:

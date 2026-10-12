@@ -39,6 +39,11 @@ class PostgresSnapshotRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
+    async def snapshot_database_time(self) -> datetime:
+        """Use the database clock for deadlines written by database transactions."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval("SELECT clock_timestamp()")
+
     async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture.
 

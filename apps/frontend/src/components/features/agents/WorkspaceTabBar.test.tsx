@@ -43,15 +43,15 @@ it('keeps one tab stop and moves selection with arrows, Home, and End', () => {
   expect(tabs[0]).toHaveAttribute('aria-controls', screen.getByRole('tabpanel').id);
 
   fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
-  expect(tabs[2]).toHaveFocus();
-  expect(tabs[2]).toHaveAttribute('aria-selected', 'true');
-  expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[2]]);
+  expect(tabs[3]).toHaveFocus();
+  expect(tabs[3]).toHaveAttribute('aria-selected', 'true');
+  expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[3]]);
 
-  fireEvent.keyDown(tabs[2], { key: 'ArrowRight' });
+  fireEvent.keyDown(tabs[3], { key: 'ArrowRight' });
   expect(tabs[0]).toHaveFocus();
   fireEvent.keyDown(tabs[0], { key: 'End' });
-  expect(tabs[2]).toHaveFocus();
-  fireEvent.keyDown(tabs[2], { key: 'Home' });
+  expect(tabs[3]).toHaveFocus();
+  fireEvent.keyDown(tabs[3], { key: 'Home' });
   expect(tabs[0]).toHaveFocus();
 });
 

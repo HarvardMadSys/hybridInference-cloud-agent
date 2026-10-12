@@ -14,6 +14,10 @@ import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
 
+vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
+  EnvironmentManager: () => <div data-testid="environment-manager" />,
+}));
+
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
 }));

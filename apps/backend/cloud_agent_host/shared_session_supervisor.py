@@ -319,6 +319,8 @@ class _Group:
     terminal_tokens: dict[str, str] = field(default_factory=dict)
     operation_tokens: dict[str, str] = field(default_factory=dict)
     snapshotting: bool = False
+    environment_cancel: threading.Event | None = field(default=None, repr=False)
+    environment_owner: str | None = field(default=None, repr=False)
     # A failed initial archive observed (or could not rule out) its durable
     # preparation marker, but the exact container could not yet be stopped.
     # Only a later accepted STOPPED inspection may release this snapshot fence.
@@ -2965,6 +2967,94 @@ class SharedChatSessionSupervisor:
             group.operation_tokens[token] = thread_id
             group.idle_deadline = None
             return token, self._descriptor(group, member)
+
+    def prepare_environment(
+        self,
+        thread_id: str,
+        environment: Any,
+        preparer: Any,
+        *,
+        activation_owner: str | None = None,
+    ) -> dict[str, Any]:
+        """Serialize preparation with writers, preserving this activation's lease."""
+        with self._lock:
+            group, _ = self._member(thread_id)
+        self._ensure_running(group)
+        with self._lock:
+            group, member = self._member(thread_id)
+            backend = RetainedChatBackend(self._manager, group.spec)
+            self._require_current_inspection(group)
+            if preparer.status(backend, environment.binding_id).get("ready"):
+                return preparer.status(backend, environment.binding_id)
+            self._require_mutation_admission(group)
+            if group.operation_tokens or any(
+                m.current_turn is not None
+                or (m.lease_token is not None and m.lease_token != activation_owner)
+                for m in group.members.values()
+            ):
+                raise SessionBusy("Environment preparation waits for active workspace operations")
+            cancelled = threading.Event()
+            group.environment_cancel = cancelled
+            group.environment_owner = activation_owner
+            group.snapshotting = True
+            generation = group.lifecycle_generation
+            expected = group.inspection.container_id
+            slots = [m.resident_slot_id for m in group.members.values()]
+        monitor_stop = threading.Event()
+
+        def monitor() -> None:
+            while not monitor_stop.wait(0.5):
+                with self._lock:
+                    if group.lifecycle_generation != generation or (
+                        activation_owner is not None and member.lease_token != activation_owner
+                    ):
+                        cancelled.set()
+                        return
+
+        monitor_thread = threading.Thread(
+            target=monitor, daemon=True, name="environment-lease-fence"
+        )
+        monitor_thread.start()
+        manifest = None
+        try:
+            manifest = self._manager.freeze_shared_writers(
+                group.spec,
+                slot_ids=slots,
+                token=secrets.token_hex(16),
+                expected_container_id=expected,
+            )
+            result = preparer.prepare(backend, environment, cancel=cancelled)
+            self._require_current_inspection(group)
+            if cancelled.is_set():
+                raise SessionLeaseLost("Environment preparation lease was lost")
+            return result
+        finally:
+            monitor_stop.set()
+            monitor_thread.join(timeout=1)
+            try:
+                if manifest is not None:
+                    # The only intentional new writers are registered environment services.
+                    self._manager.thaw_shared_writers(
+                        group.spec,
+                        slot_ids=slots,
+                        manifest=manifest,
+                        require_exact_census=False,
+                        expected_container_id=expected,
+                    )
+            finally:
+                with self._lock:
+                    group.snapshotting = False
+                    group.environment_cancel = None
+                    group.environment_owner = None
+                    self._arm_idle_if_quiescent(group)
+                    self._condition.notify_all()
+
+    def cancel_environment(self, thread_id: str, activation_owner: str) -> None:
+        """Only the preparing activation may revoke its long-running setup."""
+        with self._lock:
+            group, _ = self._member(thread_id)
+            if group.environment_owner == activation_owner and group.environment_cancel:
+                group.environment_cancel.set()
 
     def capture_snapshot(
         self,

@@ -45,6 +45,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
+from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_EVENTS,
@@ -67,6 +68,11 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
+from cloud_agent_shared.environment import (
+    DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
+    DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
+    PROXY_ENV,
+)
 from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
@@ -357,31 +363,9 @@ _UNPRIVILEGED_EXEC = ("/usr/bin/setpriv", "--no-new-privs", "--")
 # plugin and credential-helper lookup, TLS roots, proxies, the Go runtime and
 # the dynamic loader -- still travel as ``KEY=VALUE``: a sandbox value under one
 # of them must not reconfigure the client, and none of them carries a secret.
-_DOCKER_CLIENT_ENV = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "GODEBUG",
-        "GOGC",
-        "GOMAXPROCS",
-        "GOMEMLIMIT",
-        "GOTRACEBACK",
-        "GLIBC_TUNABLES",
-    }
-)
-_DOCKER_CLIENT_ENV_PREFIXES = (
-    "DOCKER_",
-    "BUILDKIT_",
-    "BUILDX_",
-    "COMPOSE_",
-    "LD_",
-    "OTEL_",
-    "XDG_",
-)
-_PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY"})
+
+
+_PROXY_ENV = frozenset(name.upper() for name in PROXY_ENV)
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
 
@@ -609,6 +593,7 @@ class ChatSandboxInspection:
     networks: tuple[str, ...]
     network_ids: tuple[tuple[str, str], ...] = ()
     sandbox_runtime: str = ""
+    started_at: str = ""
 
 
 @dataclass
@@ -1979,6 +1964,11 @@ class ChatSandboxManager:
             # drivers/backing filesystems reject creation; never retry without
             # the requested quota or pretend it was applied.
             argv += ["--storage-opt", f"size={spec.disk_limit_mib}M"]
+        for uid in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+            argv += [
+                "--tmpfs",
+                f"/run/agent-environments/{uid}:rw,nosuid,nodev,noexec,mode=0700,uid={uid},gid={self.backend.gid}",
+            ]
         for slot_id in range(spec.resident_slot_capacity):
             uid = MEMBER_UID_BASE + slot_id
             argv += [
@@ -2200,6 +2190,19 @@ class ChatSandboxManager:
             },
         }
 
+    def remove_environment_test(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
+        """Remove only the exact independently labelled ephemeral test container."""
+        inspection = self._require_exact(spec, container_id)
+        if inspection.labels.get("hybridinference.environment-test") != spec.labels.get(
+            "hybridinference.environment-test"
+        ) or not spec.labels.get("hybridinference.environment-test"):
+            raise SandboxError("Container is not an environment test")
+        if inspection.running:
+            self.stop(spec, expected_container_id=container_id)
+        result = self._run([self.backend.docker_binary, "rm", container_id], timeout=120)
+        if result.returncode:
+            raise SandboxError("Environment test cleanup failed")
+
     def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
         """Remove only a verified archive's exact stopped container, without force."""
         current = self.require_stopped_archive(spec, container_id=container_id)
@@ -2274,6 +2277,7 @@ class ChatSandboxManager:
                     )
                 ),
                 sandbox_runtime=str((raw.get("HostConfig") or {}).get("Runtime") or ""),
+                started_at=str(state.get("StartedAt") or ""),
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
@@ -2335,7 +2339,8 @@ class ChatSandboxManager:
             item = self.inspect(container_id, verify_mounts=False)
             if item is not None and self._belongs_to_namespace(item):
                 self._verify_mounts(item)
-                found.append(item)
+                if not item.labels.get("hybridinference.environment-test"):
+                    found.append(item)
         return found
 
     def start(
@@ -3004,6 +3009,28 @@ class ChatSandboxManager:
             'else printf "%s" running; fi; }; '
         )
 
+    def _operation_writer_uids(self, spec: ChatSandboxSpec) -> builtins.list[int]:
+        """Enumerate active operation identities without reading their environments."""
+        script = """import os
+# AGENT_OPERATION_UID_CENSUS
+uids=set()
+for name in os.listdir('/proc'):
+ if not name.isdigit(): continue
+ try: uids.add(os.stat('/proc/'+name).st_uid)
+ except FileNotFoundError: pass
+print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or 31000<=uid<31064))
+"""
+        result = self.exec_capture(spec, ["python3", "-c", script], workdir="/", timeout_s=10)
+        if result.returncode:
+            raise SandboxError("Environment writer census could not be verified")
+        try:
+            uids = [int(value) for value in result.stdout.decode().split()]
+        except ValueError:
+            raise SandboxError("Invalid environment writer census") from None
+        if any(uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS) for uid in uids):
+            raise SandboxError("Unexpected environment writer identity")
+        return uids
+
     def freeze_shared_writers(
         self,
         spec: ChatSandboxSpec,
@@ -3028,7 +3055,11 @@ class ChatSandboxManager:
         if expected_container_id is not None:
             self._require_exact(spec, expected_container_id)
         manifest = f"{ACTIVATION_TMPFS}/snapshot-{token}.pids"
-        target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
+        target_uids = [
+            self.backend.uid,
+            *self._operation_writer_uids(spec),
+            *(MEMBER_UID_BASE + slot for slot in unique_slots),
+        ]
         # The container drops every capability.  Even UID 0 therefore cannot
         # signal a process owned by a member UID; CAP_KILL is intentionally not
         # added back.  Run one census as each identity instead.  Repeating the
@@ -3140,7 +3171,11 @@ class ChatSandboxManager:
             raise ValueError("snapshot member slot is outside sandbox capacity")
         if expected_container_id is not None:
             self._require_exact(spec, expected_container_id)
-        target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
+        target_uids = [
+            self.backend.uid,
+            *self._operation_writer_uids(spec),
+            *(MEMBER_UID_BASE + slot for slot in unique_slots),
+        ]
         read = self.exec_capture(
             spec,
             ["/bin/sh", "-c", 'cat -- "$1"', "sh", manifest],
@@ -3155,7 +3190,10 @@ class ChatSandboxManager:
                 "shared snapshot writer manifest is unavailable: "
                 + read.stderr.decode("utf-8", "replace")[:300]
             )
-        frozen = self._parse_frozen_processes(read.stdout, allowed_uids=set(target_uids))
+        frozen = self._parse_frozen_processes(
+            read.stdout, allowed_uids={*target_uids, *ENVIRONMENT_UIDS, *ACTION_UIDS}
+        )
+        target_uids = sorted({*target_uids, *(uid for _, uid, _ in frozen)})
         resume_error: BaseException | None = None
         try:
             self._resume_frozen_processes(
@@ -3366,13 +3404,22 @@ class ChatSandboxManager:
         workdir: str = CHAT_WORKDIR,
         rows: int,
         cols: int,
+        argv: builtins.list[str] | None = None,
+        user_uid: int | None = None,
     ) -> TerminalProcess:
         """Attach a PTY to one shell without creating or killing a container."""
         current = self._require(spec)
         if not current.running:
             raise SandboxError("chat sandbox must be started before terminal exec")
         token = secrets.token_hex(16)
-        pidfile = f"{ACTIVATION_TMPFS}/terminal-{token}.pid"
+        if user_uid is not None:
+            from cloud_agent_host.environment_process import prepare_home
+
+            directory = prepare_home(self, spec, user_uid)
+            pidfile = f"{directory}/terminal-{token}.pid"
+            env = {**(env or {}), "HOME": directory + "/home"}
+        else:
+            pidfile = f"{ACTIVATION_TMPFS}/terminal-{token}.pid"
         rcfile = _terminal_rcfile(pidfile)
         # The session shell gets its own process group.  Broker suspend/kill
         # then signals this terminal tree only; pausing or killing the retained
@@ -3402,6 +3449,7 @@ class ChatSandboxManager:
             'printf "%s\\n" "$$" > "$pidfile" || exit 126; '
             "umask 0002; "
             "trap '' TSTP TTIN TTOU; "
+            'if [ "$#" -gt 3 ]; then shift 3; exec "$@"; fi; '
             "if command -v bash >/dev/null 2>&1; then "
             'if printf "%s" "$3" > "$rcfile"; then '
             "SHELL=$(command -v bash); export SHELL; "
@@ -3414,11 +3462,22 @@ class ChatSandboxManager:
         )
         command = self.build_exec_command(
             spec,
-            ["/bin/sh", "-c", script, "sh", pidfile, rcfile, _terminal_bashrc(pidfile, rcfile)],
+            [
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                pidfile,
+                rcfile,
+                _terminal_bashrc(pidfile, rcfile),
+                *(argv or []),
+            ],
             env=env,
             workdir=workdir,
             interactive=True,
             tty=True,
+            user_uid=user_uid,
+            user_gid=self.backend.gid if user_uid is not None else None,
         )
         master_fd, slave_fd = os.openpty()
         try:
@@ -3450,6 +3509,7 @@ class ChatSandboxManager:
             spec=spec,
             pidfile=pidfile,
             input_fd=master_fd,
+            operation_uid=user_uid,
         )
 
     def reap_stale_terminal_processes(self, spec: ChatSandboxSpec) -> None:
@@ -5369,11 +5429,13 @@ class _RetainedTerminalProcess(TerminalProcess):
         spec: ChatSandboxSpec,
         pidfile: str,
         input_fd: int,
+        operation_uid: int | None = None,
     ) -> None:
         self._process = process
         self._manager = manager
         self._spec = spec
         self._pidfile = pidfile
+        self._operation_uid = operation_uid
         self._input_fd: int | None = input_fd
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -5444,6 +5506,8 @@ class _RetainedTerminalProcess(TerminalProcess):
             self._spec,
             ["/bin/sh", "-c", script, "sh", self._pidfile],
             timeout_s=15,
+            user_uid=self._operation_uid,
+            user_gid=self._manager.backend.gid if self._operation_uid is not None else None,
         )
         # Natural exit can win the small poll-to-signal race. That is already
         # the requested end state; a live client without a confirmed signal
@@ -5477,6 +5541,16 @@ class _RetainedTerminalProcess(TerminalProcess):
     def kill(self) -> None:
         with self._state_lock:
             if self._killed:
+                return
+            if self._operation_uid is not None:
+                from cloud_agent_host.environment_process import kill_identity
+
+                kill_identity(RetainedChatBackend(self._manager, self._spec), self._operation_uid)
+                self._close_input()
+                if self._process.poll() is None:
+                    self._process.kill()
+                self._process.wait(timeout=5)
+                self._killed = True
                 return
             if self._process.poll() is None:
                 # A hangup, as when a terminal window closes. An interactive
@@ -5623,16 +5697,26 @@ class RetainedChatBackend(SandboxBackend):
             process_pidfile=pidfile,
         )
 
+    def spawn_environment_script(
+        self, *, phase: str, script: str, env: dict[str, str]
+    ) -> SandboxProcess:
+        """Give install, services and verification independent non-root identities."""
+        from cloud_agent_host.environment_process import EnvironmentProcess
+
+        return EnvironmentProcess(self, phase=phase, script=script, env=env)
+
     def spawn_terminal(self, spec: SandboxSpec, *, rows: int, cols: int) -> TerminalProcess:
         """Open an interactive PTY in this chat's retained workspace."""
-        if spec.workdir != CHAT_WORKDIR:
+        if not (spec.workdir == CHAT_WORKDIR or spec.workdir.startswith(CHAT_WORKDIR + "/")):
             raise SandboxError("retained terminal must run in the chat workspace")
         return self.manager.spawn_terminal(
             self.spec,
             env=spec.env,
-            workdir=CHAT_WORKDIR,
+            workdir=spec.workdir,
             rows=rows,
             cols=cols,
+            argv=spec.argv if len(spec.argv) > 1 else None,
+            user_uid=int(spec.env["AGENT_ACTION_UID"]) if "AGENT_ACTION_UID" in spec.env else None,
         )
 
     def preflight(self) -> None:

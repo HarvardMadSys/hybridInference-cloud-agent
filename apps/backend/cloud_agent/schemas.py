@@ -165,6 +165,9 @@ RESET_REASONING_EFFORT = "auto"
 PLATFORM_REASONING_EFFORTS = ("low", "medium", "high", "max")
 
 
+from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable, environment_limits
+
+
 class AgentJobCreate(BaseModel):
     """Request body for creating an agent job."""
 
@@ -191,13 +194,19 @@ class AgentJobCreate(BaseModel):
             "silently dropped or nearest-value setting."
         ),
     )
+    environment_id: str | None = Field(None, max_length=80)
+    environment_revision: int | None = Field(None, ge=0)
+    global_revision: int | None = Field(None, ge=0)
+    environment_overrides: list[EnvironmentVariable] = Field(
+        default_factory=list, max_length=50, repr=False
+    )
     setup_script: str | None = Field(
         None,
         max_length=8000,
         description=(
             "Shell run in the sandbox before the agent starts. What it adds "
-            "to the worktree is cached per repository, script, and sandbox image, "
-            "so a retry does not reinstall."
+            "to a new workspace remains in its retained container. Omitted inherits "
+            "the selected environment; explicit null disables its install script."
         ),
     )
     base_ref: str | None = Field(
@@ -1720,6 +1729,8 @@ class WorkerAttachmentContentResponse(BaseModel):
 class WorkerClaimResponse(BaseModel):
     """A claimed job plus the capability token scoped to this attempt."""
 
+    environment: BoundEnvironment | None = Field(None, repr=False)
+
     #: How many uploads this whole conversation holds, not just this turn.
     #: A host with zero here skips the upload fetch entirely, which is every
     #: turn of every task that attached nothing. It counts the thread rather
@@ -2223,8 +2234,8 @@ class WorkerFinishRequest(BaseModel):
         max_length=8000,
         description=(
             "Shell run in the sandbox before the agent starts. What it adds "
-            "to the worktree is cached per repository, script, and sandbox image, "
-            "so a retry does not reinstall."
+            "to a new workspace remains in its retained container. Omitted inherits "
+            "the selected environment; explicit null disables its install script."
         ),
     )
     base_ref: str | None = Field(
@@ -2353,6 +2364,7 @@ class AgentConfigResponse(BaseModel):
     described a job nobody was running. These are the real answers.
     """
 
+    environment_limits: dict[str, Any] = Field(default_factory=environment_limits)
     skill_limits: SkillLimits = Field(default_factory=SkillLimits)
     attachment_limits: AttachmentLimits = Field(default_factory=AttachmentLimits)
     goal_limits: GoalLimits = Field(default_factory=GoalLimits)

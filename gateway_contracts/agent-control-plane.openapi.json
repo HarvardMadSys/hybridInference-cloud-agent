@@ -3440,6 +3440,11 @@
           "attachment_limits": {
             "$ref": "#/components/schemas/AttachmentLimits"
           },
+          "environment_limits": {
+            "additionalProperties": true,
+            "title": "Environment Limits",
+            "type": "object"
+          },
           "github_connected": {
             "default": false,
             "title": "Github Connected",
@@ -4239,6 +4244,50 @@
             "description": "Commit SHA to work from.",
             "title": "Base Sha"
           },
+          "environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Id"
+          },
+          "environment_overrides": {
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentVariable"
+            },
+            "maxItems": 50,
+            "title": "Environment Overrides",
+            "type": "array"
+          },
+          "environment_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Revision"
+          },
+          "global_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Revision"
+          },
           "goal": {
             "anyOf": [
               {
@@ -4336,7 +4385,7 @@
                 "type": "null"
               }
             ],
-            "description": "Shell run in the sandbox before the agent starts. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
+            "description": "Shell run in the sandbox before the agent starts. What it adds to a new workspace remains in its retained container. Omitted inherits the selected environment; explicit null disables its install script.",
             "title": "Setup Script"
           },
           "skill_ids": {
@@ -8074,6 +8123,97 @@
         "title": "BindingsResponse",
         "type": "object"
       },
+      "BoundEnvironment": {
+        "additionalProperties": false,
+        "description": "A frozen execution binding sent only over protected execution channels.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentAction"
+            },
+            "maxItems": 20,
+            "title": "Actions",
+            "type": "array"
+          },
+          "binding_id": {
+            "title": "Binding Id",
+            "type": "string"
+          },
+          "environment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Id"
+          },
+          "global_revision": {
+            "default": 0,
+            "title": "Global Revision",
+            "type": "integer"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "setup_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Setup Script",
+            "type": "string"
+          },
+          "start_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Start Script",
+            "type": "string"
+          },
+          "variables": {
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentVariable"
+            },
+            "maxItems": 150,
+            "title": "Variables",
+            "type": "array"
+          },
+          "verify_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Verify Script",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_id"
+        ],
+        "title": "BoundEnvironment",
+        "type": "object"
+      },
+      "ClaimTestInput": {
+        "additionalProperties": false,
+        "description": "Host proof that this process understands the environment contract.",
+        "properties": {
+          "attestation": {
+            "additionalProperties": true,
+            "title": "Attestation",
+            "type": "object"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Capabilities",
+            "type": "array"
+          }
+        },
+        "title": "ClaimTestInput",
+        "type": "object"
+      },
       "CloudLabAutoscalingPolicy": {
         "additionalProperties": false,
         "description": "Desired singleton policy; provider secrets remain connection references.",
@@ -8739,6 +8879,36 @@
         "title": "ConversationUsage",
         "type": "object"
       },
+      "CopyInput": {
+        "additionalProperties": false,
+        "description": "Copy a reviewed environment to an entitled repository.",
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "repo": {
+            "maxLength": 140,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+            "title": "Repo",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "repo",
+          "name"
+        ],
+        "title": "CopyInput",
+        "type": "object"
+      },
       "CreateConnectionRequest": {
         "additionalProperties": false,
         "description": "Add one connection by hand.",
@@ -9304,6 +9474,34 @@
         "title": "DecisionRequest",
         "type": "object"
       },
+      "DefaultInput": {
+        "additionalProperties": false,
+        "description": "A repository default choice; null selects the platform base.",
+        "properties": {
+          "environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Id"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "DefaultInput",
+        "type": "object"
+      },
       "EnableConnectionRequest": {
         "additionalProperties": false,
         "description": "Account-wide availability, independent of connection health.",
@@ -9317,6 +9515,93 @@
           "enabled"
         ],
         "title": "EnableConnectionRequest",
+        "type": "object"
+      },
+      "EnvironmentAction": {
+        "additionalProperties": false,
+        "description": "A stable named command executed through the owner terminal surface.",
+        "properties": {
+          "command": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          },
+          "cwd": {
+            "default": ".",
+            "maxLength": 4096,
+            "title": "Cwd",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{1,80}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "command"
+        ],
+        "title": "EnvironmentAction",
+        "type": "object"
+      },
+      "EnvironmentVariable": {
+        "additionalProperties": false,
+        "description": "A value-bearing variable, never suitable for request logging.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "phase": {
+            "default": "both",
+            "enum": [
+              "setup",
+              "runtime",
+              "both"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "secret": {
+            "default": true,
+            "title": "Secret",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "global",
+                  "environment",
+                  "override"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "title": "EnvironmentVariable",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -9412,6 +9697,30 @@
           }
         },
         "title": "GitHubConnectionResponse",
+        "type": "object"
+      },
+      "GlobalInput": {
+        "additionalProperties": false,
+        "description": "Modify personal variables without enabling global scripts.",
+        "properties": {
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "variables": {
+            "items": {
+              "$ref": "#/components/schemas/VariableEdit"
+            },
+            "maxItems": 200,
+            "title": "Variables",
+            "type": "array"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "GlobalInput",
         "type": "object"
       },
       "GoalClearedResponse": {
@@ -11160,6 +11469,52 @@
         "title": "ImportGitHubSkill",
         "type": "object"
       },
+      "ImportInput": {
+        "additionalProperties": false,
+        "description": "An owner-reviewed dotenv batch, reparsed on commit.",
+        "properties": {
+          "environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Id"
+          },
+          "global_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Revision"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "text": {
+            "maxLength": 1048576,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "text"
+        ],
+        "title": "ImportInput",
+        "type": "object"
+      },
       "ImportPreview": {
         "description": "What a paste turned into, and what was created if it was saved.\n\n``drafts`` is always the preview: what the configuration *would* create,\nwith commands as argument vectors and secrets masked. ``saved`` holds the\nconnections an explicit save produced. They are separate fields because\nthey are different shapes, and reusing one field for both is how a client\nends up guessing which of two documents it is holding.",
         "properties": {
@@ -12685,6 +13040,28 @@
         "title": "ResourceMetricBrief",
         "type": "object"
       },
+      "RestoreInput": {
+        "additionalProperties": false,
+        "description": "Restore one historical version as a new current revision.",
+        "properties": {
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source_revision": {
+            "exclusiveMinimum": 0.0,
+            "title": "Source Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "source_revision"
+        ],
+        "title": "RestoreInput",
+        "type": "object"
+      },
       "RetainedSandboxBeat": {
         "description": "Docker-observed lifecycle of one retained chat sandbox on this host.",
         "properties": {
@@ -13339,6 +13716,76 @@
           "sample_age_ms"
         ],
         "title": "SandboxResourceSample",
+        "type": "object"
+      },
+      "SaveEnvironment": {
+        "additionalProperties": false,
+        "description": "Publish all scripts and explicit variable edits atomically.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentAction"
+            },
+            "maxItems": 20,
+            "title": "Actions",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "setup_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Setup Script",
+            "type": "string"
+          },
+          "start_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Start Script",
+            "type": "string"
+          },
+          "variables": {
+            "items": {
+              "$ref": "#/components/schemas/VariableEdit"
+            },
+            "maxItems": 200,
+            "title": "Variables",
+            "type": "array"
+          },
+          "verify_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Verify Script",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "revision"
+        ],
+        "title": "SaveEnvironment",
         "type": "object"
       },
       "SecretRequest": {
@@ -14216,6 +14663,75 @@
         "title": "SourceControlRepository",
         "type": "object"
       },
+      "SuggestInput": {
+        "additionalProperties": false,
+        "description": "Read lockfile facts without executing repository code.",
+        "properties": {
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo": {
+            "maxLength": 140,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+            "title": "Repo",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "title": "SuggestInput",
+        "type": "object"
+      },
+      "TestInput": {
+        "additionalProperties": false,
+        "description": "Fixed inputs to a disposable preparation test.",
+        "properties": {
+          "environment_id": {
+            "maxLength": 80,
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "environment_revision": {
+            "minimum": 1.0,
+            "title": "Environment Revision",
+            "type": "integer"
+          },
+          "global_revision": {
+            "minimum": 0.0,
+            "title": "Global Revision",
+            "type": "integer"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "required": [
+          "environment_id",
+          "environment_revision",
+          "global_revision"
+        ],
+        "title": "TestInput",
+        "type": "object"
+      },
       "TestResult": {
         "description": "What a staged diagnostic found.",
         "properties": {
@@ -14299,6 +14815,65 @@
           "ok"
         ],
         "title": "TestResult",
+        "type": "object"
+      },
+      "TestUpdate": {
+        "additionalProperties": false,
+        "description": "Bounded execution results under a matching host lease.",
+        "properties": {
+          "cleanup_complete": {
+            "default": false,
+            "title": "Cleanup Complete",
+            "type": "boolean"
+          },
+          "detail": {
+            "default": "",
+            "maxLength": 1000,
+            "title": "Detail",
+            "type": "string"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "image_digest": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Digest"
+          },
+          "state": {
+            "default": "running",
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "maxItems": 3,
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "title": "TestUpdate",
         "type": "object"
       },
       "ToolCallResources": {
@@ -15436,6 +16011,57 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VariableEdit": {
+        "additionalProperties": false,
+        "description": "An explicit keep, replace or remove operation on a saved variable.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "operation": {
+            "default": "replace",
+            "enum": [
+              "keep",
+              "replace",
+              "remove"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "phase": {
+            "default": "both",
+            "enum": [
+              "setup",
+              "runtime",
+              "both"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "secret": {
+            "default": true,
+            "title": "Secret",
+            "type": "boolean"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "VariableEdit",
+        "type": "object"
+      },
       "WorkerAckResponse": {
         "description": "Generic worker acknowledgement.",
         "properties": {
@@ -15689,6 +16315,16 @@
             ],
             "description": "Short-lived read-only credential for this one repository, for the runner to check it out with. Stays in the runner; never enters the sandbox. Null when no GitHub App is configured, which is enough for a public repository.",
             "title": "Clone Token"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundEnvironment"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "execution_profile": {
             "$ref": "#/components/schemas/ExecutionProfile",
@@ -16004,7 +16640,7 @@
                 "type": "null"
               }
             ],
-            "description": "Shell run in the sandbox before the agent starts. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
+            "description": "Shell run in the sandbox before the agent starts. What it adds to a new workspace remains in its retained container. Omitted inherits the selected environment; explicit null disables its install script.",
             "title": "Setup Script"
           },
           "state": {
@@ -23540,6 +24176,1456 @@
         "summary": "List Agent Conversations"
       }
     },
+    "/v1/agent/environment-action-runs/{run_id}": {
+      "get": {
+        "description": "Read live terminal state and bounded masked output for an operation.",
+        "operationId": "action_status_v1_agent_environment_action_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Action Status V1 Agent Environment Action Runs  Run Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Action Status",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-action-runs/{run_id}/stop": {
+      "post": {
+        "description": "Stop this operation's terminal without touching other group processes.",
+        "operationId": "stop_action_v1_agent_environment_action_runs__run_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stop Action V1 Agent Environment Action Runs  Run Id  Stop Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Action",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-default": {
+      "delete": {
+        "description": "Clear an owner-reviewed default choice.",
+        "operationId": "clear_default_v1_agent_environment_default_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "Revision",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Clear Default V1 Agent Environment Default Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Default",
+        "tags": [
+          "environments"
+        ]
+      },
+      "put": {
+        "description": "Set an owned environment as this repository's default.",
+        "operationId": "set_default_v1_agent_environment_default_put",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefaultInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Set Default V1 Agent Environment Default Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Default",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-globals": {
+      "get": {
+        "description": "Read personally scoped global variable metadata.",
+        "operationId": "read_globals_v1_agent_environment_globals_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Globals V1 Agent Environment Globals Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Globals",
+        "tags": [
+          "environments"
+        ]
+      },
+      "patch": {
+        "description": "Publish global edits after checking every active merged environment.",
+        "operationId": "save_globals_v1_agent_environment_globals_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GlobalInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Save Globals V1 Agent Environment Globals Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Globals",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-globals/restore": {
+      "post": {
+        "description": "Restore a global version after validating all dependent environments.",
+        "operationId": "restore_globals_v1_agent_environment_globals_restore_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Restore Globals V1 Agent Environment Globals Restore Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Globals",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-globals/versions": {
+      "get": {
+        "description": "Read historical personal global variables.",
+        "operationId": "global_versions_v1_agent_environment_globals_versions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Global Versions V1 Agent Environment Globals Versions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Global Versions",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-import": {
+      "post": {
+        "description": "Reparse and publish the complete batch at its reviewed revision.",
+        "operationId": "import_variables_v1_agent_environment_import_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Import Variables V1 Agent Environment Import Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Variables",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-import/preview": {
+      "post": {
+        "description": "Parse input atomically without returning submitted values.",
+        "operationId": "preview_import_v1_agent_environment_import_preview_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preview Import V1 Agent Environment Import Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Import",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-runs": {
+      "post": {
+        "description": "Queue a disposable test without minting any inference credentials.",
+        "operationId": "test_environment_v1_agent_environment_runs_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "idempotency-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Test Environment V1 Agent Environment Runs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-runs/{run_id}": {
+      "get": {
+        "description": "Read progress and bounded redacted output for an owned test.",
+        "operationId": "read_run_v1_agent_environment_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Run V1 Agent Environment Runs  Run Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Run",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-runs/{run_id}/cancel": {
+      "post": {
+        "description": "Cancel queued or active tests idempotently.",
+        "operationId": "cancel_test_v1_agent_environment_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Test V1 Agent Environment Runs  Run Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Test",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environment-script-suggestions": {
+      "post": {
+        "description": "Suggest reviewed lockfile commands without executing source code.",
+        "operationId": "suggest_script_v1_agent_environment_script_suggestions_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuggestInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Suggest Script V1 Agent Environment Script Suggestions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Suggest Script",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments": {
+      "get": {
+        "description": "List owned repository configurations and their default selection.",
+        "operationId": "list_environments_v1_agent_environments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Repo"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Environments V1 Agent Environments Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Environments",
+        "tags": [
+          "environments"
+        ]
+      },
+      "post": {
+        "description": "Create a reusable environment before its first task runs.",
+        "operationId": "create_environment_v1_agent_environments_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveEnvironment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Environment V1 Agent Environments Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}": {
+      "delete": {
+        "description": "Archive an environment and clear a matching default.",
+        "operationId": "delete_environment_v1_agent_environments__environment_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Revision",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Environment",
+        "tags": [
+          "environments"
+        ]
+      },
+      "get": {
+        "description": "Read configuration with write-only Secret fields.",
+        "operationId": "read_environment_v1_agent_environments__environment_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Environment V1 Agent Environments  Environment Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Environment",
+        "tags": [
+          "environments"
+        ]
+      },
+      "patch": {
+        "description": "Publish a new version without changing any bound workspace.",
+        "operationId": "save_environment_v1_agent_environments__environment_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveEnvironment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Save Environment V1 Agent Environments  Environment Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}/copy": {
+      "post": {
+        "description": "Copy scripts and encrypted variables within one owner.",
+        "operationId": "copy_environment_v1_agent_environments__environment_id__copy_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "idempotency-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CopyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Copy Environment V1 Agent Environments  Environment Id  Copy Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Copy Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}/restore": {
+      "post": {
+        "description": "Restore reviewed history as a new CAS-checked version.",
+        "operationId": "restore_environment_v1_agent_environments__environment_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Restore Environment V1 Agent Environments  Environment Id  Restore Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}/versions": {
+      "get": {
+        "description": "Read paginated immutable history without secret values.",
+        "operationId": "environment_versions_v1_agent_environments__environment_id__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Environment Versions V1 Agent Environments  Environment Id  Versions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Environment Versions",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
     "/v1/agent/github/connect": {
       "post": {
         "description": "Record the installations this user proved they can reach.\n\nThe browser sends the code GitHub handed it; the platform exchanges it for\na token that speaks *as that user* and asks GitHub which installations they\ncan see. Nothing the browser asserts is trusted — an installation id posted\ndirectly would be exactly the confused deputy this whole path exists to\nprevent, so the id is only ever taken from GitHub's own answer.",
@@ -25760,6 +27846,208 @@
           }
         },
         "summary": "Get Agent Thread"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/environment": {
+      "get": {
+        "description": "Show the workspace's fixed versions and preparation history.",
+        "operationId": "workspace_environment_v1_agent_jobs__job_id__thread_environment_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Workspace Environment V1 Agent Jobs  Job Id  Thread Environment Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Workspace Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/environment/actions/{action_id}/runs": {
+      "post": {
+        "description": "Execute a saved command through the retained owner's PTY mechanism.",
+        "operationId": "start_action_v1_agent_jobs__job_id__thread_environment_actions__action_id__runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action_id",
+            "required": true,
+            "schema": {
+              "title": "Action Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Action V1 Agent Jobs  Job Id  Thread Environment Actions  Action Id  Runs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Action",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/environment/retry": {
+      "post": {
+        "description": "Retry failed preparation using the same workspace binding.",
+        "operationId": "retry_preparation_v1_agent_jobs__job_id__thread_environment_retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Preparation V1 Agent Jobs  Job Id  Thread Environment Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Preparation",
+        "tags": [
+          "environments"
+        ]
       }
     },
     "/v1/agent/jobs/{job_id}/thread/events": {
@@ -30829,6 +33117,200 @@
           }
         },
         "summary": "Worker Claim"
+      }
+    },
+    "/v1/agent/worker/environment-runs/claim": {
+      "post": {
+        "description": "Hand only an environment-capable enrolled host a test lease.",
+        "operationId": "claim_environment_test_v1_agent_worker_environment_runs_claim_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimTestInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Claim Environment Test V1 Agent Worker Environment Runs Claim Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Claim Environment Test",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/worker/environment-runs/orphans": {
+      "get": {
+        "description": "Name only this enrolled host's expired resources for cleanup.",
+        "operationId": "orphan_tests_v1_agent_worker_environment_runs_orphans_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Orphan Tests V1 Agent Worker Environment Runs Orphans Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Orphan Tests",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/worker/environment-runs/{run_id}": {
+      "post": {
+        "description": "Renew or finish only this host's currently fenced test run.",
+        "operationId": "report_test_v1_agent_worker_environment_runs__run_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Report Test V1 Agent Worker Environment Runs  Run Id  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Report Test",
+        "tags": [
+          "environments"
+        ]
       }
     },
     "/v1/agent/worker/jobs/{job_id}/attachments": {

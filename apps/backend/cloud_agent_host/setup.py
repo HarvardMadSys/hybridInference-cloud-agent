@@ -11,12 +11,17 @@ into.
 from __future__ import annotations
 
 import queue
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.sandbox import SandboxSpec
+from cloud_agent_shared.secret_redaction import SecretRedactor
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,12 @@ def run_setup(
     workdir: str,
     backend: Any,
     timeout_s: float = 900.0,
+    env: dict[str, str] | None = None,
+    secrets: dict[str, str] | None = None,
+    on_output: Callable[[str], None] | None = None,
+    cancel: threading.Event | None = None,
+    cleanup_background: bool = False,
+    phase: str | None = None,
 ) -> SetupResult:
     """Run one bounded setup command in the retained container.
 
@@ -43,20 +54,48 @@ def run_setup(
     if not script.strip():
         return SetupResult(ran=False)
 
-    process = backend.spawn(
-        SandboxSpec(
-            argv=["/bin/sh", "-c", script],
-            workdir=workdir,
-            env={},
+    if phase and hasattr(backend, "spawn_environment_script"):
+        process = backend.spawn_environment_script(phase=phase, script=script, env=env or {})
+    else:
+        process = backend.spawn(
+            SandboxSpec(
+                argv=["/bin/sh", "-c", script],
+                workdir=workdir,
+                env=env or {},
+            )
         )
-    )
     output = OutputPump(getattr(process, "chunks", process.lines)(), name="retained-setup-output")
     deadline = time.monotonic() + timeout_s
     tail = TextTail()
+    redactor = SecretRedactor(secrets or {})
+    retained_output = False
+
+    def consume(chunk: str) -> None:
+        safe = redactor.feed(chunk)
+        tail.append(safe)
+        if on_output and safe:
+            on_output(safe)
+
+    def drain_service() -> None:
+        try:
+            while True:
+                try:
+                    chunk = output.get(timeout=1)
+                except queue.Empty:
+                    continue
+                if chunk is None:
+                    break
+                consume(chunk)
+            final = redactor.flush()
+            if on_output and final:
+                on_output(final)
+        finally:
+            output.close()
+
     try:
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or (cancel is not None and cancel.is_set()):
                 output.close(drain=True)
                 process.kill()
                 process.wait()
@@ -65,17 +104,56 @@ def run_setup(
                     exit_code=124,
                     detail=f"setup exceeded {timeout_s:.0f}s",
                 )
+            if (
+                phase
+                and hasattr(backend, "spawn_environment_script")
+                and process.poll() is not None
+            ):
+                code = process.wait()
+                if code == 0 and phase == "start":
+                    retained_output = True
+                    threading.Thread(
+                        target=drain_service, daemon=True, name="environment-service-output"
+                    ).start()
+                else:
+                    process.kill()
+                    while True:
+                        try:
+                            chunk = output.get(timeout=0.25)
+                        except queue.Empty:
+                            break
+                        if chunk is None:
+                            break
+                        consume(chunk)
+                break
             try:
                 chunk = output.get(timeout=min(0.25, remaining))
             except queue.Empty:
                 continue
             if chunk is None:
                 break
-            tail.append(chunk)
+            consume(chunk)
     finally:
-        output.close()
+        if not retained_output:
+            output.close()
 
+    final = "" if retained_output else redactor.flush()
+    tail.append(final)
+    if on_output and final:
+        on_output(final)
     exit_code = process.wait()
+    if (
+        phase
+        and hasattr(backend, "spawn_environment_script")
+        and (phase != "start" or exit_code != 0)
+    ):
+        process.kill()
+    if cleanup_background and not (phase and hasattr(backend, "spawn_environment_script")):
+        process.kill()
+    stderr = redactor.text(process.stderr_text())
+    tail.append(stderr)
+    if on_output and stderr:
+        on_output(stderr)
     if exit_code != 0:
         return SetupResult(ran=True, exit_code=exit_code, detail=tail.text()[-500:])
     return SetupResult(ran=True, detail="setup completed")

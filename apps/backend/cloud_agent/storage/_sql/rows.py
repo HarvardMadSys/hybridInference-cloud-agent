@@ -83,6 +83,7 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "title": row.get("title") or row.get("session_title"),
         "title_source": row.get("title_source"),
         "setup_script": row["setup_script"],
+        "environment_binding_id": row.get("environment_binding_id"),
         "runtime": row["runtime"],
         "model": row["model"],
         "execution_profile": row["execution_profile"],

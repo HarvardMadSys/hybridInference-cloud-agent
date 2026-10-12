@@ -28,7 +28,7 @@
 1. 沙盒内代码不能获得 control plane、runner host、Docker daemon 或 source-control publisher 的控制权。
 2. 沙盒只得到完成当前任务所需的短期能力；能力有 scope、subject、generation、TTL 与撤销边界。
 3. Setup、Agent 执行与 Fork 使用同一套固定网络边界：只到公网 IPv4 TCP 80/443、指定解析器和本组两个中继，不到宿主、私网与特殊用途地址或其他沙盒组；没有可选择或放宽的网络模式。
-4. Repository credential、长期模型 credential、MCP upstream credential 和发布 credential 不进入 workspace 或 Docker writable layer。
+4. 平台持有的长期源代码、模型、MCP upstream 和发布 credential 不进入 workspace 或 Docker writable layer。Owner 主动提供的环境凭据遵循下述环境例外，不属于平台 credential。
 5. 同一 shared sandbox 内的 sibling chat 可以共享文件，但不能读取彼此 credential、控制彼此进程或接收彼此事件。
 6. 安全能力无法验证时 fail closed；不得静默降级到更弱 runtime、开放网络或共享 credential 路径。
 7. 观测、审计和资源采样不依赖沙盒内代码配合，也不能被其伪造为成功。
@@ -153,6 +153,24 @@ Relay 是固定目的地转发器，不是让 caller 自选目标的通用 HTTP 
 - Fork receipt journal；
 - patch、artifact、日志 body 与 frontend event；
 - host 的 per-chat 文件目录。
+
+### 6.1a Owner 主动提供的环境变量
+
+[可复用云端环境](2026-10-12-repository-environment-design.zh-CN.md) 允许 owner
+将自己的变量和 Secret 注入固定版本的工作区。它们可以是长期凭据；仓库代码、
+依赖和 agent 可读取、外发，或写入文件及模型上下文。上述平台 credential 的
+禁止持久化规则不会转化成对用户代码行为的保密承诺。
+
+控制面使用独立加密 domain 保存所有值，Secret 不经 owner 配置读取接口回显；
+阶段过滤、写入平台历史前的有状态脱敏，以及对普通文件/二进制新增内容的受信
+快照和发布扫描保护已知原文。Owner 原始终端和文件查看不打码。保留名禁止
+覆盖平台 grant、MCP、GitHub、Docker 和网络配置。全局及仓库配置变化只影响
+未来工作区，同 owner Fork 继承原绑定；不新增跨 owner 分享。
+
+安装、服务、验证和快捷操作使用受管 non-root 身份，各自拥有私有 HOME。
+安装与验证后清理对应 UID 的进程，包括 detached 后代；服务属于容器 boot。
+快照冻结纳入这些身份，操作停止只清理本次操作身份。真实 Kata 和五种 CLI
+的完整现场验收仍需部署环境，不能用 Docker/mock 的通过替代。
 
 ### 6.2 注入与撤销
 

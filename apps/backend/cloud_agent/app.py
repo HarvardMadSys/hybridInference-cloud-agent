@@ -161,6 +161,7 @@ def create_app() -> FastAPI:
         admin_steps,
         admin_usage,
         compute_registration,
+        environments,
         host_profiling,
         hosts,
         mcp_connections,
@@ -188,6 +189,26 @@ def create_app() -> FastAPI:
     # public edge, so a sandbox's ``mcp`` token carried out and replayed there
     # must find no tool route at all, not one that merely refuses it.
     app.include_router(skills.router)
+    from fastapi.responses import JSONResponse
+
+    from cloud_agent.environments import EnvironmentBusy, EnvironmentConflict, EnvironmentNotFound
+    from cloud_agent.source_control import SourceControlError
+
+    async def environment_failure(request: Request, exc: Exception) -> JSONResponse:
+        if isinstance(exc, EnvironmentNotFound):
+            code, detail = 404, "Environment not found"
+        elif isinstance(exc, SourceControlError):
+            code, detail = 503, "Environment encryption is unavailable"
+        else:
+            code, detail = 409, str(exc)
+        return JSONResponse(
+            status_code=code, content={"detail": detail}, headers={"Cache-Control": "no-store"}
+        )
+
+    for failure in (EnvironmentNotFound, EnvironmentConflict, EnvironmentBusy, SourceControlError):
+        app.add_exception_handler(failure, environment_failure)
+
+    app.include_router(environments.router)
     app.include_router(user_memory.router)
     app.include_router(user_memory.project_router)
     app.include_router(uploads.router)

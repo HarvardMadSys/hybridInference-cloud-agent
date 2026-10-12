@@ -373,6 +373,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "environment-v1",
     ]
     assert dispatched[0]["job"] is _JOB
     assert dispatched[0]["gateway_base_url"] == "http://gateway"

@@ -24,6 +24,9 @@ class _Process:
             return
         yield from self._lines
 
+    def stderr_text(self) -> str:
+        return ""
+
     def kill(self) -> None:
         self.killed = True
         self._killed.set()

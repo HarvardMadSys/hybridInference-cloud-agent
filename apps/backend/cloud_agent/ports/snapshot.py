@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 class SnapshotRepository(Protocol):
     """Port: sandbox snapshots -- capture, publication, and base import."""
 
+    async def snapshot_database_time(self) -> datetime:
+        """Read the same clock used to fence publication retry deadlines."""
+        ...
+
     async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture.
 

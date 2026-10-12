@@ -12,6 +12,7 @@ import {
   getAgentIntegrations,
 } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
+import { EnvironmentManager } from './environment/EnvironmentManager';
 import { SkillsSection } from './skills/SkillsSection';
 import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
@@ -434,6 +435,7 @@ export function IntegrationsView({
       <div className="ui-card mt-4 bg-surface p-3 sm:p-4">
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
+      <EnvironmentManager />
       <SkillsSection />
       <UserMemorySettings />
       <ProjectMemorySettings />

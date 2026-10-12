@@ -494,7 +494,7 @@ class PostgresComputeResourceRepository:
                 dict(r)
                 for r in await conn.fetch(
                     """SELECT h.host,h.status,h.compute_node_id,
-                h.slots_used,h.last_heartbeat_at,h.broker_url,h.drain_fence_active,
+                (h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete)) AS slots_used,h.last_heartbeat_at,h.broker_url,h.drain_fence_active,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
                 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -544,7 +544,7 @@ class PostgresComputeResourceRepository:
             hosts = [
                 dict(r)
                 for r in await conn.fetch("""SELECT h.host,h.status,h.compute_node_id,
-                n.allocation_id,h.slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
+                n.allocation_id,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete)) AS slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
                 h.labels->>'physical_host' AS physical_host,h.broker_url,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
@@ -1200,7 +1200,7 @@ class PostgresComputeResourceRepository:
             ):
                 raise ValueError("autoscaling_member_not_retirable")
             hosts = await conn.fetch(
-                """SELECT h.host,h.slots_used FROM agent_compute_nodes n
+                """SELECT h.host,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete)) AS slots_used FROM agent_compute_nodes n
                    JOIN agent_runner_hosts h ON h.compute_node_id=n.id
                    WHERE n.allocation_id=$1 FOR UPDATE OF h""",
                 allocation_id,

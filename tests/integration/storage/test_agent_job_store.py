@@ -350,6 +350,7 @@ async def _reserve_shared_chat(
     task_prompt: str = "fix the flaky test",
     fork_helper_version: str | None = None,
     disk_limit_mib: int = 0,
+    environment_selection: dict | None = None,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -370,6 +371,7 @@ async def _reserve_shared_chat(
         metadata=metadata,
         plugins=plugins,
         task_prompt=task_prompt,
+        environment_selection=environment_selection,
     )
     claim = await _claim(
         store,
@@ -1443,13 +1445,41 @@ async def test_a_rebuilt_host_image_leaves_fork_and_mid_turn_input_to_the_group(
 async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     pool,
     store: Storage,
+    monkeypatch,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "native-fork-environment-key")
+    environment = await store.environments.save_environment(
+        "user-1",
+        repo="example-org/example-repo",
+        name="Fork environment",
+        environment_id=None,
+        revision=0,
+        document={},
+        edits=[{"name": "FORK_TOKEN", "value": "fixed-secret-one"}],
+    )
     saved_plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/repo"}]
     job, claim, sandbox = await _reserve_shared_chat(
-        store, disk_limit_mib=16384, plugins=saved_plugins
+        store,
+        disk_limit_mib=16384,
+        plugins=saved_plugins,
+        environment_selection={
+            "environment_id": environment["id"],
+            "environment_id_provided": True,
+            "environment_revision": 1,
+            "overrides": [{"name": "TEMP_TOKEN", "value": "temporary-secret"}],
+        },
     )
     assert job["plugins"] == claim["plugins"] == saved_plugins
+    await store.environments.save_environment(
+        "user-1",
+        repo=environment["repo"],
+        name=environment["name"],
+        environment_id=environment["id"],
+        revision=1,
+        document={},
+        edits=[{"name": "FORK_TOKEN", "value": "rotated-secret-two"}],
+    )
     saved_skills = [
         {
             "id": 42,
@@ -1717,6 +1747,14 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child is not None
     assert child["thread_id"] == operation["target_thread_id"]
     assert child["fork_source_job_id"] == job["id"]
+    assert child["environment_binding_id"] == job["environment_binding_id"]
+    inherited = await store.environments.get_environment_binding(
+        "user-1", child["environment_binding_id"]
+    )
+    assert inherited.values("runtime") == {
+        "FORK_TOKEN": "fixed-secret-one",
+        "TEMP_TOKEN": "temporary-secret",
+    }
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]

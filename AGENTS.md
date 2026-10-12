@@ -177,7 +177,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   risk replaces the separate internal inference entry as a release prerequisite;
   neither that entry nor a host credential-substitution relay is required.
   See the [decision and remaining boundaries](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
-- Long-lived account and service credentials never enter the sandbox. Each
+- Platform-held long-lived account and service credentials never enter the sandbox. Each
   member receives its own scoped inference and MCP credentials; sibling
   members cannot read or reuse them. Spend remains governed by the gateway's
   per-user quota. The runner also injects a separate short-lived GitHub App
@@ -186,6 +186,18 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   tokens, refresh tokens, and the App's private key remain outside. Direct
   sandbox publication does not pass through the trusted publisher's patch
   gate; repository branch protection and GitHub rules still apply.
+- **Owner-provided environment credentials.** An owner may deliberately inject
+  personal variables and Secrets through a frozen environment binding. Repository
+  code, dependencies and the agent can read them, send them through the existing
+  public egress, or write them into files/model context. These are user-supplied
+  credentials, not platform credentials. The platform encrypts stored values,
+  keeps Secrets write-only, filters setup/runtime phases, masks known values in
+  durable output and scans trusted snapshot/publication additions, including
+  binary content. These controls do not prevent deliberate exfiltration or direct
+  Git pushes. Same-owner Fork inherits the binding; no cross-owner sharing is
+  introduced. Reserved platform/host variable names and the existing fixed
+  network and member credential boundaries still apply. See the
+  [environment design](docs/specs/2026-10-12-repository-environment-design.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.

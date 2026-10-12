@@ -132,6 +132,7 @@ from cloud_agent_host.shared_protocol import (
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_upload_archive,
@@ -144,6 +145,7 @@ from cloud_agent_shared.host_settings import (
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
+from cloud_agent_shared.secret_redaction import SecretRedactor
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     HOST_SETTINGS_CAPABILITY,
@@ -321,6 +323,7 @@ class ClaimedJob:
     # Optional, so it carries a default rather than forcing every caller to
     # pass one.
     setup_script: str | None = None
+    environment: BoundEnvironment | None = field(default=None, repr=False)
     # Explicit CLI plugins installed in this chat's private member state.
     plugins: list[dict[str, str]] = field(default_factory=list)
     # Read-only, single-repo, short-lived: what the runner clones with. Never
@@ -372,6 +375,9 @@ class ClaimedJob:
             base_sha=body.get("base_sha"),
             task_prompt=body["task_prompt"],
             setup_script=body.get("setup_script"),
+            environment=BoundEnvironment.model_validate(body["environment"])
+            if body.get("environment")
+            else None,
             plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],
@@ -406,6 +412,10 @@ class ControlPlane:
         # plain counter is the whole numbering scheme. It makes each upload
         # idempotent server-side, which is what licenses the retry below.
         self._event_seq = 0
+        self._redactor = SecretRedactor({})
+        self._preview_redactors: dict[str, SecretRedactor] = {}
+        self._preview_contexts: dict[str, tuple[str, dict[str, Any]]] = {}
+        self._secret_values: dict[str, str] = {}
 
     def close(self) -> None:
         """Release the HTTP connection pool."""
@@ -417,10 +427,11 @@ class ControlPlane:
         payload: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        already_redacted: bool = False,
     ) -> dict[str, Any]:
         response = self._client.post(
             f"{self._base}{path}",
-            json=payload or {},
+            json=(payload or {}) if already_redacted else self._redactor.payload(payload or {}),
             timeout=self._client.timeout if timeout is None else timeout,
         )
         if response.status_code == 409:
@@ -438,7 +449,7 @@ class ControlPlane:
         """
         response = self._client.post(
             f"{self._base}/v1/agent/worker/jobs/{job_id}/measurements",
-            json=body,
+            json=self._redactor.payload(body),
             timeout=DELIVERY_TIMEOUT_S,
         )
         try:
@@ -457,16 +468,28 @@ class ControlPlane:
         with the already-stored id, so one transport error no longer kills an
         otherwise healthy turn.
         """
+        payload = self._redactor.payload(event.payload)
+        if isinstance(event.payload, dict) and isinstance(event.payload.get("delta"), str):
+            stream_id = str(
+                event.payload.get("preview_id") or event.payload.get("id") or event.event_type
+            )
+            if event.payload.get("reset") or stream_id not in self._preview_redactors:
+                self._preview_redactors[stream_id] = SecretRedactor(self._secret_values)
+            payload["delta"] = self._preview_redactors[stream_id].feed(event.payload["delta"])
+            self._preview_contexts[stream_id] = (
+                event.event_type,
+                {k: v for k, v in payload.items() if k not in {"delta", "reset"}},
+            )
         self._event_seq += 1
         body = {
             "event_type": event.event_type,
-            "payload": event.payload,
+            "payload": payload,
             "event_seq": self._event_seq,
         }
         try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
+            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True)
         except httpx.TransportError:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
+            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True)
 
     def _get(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
         """Read from the worker surface, with the same fencing as a write."""
@@ -705,6 +728,26 @@ class ControlPlane:
         without knowing its base — so the runner, which resolves it when it
         checks the repository out, is the component that knows.
         """
+        for stream_id, redactor in tuple(self._preview_redactors.items()):
+            final = redactor.flush()
+            if final:
+                event_type, payload = self._preview_contexts[stream_id]
+                self._event_seq += 1
+                body = {
+                    "event_type": event_type,
+                    "payload": {**payload, "delta": final},
+                    "event_seq": self._event_seq,
+                }
+                try:
+                    self._post(
+                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
+                    )
+                except httpx.TransportError:
+                    self._post(
+                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
+                    )
+        self._preview_redactors.clear()
+        self._preview_contexts.clear()
         self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/finish",
             {"state": state, "detail": detail, "base_sha": base_sha},
@@ -1393,6 +1436,8 @@ def _claim_attestation(
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    if stamp["runner_capabilities"]:
+        stamp["runner_capabilities"].append(ENVIRONMENT_CAPABILITY)
     if sandbox_archive_settings_applied_revision is not None:
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
@@ -2560,7 +2605,7 @@ def _run_shared_live_attempt(
                     manager, spec, observer=operation_profiling.stage_observer(measurement)
                 )
                 reused_workspace = False
-                if job.setup_script:
+                if job.setup_script and job.environment is None:
                     stage = _stage(measurement, "setup")
                     setup = run_setup(
                         script=job.setup_script,
@@ -2570,7 +2615,7 @@ def _run_shared_live_attempt(
                     control.append_event(
                         NormalizedEvent(
                             "lifecycle",
-                            {"phase": "setup", "cached": False, "ran": setup.ran},
+                            {"phase": "setup", "ran": setup.ran},
                         )
                     )
                     if setup.exit_code != 0:
@@ -2709,6 +2754,17 @@ def _run_shared_live_attempt(
         # setup ran past a minute.
         network_observer = operation_profiling.stage_observer(measurement)
         retained.require_network(observer=network_observer)
+        if job.environment is not None:
+            prepared = supervisor.prepare_environment(
+                job.thread_id,
+                job.environment,
+                activation_owner=lease_token,
+                cancelled=lambda: heart.cancel_requested or heart.lease_lost,
+            )
+            control.append_event(
+                NormalizedEvent("lifecycle", {"phase": "environment_prepared", **prepared})
+            )
+
         stage = _stage(measurement, "terminal_resume")
         control.resume_terminals()
         terminals_suspended = False
@@ -2724,6 +2780,7 @@ def _run_shared_live_attempt(
             gateway_base_url=gateway_base_url,
             credential=None,
             github_token=job.github_token,
+            environment=job.environment,
             github_repo=job.repo,
             plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
@@ -3270,6 +3327,8 @@ def _deliver_in_background(
         control: ControlPlane | None = None
         try:
             control = ControlPlane(base_url, job.worker_token)
+            control._secret_values = job.environment.secrets() if job.environment else {}
+            control._redactor = SecretRedactor(control._secret_values)
             outcome = measurement.frozen_outcome or "incomplete"
             record = operation_profiling.frozen_record(measurement, outcome)
             manifest = operation_profiling.manifest_for_measurement(measurement)
@@ -3383,6 +3442,8 @@ def _run_turn(
         host,
     )
     control = ControlPlane(base_url, job.worker_token)
+    control._secret_values = job.environment.secrets() if job.environment else {}
+    control._redactor = SecretRedactor(control._secret_values)
     control.job_id = job.job_id
     heart = Heartbeater(control, ttl=lease_ttl, interval=HEARTBEAT_INTERVAL_S)
 
@@ -3942,7 +4003,12 @@ def run_forever(
     # says this runner applies ``slots_desired``, which is what lets the admin
     # page tell a host that will honour a new number from one that needs a
     # redeploy to change.
-    host_capabilities = [*capabilities, HOST_CONCURRENCY_CAPABILITY, HOST_SETTINGS_CAPABILITY]
+    host_capabilities = [
+        *capabilities,
+        ENVIRONMENT_CAPABILITY,
+        HOST_CONCURRENCY_CAPABILITY,
+        HOST_SETTINGS_CAPABILITY,
+    ]
     identity = ensure_enrolled(
         base_url=base_url,
         host=host,
@@ -4053,6 +4119,7 @@ def run_forever(
         launch_error=lambda: qualification_error or turns.launch_error,
         capabilities=lambda: [
             *_shared_live_host_capabilities(backend, stamp),
+            ENVIRONMENT_CAPABILITY,
             HOST_CONCURRENCY_CAPABILITY,
             # Advertised so an operator can tell a host that will pick up a
             # runtime configuration from one that needs a redeploy, which is
@@ -4270,6 +4337,16 @@ def run_forever(
                 # Nothing was claimed, so there is no startup to measure and
                 # the poll must not spend a slot.
                 operation_profiling.discard(measurement)
+                if isinstance(backend, ContainerBackend):
+                    from cloud_agent_host.environment_tests import claim_and_execute
+
+                    try:
+                        if claim_and_execute(
+                            base_url=base_url, credential=pool.credential, backend=backend
+                        ):
+                            continue
+                    except Exception:
+                        logger.warning("environment_test_poll_failed")
                 work.wait(pool.credential)
                 continue
 

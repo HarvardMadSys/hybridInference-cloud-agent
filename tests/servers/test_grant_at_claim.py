@@ -602,3 +602,58 @@ async def test_failed_claim_does_not_schedule_title_generation(monkeypatch, clai
     response = await claim(store, grants)
     assert response.status_code == 503
     generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("compatibility", ["old-runner", "missing-broker", "old-broker", "ready"])
+async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypatch, compatibility):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
+
+    store, grants = _ClaimStore(), _Grants()
+    original_claim = store.claim_job
+
+    async def bound_claim(**kwargs):
+        result = await original_claim(**kwargs)
+        return {**result, "environment_binding_id": "frozen-binding"}
+
+    monkeypatch.setattr(store, "claim_job", bound_claim)
+    store.get_environment_binding = AsyncMock(
+        return_value=BoundEnvironment(
+            binding_id="frozen-binding",
+            variables=[EnvironmentVariable(name="TOKEN", value="private-example")],
+        )
+    )
+    broker = SimpleNamespace(require_environment_capability=AsyncMock())
+    if compatibility == "old-broker":
+        broker.require_environment_capability.side_effect = WorkspaceBrokerError(
+            503, "Broker upgrade required"
+        )
+    route = AsyncMock(return_value=None if compatibility == "missing-broker" else broker)
+    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", route)
+    body = {
+        "worker_id": "w1",
+        "attestation": {
+            "runner_capabilities": [] if compatibility == "old-runner" else ["environment-v1"]
+        },
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/agent/worker/claim", json=body)
+    if compatibility == "ready":
+        assert response.status_code == 200, response.text
+        assert response.json()["environment"]["binding_id"] == "frozen-binding"
+        assert response.json()["environment"]["variables"][0]["value"] == "private-example"
+        assert len(grants.calls) == 1
+        assert store.released == []
+        broker.require_environment_capability.assert_awaited_once()
+    else:
+        assert response.status_code == 503, response.text
+        assert "private-example" not in response.text
+        assert store.released == [(_JOB, _ATTEMPT)]
+        assert store.retry_delays == [30]
+        assert grants.calls == []
+        assert store.failed == []

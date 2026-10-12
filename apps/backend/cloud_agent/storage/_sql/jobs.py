@@ -40,7 +40,7 @@ JOB_OWN_COLUMNS = (
 # same name keeps only the later one, which would quietly make every job read
 # report the conversation's revision as its own snapshot.
 THREAD_CONFIG_COLUMNS = (
-    "t.repo, t.setup_script, t.execution_profile, t.plugins, "
+    "t.repo, t.setup_script, t.execution_profile, t.plugins, t.environment_binding_id, "
     "t.goal_id, t.goal_objective, t.goal_state, t.goal_pause_reason, "
     "t.goal_pause_detail, t.goal_revision AS thread_goal_revision, "
     "t.goal_max_rounds, t.goal_completion_basis, t.goal_completed_by_job_id, "

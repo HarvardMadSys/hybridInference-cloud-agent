@@ -216,7 +216,7 @@ class PostgresSessionForkRepository:
             # history in, and a membership that already owns its resident
             # slot and can carry the residency the host is about to open.
             source_thread = await conn.fetchrow(
-                "SELECT repo, title, setup_script, execution_profile, plugins, "
+                "SELECT repo, title, setup_script, execution_profile, plugins, environment_binding_id, "
                 "goal_objective, goal_max_rounds "
                 "FROM agent_threads WHERE id = $1",
                 source["thread_id"],
@@ -256,6 +256,11 @@ class PostgresSessionForkRepository:
                 source_thread["goal_max_rounds"],
                 new_goal_id(),
                 json.dumps(load_json(source_thread["plugins"]) or []),
+            )
+            await conn.execute(
+                "UPDATE agent_threads SET environment_binding_id=$2 WHERE id=$1",
+                target_thread_id,
+                source_thread["environment_binding_id"],
             )
             await conn.execute(
                 """

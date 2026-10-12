@@ -31,6 +31,7 @@ from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
+from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 from cloud_agent.storage.repositories.goals import new_goal_id
 from cloud_agent.task_titles import (
     fallback_title,
@@ -91,6 +92,7 @@ class PostgresConversationCommands:
         reasoning_effort: str | None = None,
         base_sha: str | None = None,
         setup_script: str | None = None,
+        environment_selection: dict[str, Any] | None = None,
         plugins: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
@@ -139,6 +141,11 @@ class PostgresConversationCommands:
         user_input_seq = 1 if goal is not None else 0
         try:
             async with self._pool.acquire() as conn, conn.transaction():
+                binding_id = None
+                if environment_selection is not None:
+                    binding_id, setup_script = await PostgresEnvironmentRepository(
+                        self._pool
+                    )._bind_environment(conn, user_id, repo, environment_selection)
                 # What every turn of this conversation shares is written once,
                 # here, on the thread; the turns below carry only their own.
                 await conn.execute(
@@ -174,6 +181,12 @@ class PostgresConversationCommands:
                     user_input_seq,
                     json.dumps(plugins or []),
                 )
+                if binding_id is not None:
+                    await conn.execute(
+                        "UPDATE agent_threads SET environment_binding_id=$2 WHERE id=$1",
+                        thread_id,
+                        binding_id,
+                    )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
                     """

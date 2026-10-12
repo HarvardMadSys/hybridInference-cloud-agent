@@ -18,6 +18,7 @@ from cloud_agent.workers.background_wake import SNAPSHOT
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SnapshotRepository
+    from cloud_agent.ports.environments import EnvironmentRepository
     from cloud_agent.workers.background_wake import BackgroundWake
 
 #: The moved loop keeps logging under the module it came from: the deployment's
@@ -31,6 +32,7 @@ class _SnapshotCapture(Protocol):
 
     host_pool: HostPoolRepository
     snapshot: SnapshotRepository
+    environments: EnvironmentRepository
 
 
 SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
@@ -63,6 +65,13 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
                 detail="the owning workspace broker is unavailable",
             )
             return True
+        environment = (
+            await store.environments.get_job_environment(snapshot["anchor_job_id"])
+            if getattr(store, "environments", None)
+            else None
+        )
+        if environment:
+            snapshot = {**snapshot, "environment": environment.model_dump(mode="json")}
         receipt = await broker.capture_shared_snapshot(snapshot)
         expected = {
             "snapshot_id": int(snapshot["snapshot_id"]),

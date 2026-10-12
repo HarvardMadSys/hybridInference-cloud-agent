@@ -505,7 +505,9 @@ async def test_a_deferred_or_stalled_capture_leaves_the_coordinator_asleep(store
         assert await store.snapshot.claim_due_sandbox_snapshot() is None, "not before its retry"
         due = await store.snapshot.next_snapshot_retry_due()
         assert due is not None
-        assert 3 < (due - datetime.now(UTC)).total_seconds() <= 5, "its retry is when it is due"
+        assert 3 < (due - await pool.fetchval("SELECT clock_timestamp()")).total_seconds() <= 5, (
+            "its retry is when it is due"
+        )
 
         await _retry_now(pool, capture["snapshot_id"])
         assert await store.snapshot.next_snapshot_retry_due() is None
@@ -561,7 +563,7 @@ async def test_a_failed_base_import_waits_out_its_retry(store, pool):
     assert await store.snapshot.pending_snapshot_base_import() is None, "not before its retry"
     due = await store.snapshot.next_base_import_retry_due()
     assert due is not None
-    assert 13 < (due - datetime.now(UTC)).total_seconds() <= 15
+    assert 13 < (due - await pool.fetchval("SELECT clock_timestamp()")).total_seconds() <= 15
 
     await _retry_now(pool, capture["snapshot_id"])
     assert await store.snapshot.pending_snapshot_base_import() is not None

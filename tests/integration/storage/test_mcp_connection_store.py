@@ -1445,6 +1445,8 @@ async def test_revocation_wins_against_a_late_direct_connector_create(pool, stor
             )
             create_blocked = False
             for _ in range(100):
+                # pg_stat_activity caches within a transaction; refresh before observing a later waiter.
+                await blocker.execute("SELECT pg_stat_clear_snapshot()")
                 create_blocked = await blocker.fetchval(
                     """
                     SELECT EXISTS (

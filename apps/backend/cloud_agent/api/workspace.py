@@ -80,6 +80,7 @@ if TYPE_CHECKING:
         SandboxRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.ports.environments import EnvironmentRepository
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -98,6 +99,7 @@ class _WorkspaceStorage(Protocol):
     operation_measurements: OperationMeasurements
     sandbox: SandboxRepository
     source_control: SourceControlPort
+    environments: EnvironmentRepository
 
 
 def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:
@@ -411,12 +413,22 @@ async def run_agent_job_terminal_command(
     broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
+    environment = (
+        await job_store.environments.get_environment_binding(
+            user["user_id"], job["environment_binding_id"]
+        )
+        if job.get("environment_binding_id")
+        else None
+    )
+    if environment:
+        await broker.prepare_environment(_workspace_id(job), environment)
     try:
         result = await broker.terminal(
             _workspace_id(job),
             command=body.command,
             cwd=body.cwd,
             timeout_seconds=body.timeout_seconds,
+            **({"environment": environment} if environment else {}),
         )
         return AgentTerminalResponse(**result)
     except WorkspaceBrokerError as exc:
@@ -448,6 +460,15 @@ async def create_agent_job_terminal(
         app_credentials=app_credentials,
         require_ready=True,
     )
+    environment = (
+        await require_store(store).environments.get_environment_binding(
+            user["user_id"], job["environment_binding_id"]
+        )
+        if job.get("environment_binding_id")
+        else None
+    )
+    if environment:
+        await broker.prepare_environment(_workspace_id(job), environment)
     scope = root_scope(TERMINAL_OPEN, job, service=ROUTE_TERMINALS)
     with measured_operation(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
@@ -465,6 +486,7 @@ async def create_agent_job_terminal(
                         rows=body.rows,
                         cols=body.cols,
                         profiling=profiling,
+                        **({"environment": environment} if environment else {}),
                     ),
                 )
             except WorkspaceBrokerError as exc:

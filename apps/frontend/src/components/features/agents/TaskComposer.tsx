@@ -41,6 +41,7 @@ import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
 import { PluginSelectionDialog } from './plugins/PluginSelectionDialog';
+import { EnvironmentPicker, type EnvironmentSelection } from './environment/EnvironmentPicker';
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
 import { useUserHomeProfile } from './useUserHomeProfile';
@@ -129,6 +130,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker.
   const [repo, setRepo] = useState(draft?.repo ?? '');
+  const [environmentSelection, setEnvironmentSelection] = useState<EnvironmentSelection | null>(
+    null,
+  );
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   // Enter with no repository opens the picker; the choice then hands the caret
   // back to the task, so a second Enter sends it.
@@ -371,7 +375,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
-  const busy = submitting || goalCommand.busy || rewriting;
+  const busy =
+    submitting ||
+    goalCommand.busy ||
+    rewriting ||
+    Boolean(config?.environment_limits && repo && !environmentSelection);
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
     config?.github_connected === true &&
@@ -510,6 +518,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // Sent as a ref; the platform pins it to a commit at creation, because
       // a branch moves and the publisher applies onto a fixed one.
       ...(branch ? { base_ref: branch } : {}),
+      ...(environmentSelection ?? {}),
       // Whatever the control shows is what is sent. Empty only when the
       // pair offers no control at all, and then there is nothing to say.
       ...(effort ? { reasoning_effort: effort } : {}),
@@ -725,6 +734,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
         )}
 
+        {config?.environment_limits && (
+          <EnvironmentPicker repo={repo} onChange={setEnvironmentSelection} />
+        )}
         <div className="flex min-w-0 flex-wrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
           {disconnected ? (
             <span

@@ -26,7 +26,7 @@ import {
 } from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
-import { SettingsSearch } from './SettingsSearch';
+import { SettingsSearch } from './SettingsSearchPanel';
 import { applicationCategoryName } from './settingsOrganization';
 import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearch';
 import { AdminNavigation } from '../AdminNavigation';

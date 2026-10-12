@@ -30,6 +30,7 @@ class ConversationCommands(Protocol):
         reasoning_effort: str | None = None,
         base_sha: str | None = None,
         setup_script: str | None = None,
+        environment_selection: dict[str, Any] | None = None,
         plugins: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,

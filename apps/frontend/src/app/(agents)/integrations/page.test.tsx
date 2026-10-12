@@ -7,6 +7,10 @@ import type { McpConnectionApi } from '@/lib/api/mcp';
 import { getUserMemory } from '@/lib/api/userMemory';
 import { getMemoryProjects } from '@/lib/api/projectMemory';
 
+vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
+  EnvironmentManager: () => <div data-testid="environment-manager" />,
+}));
+
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
 }));

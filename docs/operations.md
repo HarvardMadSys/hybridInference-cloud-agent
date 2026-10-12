@@ -3397,3 +3397,47 @@ to date.
 - **Cutover inventory.** Secret provenance and one-time migration steps remain
   in [cutover.md](cutover.md) and `ENVIRONMENT.md`; this page documents the
   resulting runtime topology.
+
+
+## Reusable cloud environments
+
+Migration `0061_environments` adds owner configuration, immutable encrypted
+versions, fixed workspace bindings, isolated test leases and action results.
+Control plane values use `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` with a separate
+`hybridinference/environment-variable/v1` domain. Back up this key with the
+existing credential store; changing it without re-encryption makes old bindings
+unreadable. Secrets are not available through owner read/history APIs.
+
+Upgrade every control-plane replica before creating any new environment-bound
+workspace; mixed old/new admission, Fork and terminal handlers may silently lose
+binding information. After the first binding, do not roll back to binaries that
+cannot read it. To roll back, close those execution entrances, drain environment
+tests/preparation, and keep bound workspaces on compatible hosts or fenced off.
+
+Roll out the environment-capable runner and broker together. A claiming replica
+must attest `environment-v1`, and the actual authenticated broker must advertise
+it before receiving configuration. An older host releases jobs that require
+configuration without consuming an attempt; it must never run them without
+variables. Environment tests also obey the deployment pin, compute admission,
+replica attestation and host slot limits, and receive read-only source credentials
+without inference, MCP or repository write grants.
+
+Preparation receipts live in the host credential directory under
+`environment-preparation`, outside container mounts and source archives. They
+contain binding/container/boot identities and masked steps, never variable values.
+Keep this host state across broker restarts. Installation succeeds once per fixed
+workspace; startup runs once per actual boot. A failed step remains visible in
+the Environment tab and can be retried against the original binding.
+
+Cancellation fences the result immediately but keeps the test's host slot until
+cleanup is confirmed. The reaper expires leases/30-minute executions. On reconnect
+the enrolled host receives only its own expired test IDs and removes the exact
+labelled containers before acknowledging cleanup. Do not delete unrelated groups
+or bypass lease/container identity checks to clear capacity. Archived, unreferenced
+versions are collected after 30 days; existing workspace, test and publication
+bindings keep their historical encrypted values for redaction/scanning.
+
+Owner-provided credentials can be read and sent outside by user code through the
+existing network. Known-value masking and trusted publish scans do not cover
+encoded secrets, raw owner terminals/files, or direct Git pushes. Platform-held
+long-lived credentials, reserved variable names and fixed egress remain protected.

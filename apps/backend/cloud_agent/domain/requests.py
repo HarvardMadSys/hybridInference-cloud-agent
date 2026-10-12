@@ -8,11 +8,12 @@ from the same key reused for different content.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from typing import Any
 
 
-def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
+def request_fingerprint(kind: str, payload: dict[str, Any], *, sensitive: bool = False) -> str:
     """Hash what a submission asked for, so a replayed key must ask the same thing.
 
     A client resending a create or follow-up after a lost response carries the
@@ -28,10 +29,25 @@ def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
         for key, value in payload.items()
         if (key not in {"skill_ids", "plugins", "expected_latest_job_id"} or value is not None)
         and (key != "require_idle" or value is not False)
+        and not (
+            key in {"environment_id", "environment_revision", "global_revision"} and value is None
+        )
+        and not (key == "environment_overrides" and not value)
     }
     canonical = json.dumps(
         {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
     )
+    if sensitive:
+        from cloud_agent.settings import setting_env
+        from cloud_agent.source_control import ENV_ENCRYPTION_KEY, SourceControlError
+
+        material = setting_env(ENV_ENCRYPTION_KEY, "")
+        if not material:
+            raise SourceControlError("Environment encryption is unavailable")
+        key = hashlib.sha256(
+            b"hybridinference/environment-request/v1\0" + material.encode()
+        ).digest()
+        return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

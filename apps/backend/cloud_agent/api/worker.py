@@ -21,6 +21,7 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -104,6 +105,7 @@ from cloud_agent.schemas import (
     WorkerWaitResponse,
 )
 from cloud_agent.skills.selection import prompt_with_skills
+from cloud_agent.source_control import SourceControlError
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
@@ -122,6 +124,7 @@ from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAP
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent.workspace_errors import _workspace_broker_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -145,6 +148,7 @@ if TYPE_CHECKING:
         SourceControlRepository as SourceControlPort,
         UserMemoryRepository,
     )
+    from cloud_agent.ports.environments import EnvironmentRepository
     from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 
@@ -259,6 +263,7 @@ class _WorkerStorage(Protocol):
     skills: SkillRepository
     source_control: SourceControlPort
     user_memory: UserMemoryRepository
+    environments: EnvironmentRepository
 
 
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
@@ -856,6 +861,34 @@ async def worker_claim(
             detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
         ) from exc
 
+    environment = None
+    if claim.get("environment_binding_id"):
+        try:
+            environment = await job_store.environments.get_environment_binding(
+                claim["user_id"], claim["environment_binding_id"]
+            )
+            capabilities = body.attestation.runner_capabilities if body.attestation else []
+            if environment.required:
+                if ENVIRONMENT_CAPABILITY not in capabilities:
+                    raise SourceControlError("Host cannot execute environment configuration")
+                from cloud_agent.broker_routing import broker_for_job
+                from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+
+                try:
+                    broker = await broker_for_job(job_store.host_pool, claim["id"])
+                    if broker is None:
+                        raise SourceControlError("Workspace broker is unavailable")
+                    await broker.require_environment_capability()
+                except (WorkspaceBrokerError, httpx.HTTPError):
+                    raise SourceControlError("Workspace broker must be upgraded") from None
+            else:
+                environment = None
+        except SourceControlError:
+            await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
+            raise HTTPException(
+                503, "Waiting for environment-capable host or available encryption"
+            ) from None
+
     # Two credentials with different powers. The runner keeps the full one and
     # passes only the sandbox one inside, so a credential that leaks from inside
     # the agent can make model calls the gateway already meters but cannot touch
@@ -1001,6 +1034,7 @@ async def worker_claim(
             claim.get("goal"),
         ),
         setup_script=claim.get("setup_script"),
+        environment=environment,
         plugins=claim.get("plugins") or [],
         runtime=claim["runtime"],
         model=claim["model"],

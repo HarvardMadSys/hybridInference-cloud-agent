@@ -67,6 +67,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
+    from cloud_agent.ports.environments import EnvironmentRepository
     from cloud_agent.source_control_runtime import GitHubAppSource
     from cloud_agent.workers.background_wake import BackgroundWake
 
@@ -82,6 +83,7 @@ class PublishStorage(Protocol):
     snapshot: SnapshotRepository
     host_pool: HostPoolRepository
     source_control: SourceControlRepository
+    environments: EnvironmentRepository
 
 
 logger = get_logger(__name__)
@@ -738,6 +740,7 @@ async def _publish_claimed_owned(
     # allowlist) has to be able to stop it. The read side already refuses at
     # claim; without this the same deployment would block the read-only token
     # and still hand out the push token.
+    environment = None
     try:
         await require_entitled_repo(
             job["repo"],
@@ -784,6 +787,11 @@ async def _publish_claimed_owned(
     try:
         # Blocking git work: keep it off the event loop so a slow clone cannot
         # stall the gateway's request handling.
+        environment = (
+            await store.environments.get_job_environment(job_id)
+            if getattr(store, "environments", None)
+            else None
+        )
         result = await asyncio.to_thread(
             publish_patch,
             job_id=job_id,
@@ -794,6 +802,7 @@ async def _publish_claimed_owned(
             commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
             allow_workflow_changes=allow_workflow_changes,
             include_base_bundle=True,
+            **({"known_secrets": environment.secrets()} if environment else {}),
         )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
         pr_url = await ensure_draft_pull_request(
@@ -806,6 +815,10 @@ async def _publish_claimed_owned(
         )
     except Exception as exc:
         detail = str(exc) if isinstance(exc, PublishError) else f"publish failed: {exc}"
+        if environment is not None:
+            from cloud_agent_shared.secret_redaction import SecretRedactor
+
+            detail = SecretRedactor(environment.secrets()).text(detail)
         if _is_retryable_publication_failure(exc):
             await retry(detail)
             return None
@@ -815,7 +828,10 @@ async def _publish_claimed_owned(
                 extra={"event": "agent_job_publish_rejected", "job_id": job_id},
             )
         else:
-            logger.exception("agent job publish failed unexpectedly")
+            if environment is not None and environment.secrets():
+                logger.error("agent job publish failed unexpectedly (%s)", type(exc).__name__)
+            else:
+                logger.exception("agent job publish failed unexpectedly")
         await fail(detail)
         return None
 
@@ -937,12 +953,18 @@ async def publish_loop(
 async def _next_look_s(store: PublishStorage) -> float:
     """How long the publisher may sleep before it looks for work again."""
     idle_s = number_setting("publish_idle_seconds", PUBLISH_IDLE_S)
+    deadlines = []
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_base_import_retry_due()
         if due is not None:
-            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
+            deadlines.append(due)
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_snapshot_publish_retry_due()
         if due is not None:
-            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
-    return max(idle_s, 0.0)
+            deadlines.append(due)
+    clock = getattr(store.snapshot, "snapshot_database_time", None)
+    now = datetime.now(UTC)
+    if clock is not None:
+        with contextlib.suppress(Exception):
+            now = await clock()
+    return max(min([idle_s, *((due - now).total_seconds() for due in deadlines)]), 0.0)
