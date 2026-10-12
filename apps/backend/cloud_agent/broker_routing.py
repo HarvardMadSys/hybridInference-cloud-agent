@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
+import socket
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -47,6 +49,41 @@ class BrokerUrlRefused(ValueError):
     """A host reported a broker address this deployment will not talk to."""
 
 
+#: Addresses no workspace broker lives at, whatever the allowlist says.
+#: Link-local holds the cloud metadata services (169.254.169.254, and AWS's
+#: fd00:ec2::254 over IPv6), and the control plane's probe of a broker carries
+#: the pool's token and reflects the failure back to the host: aimed there, it
+#: is a credentialed request to the control plane's own instance identity.
+#: Loopback and private ranges stay allowed, because single-host and private
+#: pools put their brokers exactly there.
+_NEVER_BROKER_NETWORKS = (
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
+)
+
+
+def _literal_address(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address a numeric host names, in any spelling the resolver accepts.
+
+    ``None`` for a name: what a name resolves to is the allowlist's business.
+    """
+    name = hostname.rstrip(".")
+    try:
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(name)
+    except ValueError:
+        try:
+            # What the resolver applies to a numeric host, including shorthand
+            # spellings ``ip_address`` refuses: "2852039166", "0xa9fea9fe",
+            # "169.254.43518" all name 169.254.169.254.
+            address = ipaddress.IPv4Address(socket.inet_aton(name))
+        except OSError:
+            return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
 def validate_broker_url(url: str | None) -> str | None:
     """Return ``url`` if this deployment may send its broker token there.
 
@@ -55,20 +92,24 @@ def validate_broker_url(url: str | None) -> str | None:
     that receives a credential good for every broker in the pool — a
     compromised host, or one with a typo, could name anything and be handed it.
 
-    Two checks, both structural:
+    Three checks, all structural:
 
     * **Scheme.** `http`/`https` only. A `file:` or `gopher:` URL is not a
       broker, and the client would do something surprising with it.
+    * **Never a link-local address**, written in any spelling: that is where
+      cloud metadata services answer (see ``_NEVER_BROKER_NETWORKS``).
     * **Host allowlist**, when configured. Names, not patterns: a pattern is a
       thing to get subtly wrong, and the set of machines in a pool is small
-      and known. Unconfigured means any host, which is what this did before —
-      the check is opt-in so that turning it on is a deployment's decision
-      rather than something that breaks every existing pool on upgrade.
+      and known. Unconfigured means any other host, which is what this did
+      before — the check is opt-in so that turning it on is a deployment's
+      decision rather than something that breaks every existing pool on
+      upgrade. It is also the only check on what a *name* resolves to.
 
     Raises:
-        BrokerUrlRefused: If the URL is unusable or names a host outside the
-            allowlist. Refused rather than dropped: a host whose address is
-            ignored looks enrolled and silently never serves a workspace.
+        BrokerUrlRefused: If the URL is unusable, names a link-local address,
+            or names a host outside the allowlist. Refused rather than
+            dropped: a host whose address is ignored looks enrolled and
+            silently never serves a workspace.
     """
     if url is None or not url.strip():
         return None
@@ -79,6 +120,11 @@ def validate_broker_url(url: str | None) -> str | None:
         raise BrokerUrlRefused("broker_url must be a valid http(s) URL") from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise BrokerUrlRefused(f"broker_url must be an http(s) URL, got {candidate!r}")
+    address = _literal_address(parsed.hostname)
+    if address is not None and any(address in network for network in _NEVER_BROKER_NETWORKS):
+        raise BrokerUrlRefused(
+            f"broker_url host {parsed.hostname!r} is a link-local address, where no broker runs"
+        )
 
     allowed = [
         entry.strip() for entry in (setting_env(ENV_BROKER_HOSTS) or "").split(",") if entry.strip()

@@ -2066,6 +2066,49 @@ def test_a_broker_url_that_is_not_http_is_refused(url: str) -> None:
         validate_broker_url(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/role?x=",
+        "http://169.254.169.254.:8092",
+        # Spellings the resolver turns into the same address.
+        "http://2852039166:8092",
+        "http://0xa9fea9fe:8092",
+        "http://169.254.43518:8092",
+        "http://[::ffff:169.254.169.254]:8092",
+        "http://[fd00:ec2::254]:8092",
+        "http://[fe80::1]:8092",
+    ],
+)
+def test_a_link_local_broker_url_is_refused_even_without_an_allowlist(monkeypatch, url) -> None:
+    """No broker lives at a metadata address, whatever the allowlist says.
+
+    The control plane probes and calls a host's broker carrying the pool's
+    token, and reflects a failure's detail back to the host. Pointed at the
+    metadata service, that is a credentialed request to the control plane's
+    own instance identity, issued on the say-so of one host credential.
+    """
+    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
+    with pytest.raises(BrokerUrlRefused):
+        validate_broker_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8092",
+        "http://[::1]:8092",
+        "http://172.17.0.1:18092",
+        "http://10.0.0.5:8092",
+        "http://workspace-broker:8092",
+    ],
+)
+def test_loopback_private_and_named_brokers_are_still_accepted(monkeypatch, url) -> None:
+    """Single-host and private pools put brokers exactly there."""
+    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
+    assert validate_broker_url(url) == url
+
+
 def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
     """Names, not patterns: a pattern is a thing to get subtly wrong, and the
     set of machines in a pool is small and known.

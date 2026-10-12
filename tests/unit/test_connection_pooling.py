@@ -163,3 +163,16 @@ async def test_a_host_with_no_broker_url_still_gets_no_client(broker_pools) -> N
     assert broker_routing._client_for(_row("host-a", "")) is None
     assert broker_routing._client_for({}) is None
     assert not broker_routing._POOLS
+
+
+async def test_a_stored_metadata_address_gets_no_client(broker_pools, monkeypatch) -> None:
+    """A row written before the refusal existed is refused when it is used.
+
+    The address is checked where the token is about to be lent, so a broker
+    URL already stored as the metadata service never receives the pool's
+    credential, with or without an allowlist.
+    """
+    monkeypatch.delenv(broker_routing.ENV_BROKER_HOSTS, raising=False)
+
+    assert broker_routing._client_for(_row("host-a", "http://169.254.169.254:80")) is None
+    assert not broker_routing._POOLS
