@@ -313,3 +313,11 @@ consuming distribution must:
 - run preparation, Kata checks, and environment acceptance on the actual hosts;
 - keep environment configuration, deployment records, and recovery material
   outside this upstream repository.
+
+Retain previous verified manifests, recipes, reviewed hashes and digest-addressed
+images separately from the persistent deployment roots. Artifact-mode host
+rollouts receive only one manifest and cannot automatically select an older
+release. Follow the [backup and recovery runbook](../../docs/disaster-recovery.md#recover-a-previous-artifact-release)
+to check database/protocol compatibility and run the same phased readiness
+sequence with a previous verified recipe; a previous release is not automatically
+compatible with newer installed migrations.

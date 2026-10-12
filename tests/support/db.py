@@ -32,7 +32,36 @@ async def reset_agent_tables(conn: Any) -> None:
     )
     names = ", ".join(sorted(row["tablename"] for row in rows))
     if names:
-        await conn.execute(f"TRUNCATE TABLE {names} CASCADE")
+        protects_sandbox_events = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_trigger AS trigger
+                JOIN pg_class AS relation ON relation.oid = trigger.tgrelid
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'public'
+                  AND relation.relname = 'agent_sandbox_events'
+                  AND trigger.tgname = 'trg_agent_sandbox_events_no_truncate'
+                  AND NOT trigger.tgisinternal
+            )
+            """
+        )
+        if protects_sandbox_events:
+            # Production has no bypass for the append-only trigger. Test reset
+            # owns the migrated schema, so disable only this named guard inside
+            # one transaction; a failed TRUNCATE rolls the ALTER TABLE back.
+            async with conn.transaction():
+                await conn.execute(
+                    "ALTER TABLE agent_sandbox_events "
+                    "DISABLE TRIGGER trg_agent_sandbox_events_no_truncate"
+                )
+                await conn.execute(f"TRUNCATE TABLE {names} CASCADE")
+                await conn.execute(
+                    "ALTER TABLE agent_sandbox_events "
+                    "ENABLE TRIGGER trg_agent_sandbox_events_no_truncate"
+                )
+        else:
+            await conn.execute(f"TRUNCATE TABLE {names} CASCADE")
     # The baseline seeds this row; every claim reads it, and a test that left
     # a host pinned would otherwise gate every later claim.
     await conn.execute(
@@ -45,6 +74,11 @@ async def reset_agent_tables(conn: Any) -> None:
         '"multipart_threshold_bytes":8388608,"multipart_part_bytes":8388608}\'::jsonb, '
         "sandbox_archive_revision = 0, sandbox_archive_updated_at = NOW()"
     )
+    # Autoscaling uses the same singleton/CAS shape. Keep older migration
+    # targets usable by checking for the additive tables before reseeding.
+    if await conn.fetchval("SELECT to_regclass('agent_cloudlab_autoscaling_policy')") is not None:
+        await conn.execute("INSERT INTO agent_cloudlab_autoscaling_policy (id) VALUES (TRUE)")
+        await conn.execute("INSERT INTO agent_cloudlab_autoscaling_runtime (id) VALUES (TRUE)")
     # The profiling control row is seeded by its migration for the same reason:
     # every Start, Stop and policy read takes it, so a truncate that left it out
     # would make a correct deployment look like one that was never configured.

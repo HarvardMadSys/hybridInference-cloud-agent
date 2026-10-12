@@ -225,8 +225,9 @@ async def test_a_late_write_from_a_replaced_credential_is_refused(store):
     Credential A authenticates, an operator re-enrolls the name under
     credential B, and A's request arrives afterwards. Checking "is this still
     the right credential" outside the write would let exactly that request
-    repopulate the row with the previous machine's numbers. The liveness half
-    of the same heartbeat still lands: the host is real either way.
+    repopulate the row with the previous machine's numbers. Its liveness half
+    is refused too: the beat speaks for the machine that was replaced, and
+    counting it would mark the new one online before it has said a word.
     """
     stale_digest = await _enrol(store, "runner-a")
     fresh_digest = await _enrol(store, "runner-a", credential="cred-runner-a-rebuilt")
@@ -239,7 +240,7 @@ async def test_a_late_write_from_a_replaced_credential_is_refused(store):
     (listed,) = await store.host_pool.list_runner_hosts()
     assert listed["capacity_snapshot"] is None
     assert listed["capacity_sampled_at"] is None
-    assert listed["last_heartbeat_at"] is not None
+    assert listed["last_heartbeat_at"] is None
 
     # And the credential that is actually held still works.
     await _beat(store, "runner-a", fresh_digest, block=capacity_block(), age_ms=120)

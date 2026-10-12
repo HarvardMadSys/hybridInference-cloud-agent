@@ -269,6 +269,19 @@ def test_the_same_message_is_given_once(tmp_path):
     assert _written(process) == ["again"]
 
 
+def test_claude_replays_a_taken_message_receipt_without_writing_it_again(tmp_path):
+    process, _, turn, events = _claude_turn(tmp_path)
+    _read(process, events, _assistant(_tool_use("toolu_1")))
+    assert turn.inject("again", message_id="apmsg_1") == InputOutcome(True)
+    (taken,) = _read(process, events, _echo("again"))
+
+    replayed = turn.inject("again", message_id="apmsg_1")
+
+    assert taken.event_type == USER_MESSAGE_EVENT
+    assert replayed == InputOutcome(True)
+    assert _written(process) == ["again"]
+
+
 def test_claude_refuses_a_message_for_a_turn_that_is_over(tmp_path):
     process, _, turn, events = _claude_turn(tmp_path)
     _read(process, events, _assistant(_tool_use("toolu_1")))
@@ -403,6 +416,87 @@ def test_codex_steers_the_turn_it_saw_running_and_its_stream_reports_it_taken(tm
     assert answer.event_type == USER_MESSAGE_EVENT
     assert answer.payload == {"text": "also run the linter", "pending_message_id": "apmsg_1"}
     assert outcome == [InputOutcome(True)]
+
+
+def test_codex_replays_one_receipt_for_concurrent_duplicate_message_ids(tmp_path):
+    process, turn = _codex_turn(tmp_path)
+
+    first, first_outcome = _steer_in_background(turn, "also run the linter")
+    steer = _sent_steer(process)
+    second, second_outcome = _steer_in_background(turn, "also run the linter")
+    (answer,) = turn.events_for_line(
+        json.dumps({"id": steer["id"], "result": {"turnId": "turn-a"}})
+    )
+    first.join(5)
+    second.join(5)
+
+    assert answer.event_type == USER_MESSAGE_EVENT
+    assert first_outcome == second_outcome == [InputOutcome(True)]
+    assert sum(json.loads(line).get("method") == "turn/steer" for line in process.sent) == 1
+
+
+def test_codex_replays_an_uncertain_native_failure_to_concurrent_duplicates(tmp_path, monkeypatch):
+    _process, turn = _codex_turn(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    waiter_started = threading.Event()
+    native_calls = 0
+
+    def lose_native_response(_turn, _pending):
+        nonlocal native_calls
+        native_calls += 1
+        entered.set()
+        assert release.wait(5)
+        raise drivers.DriverError("native response lost")
+
+    original_wait = drivers._InputReceipt.wait
+
+    def mark_waiting(receipt):
+        waiter_started.set()
+        return original_wait(receipt)
+
+    monkeypatch.setattr(turn._session, "inject_input", lose_native_response)
+    monkeypatch.setattr(drivers._InputReceipt, "wait", mark_waiting)
+    errors: list[BaseException] = []
+
+    def inject() -> None:
+        try:
+            turn.inject("also run the linter", message_id="apmsg_1")
+        except BaseException as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(target=inject)
+    duplicate = threading.Thread(target=inject)
+    owner.start()
+    assert entered.wait(5)
+    duplicate.start()
+    assert waiter_started.wait(5)
+    release.set()
+    owner.join(5)
+    duplicate.join(5)
+
+    assert not owner.is_alive()
+    assert not duplicate.is_alive()
+    assert native_calls == 1
+    assert len(errors) == 2
+    assert all(isinstance(error, drivers.DriverError) for error in errors)
+    assert [str(error) for error in errors] == ["native response lost"] * 2
+    assert "apmsg_1" not in turn._input_receipts
+
+
+def test_codex_replays_settled_receipt_without_a_second_native_steer(tmp_path):
+    process, turn = _codex_turn(tmp_path)
+
+    first, first_outcome = _steer_in_background(turn, "also run the linter")
+    steer = _sent_steer(process)
+    turn.events_for_line(json.dumps({"id": steer["id"], "result": {"turnId": "turn-a"}}))
+    first.join(5)
+
+    replayed = turn.inject("also run the linter", message_id="apmsg_1")
+
+    assert first_outcome == [InputOutcome(True)]
+    assert replayed == InputOutcome(True)
+    assert sum(json.loads(line).get("method") == "turn/steer" for line in process.sent) == 1
 
 
 @pytest.mark.parametrize(

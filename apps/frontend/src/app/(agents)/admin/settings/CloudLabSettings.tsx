@@ -11,6 +11,28 @@ import {
 } from '@/lib/api/compute';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
+import { SettingsSection } from '../SettingsSection';
+
+const SSH_PUBLIC_KEY_ALGORITHM =
+  /^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa)$/;
+
+function sshPublicKeyError(value: string): string | null {
+  const key = value.trim();
+  if (!key) return null;
+  if (/[\r\n]/.test(value)) return 'SSH public key must be one OpenSSH public key.';
+  const parts = key.split(/\s+/);
+  const comment = parts.slice(2).join(' ');
+  if (
+    parts.length < 2 ||
+    !SSH_PUBLIC_KEY_ALGORITHM.test(parts[0]) ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(parts[1]) ||
+    comment.length > 128
+  ) {
+    return 'SSH public key must be one OpenSSH public key.';
+  }
+  return null;
+}
+
 function AccessDenied() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
@@ -44,6 +66,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
   const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const fail = useCallback(
     (cause: unknown) => {
@@ -85,13 +108,25 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
     return () => controller.abort();
   }, [load]);
 
+  function updateDraft(update: Partial<CloudLabDefaults>) {
+    setDraft((current) => (current ? { ...current, ...update } : current));
+    setAdvancedOpen(false);
+  }
+
   async function submit() {
     if (!draft || busy) return;
     if (!Number.isInteger(draft.duration) || draft.duration < 1 || draft.duration > 168) {
       setError('Initial duration must be a whole number from 1 to 168 hours.');
       return;
     }
+    const keyError = sshPublicKeyError(draft.ssh_public_key ?? '');
+    if (keyError) {
+      setError(keyError);
+      setAdvancedOpen(true);
+      return;
+    }
     setBusy(true);
+    setAdvancedOpen(false);
     setError(null);
     setNotice(null);
     try {
@@ -100,6 +135,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
       setDraft(response.defaults);
       setNotice('CloudLab defaults saved. New server forms use them immediately.');
     } catch (cause) {
+      if (cause instanceof APIError && cause.statusCode === 422) setAdvancedOpen(true);
       fail(cause);
     } finally {
       setBusy(false);
@@ -112,7 +148,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
   const inputClass = 'ui-input min-h-11 w-full';
 
   return (
-    <div className="max-w-4xl">
+    <>
       <div className="mt-6">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">CloudLab defaults</h2>
         <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -156,104 +192,128 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
           }}
         >
           <fieldset disabled={busy} className="space-y-8">
-            <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
-              <h3
-                id="cloud-resource-heading"
-                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
-              >
-                Cloud resource
-              </h3>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">CloudLab project</span>
-                  <input
-                    aria-label="CloudLab project"
-                    className={inputClass}
-                    maxLength={128}
-                    value={draft.project}
-                    onChange={(event) => setDraft({ ...draft, project: event.target.value })}
-                  />
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">
-                    Project that will own new experiments.
-                  </span>
-                </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Initial duration (hours)</span>
-                  <input
-                    aria-label="Initial duration (hours)"
-                    className={inputClass}
-                    type="number"
-                    min={1}
-                    max={168}
-                    step={1}
-                    required
-                    value={draft.duration}
-                    onChange={(event) =>
-                      setDraft({ ...draft, duration: Number(event.target.value) })
-                    }
-                  />
-                </label>
-              </div>
-            </section>
+            <SettingsSection
+              title="Important"
+              description="Choose the project and initial lifetime for new CloudLab servers."
+            >
+              <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
+                <h3
+                  id="cloud-resource-heading"
+                  className="border-b border-border pb-3 text-sm font-semibold text-foreground"
+                >
+                  Cloud resource
+                </h3>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">CloudLab project</span>
+                    <input
+                      aria-label="CloudLab project"
+                      className={inputClass}
+                      maxLength={128}
+                      value={draft.project}
+                      onChange={(event) => updateDraft({ project: event.target.value })}
+                    />
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      Project that will own new experiments.
+                    </span>
+                  </label>
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">Initial duration (hours)</span>
+                    <input
+                      aria-label="Initial duration (hours)"
+                      className={inputClass}
+                      type="number"
+                      min={1}
+                      max={168}
+                      step={1}
+                      required
+                      value={draft.duration}
+                      onChange={(event) => updateDraft({ duration: Number(event.target.value) })}
+                    />
+                  </label>
+                </div>
+              </section>
+            </SettingsSection>
 
-            <section className="ui-card space-y-4 p-5" aria-labelledby="machine-template-heading">
-              <h3
-                id="machine-template-heading"
-                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
+            <SettingsSection
+              title="Advanced"
+              description="Customize the machine template and SSH access used for new servers."
+              open={advancedOpen}
+            >
+              <section
+                className="ui-card space-y-4 p-5"
+                aria-labelledby="machine-template-heading"
+                onInvalidCapture={(event) => {
+                  const section = event.currentTarget.closest('details');
+                  if (section) section.open = true;
+                }}
               >
-                Machine template
-              </h3>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Template project</span>
+                <h3
+                  id="machine-template-heading"
+                  className="border-b border-border pb-3 text-sm font-semibold text-foreground"
+                >
+                  Machine template and access
+                </h3>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">Template project</span>
+                    <input
+                      aria-label="Template project"
+                      className={inputClass}
+                      maxLength={128}
+                      value={draft.profile_project}
+                      onChange={(event) => updateDraft({ profile_project: event.target.value })}
+                    />
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      Project that publishes the CloudLab profile.
+                    </span>
+                  </label>
+                  <label className="space-y-2 text-sm">
+                    <span className="font-medium">Template name</span>
+                    <input
+                      aria-label="Template name"
+                      className={inputClass}
+                      maxLength={128}
+                      value={draft.profile_name}
+                      onChange={(event) => updateDraft({ profile_name: event.target.value })}
+                    />
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      Name of the CloudLab profile to use.
+                    </span>
+                  </label>
+                </div>
+                <label className="block max-w-xl space-y-2 text-sm">
+                  <span className="font-medium">CloudLab SSH user</span>
                   <input
-                    aria-label="Template project"
+                    aria-label="CloudLab SSH user"
                     className={inputClass}
                     maxLength={128}
-                    value={draft.profile_project}
-                    onChange={(event) =>
-                      setDraft({ ...draft, profile_project: event.target.value })
-                    }
+                    autoComplete="off"
+                    value={draft.ssh_username}
+                    onChange={(event) => updateDraft({ ssh_username: event.target.value })}
+                  />
+                </label>
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">SSH public key</span>
+                  <textarea
+                    aria-label="CloudLab SSH public key"
+                    className={`${inputClass} font-mono`}
+                    rows={3}
+                    maxLength={8192}
+                    spellCheck={false}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    placeholder="ssh-ed25519 AAAA..."
+                    value={draft.ssh_public_key ?? ''}
+                    onChange={(event) => updateDraft({ ssh_public_key: event.target.value })}
                   />
                   <span className="block text-xs text-gray-500 dark:text-gray-400">
-                    Project that publishes the CloudLab profile.
+                    Installed for this user on new experiments. Leave blank to use keys already on
+                    the CloudLab account.
                   </span>
                 </label>
-                <label className="space-y-2 text-sm">
-                  <span className="font-medium">Template name</span>
-                  <input
-                    aria-label="Template name"
-                    className={inputClass}
-                    maxLength={128}
-                    value={draft.profile_name}
-                    onChange={(event) => setDraft({ ...draft, profile_name: event.target.value })}
-                  />
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">
-                    Name of the CloudLab profile to use.
-                  </span>
-                </label>
-              </div>
-            </section>
-
-            <section className="ui-card space-y-4 p-5" aria-labelledby="ssh-access-heading">
-              <h3
-                id="ssh-access-heading"
-                className="border-b border-border pb-3 text-sm font-semibold text-foreground"
-              >
-                SSH access
-              </h3>
-              <label className="block max-w-xl space-y-2 text-sm">
-                <span className="font-medium">CloudLab SSH user</span>
-                <input
-                  aria-label="CloudLab SSH user"
-                  className={inputClass}
-                  maxLength={128}
-                  autoComplete="off"
-                  value={draft.ssh_username}
-                  onChange={(event) => setDraft({ ...draft, ssh_username: event.target.value })}
-                />
-              </label>
-            </section>
+              </section>
+            </SettingsSection>
 
             <div className="flex items-center justify-end">
               <button
@@ -267,6 +327,6 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
           </fieldset>
         </form>
       )}
-    </div>
+    </>
   );
 }

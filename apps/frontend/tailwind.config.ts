@@ -47,7 +47,7 @@ export default {
       },
       boxShadow: {
         subtle: '0 1px 2px rgba(0,0,0,0.06)',
-        card: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
+        card: '0 8px 24px -8px rgb(var(--ui-foreground) / 0.12), 0 2px 6px rgb(var(--ui-foreground) / 0.04)',
       },
     },
   },

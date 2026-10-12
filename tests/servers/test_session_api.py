@@ -586,6 +586,37 @@ async def test_an_unreachable_gateway_mints_no_session(key):
     assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
 
+@pytest.mark.parametrize("web_base", [_WEB_BASE_URL, ""])
+async def test_a_signing_key_fetch_outage_offers_retry_and_mints_no_session(
+    monkeypatch, key, web_base
+):
+    """A valid exchanged token cannot be judged while its public key is unavailable."""
+    monkeypatch.setenv(session_router.ENV_WEB_BASE_URL, web_base)
+
+    class Unreachable:
+        def get_signing_key_from_jwt(self, token):
+            raise jwt.PyJWKClientConnectionError("private-upstream-error-sentinel")
+
+    monkeypatch.setattr(identity, "_jwks_client", lambda: Unreachable())
+    gateway = _FakeGateway(identity_token=_identity_token(key))
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+    ) as client:
+        response = await _sign_in(client, return_to="/jobs/42")
+        assert not client.cookies.get(identity.SESSION_COOKIE)
+        if web_base:
+            assert response.status_code == 303
+            assert parse_qs(urlparse(response.headers["location"]).query) == {
+                "sign_in_error": ["temporary"],
+                "return_to": ["/jobs/42"],
+            }
+            assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+        else:
+            assert response.status_code == 503
+        assert "private-upstream-error-sentinel" not in response.text
+    assert gateway.access_asked == []
+
+
 async def test_a_token_for_another_audience_is_refused(key):
     """The audience check is what stops one consumer's token acting as ours."""
     gateway = _FakeGateway(

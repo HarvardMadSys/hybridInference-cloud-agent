@@ -181,7 +181,7 @@ class SandboxArchiveRuntimeSettings:
         before = self.invalidate()
         if self._broker is None:
             raise RuntimeError("workspace broker is unavailable for sandbox archive policy")
-        answer = self._broker(policy.as_dict())
+        answer = self._broker(policy.as_broker_dict())
         applied = answer.get("applied_revision")
         if isinstance(applied, bool) or not isinstance(applied, int):
             raise RuntimeError("workspace broker returned no sandbox archive policy revision")

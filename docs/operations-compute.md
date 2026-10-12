@@ -105,7 +105,13 @@ Supply the infrastructure inputs once:
 
 1. Add and validate management SSH connections for the stable gateway machine
    and control-plane machine, including independently verified host keys.
-2. Select those connections and enter the machines' SSH addresses and users.
+2. Select those connections and confirm the machines' SSH addresses and users.
+   The gateway address defaults to the saved Gateway API URL's hostname
+   (for FreeInference, `freeinference.org`). The supported control-plane deployer
+   supplies the service node's FQDN as the control-plane address. Override these
+   with `AGENT_GATEWAY_SSH_HOST` and `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses
+   different addresses; other deployers must supply the control-plane value.
+   Saved and pending setup inputs take precedence over these first-time defaults.
    Both machines need Python 3 and passwordless `sudo`. The control machine
    must run the supported Docker Compose deployment, and the gateway must
    already listen on the selected inference port.
@@ -226,7 +232,11 @@ The Host control connection also reverse-forwards from the stable
 control-plane machine to `workspace-broker:8092`. Bind its listener to the
 actual control-plane Docker bridge gateway address, never loopback or
 `0.0.0.0`. Configure `GatewayPorts clientspecified`, restricting both the
-key's reverse listen address/port and forward destination. Set
+key's reverse listen address/port and forward destination; never `yes`, which
+binds every remote forward to the wildcard address. Firewall the reverse ports
+on that machine so they answer only on its Docker bridge interface
+([broker route](operations.md#the-way-back-the-control-plane-reaching-this-hosts-broker)).
+Set
 `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` to the resulting URL reachable from the
 control-plane container. Add its hostname/IP to
 `AGENT_BROKER_URL_ALLOWED_HOSTS` when that allowlist is enabled. Every
@@ -329,8 +339,10 @@ Provider references:
 ## Day-to-day workflow
 
 Use **Admin → CloudLab** to set the project, initial duration, template project,
-template name and SSH user that new CloudLab server forms start with. These are
-non-secret defaults only; an administrator can change them for one allocation.
+template name, SSH user, and the SSH public key installed for that user. These
+are non-secret defaults only; an administrator can change them for one
+allocation. Leave the public key blank to use keys already on the CloudLab
+account.
 
 1. In **Admin → Servers**, choose **Add server** and select existing SSH or
    CloudLab.
@@ -340,7 +352,9 @@ non-secret defaults only; an administrator can change them for one allocation.
    first-boot host-key registration. Credential responses expose metadata only.
 3. Enter the resource details. Existing SSH needs an address, port and user.
    CloudLab needs an exact experiment UUID to attach, or a profile and explicitly
-   selected project to provision, plus its SSH user.
+   selected project to provision, plus its SSH user. A public key set with that
+   user is sent as the experiment's additional SSH key when the experiment is
+   created.
 4. Submit and follow the durable operation until ready. HTTP 202 confirms only
    that the operation was recorded; allocation, installation, enrollment and
    readiness are separate steps.

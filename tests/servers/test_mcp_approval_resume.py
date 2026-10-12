@@ -149,7 +149,7 @@ async def test_upstream_failure_finishes_approval_and_returns_a_protocol_error(
     calls = []
 
     class BrokenTransport:
-        async def request(self, method, params):
+        async def request(self, method, params=None, **_kwargs):
             calls.append(method)
             raise failure
 

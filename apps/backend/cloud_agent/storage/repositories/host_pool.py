@@ -8,15 +8,18 @@ they were; only the class holding them changed.
 from __future__ import annotations
 
 import json
+from collections import deque
 from typing import TYPE_CHECKING
 
 from cloud_agent.capacity_protocol import (
     CAPACITY_HISTORY_MAX_AGE_S,
+    FRESH_AFTER_SECONDS,
     history_point_write_from_block,
 )
 from cloud_agent.execution_profiles import KATA_RUNTIME
 from cloud_agent.host_pool import (
     HOST_DISABLED,
+    HOST_DRAINING,
     HOST_ENROLLING,
     HOST_OFFLINE,
     HOST_ONLINE,
@@ -24,6 +27,11 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.sandbox_archive_credentials import (
+    archive_settings_payload,
+    load_stored_archive_policy,
+    seal_archive_storage,
+)
 from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,
@@ -52,7 +60,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
     from typing import Any
 
@@ -64,6 +72,95 @@ logger = get_logger(__name__)
 _LEGACY_BROKER_KEYS = frozenset(
     {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions"}
 )
+
+_JobDemand = tuple[frozenset[str] | None, str]
+_HostShape = tuple[frozenset[str], str | None]
+_HostCapacity = tuple[_HostShape, int]
+
+
+def _job_matches_host(job: _JobDemand, host: _HostShape) -> bool:
+    """Mirror the capability and execution-profile half of a new-group claim."""
+    required, execution_profile = job
+    capabilities, sandbox_runtime = host
+    if required is None or not required.issubset(capabilities):
+        return False
+    return execution_profile == "trusted-v1" or (
+        execution_profile == "untrusted-kata-v1" and sandbox_runtime == KATA_RUNTIME
+    )
+
+
+def _maximum_compatible_jobs(jobs: Sequence[_JobDemand], hosts: Sequence[_HostCapacity]) -> int:
+    """Return the exact maximum cardinality of the job/host-capacity matching.
+
+    Equal jobs and equal host shapes are aggregated before a small Dinic flow.
+    That keeps the graph bounded by compatibility shapes rather than queue
+    depth, while retaining the same answer as expanding every free slot into a
+    separate host vertex. In particular it handles the constrained/generic
+    trap where a greedy pass can waste the only flexible slot.
+    """
+    job_counts: dict[_JobDemand, int] = {}
+    for job in jobs:
+        job_counts[job] = job_counts.get(job, 0) + 1
+    host_counts: dict[_HostShape, int] = {}
+    for shape, capacity in hosts:
+        if capacity > 0:
+            host_counts[shape] = host_counts.get(shape, 0) + capacity
+    if not job_counts or not host_counts:
+        return 0
+
+    job_types = list(job_counts)
+    host_types = list(host_counts)
+    source = 0
+    job_offset = 1
+    host_offset = job_offset + len(job_types)
+    sink = host_offset + len(host_types)
+    graph: list[list[list[int]]] = [[] for _ in range(sink + 1)]
+
+    def add_edge(start: int, end: int, capacity: int) -> None:
+        graph[start].append([end, capacity, len(graph[end])])
+        graph[end].append([start, 0, len(graph[start]) - 1])
+
+    for index, job in enumerate(job_types):
+        count = job_counts[job]
+        add_edge(source, job_offset + index, count)
+        for host_index, host in enumerate(host_types):
+            if _job_matches_host(job, host):
+                add_edge(job_offset + index, host_offset + host_index, count)
+    for index, host in enumerate(host_types):
+        add_edge(host_offset + index, sink, host_counts[host])
+
+    def send(node: int, available: int, level: list[int], next_edge: list[int]) -> int:
+        if node == sink:
+            return available
+        while next_edge[node] < len(graph[node]):
+            edge = graph[node][next_edge[node]]
+            target, capacity, reverse = edge
+            if capacity > 0 and level[target] == level[node] + 1:
+                pushed = send(target, min(available, capacity), level, next_edge)
+                if pushed:
+                    edge[1] -= pushed
+                    graph[target][reverse][1] += pushed
+                    return pushed
+            next_edge[node] += 1
+        return 0
+
+    total = 0
+    while True:
+        level = [-1] * len(graph)
+        level[source] = 0
+        pending = deque([source])
+        while pending:
+            node = pending.popleft()
+            for target, capacity, _reverse in graph[node]:
+                if capacity > 0 and level[target] < 0:
+                    level[target] = level[node] + 1
+                    pending.append(target)
+        if level[sink] < 0:
+            return total
+
+        next_edge = [0] * len(graph)
+        while pushed := send(source, sum(job_counts.values()), level, next_edge):
+            total += pushed
 
 
 def _changed_settings(
@@ -103,7 +200,7 @@ class PostgresHostPoolRepository:
             row = await conn.fetchrow(
                 """
                 INSERT INTO agent_host_enroll_tokens (token_hash, host, issued_by, expires_at)
-                VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
+                VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4))
                 RETURNING expires_at, created_at
                 """,
                 token_hash,
@@ -132,12 +229,20 @@ class PostgresHostPoolRepository:
         matches nothing, because ``NULL = $2`` is never true. That is the
         fail-closed direction: such a token was redeemable under any name.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT token_hash FROM agent_host_enroll_tokens "
+                "WHERE token_hash = $1 AND consumed_at IS NULL AND host = $2 FOR UPDATE",
+                token_hash,
+                host,
+            )
+            if locked is None:
+                return False
             consumed = await conn.fetchval(
                 """
                 UPDATE agent_host_enroll_tokens
                 SET consumed_at = NOW(), consumed_host = $2
-                WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
+                WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > clock_timestamp()
                   AND host = $2
                 RETURNING token_hash
                 """,
@@ -192,6 +297,12 @@ class PostgresHostPoolRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn)
+            existing = await conn.fetchrow(
+                "SELECT drain_fence_active FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                host,
+            )
+            if existing is not None and existing["drain_fence_active"]:
+                raise ValueError("host_drain_fenced")
             retiring = await conn.fetchval(
                 """SELECT 1 FROM agent_runner_hosts h
                 JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -210,6 +321,9 @@ class PostgresHostPoolRepository:
                 VALUES ($1, '{HOST_ENROLLING}', $2::jsonb, $3, $4, $5, $6::jsonb, $7)
                 ON CONFLICT (host) DO UPDATE
                 SET status = '{HOST_ENROLLING}',
+                    drain_fence_token = NULL,
+                    drain_fence_status_before = NULL,
+                    drain_fence_active = FALSE,
                     capabilities = EXCLUDED.capabilities,
                     slots_total = EXCLUDED.slots_total,
                     broker_url = EXCLUDED.broker_url,
@@ -297,9 +411,11 @@ class PostgresHostPoolRepository:
         taking work", and letting it re-promote itself would make drain a
         suggestion.
 
-        Returns ``None`` for an unknown host. Every field is optional and only
-        overwrites when supplied, so a heartbeat that carries nothing but
-        liveness does not blank out what enrollment declared.
+        Returns ``None`` for an unknown host, and for one whose credential is
+        no longer the one this request authenticated with. Every field is
+        optional and only overwrites when supplied, so a heartbeat that
+        carries nothing but liveness does not blank out what enrollment
+        declared.
 
         **The capacity block is written by a second statement, deliberately.**
         Its acceptance conditions are not the heartbeat's: the credential must
@@ -321,8 +437,9 @@ class PostgresHostPoolRepository:
         Args:
             host: The authenticated host name.
             credential_hash: Digest the request authenticated with. The
-                archive revision, capacity write, and legacy settings import
-                are refused unless the row still holds it.
+                whole beat — liveness, archive revision, capacity write and
+                legacy settings import — is refused unless the row still
+                holds it.
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
@@ -343,7 +460,8 @@ class PostgresHostPoolRepository:
                 per-host overrides. Either ``None`` leaves the report in place.
 
         Returns:
-            The updated host row, or ``None`` when the host no longer exists.
+            The updated host row, or ``None`` when the host no longer exists
+            or no longer holds ``credential_hash``.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Match the admin writer's lock order: policy before host. Once
@@ -384,7 +502,10 @@ class PostgresHostPoolRepository:
                         WHEN $15 AND ($16::text IS NULL OR credential_hash = $16) THEN $14
                         ELSE sandbox_archive_settings_applied_revision
                     END
-                WHERE host = $1
+                -- The credential the request authenticated with must still be
+                -- the row's: a beat delayed past a re-enrollment or a removal
+                -- must not mark the new machine online, or a removed one alive.
+                WHERE host = $1 AND ($16::text IS NULL OR credential_hash = $16)
                 RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
                 """,
                 host,
@@ -464,33 +585,124 @@ class PostgresHostPoolRepository:
                 )
         return self._host_row_to_dict(row)
 
-    async def set_host_status(self, *, host: str, status: str) -> str:
+    async def set_host_status(self, *, host: str, status: str, force: bool = False) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.
 
-        Returns ``"ok"``, ``"unknown"`` or ``"invalid"``. The table is consulted
+        Returns ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"fenced"``. The table is consulted
         inside the transaction that writes, on a locked row: checking it in the
         caller means an admin draining a host and the reaper marking it offline
         can both read ``online`` and both write, and the loser's decision is the
         one that sticks.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            current = await conn.fetchval(
-                "SELECT status FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", host
+            row = await conn.fetchrow(
+                "SELECT status, drain_fence_active FROM agent_runner_hosts "
+                "WHERE host = $1 FOR UPDATE",
+                host,
             )
-            if current is None:
+            if row is None:
                 return "unknown"
+            current = row["status"]
+            if row["drain_fence_active"]:
+                if current == HOST_DRAINING and status == HOST_DRAINING:
+                    return "ok"
+                if not force:
+                    return "fenced"
             if not transition_allowed(current, status):
                 return "invalid"
             await conn.execute(
-                "UPDATE agent_runner_hosts SET status = $2 WHERE host = $1", host, status
+                "UPDATE agent_runner_hosts SET status = $2, drain_fence_token = NULL, "
+                "drain_fence_status_before = NULL, drain_fence_active = FALSE WHERE host = $1",
+                host,
+                status,
             )
         return "ok"
+
+    async def acquire_host_drain_fence(
+        self,
+        *,
+        host: str,
+        expected_fence_token: Any | None,
+        expected_fence_epoch: Any | None,
+        fence_token: Any,
+    ) -> tuple[str, str | None, Any | None]:
+        """CAS one deployment drain under the host row lock."""
+        expected_token = None if expected_fence_token is None else str(expected_fence_token)
+        expected_epoch = None if expected_fence_epoch is None else str(expected_fence_epoch)
+        requested = str(fence_token)
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT status, drain_fence_token, drain_fence_status_before, "
+                "drain_fence_active, drain_fence_epoch "
+                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                host,
+            )
+            if row is None:
+                return "unknown", None, None
+            current_token = (
+                None if row["drain_fence_token"] is None else str(row["drain_fence_token"])
+            )
+            current_epoch = row["drain_fence_epoch"]
+            if current_token == requested:
+                if row["drain_fence_active"] and row["status"] == HOST_DRAINING:
+                    return "ok", row["drain_fence_status_before"], current_epoch
+                if not row["drain_fence_active"]:
+                    return "released", None, current_epoch
+                return "invalid", None, current_epoch
+            if current_token != expected_token or str(current_epoch) != expected_epoch:
+                return "stale", None, current_epoch
+            if row["status"] == HOST_DRAINING and not row["drain_fence_active"]:
+                return "manual", None, current_epoch
+            if row["status"] not in (HOST_ONLINE, HOST_DRAINING):
+                return "invalid", None, current_epoch
+            status_before = row["status"]
+            next_epoch = await conn.fetchval(
+                "UPDATE agent_runner_hosts SET status = $2, drain_fence_token = $3::uuid, "
+                "drain_fence_status_before = $4, drain_fence_active = TRUE WHERE host = $1 "
+                "RETURNING drain_fence_epoch",
+                host,
+                HOST_DRAINING,
+                requested,
+                status_before,
+            )
+        return "ok", status_before, next_epoch
+
+    async def release_host_drain_fence(
+        self, *, host: str, fence_token: Any
+    ) -> tuple[str, Any | None]:
+        """Release only the exact active owner, retaining its idempotency receipt."""
+        requested = str(fence_token)
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT status, drain_fence_token, drain_fence_active, drain_fence_epoch "
+                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                host,
+            )
+            if row is None:
+                return "unknown", None
+            current_epoch = row["drain_fence_epoch"]
+            current_token = (
+                None if row["drain_fence_token"] is None else str(row["drain_fence_token"])
+            )
+            if current_token != requested:
+                return "stale", current_epoch
+            if row["drain_fence_active"]:
+                if row["status"] != HOST_DRAINING:
+                    return "invalid", current_epoch
+                next_epoch = await conn.fetchval(
+                    "UPDATE agent_runner_hosts SET status = $2, drain_fence_active = FALSE "
+                    "WHERE host = $1 RETURNING drain_fence_epoch",
+                    host,
+                    HOST_ONLINE,
+                )
+                return "ok", next_epoch
+            return "ok", current_epoch
 
     async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
         """Ask a host to run ``slots`` turns at once, or with ``None`` its default.
 
-        Returns ``"ok"`` or ``"unknown"``. Nothing here starts or stops
-        anything: the host reads the value off its next heartbeat answer,
+        Returns ``"ok"``, ``"unknown"`` or ``"autoscaling_managed"``. Nothing
+        here starts or stops anything: the host reads the value off its next heartbeat answer,
         serves it as its limit, and reports it back as ``slots_total``. The
         claim honours the lower of the two from the next poll on, so a number
         the host has not confirmed admits nothing extra and a lowered one takes
@@ -502,13 +714,29 @@ class PostgresHostPoolRepository:
         the request schema's business; the column refuses only a non-positive
         size, which is not a size.
         """
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                "UPDATE agent_runner_hosts SET slots_desired = $2 WHERE host = $1 RETURNING host",
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn)
+            current = await conn.fetchrow(
+                """SELECT h.host,
+                          EXISTS (
+                              SELECT 1 FROM agent_compute_nodes n
+                              JOIN agent_cloudlab_autoscaling_members m
+                                ON m.allocation_id=n.allocation_id
+                              WHERE n.id=h.compute_node_id AND m.state<>'released'
+                          ) AS autoscaling_managed
+                   FROM agent_runner_hosts h WHERE h.host=$1 FOR UPDATE OF h""",
+                host,
+            )
+            if current is None:
+                return "unknown"
+            if current["autoscaling_managed"]:
+                return "autoscaling_managed"
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET slots_desired=$2 WHERE host=$1",
                 host,
                 slots,
             )
-        return "ok" if updated is not None else "unknown"
+        return "ok"
 
     async def set_runner_host_settings(
         self, *, host: str, changes: Mapping[str, int | None]
@@ -552,12 +780,14 @@ class PostgresHostPoolRepository:
         """Revoke a host's credential and take it out of the pool.
 
         Returns ``"ok"``, ``"unknown"`` or ``"busy"``. Busy means the host is
-        still holding slots: removing it then would leave running attempts
-        whose machine has officially stopped existing, and nothing would notice
-        until their leases lapsed. ``force`` accepts exactly that — the lease
-        expiry *is* the recovery path. A retained activation cannot be replayed
-        safely after its host disappears, so its expiry marks that chat LOST
-        and fails already-queued descendants instead.
+        still holding slots: removing it then ends running attempts whose
+        machine has officially stopped existing. ``force`` accepts exactly
+        that — lease expiry *is* the recovery path, and the revocation brings
+        it forward to now (see ``revoke_host_credentials``): the attempts'
+        worker tokens name no host, so a lease left to run would let the
+        removed machine keep renewing it. A retained activation cannot be
+        replayed safely after its host disappears, so its expiry marks that
+        chat LOST and fails already-queued descendants instead.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -567,12 +797,24 @@ class PostgresHostPoolRepository:
         Docker writable layer was deleted.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # The host's running attempts before its row: the order every
+            # writer that ends an attempt keeps (move the attempt, then give
+            # its slot back). Expiring those leases while holding the host row
+            # first would deadlock against an attempt finishing at that moment.
+            await conn.execute(
+                "SELECT id FROM agent_attempts WHERE host_id = $1 AND status = 'running' "
+                "ORDER BY id FOR UPDATE",
+                host,
+            )
             row = await conn.fetchrow(
-                "SELECT status, slots_used FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                "SELECT status, slots_used, drain_fence_active "
+                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
             )
             if row is None:
                 return "unknown"
+            if row["drain_fence_active"] and not force:
+                return "fenced"
             if row["slots_used"] > 0 and not force:
                 return "busy"
             await revoke_host_credentials(conn, [host])
@@ -612,7 +854,10 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 f"""
                 UPDATE agent_runner_hosts
-                SET status = '{HOST_OFFLINE}'
+                SET status = '{HOST_OFFLINE}',
+                    drain_fence_token = NULL,
+                    drain_fence_status_before = NULL,
+                    drain_fence_active = FALSE
                 WHERE credential_hash IS NOT NULL
                   AND status IN ('{HOST_ENROLLING}', '{HOST_ONLINE}')
                   AND COALESCE(last_heartbeat_at, first_seen_at)
@@ -761,6 +1006,192 @@ class PostgresHostPoolRepository:
             {str(row["host"]) for row in owner_rows},
         )
 
+    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:
+        """Read the durable, content-free signal used by compute autoscaling.
+
+        A retained turn is tied to its existing Host and therefore cannot be
+        relieved by adding a CloudLab node. Only the first runnable turn of a
+        thread with no sandbox membership is demand here. Capacity is the
+        effective claim ceiling (the lower of reported and desired slots),
+        after liveness, placement, release/rotation holds, deployment
+        attestation, and archive-policy gates have all been applied. Pressure
+        is an exact maximum compatibility matching, not queue depth minus an
+        interchangeable slot count. The shared topology lock stabilizes
+        bindings, but it deliberately remains compatible with claims; repeatable
+        read prevents a claim committed between the job and host queries from
+        combining pre-claim demand with post-claim capacity into a state that
+        never existed.
+        """
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read"),
+        ):
+            policy = await conn.fetchrow(
+                """
+                SELECT active_host, sandbox_archive_settings, sandbox_archive_revision
+                FROM agent_runner_policy WHERE id FOR SHARE
+                """
+            )
+            await lock_compute_topology(conn)
+            observed_at = await conn.fetchval("SELECT NOW()")
+            job_rows = await conn.fetch(
+                """
+                SELECT t.execution_profile,
+                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
+                FROM agent_jobs j
+                JOIN agent_threads t ON t.id=j.thread_id
+                WHERE j.state='queued' AND NOT j.cancel_requested
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_thread_sandbox_memberships m
+                      WHERE m.thread_id=j.thread_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_jobs earlier
+                      WHERE earlier.thread_id=j.thread_id
+                        AND earlier.turn_no < j.turn_no
+                        AND earlier.state IN ('queued','running')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_jobs parent
+                      WHERE parent.id=j.parent_job_id AND parent.state='succeeded'
+                  )
+                  AND (
+                      j.turn_source <> 'goal'
+                      OR (
+                          t.goal_state='active'
+                          AND t.goal_id=j.goal_id
+                          AND t.goal_revision=j.goal_revision
+                      )
+                  )
+                ORDER BY j.created_at, j.id
+                """
+            )
+            rows = await conn.fetch(
+                f"""
+                SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS}, n.allocation_id,
+                       (am.allocation_id IS NOT NULL) AS autoscaler_owned,
+                       (SELECT COUNT(*) FROM agent_sandboxes g
+                        WHERE g.host=h.host AND g.deletion_state<>'deleted')
+                           AS retained_groups
+                FROM agent_runner_hosts h
+                LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                LEFT JOIN agent_cloudlab_autoscaling_members am
+                  ON am.allocation_id=n.allocation_id AND am.state<>'released'
+                ORDER BY h.host
+                """
+            )
+
+            archive_raw = (
+                {}
+                if policy is None
+                else {
+                    **(load_json(policy["sandbox_archive_settings"]) or {}),
+                    "revision": policy["sandbox_archive_revision"],
+                }
+            )
+            try:
+                archive_policy = SandboxArchivePolicy.from_mapping(archive_raw)
+            except SandboxArchivePolicyError:
+                archive_policy = None
+
+            jobs: list[_JobDemand] = []
+            for row in job_rows:
+                raw_requires = load_json(row["requires"])
+                required = (
+                    frozenset(raw_requires)
+                    if isinstance(raw_requires, list)
+                    and all(isinstance(value, str) for value in raw_requires)
+                    else None
+                )
+                jobs.append((required, str(row["execution_profile"])))
+
+            hosts: list[dict[str, Any]] = []
+            matching_hosts: list[_HostCapacity] = []
+            templates: list[tuple[str, _HostShape]] = []
+            free_slots = 0
+            for raw in rows:
+                host = self._host_row_to_dict(raw)
+                host["allocation_id"] = raw["allocation_id"]
+                host["retained_groups"] = int(raw["retained_groups"])
+                hosts.append(host)
+
+                capabilities = host.get("capabilities") or []
+                heartbeat = host.get("last_heartbeat_at")
+                deployment_ready = any(
+                    isinstance(capability, str)
+                    and capability.startswith("shared-sandbox-deployment:")
+                    for capability in capabilities
+                ) and (
+                    not expected_deployment_sha
+                    or f"shared-sandbox-deployment:{expected_deployment_sha}" in capabilities
+                )
+                archive_ready = bool(
+                    archive_policy is not None
+                    and (
+                        not archive_policy.enabled
+                        or (
+                            SANDBOX_ARCHIVE_CAPABILITY in capabilities
+                            and host.get("sandbox_archive_settings_applied_revision")
+                            == archive_policy.revision
+                        )
+                    )
+                )
+                fresh = bool(
+                    heartbeat is not None
+                    and (observed_at - heartbeat).total_seconds() <= FRESH_AFTER_SECONDS
+                )
+                if not (
+                    host.get("status") == HOST_ONLINE
+                    and host.get("enrolled")
+                    and not host.get("launch_error")
+                    and fresh
+                    and (policy is None or policy["active_host"] in (None, host["host"]))
+                    and "shared-sandbox-v1" in capabilities
+                    and "native-fork-at-anchor-v1" in capabilities
+                    and deployment_ready
+                    and archive_ready
+                ):
+                    continue
+                allows_new_groups, _ = await host_compute_admission(conn, host["host"])
+                if not allows_new_groups:
+                    continue
+                shape = (
+                    frozenset(str(capability) for capability in capabilities),
+                    host.get("sandbox_runtime")
+                    if isinstance(host.get("sandbox_runtime"), str)
+                    else None,
+                )
+                if raw["autoscaler_owned"]:
+                    templates.append((str(host["host"]), shape))
+                total = host.get("slots_total")
+                desired = host.get("slots_desired")
+                ceilings = [value for value in (total, desired) if isinstance(value, int)]
+                if not ceilings:
+                    continue
+                free = max(0, min(ceilings) - int(host.get("slots_used") or 0))
+                free_slots += free
+                if free:
+                    matching_hosts.append((shape, free))
+
+            matchable_jobs = jobs
+            if templates:
+                matchable_jobs = [
+                    job
+                    for job in jobs
+                    if any(_job_matches_host(job, shape) for _host, shape in templates)
+                ]
+            matched = _maximum_compatible_jobs(matchable_jobs, matching_hosts)
+
+        return {
+            "observed_at": observed_at,
+            "active_host": None if policy is None else policy["active_host"],
+            "runnable_new_group_jobs": len(jobs),
+            "fresh_effective_free_slots": free_slots,
+            "unmatched_new_group_jobs": len(matchable_jobs) - matched,
+            "autoscaling_template_hosts": [host for host, _shape in templates],
+            "hosts": hosts,
+        }
+
     async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
         """Observe configured queue stalls without claiming or changing jobs.
 
@@ -777,7 +1208,7 @@ class PostgresHostPoolRepository:
                 """
             )
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(
+                archive_policy = load_stored_archive_policy(
                     {}
                     if archive_row is None
                     else {
@@ -966,12 +1397,11 @@ class PostgresHostPoolRepository:
         if row is None:
             # The baseline normally creates the singleton. Keep a missing row
             # readable during restore/bootstrap; the first write recreates it.
-            policy = SandboxArchivePolicy()
-            return {**policy.as_dict(), "updated_at": None}
+            return archive_settings_payload(SandboxArchivePolicy(), None)
         raw = dict(load_json(row["sandbox_archive_settings"]) or {})
         raw["revision"] = row["sandbox_archive_revision"]
-        policy = SandboxArchivePolicy.from_mapping(raw)
-        return {**policy.as_dict(), "updated_at": row["sandbox_archive_updated_at"]}
+        policy = load_stored_archive_policy(raw)
+        return archive_settings_payload(policy, row["sandbox_archive_updated_at"])
 
     async def set_sandbox_archive_settings(
         self,
@@ -994,15 +1424,15 @@ class PostgresHostPoolRepository:
             assert current is not None
             current_raw = dict(load_json(current["sandbox_archive_settings"]) or {})
             current_raw["revision"] = current["sandbox_archive_revision"]
-            current_policy = SandboxArchivePolicy.from_mapping(current_raw)
+            current_policy = load_stored_archive_policy(current_raw)
             requested = SandboxArchivePolicy.from_mapping(
                 {**dict(settings), "revision": current_policy.revision}
             )
-            current_response = {
-                **current_policy.as_dict(),
-                "updated_at": current["sandbox_archive_updated_at"],
-                "_changed": False,
-            }
+            current_response = archive_settings_payload(
+                current_policy,
+                current["sandbox_archive_updated_at"],
+                _changed=False,
+            )
             if expected_revision > current_policy.revision:
                 return None
             if requested.as_storage_dict() == current_policy.as_storage_dict():
@@ -1024,10 +1454,10 @@ class PostgresHostPoolRepository:
                 WHERE id
                 RETURNING sandbox_archive_updated_at
                 """,
-                json.dumps(policy.as_storage_dict()),
+                json.dumps(seal_archive_storage(policy.as_storage_dict())),
                 policy.revision,
             )
-        return {**policy.as_dict(), "updated_at": updated_at, "_changed": True}
+        return archive_settings_payload(policy, updated_at, _changed=True)
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:
         """Pin new-chat placement to one host, or unpin with ``None``.
@@ -1076,6 +1506,7 @@ class PostgresHostPoolRepository:
         """Drop a host from the pool. A runner still polling re-adds itself.
 
         Returns ``"deleted"`` or ``"unknown"``; refuses ``"active"``,
+        ``"fenced"``,
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
         A disabled attached machine without external release capability may
@@ -1100,9 +1531,12 @@ class PostgresHostPoolRepository:
             if retained:
                 return "retained_groups_present"
             host_row = await conn.fetchrow(
-                "SELECT compute_node_id,status FROM agent_runner_hosts WHERE host=$1 FOR UPDATE",
+                "SELECT compute_node_id,status,drain_fence_active "
+                "FROM agent_runner_hosts WHERE host=$1 FOR UPDATE",
                 host,
             )
+            if host_row is not None and host_row["drain_fence_active"]:
+                return "fenced"
             bound = None if host_row is None else host_row["compute_node_id"]
             local_cleanup_allocation = None
             if bound is not None:

@@ -32,13 +32,29 @@ token="$2"
 # Overridable only so the script can be exercised outside a node.
 ssh_dir="${CLOUD_AGENT_SSH_DIR:-/etc/ssh}"
 state="${CLOUD_AGENT_STATE_DIR:-/var/lib/cloud-agent-node}"
-mkdir -p "$state"
-chmod 700 "$state"
-if [ ! -e "$state/host-keys-regenerated" ]; then
-    rm -f "$ssh_dir"/ssh_host_*_key "$ssh_dir"/ssh_host_*_key.pub
-    ssh-keygen -A -f "${CLOUD_AGENT_KEYGEN_ROOT:-/}" >/dev/null
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-    touch "$state/host-keys-regenerated"
+mkdir -p "$state" || exit 1
+chmod 700 "$state" || exit 1
+fail() {
+    echo "cloud-agent: $1" > "$state/registration"
+    exit 1
+}
+usable_host_keys() {
+    for key_type in ed25519 ecdsa rsa; do
+        if [ -s "$ssh_dir/ssh_host_${key_type}_key" ] && [ -s "$ssh_dir/ssh_host_${key_type}_key.pub" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+if [ ! -e "$state/host-keys-regenerated" ] || ! usable_host_keys; then
+    # A failed first boot must remain retryable. Commit the marker only after
+    # generation and sshd restart succeed; missing keys invalidate old markers.
+    rm -f "$state/host-keys-regenerated" || fail "host key marker could not be cleared"
+    rm -f "$ssh_dir"/ssh_host_*_key "$ssh_dir"/ssh_host_*_key.pub || fail "host keys could not be removed"
+    ssh-keygen -A -f "${CLOUD_AGENT_KEYGEN_ROOT:-/}" >/dev/null || fail "host key generation failed"
+    usable_host_keys || fail "host key generation produced no usable key pair"
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || fail "SSH restart failed"
+    touch "$state/host-keys-regenerated" || fail "host key marker could not be written"
 fi
 keys=""
 for file in "$ssh_dir/ssh_host_ed25519_key.pub" "$ssh_dir/ssh_host_ecdsa_key.pub" "$ssh_dir/ssh_host_rsa_key.pub"; do

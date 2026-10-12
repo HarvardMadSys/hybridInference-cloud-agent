@@ -8,6 +8,10 @@ import { absoluteTime, inputClass, remainingTime } from './compute-ui';
 
 type InventoryHost = ComputeServerSnapshot['hosts'][number];
 
+function isTerminalAllocation(allocation: ComputeAllocation): boolean {
+  return allocation.state === 'terminated' || allocation.state === 'absent';
+}
+
 export interface ComputeServerGroup {
   name: string;
   host?: { host: string };
@@ -65,36 +69,43 @@ function ServerRow({
   onManage?: () => void;
 }) {
   return (
-    <li aria-label={name} className="flex items-start gap-3 px-5 py-5 sm:gap-4 sm:px-6">
-      <svg
-        aria-hidden="true"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        className="mt-0.5 h-5 w-5 shrink-0 text-gray-400 dark:text-gray-500"
+    <li
+      aria-label={name}
+      className="flex items-start gap-3 px-4 py-4 transition-colors hover:bg-surface-hover sm:gap-4 sm:px-5 sm:py-5"
+    >
+      <span
+        aria-hidden
+        className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-muted text-muted"
       >
-        <rect x="3" y="3" width="18" height="7" rx="2" />
-        <rect x="3" y="14" width="18" height="7" rx="2" />
-        <path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" strokeLinecap="round" />
-      </svg>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          className="h-5 w-5"
+        >
+          <rect x="3" y="3" width="18" height="7" rx="2" />
+          <rect x="3" y="14" width="18" height="7" rx="2" />
+          <path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" strokeLinecap="round" />
+        </svg>
+      </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <button
             type="button"
-            className="break-words text-left text-sm font-semibold text-gray-900 hover:underline disabled:cursor-default dark:text-gray-100"
+            className="break-words text-left text-sm font-semibold text-foreground underline-offset-2 hover:text-accent hover:underline disabled:cursor-default disabled:hover:no-underline disabled:hover:text-foreground"
             disabled={!onManage}
             onClick={onManage}
           >
             {name}
           </button>
           {selected && (
-            <span className="rounded-full bg-crimson/10 px-2 py-0.5 text-[11px] font-medium text-crimson dark:text-crimson-light">
+            <span className="rounded-full bg-accent-subtle px-2 py-0.5 text-[11px] font-medium text-accent">
               Current target
             </span>
           )}
         </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
           <State label={status} />
           <span aria-hidden="true">·</span>
           <span>{source}</span>
@@ -130,10 +141,14 @@ function ServerRow({
           type="button"
           aria-label={`Manage ${name}`}
           title="Server details"
-          className="-mr-2 rounded-lg px-2 text-xl leading-6 text-gray-400 dark:text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-white/5 dark:hover:text-gray-200"
+          className="ui-icon-button ui-button-ghost h-10 w-10 shrink-0 text-muted"
           onClick={onManage}
         >
-          ⋯
+          <svg aria-hidden viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
+            <circle cx="4" cy="10" r="1.4" />
+            <circle cx="10" cy="10" r="1.4" />
+            <circle cx="16" cy="10" r="1.4" />
+          </svg>
         </button>
       )}
     </li>
@@ -159,8 +174,11 @@ export default function ComputeServerList({
 }) {
   const [search, setSearch] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
+  const [showReleased, setShowReleased] = useState(false);
+  const currentAllocations = allocations.filter((allocation) => !isTerminalAllocation(allocation));
+  const releasedCount = allocations.length - currentAllocations.length;
   const linkedHosts = new Set(
-    allocations.flatMap((allocation) => allocation.nodes.flatMap((node) => node.hosts)),
+    currentAllocations.flatMap((allocation) => allocation.nodes.flatMap((node) => node.hosts)),
   );
   const existingHosts: InventoryHost[] =
     inventory?.hosts.filter((host) => !host.allocation_id && !linkedHosts.has(host.host)) ??
@@ -199,7 +217,7 @@ export default function ComputeServerList({
       .map((host) => ({ ...host, name: host.host, members: [host] })),
   );
   const matches = (text: string) => text.toLowerCase().includes(search.toLowerCase());
-  const shownAllocations = allocations.filter(
+  const shownAllocations = (showReleased ? allocations : currentAllocations).filter(
     (allocation) =>
       (!providerFilter || allocation.provider_id === providerFilter) &&
       matches(
@@ -217,9 +235,12 @@ export default function ComputeServerList({
   );
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900">
-      {(allocations.length + existingServers.length > 5 || search || providerFilter) && (
-        <div className="flex flex-wrap gap-2 border-b border-gray-100 p-4 dark:border-white/5">
+    <div className="ui-card overflow-hidden rounded-2xl">
+      {(currentAllocations.length + existingServers.length > 5 ||
+        releasedCount > 0 ||
+        search ||
+        providerFilter) && (
+        <div className="flex flex-wrap gap-2 border-b border-border bg-surface-muted/60 p-4">
           <input
             aria-label="Search servers"
             className={`${inputClass} sm:!w-64`}
@@ -242,19 +263,32 @@ export default function ComputeServerList({
             ))}
             <option value="unmanaged">Existing server</option>
           </select>
+          {releasedCount > 0 && (
+            <button
+              type="button"
+              aria-pressed={showReleased}
+              className="ml-auto rounded-lg px-3 py-2 text-xs font-medium text-muted hover:bg-surface-hover hover:text-foreground"
+              onClick={() => setShowReleased((current) => !current)}
+            >
+              {showReleased ? 'Hide released' : `Show released (${releasedCount})`}
+            </button>
+          )}
         </div>
       )}
       {!inventory && !serverGroups ? (
-        <p className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">Loading servers…</p>
+        <p className="p-10 text-center text-sm text-muted">Loading servers…</p>
       ) : shownAllocations.length + shownExisting.length === 0 ? (
-        <p className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">
+        <p className="p-10 text-center text-sm text-muted">
           {search || providerFilter
             ? 'No matching servers.'
-            : 'Add your first server to run sandboxes.'}
+            : releasedCount > 0 && !showReleased
+              ? 'No active servers. Released servers are hidden.'
+              : 'Add your first server to run sandboxes.'}
         </p>
       ) : (
-        <ul aria-label="Server inventory" className="divide-y divide-gray-100 dark:divide-white/5">
+        <ul aria-label="Server inventory" className="divide-y divide-border">
           {shownAllocations.map((allocation) => {
+            const terminal = isTerminalAllocation(allocation);
             const hostIds = allocation.nodes.flatMap((node) => node.hosts);
             const hosts = (inventory?.hosts ?? []).filter(
               (host) => host.allocation_id === allocation.id || hostIds.includes(host.host),
@@ -274,11 +308,11 @@ export default function ComputeServerList({
                 }
                 sandboxes={hosts.reduce((total, host) => total + host.retained_groups, 0)}
                 lease={
-                  allocation.expires_at
+                  !terminal && allocation.expires_at
                     ? { expiresAt: allocation.expires_at, nodes: allocation.nodes.length }
                     : undefined
                 }
-                warning={allocation.blocked_reasons[0]?.message}
+                warning={terminal ? undefined : allocation.blocked_reasons[0]?.message}
                 onManage={() => onManage(allocation.id)}
               />
             );

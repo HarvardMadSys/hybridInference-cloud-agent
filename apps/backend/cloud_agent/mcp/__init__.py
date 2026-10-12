@@ -13,6 +13,8 @@ Modules are layered so that each one can be tested by calling it:
 ``models``
     The domain records: connections, credentials, capability snapshots,
     thread bindings, invocations and connectors.
+``errors``
+    A credential write that matched no row, so the connection insert rolls back.
 ``net_policy``
     What a connection is allowed to dial, and where a credential may travel.
 ``config_import``

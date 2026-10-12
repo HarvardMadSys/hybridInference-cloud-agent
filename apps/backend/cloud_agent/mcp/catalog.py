@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_bytes
 from cloud_agent.settings import number_setting, text_setting
 
 if TYPE_CHECKING:
@@ -270,10 +271,11 @@ async def fetch_catalog(client: httpx.AsyncClient) -> list[dict[str, Any]]:
                 params=params,
                 timeout=number_setting("mcp_catalog_request_timeout_s", 15),
                 follow_redirects=False,
+                headers=IDENTITY_ENCODING_HEADERS,
             ) as response:
                 response.raise_for_status()
                 data = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in iter_response_bytes(response):
                     data.extend(chunk)
                     if len(data) > 5_000_000:
                         raise ValueError("Registry page exceeded size limit")

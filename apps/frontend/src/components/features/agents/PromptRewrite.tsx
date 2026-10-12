@@ -8,6 +8,9 @@ interface PromptRewriteProps {
   value: string;
   model: string;
   disabled?: boolean;
+  compact?: boolean;
+  // Share the composer toolbar; expanded content occupies a full row below it.
+  inline?: boolean;
   onApply: (prompt: string) => void;
   onActiveChange?: (active: boolean) => void;
 }
@@ -16,6 +19,8 @@ export function PromptRewrite({
   value,
   model,
   disabled = false,
+  compact = false,
+  inline = false,
   onApply,
   onActiveChange,
 }: PromptRewriteProps) {
@@ -154,14 +159,16 @@ export function PromptRewrite({
   const complete = questions.length > 0 && answers.every((answer) => answer.trim());
 
   return (
-    <div className="space-y-3 px-4 pb-3">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+    <div className={inline ? 'contents' : compact ? 'space-y-2 px-3 pb-1' : 'space-y-3 px-4 pb-3'}>
+      <div
+        className={`flex max-w-full flex-wrap items-center ${compact ? 'gap-x-3 gap-y-1' : 'gap-x-4 gap-y-2'}`}
+      >
         <button
           ref={trigger}
           type="button"
           disabled={disabled || active || !value.trim() || !model}
           onClick={() => void rewrite()}
-          className="ui-focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:min-h-11"
+          className={`ui-focus-ring inline-flex ${compact ? 'min-h-7' : 'min-h-9'} items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:min-h-11`}
         >
           <svg
             viewBox="0 0 20 20"
@@ -179,7 +186,9 @@ export function PromptRewrite({
           </svg>
           {t('rewrite.button')}
         </button>
-        <label className="flex min-h-9 cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400 [@media(pointer:coarse)]:min-h-11">
+        <label
+          className={`flex ${compact ? 'min-h-7' : 'min-h-9'} cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400 [@media(pointer:coarse)]:min-h-11`}
+        >
           <input
             type="checkbox"
             checked={clarify}
@@ -204,7 +213,7 @@ export function PromptRewrite({
         <section
           aria-labelledby={`${id}-heading`}
           aria-busy={pending}
-          className="space-y-3 rounded-xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]"
+          className={`${inline ? 'order-last w-full' : ''} space-y-3 rounded-xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]`}
           onKeyDown={(event) => {
             // The enclosing composer owns submit and stop shortcuts. These
             // textareas collect answers and never submit the task itself.
@@ -267,12 +276,18 @@ export function PromptRewrite({
         </section>
       ) : null}
       {error ? (
-        <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+        <p
+          role="alert"
+          className={`${inline ? 'order-last w-full px-2 py-1' : ''} text-xs text-red-600 dark:text-red-400`}
+        >
           {t(error)}
         </p>
       ) : null}
       {appliedPrompt === value ? (
-        <p role="status" className="text-xs text-gray-500 dark:text-gray-400">
+        <p
+          role="status"
+          className={`${inline ? 'order-last w-full px-2 py-1' : ''} text-xs text-gray-500 dark:text-gray-400`}
+        >
           {t('rewrite.applied')}
         </p>
       ) : null}

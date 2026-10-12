@@ -181,7 +181,47 @@ class TestNetPolicy:
             )
 
     @pytest.mark.parametrize(
-        "address", ["169.254.169.254", "fd00:ec2::254", "::ffff:169.254.169.254"]
+        "address",
+        [
+            "64:ff9b::7f00:1",  # NAT64, delivering to 127.0.0.1
+            "64:ff9b::a01:203",  # NAT64, delivering to 10.1.2.3
+            "64:ff9b:1::a01:203",  # local-use NAT64, whose layout is the operator's
+            "2002:7f00:1::1",  # 6to4 through 127.0.0.1
+            "2002:c0a8:10a::1",  # 6to4 through 192.168.1.10
+            "2001:0:808:808::80ff:fffe",  # Teredo, client 127.0.0.1 behind 8.8.8.8
+            "fec0::1",
+            "192.0.0.8",
+            "192.0.2.1",
+            "198.18.0.1",
+            "198.19.255.254",
+            "198.51.100.7",
+            "203.0.113.9",
+        ],
+    )
+    def test_refuses_private_space_an_address_carries_or_reserves(self, address: str) -> None:
+        """An IPv6 form that a translator or tunnel delivers to IPv4 is checked as that IPv4.
+
+        Reserved IPv4 ranges with no public server in them are private too.
+        """
+        with pytest.raises(net_policy.EndpointRejected):
+            net_policy.check_addresses("example.com", [address], net_policy.EgressPolicy())
+
+    @pytest.mark.parametrize("address", ["64:ff9b::5db8:d822", "2002:5db8:d822::1", "2606:4700::1"])
+    def test_a_translated_public_address_is_still_public(self, address: str) -> None:
+        """A DNS64 deployment reaches public IPv4 servers only through NAT64."""
+        assert net_policy.check_addresses("example.com", [address], net_policy.EgressPolicy()) == (
+            address,
+        )
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "169.254.169.254",
+            "fd00:ec2::254",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+        ],
     )
     @pytest.mark.parametrize(
         "policy",

@@ -41,6 +41,12 @@ class FakeHandle:
         self.killed = False
 
     def poll(self) -> int | None:
+        # Service tests need a finite turn after the parent begins its drain,
+        # just as real one-turn children eventually exit on their own. This is
+        # deliberately not implemented through terminate(): graceful
+        # deployment must not signal a child whose ownership is ambiguous.
+        if self.exit_code is None and runner_mod._STOPPING.is_set():
+            self.exit_code = 0
         return self.exit_code
 
     def terminate(self) -> None:
@@ -366,6 +372,148 @@ def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
         {"guest_kernel": "proved"},
     ]
     assert all(payload["worker_token"] == "ajt.1" for payload in delivered)
+
+
+def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
+    """Once spawned, an ambiguous child must remain in the graceful-drain set."""
+    import errno
+    import io
+    from types import SimpleNamespace
+
+    from cloud_agent_host import host_runtime as host_runtime_mod
+
+    process = SimpleNamespace(stdin=io.BytesIO(), killed=False)
+
+    def kill() -> None:
+        process.killed = True
+
+    process.kill = kill
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    def broken_select(*_args, **_kwargs):
+        raise OSError(errno.EIO, "handover pipe failed")
+
+    monkeypatch.setattr(host_runtime_mod.select, "select", broken_select)
+
+    result = runner_mod._spawn_turn(
+        _delivered_job(),
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert result.outcome == LAUNCH_UNCERTAIN
+    assert result.handle is process
+    assert "handover failed (OSError)" in result.detail
+    assert not process.killed
+
+
+def test_a_handover_pipe_failure_is_not_started(monkeypatch):
+    """Failure before a process exists may safely hand the claim back."""
+    import errno
+
+    def broken_pipe():
+        raise OSError(errno.EMFILE, "too many open files")
+
+    monkeypatch.setattr(runner_mod.os, "pipe", broken_pipe)
+    result = runner_mod._spawn_turn(
+        _delivered_job(),
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert result.outcome == LAUNCH_NOT_STARTED
+    assert result.handle is None
+    assert "handover pipe" in result.detail
+
+
+def test_handover_eof_keeps_the_spawned_child_tracked(monkeypatch):
+    """A failed accepted write and a pre-answer exit both look like EOF."""
+    import io
+    import os
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(stdin=io.BytesIO(), killed=False, waited=False)
+
+    def kill() -> None:
+        process.killed = True
+
+    def wait(*, timeout: float) -> int:
+        process.waited = True
+        return 0
+
+    process.kill = kill
+    process.wait = wait
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    def eof(fd: int) -> str:
+        os.close(fd)
+        return ""
+
+    monkeypatch.setattr(runner_mod, "read_handover", eof)
+
+    result = runner_mod._spawn_turn(
+        _delivered_job(),
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert result.outcome == LAUNCH_UNCERTAIN
+    assert result.handle is process
+    assert not process.killed
+    assert not process.waited
+
+
+def test_ctrl_c_during_handover_kills_and_reaps_the_untracked_child(monkeypatch):
+    """Immediate shutdown owns a child that TurnPool has not received yet."""
+    import io
+    import os
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(stdin=io.BytesIO(), killed=False, waited=False)
+
+    def kill() -> None:
+        process.killed = True
+
+    def wait(*, timeout: float) -> int:
+        assert timeout == 10
+        process.waited = True
+        return -9
+
+    process.kill = kill
+    process.wait = wait
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    def interrupted_read(fd: int) -> str:
+        os.close(fd)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner_mod, "read_handover", interrupted_read)
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_mod._spawn_turn(
+            _delivered_job(),
+            base_url="http://control",
+            gateway_url="http://gateway",
+            worker_id="runner-a",
+            lease_ttl=120.0,
+            agent_timeout_s=3600.0,
+            host="host-a",
+        )
+
+    assert process.killed
+    assert process.waited
 
 
 class FakeQualification:
@@ -869,7 +1017,19 @@ def test_an_uncertain_handover_is_never_handed_back(service, monkeypatch):
     """
     _identity, backend, released = service
     monkeypatch.setattr(runner_mod, "claim_payload", _queue([_job(1)], stop_after=1))
-    handle = FakeHandle()
+
+    class NaturallyFinishingHandle(FakeHandle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.polls = 0
+
+        def poll(self) -> int | None:
+            self.polls += 1
+            if self.polls >= 2:
+                self.exit_code = 0
+            return self.exit_code
+
+    handle = NaturallyFinishingHandle()
 
     _serve(
         backend,
@@ -877,7 +1037,8 @@ def test_an_uncertain_handover_is_never_handed_back(service, monkeypatch):
     )
 
     assert released == []
-    assert handle.terminated, "still waited for, like any other turn in flight"
+    assert handle.polls >= 2, "still waited for, like any other turn in flight"
+    assert not handle.terminated and not handle.killed
 
 
 def test_a_turn_with_no_worker_token_is_not_released(service, monkeypatch):

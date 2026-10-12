@@ -10,8 +10,11 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   setArchived: vi.fn(),
   deleteSessions: vi.fn(),
+  review: vi.fn(),
   locale: 'en' as 'en' | 'zh-CN',
 }));
+
+vi.mock('./useSessionReview', () => ({ useSessionReview: mocks.review }));
 
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.ComponentProps<'a'>) => (
@@ -120,6 +123,7 @@ beforeEach(() => {
     },
   );
   mocks.locale = 'en';
+  mocks.review.mockReturnValue(null);
   sessions = [session('one')];
   mocks.list.mockImplementation(async (options: AgentSessionListOptions) => listing(options));
   mocks.setArchived.mockImplementation(async (ids: string[], archived: boolean) => {
@@ -199,6 +203,28 @@ describe('archived session management', () => {
       expect.any(AbortSignal),
     );
     expect(mocks.setArchived).not.toHaveBeenCalled();
+  });
+
+  it('marks an archived live session waiting for an answer beside its activity and archive date', async () => {
+    sessions = [
+      session('question', { can_delete: false }, { state: 'running', current_attempt_id: 7 }),
+    ];
+    mocks.review.mockReturnValue('question');
+    render(<ArchivedTasksView />);
+    const row = await screen.findByRole('link', { name: /Session question/ });
+    const badge = within(row).getByRole('status', { name: 'Waiting for your answer' });
+    expect(badge).toBeVisible();
+    expect(badge).toHaveTextContent('Needs review');
+    expect(badge).toHaveAttribute('title', 'Waiting for your answer');
+    expect(within(row).getByText('Running')).toBeVisible();
+    expect(row.querySelector('time')).toHaveAttribute('datetime', '2026-09-09T16:27:00Z');
+    expect(mocks.review).toHaveBeenCalledWith({
+      id: 'job-question',
+      state: 'running',
+      threadId: 'thread-question',
+      currentAttemptId: 7,
+      cancelRequested: undefined,
+    });
   });
 
   it('unarchives a whole session, offers its history link, and undoes the change', async () => {

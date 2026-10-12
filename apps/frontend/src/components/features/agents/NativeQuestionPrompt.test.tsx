@@ -41,12 +41,13 @@ const planRequest: AgentQuestionRequestApi = {
       id: '0',
       header: 'Plan approval',
       question:
-        'Approve this plan and allow the agent to proceed?\n\n1. Inspect the issue.\n2. Fix it.',
+        'Approve this plan and continue implementation?\n\n# Plan\n\n1. Inspect the issue.\n2. Fix it.',
       multiple: false,
       options: [
         { label: 'Approve plan', description: 'Allow the agent to proceed with this plan.' },
       ],
-      allow_custom: false,
+      allow_custom: true,
+      kind: 'plan_approval',
     },
   ],
 };
@@ -97,20 +98,21 @@ it('opens a discovered question, sends its selected answer, and checks for anoth
 });
 
 it.each(['approve', 'reject'] as const)(
-  'preserves plan paragraphs and sends a plan %s to the exact live request',
+  'renders the plan as markdown and sends a plan %s to the exact live request',
   async (decision) => {
     list.mockResolvedValue(snapshot([planRequest]));
     let rerender!: ReturnType<typeof render>['rerender'];
     await act(async () => {
       ({ rerender } = render(<NativeQuestionPrompt {...props} />));
     });
-    const plan = screen.getByText(planRequest.questions[0].question, {
-      exact: true,
-      normalizer: (text) => text,
-    });
-    expect(plan).toHaveClass('whitespace-pre-wrap', 'break-words');
-    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
-    expect(screen.queryByRole('radio', { name: 'Other' })).not.toBeInTheDocument();
+    // The plan body renders as Markdown: headings become elements instead of
+    // one preformatted text node.
+    expect(screen.getByRole('heading', { name: 'Plan' })).toBeInTheDocument();
+    const group = screen.getByRole('group', { name: 'Plan approval' });
+    expect(within(group).getByRole('heading', { name: 'Plan' }).closest('legend')).toBeNull();
+    expect(screen.getByText('Inspect the issue.')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Approve plan' })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Request changes' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('radio', { name: 'Approve plan' }));
 
     // A native request ID may recur in a later attempt. It needs a new decision
@@ -142,6 +144,34 @@ it.each(['approve', 'reject'] as const)(
       ...(decision === 'reject' ? { reject: true } : {}),
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  },
+);
+
+it.each(['Skip step 2; cover it with tests instead.', 'Approve plan'])(
+  'explicitly rejects the plan when requesting changes with feedback %s',
+  async (text) => {
+    list.mockResolvedValue(snapshot([planRequest]));
+    await act(async () => {
+      render(<NativeQuestionPrompt {...props} />);
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Request changes' }));
+    const feedback = within(screen.getByRole('group', { name: 'Plan approval' })).getByRole(
+      'textbox',
+      { name: 'Your feedback' },
+    );
+    expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled();
+    fireEvent.change(feedback, { target: { value: text } });
+    list.mockResolvedValue(snapshot([]));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    });
+    expect(answer).toHaveBeenCalledWith('thread-1', {
+      request_id: 'plan-request-1',
+      job_id: 'job-1',
+      attempt_id: 10,
+      answers: { 0: [text] },
+      reject: true,
+    });
   },
 );
 

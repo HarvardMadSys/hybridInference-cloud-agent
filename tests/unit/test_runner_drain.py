@@ -62,6 +62,60 @@ def test_sigterm_sets_the_flag_and_does_not_kill_the_process() -> None:
     assert "finishing the current job" in done.stderr
 
 
+def test_sigterm_during_preflight_does_not_kill_the_turn_child() -> None:
+    """A deploy may arrive before the child answers the handover pipe.
+
+    That window used to have Python's default SIGTERM action, so a slow
+    preflight followed by a graceful runner drain could still kill the child
+    with ``-15`` and strand its claimed lease.
+    """
+    program = textwrap.dedent(
+        """
+        import io, os, signal, sys, time
+        sys.path.insert(0, os.environ["HOST_PKG"])
+        from cloud_agent_host import runner
+
+        class Backend:
+            def preflight(self):
+                os.kill(os.getpid(), signal.SIGTERM)
+                for _ in range(100):
+                    if runner._STOPPING.is_set():
+                        break
+                    time.sleep(0.01)
+                print("PREFLIGHT_SURVIVED", flush=True)
+
+        runner.build_backend_from_env = Backend
+        read_fd, write_fd = os.pipe()
+        sys.stdin = io.StringIO("")
+        code = runner._serve_turn(
+            handover_fd=write_fd,
+            base_url="http://control",
+            gateway_url="http://gateway",
+            worker_id="runner-a",
+            lease_ttl=120.0,
+            agent_timeout_s=3600.0,
+            host="host-a",
+        )
+        print(os.read(read_fd, 256).decode(), flush=True)
+        raise SystemExit(code)
+        """
+    )
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = {**os.environ, "HOST_PKG": os.path.join(here, "host")}
+
+    done = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, timeout=30, env=env
+    )
+
+    assert done.returncode == 0, (
+        f"preflight was killed during graceful drain "
+        f"(rc={done.returncode}, -{signal.SIGTERM} means killed): {done.stderr[-400:]}"
+    )
+    assert "PREFLIGHT_SURVIVED" in done.stdout
+    assert "declined" in done.stdout
+    assert "finishing the current job" in done.stderr
+
+
 def test_sigint_is_left_alone() -> None:
     """Ctrl-C still means now.
 

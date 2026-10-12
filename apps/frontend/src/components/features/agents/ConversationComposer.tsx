@@ -61,14 +61,14 @@ export function ComposerSendButton({
     <button
       type="submit"
       disabled={disabled}
-      className="ui-focus-ring ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+      className="ui-icon-button ui-button-primary ml-auto rounded-xl shadow-sm"
       aria-label={label}
       title={title}
     >
       {busy ? (
         <span
           aria-hidden="true"
-          className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"
+          className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
         />
       ) : (
         <svg
@@ -105,7 +105,7 @@ export function ComposerMessageActions({
   onSteer?: () => void;
 }) {
   return (
-    <div className="ml-auto flex shrink-0 items-center gap-2">
+    <div className="ml-auto flex shrink-0 items-center gap-1.5">
       {onSteer && steerLabel ? (
         <button
           type="button"
@@ -113,7 +113,7 @@ export function ComposerMessageActions({
           disabled={disabled || busy}
           aria-keyshortcuts="Meta+Enter Control+Enter"
           title={steerTitle}
-          className="ui-focus-ring inline-flex min-h-10 items-center rounded-xl border border-gray-200 px-3 text-[13px] font-medium text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-gray-200 dark:hover:bg-white/10 [@media(pointer:coarse)]:min-h-11"
+          className="ui-button ui-button-secondary min-h-9 border-border px-3 text-xs"
         >
           {steerLabel}
         </button>
@@ -122,12 +122,12 @@ export function ComposerMessageActions({
         type="submit"
         disabled={disabled || busy}
         title={title}
-        className="ui-focus-ring inline-flex min-h-10 items-center gap-2 rounded-xl bg-crimson px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:min-h-11"
+        className="ui-button ui-button-primary min-h-9 text-xs shadow-sm"
       >
         {busy ? (
           <span
             aria-hidden="true"
-            className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"
+            className="h-3 w-3 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
           />
         ) : null}
         {label}
