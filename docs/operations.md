@@ -79,6 +79,18 @@ seconds; web appearance uses the saved public fields on each request. Apply
 changes to subsequent operations according to the description beside each
 setting.
 
+That import refuses a `GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`,
+`AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` shorter
+than 32 bytes: the listener stops with an error naming the variable before
+anything is written, so rolling back is safe. Check their lengths before the
+first deployment of this release. Replacing one has its usual cost: the
+dispatch token changes on both sides, a new control key needs hosts
+re-enrolled, and a new encryption key orphans saved user connections. Values
+already saved in Admin Settings keep working. The same import refuses an
+`AGENT_GITHUB_APP_INSTALL_URL` that is not an `https://github.com` URL and an
+`AGENT_GITLAB_OAUTH_REDIRECT_URI` that is not HTTPS (or HTTP on localhost),
+which their connect flows could never use.
+
 A release can narrow what a setting accepts. A value saved earlier that it
 refuses does not stop the listeners: each logs
 `saved setting not applied as stored: …`, naming the key but never the value,
