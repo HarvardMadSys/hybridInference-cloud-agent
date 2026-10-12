@@ -1699,9 +1699,13 @@ class SharedChatSessionSupervisor:
             group, member = self._leased_member(thread_id, token)
             self._require_mutation_admission(group)
         # CLI initialization may block. The member lock, not the group lock,
-        # leaves siblings able to initialize and execute simultaneously.
+        # leaves siblings able to initialize and execute simultaneously. The
+        # lease is checked again around the launch: an activation abandoned
+        # while it waited or launched must not install its process.
         with member.turn_lock:
-            resident_action = self._ensure_transport(group, member, launch, observer=recorder)
+            resident_action = self._ensure_transport(
+                group, member, launch, observer=recorder, lease_token=token
+            )
         with self._lock:
             return self._descriptor(
                 group,
@@ -1994,36 +1998,43 @@ class SharedChatSessionSupervisor:
                 },
                 exc_info=True,
             )
-        with self._lock:
-            _, member = self._leased_member(thread_id, token)
-            if member.current_turn is not turn:
-                raise SessionLeaseLost("member turn generation is stale")
-            member.current_turn = None
-            member.activation_processes = None
-            member.observer_cursor = None
-            member.tool_mark_reader = None
-            member.window = None
-            member.window_sampler = None
-            member.window_checkpoints = None
-            member.window_accumulator = None
-            transport = member.transport
-            if boundary_error is not None:
-                member.transport = None
-                member.resident_state = "restarting"
-            elif transport is None or not transport.alive:
-                member.resident_state = "restarting"
-                logger.warning(
-                    "shared member resident transport exited across activation boundary",
-                    extra={
-                        "event": "shared_member_transport_exited",
-                        "thread_id": thread_id,
-                        "resident_slot_id": slot_id,
-                        "activation_processes": activation_processes,
-                    },
-                )
-            else:
-                member.resident_state = "live"
-        member.turn_lock.release()
+        detached = False
+        try:
+            with self._lock:
+                _, member = self._leased_member(thread_id, token)
+                if member.current_turn is not turn:
+                    raise SessionLeaseLost("member turn generation is stale")
+                # Detaching the turn hands its member lock to this call, which
+                # releases it however the bookkeeping below ends.
+                member.current_turn = None
+                detached = True
+                member.activation_processes = None
+                member.observer_cursor = None
+                member.tool_mark_reader = None
+                member.window = None
+                member.window_sampler = None
+                member.window_checkpoints = None
+                member.window_accumulator = None
+                transport = member.transport
+                if boundary_error is not None:
+                    member.transport = None
+                    member.resident_state = "restarting"
+                elif transport is None or not transport.alive:
+                    member.resident_state = "restarting"
+                    logger.warning(
+                        "shared member resident transport exited across activation boundary",
+                        extra={
+                            "event": "shared_member_transport_exited",
+                            "thread_id": thread_id,
+                            "resident_slot_id": slot_id,
+                            "activation_processes": activation_processes,
+                        },
+                    )
+                else:
+                    member.resident_state = "live"
+        finally:
+            if detached:
+                member.turn_lock.release()
         if boundary_error is not None:
             if transport is not None:
                 with contextlib.suppress(Exception):
@@ -2619,11 +2630,13 @@ class SharedChatSessionSupervisor:
             group, member = self._leased_member(thread_id, token)
             transport = member.transport
             observer_cursor = member.observer_cursor
-            # ``complete_turn`` may have cleared ``current_turn`` and then
-            # failed before releasing the lock. Abandon owns this member's
-            # teardown, so the lock state itself is the authoritative cleanup
-            # signal here.
-            release_turn_lock = member.turn_lock.locked()
+            # An admitted turn holds the member lock until whoever detaches it
+            # releases it: ``complete_turn`` above, or, when that failed, this
+            # teardown. ``threading.Lock`` has no owner, so ``locked()`` cannot
+            # tell that from a resident start, a turn still in admission or a
+            # fork of this source, each of which releases its own acquisition.
+            # Releasing theirs would let a second launch or turn run beside it.
+            release_turn_lock = member.current_turn is not None
             member.transport = None
             member.current_turn = None
             member.activation_processes = None
@@ -3951,12 +3964,20 @@ class SharedChatSessionSupervisor:
         launch: ResidentLaunch,
         *,
         observer: StageRecorder | None = None,
+        lease_token: str | None = None,
     ) -> str:
-        """Open or reuse this member's transport, reporting which one it was."""
+        """Open or reuse this member's transport, reporting which one it was.
+
+        ``lease_token`` names the activation a leased caller opens it for; the
+        process is installed only while that lease is still the member's. A
+        fork opens its unleased source and target without one.
+        """
         with self._lock:
             current_group, current_member = self._member(member.thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("member identity changed before process launch")
+            if lease_token is not None and member.lease_token != lease_token:
+                raise SessionLeaseLost("shared member activation lease is stale")
             self._require_mutation_admission(group)
             # The retained member owns the locator. An omitted field in a
             # later activation must not turn a restart into a fresh chat.
@@ -4018,6 +4039,7 @@ class SharedChatSessionSupervisor:
                 or rechecked_member is not member
                 or group.stopping
                 or group.lifecycle_generation != lifecycle_generation
+                or (lease_token is not None and member.lease_token != lease_token)
             )
             if not launch_invalid:
                 member.transport = transport

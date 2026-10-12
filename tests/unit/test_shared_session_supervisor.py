@@ -4952,6 +4952,207 @@ def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch
     assert manager.events[-1] == ("observe-finish", 11001)
 
 
+def test_abandon_releases_the_member_lock_of_the_turn_it_detaches(monkeypatch):
+    """With normal cleanup failed, abandon owns the attached turn's release."""
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, launch)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    assert member.turn_lock.locked() is True
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    supervisor.abandon("athr_source", lease.token, lost=False)
+
+    assert member.turn_lock.locked() is False
+    monkeypatch.undo()
+    successor = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident("athr_source", successor.token, launch)
+    supervisor.start_turn(
+        "athr_source", successor.token, prompt="again", model="glm-5.1", reasoning_effort=None
+    )
+
+
+def test_a_turn_detached_by_complete_turn_releases_its_lock_even_if_it_then_fails():
+    """Once ``complete_turn`` detaches the turn, the member lock is its to release."""
+
+    class FlakyTransport(_Transport):
+        failing = False
+
+        @property
+        def alive(self) -> bool:
+            if self.failing:
+                raise RuntimeError("process table unavailable")
+            return True
+
+        @alive.setter
+        def alive(self, _value: bool) -> None:
+            return
+
+    class Factory(_TransportFactory):
+        def open(self, spec, launch):
+            transport = FlakyTransport(launch)
+            self.transports.append(transport)
+            return transport
+
+    factory = Factory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    turn = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    factory.transports[0].failing = True
+
+    with pytest.raises(RuntimeError, match="process table"):
+        supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert member.current_turn is None
+    assert member.turn_lock.locked() is False
+
+
+def test_abandon_leaves_a_resident_start_its_own_member_lock():
+    """A slow resident start keeps its exclusion, and its process, from abandon.
+
+    ``threading.Lock`` has no owner. Abandon released the member lock whenever
+    it was held, so a runner that gave up on a slow resident start freed the
+    lock that start still held: the start then installed a live process over
+    the abandoned member, and its own release raised ``RuntimeError``.
+    """
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    class SlowFactory(_TransportFactory):
+        def open(self, spec, launch):
+            entered.set()
+            assert proceed.wait(5)
+            return super().open(spec, launch)
+
+    factory = SlowFactory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    errors: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            supervisor.ensure_resident(
+                "athr_source",
+                lease.token,
+                _launch("athr_source", native_session_id="native-source", slot=0),
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    starter = threading.Thread(target=start)
+    starter.start()
+    assert entered.wait(5)
+
+    abandoned = supervisor.abandon("athr_source", lease.token, lost=True)
+
+    assert member.turn_lock.locked() is True
+    assert abandoned.resident_state == "lost"
+    proceed.set()
+    starter.join(5)
+    assert not starter.is_alive()
+    assert [type(error) for error in errors] == [SessionLeaseLost]
+    assert member.turn_lock.locked() is False
+    assert member.transport is None
+    assert (member.context_status, member.resident_state) == ("lost", "lost")
+    assert [transport.alive for transport in factory.transports] == [False]
+
+
+def test_abandon_leaves_a_turn_in_admission_its_own_member_lock():
+    """A turn still being admitted releases its own lock and is refused."""
+    admitting = threading.Event()
+    proceed = threading.Event()
+
+    class SlowCensus(_Manager):
+        def capture_member_processes(self, spec, **kwargs):
+            admitting.set()
+            assert proceed.wait(5)
+            return super().capture_member_processes(spec, **kwargs)
+
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(SlowCensus(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    errors: list[BaseException] = []
+
+    def admit() -> None:
+        try:
+            supervisor.start_turn(
+                "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    admission = threading.Thread(target=admit)
+    admission.start()
+    assert admitting.wait(5)
+
+    supervisor.abandon("athr_source", lease.token, lost=False)
+
+    assert member.turn_lock.locked() is True
+    proceed.set()
+    admission.join(5)
+    assert not admission.is_alive()
+    assert [type(error) for error in errors] == [SessionLeaseLost]
+    assert member.turn_lock.locked() is False
+    assert member.current_turn is None
+
+
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
     """The supervisor must carry the retained hook slice to the broker."""
 
