@@ -6,7 +6,9 @@ a connection of its own, taking the rows in the order that writer's code does,
 or by pausing the real call -- runs another real repository call into it, and
 then lets the held writer go on: two orders over the same rows is a deadlock,
 and Postgres says so. The capture and attempt reapers are here too, for what a
-writer that ran in between leaves them to find.
+writer that ran in between leaves them to find, and so are the two writes that
+are tried again when Postgres picks them as a deadlock's victim: a rival
+closes a real cycle against each.
 """
 
 from __future__ import annotations
