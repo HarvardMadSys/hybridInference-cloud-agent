@@ -419,26 +419,37 @@ for directory in (".kilo", ".kilocode"):
         for key in [*env, "HOME"]:
             command.extend(["--env", key])
         if runtime == "kilo":
+            # As the member: the container drops every capability, so root
+            # cannot enter the member's 0700 state. Production clears this
+            # directory after closing an HTTP runtime on Fork
+            # (resident_transport._clear_http_member_locks).
+            clear = os.environ.get("MCP_TEST_CLEAR_LOCKS") == "1"
             locks = subprocess.run(
                 [
                     "docker",
                     "exec",
                     "--user",
-                    "0:0",
+                    "11001:10001",
                     container,
                     "sh",
                     "-c",
-                    "now=$(date +%s); for d in $(find /agent-state /home/agent-member-0 /tmp "
-                    "-type d -path '*/locks/*' -mindepth 1 2>/dev/null); do "
-                    'hb="$d/heartbeat"; [ -e "$hb" ] || continue; '
-                    'echo "$d age=$((now - $(stat -c %Y "$hb")))s meta=$(cat "$d/meta.json" 2>/dev/null)"; '
-                    "done",
+                    "root=/agent-state/mcp-test/kilo/state/kilo/locks; now=$(date +%s); "
+                    'for d in "$root"/*/; do [ -d "$d" ] || continue; hb="${d}heartbeat"; '
+                    'age=-; [ -e "$hb" ] && age=$((now - $(stat -c %Y "$hb"))); '
+                    'echo "$(basename "$d") age=${age}s meta=$(cat "${d}meta.json" 2>/dev/null)"; '
+                    'done; ls -la "$root" 2>&1 | head -3; '
+                    '[ "$1" = 1 ] && rm -rf -- "$root" && echo cleared; true',
+                    "sh",
+                    "1" if clear else "0",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            _mark("locks: " + (locks.stdout.strip().replace("\n", " | ") or "none")[:1500])
+            _mark(
+                f"locks(clear={int(clear)}): "
+                + (locks.stdout + locks.stderr).strip().replace("\n", " | ")[:1500]
+            )
             _mark("spawn: debug config")
             resolved = subprocess.run(
                 [*command, container, "kilo-freeinference", "debug", "config"],

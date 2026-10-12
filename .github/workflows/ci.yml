@@ -1202,9 +1202,11 @@ jobs:
   # image these cases run is the image the sandbox cell builds and starts.
   mcp:
     name: MCP conformance (kilo, ${{ matrix.case }}, ${{ matrix.attempt }})
-    # PROBE (do not merge): phase timestamps, two samples per case.
+    # PROBE (do not merge): phase timestamps, four samples per case.
     env:
       MCP_TEST_TRACE_DIR: /tmp/mcp-trace
+      # PROBE: attempts 1-2 clear the closed process's locks, 3-4 do not.
+      MCP_TEST_CLEAR_LOCKS: ${{ matrix.attempt <= 2 && '1' || '0' }}
     needs: changes
     if: github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || matrix.artifact.runner) }}
@@ -1214,7 +1216,7 @@ jobs:
         # Kilo's three policy cases. With the sandbox cell's selection these
         # partition the parity suite; the policy test collects it to prove so.
         case: [allow, confirm, confirm-normalized-name]
-        attempt: [1, 2]
+        attempt: [1, 2, 3, 4]
         artifact:
           - name: sandbox
             arch: amd64
