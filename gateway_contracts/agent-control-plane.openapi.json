@@ -26442,7 +26442,7 @@
         ]
       },
       "patch": {
-        "description": "Edit a connection. A target change invalidates approvals made against it.",
+        "description": "Edit a connection. A target change invalidates approvals made against it.\n\nA new address or authentication kind also drops the stored credential, so\nthe connection has to be signed in to (or given its secret) again.",
         "operationId": "update_connection_v1_agent_mcp_connections__connection_id__patch",
         "parameters": [
           {
