@@ -474,7 +474,9 @@ per turn. Deferred egress rows, checker, aggregate API, and console pages add
 no standing cost today. The guest journal has a
 64 MiB hard cap. Any reusable guest rotates it at 48 MiB only when no turn
 cursor is active; a single process storm that exhausts the remaining reserve
-is reported incomplete rather than silently losing processes.
+is reported incomplete rather than silently losing processes. Tool marks,
+which any member can send, are journaled only up to those 48 MiB, so a flood
+of them never takes the reserve that process records depend on.
 
 ## 7. Signal catalog (initial; the allowlist test pins it)
 
