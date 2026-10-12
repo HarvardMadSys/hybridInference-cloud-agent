@@ -280,6 +280,29 @@ def _record_text(record: dict[str, Any]) -> str:
     )
 
 
+def _codex_error_text(message: str) -> str:
+    """Codex's error message without the request diagnostics it appends.
+
+    0.145.0 appends ``, url: <address>`` and then cf-ray, request id and auth
+    details to an HTTP error's message. The address is the sandbox's gateway
+    relay, which means nothing to the owner; the full error stays in the event.
+    """
+    return message.split(", url: ", 1)[0][:2000]
+
+
+def _http_agent_error_text(error: Any) -> str:
+    """Read an OpenCode/Kilo session error the way their own CLI prints it.
+
+    The error is ``{name, data: {message, ...}}`` (OpenCode 1.18.9, and Kilo's
+    fork of it): the message when there is one, otherwise the error's name.
+    """
+    if isinstance(error, dict):
+        data = error.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        return str(message or error.get("name") or "session failed")
+    return str(error or "session failed")
+
+
 def user_message_event(pending: PendingInput, *, raw_line: str | None = None) -> HarnessEvent:
     """The stream event saying the turn took ``pending`` at this point."""
     return HarnessEvent(
@@ -1309,7 +1332,13 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         if value is None:
             return HarnessEvent(LINE, raw_line=line)
         if value.get("error") is not None:
-            return HarnessEvent(ERROR, {"text": str(value["error"])[:2000]}, raw_line=line)
+            # A JSON-RPC error answer: {code, message}. Its message, not the
+            # Python spelling of the whole object.
+            error = value["error"]
+            message = error.get("message") if isinstance(error, dict) else None
+            return HarnessEvent(
+                ERROR, {"text": str(message or error)[:2000], "error": error}, raw_line=line
+            )
         method = str(value.get("method") or "")
         params = value.get("params")
         params = params if isinstance(params, dict) else {}
@@ -1325,6 +1354,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
             raw_line=line,
         )
+        if method == "error" and params.get("willRetry") is not True:
+            # The error that fails the turn (0.145.0 sends it before the failed
+            # turn/completed); a retried one says ``willRetry`` and stays raw.
+            error = params.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            if message:
+                return HarnessEvent(
+                    ERROR,
+                    {"text": _codex_error_text(str(message)), "error": error},
+                    raw_line=line,
+                )
         if method == "item/tool/requestUserInput":
             native_id = value.get("id")
             questions = _question_choices(params.get("questions"), dialect="codex")
@@ -1651,6 +1691,17 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
         self, line: str, turn: _JsonResidentTurn[PiRuntime]
     ) -> HarnessEvent:
         """Normalize one Pi RPC protocol event for the active turn."""
+        value = self._object(line)
+        if (
+            value is not None
+            and value.get("type") == "response"
+            and value.get("id") == turn.protocol_turn_id
+            and value.get("success") is False
+        ):
+            # The prompt failed before it ran (0.73.1 answers this way only
+            # before preflight succeeds); later failures end in agent_end.
+            text = str(value.get("error") or "pi did not accept the prompt")
+            return HarnessEvent(ERROR, {"text": text[:2000]}, raw_line=line)
         event = self.runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
@@ -1917,7 +1968,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             if event_type == "session.error":
                 return HarnessEvent(
                     ERROR,
-                    {"text": str(properties.get("error") or "session failed")[:2000]},
+                    {"text": _http_agent_error_text(properties.get("error"))[:2000]},
                     raw_line=line,
                 )
             return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)

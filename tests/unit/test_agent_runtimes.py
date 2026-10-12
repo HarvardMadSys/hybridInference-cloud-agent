@@ -194,6 +194,34 @@ def test_error_result_maps_to_error():
     assert event.payload["subtype"] == "error_max_turns"
 
 
+@pytest.mark.parametrize(
+    ("result", "text"),
+    [
+        # An API failure: the reason is the result text (staging, 2026-09-27).
+        (
+            {
+                "subtype": "success",
+                "api_error_status": 403,
+                "result": "Failed to authenticate. API Error: 403 This account has no active API key",
+            },
+            "Failed to authenticate. API Error: 403 This account has no active API key",
+        ),
+        # The error subtypes carry it in ``errors`` (the pinned 2.1.220).
+        (
+            {"subtype": "error_max_turns", "errors": ["Reached maximum number of turns (8)"]},
+            "Reached maximum number of turns (8)",
+        ),
+        ({"subtype": "error_during_execution", "errors": []}, "error_during_execution"),
+    ],
+)
+def test_a_claude_error_result_says_why(result, text):
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "is_error": True, **result})
+    )
+    assert event.event_type == "error"
+    assert event.payload["text"] == text
+
+
 @pytest.mark.parametrize("is_error", [None, False])
 def test_terminal_api_failure_overrides_the_success_subtype(is_error):
     failure = {
@@ -221,6 +249,25 @@ def test_successful_terminal_reason_remains_a_result():
     )
     assert event.event_type == "lifecycle"
     assert event.payload["phase"] == "result"
+
+
+@pytest.mark.parametrize("is_error", [None, False])
+def test_terminal_api_failure_uses_errors_when_result_is_absent(is_error):
+    failure = {
+        "type": "result",
+        "subtype": "success",
+        "terminal_reason": "api_error",
+        "api_error_status": 503,
+        "errors": ["No provider is currently available"],
+    }
+    if is_error is not None:
+        failure["is_error"] = is_error
+    event = ClaudeCodeRuntime().parse_event(json.dumps(failure))
+
+    assert event.event_type == "error"
+    assert event.payload["text"] == "No provider is currently available"
+    assert event.payload["terminal_reason"] == "api_error"
+    assert event.payload["api_error_status"] == 503
 
 
 def test_api_retry_notices_report_each_attempt_and_delay():

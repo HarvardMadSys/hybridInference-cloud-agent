@@ -160,7 +160,7 @@ def _run_terminal_turn(
     monkeypatch.setattr(
         runner_mod,
         "_stream_shared_agent_turn",
-        lambda **_kwargs: (0, "", [], frame),
+        lambda **_kwargs: (0, "", [], frame, None),
     )
     finish = Mock()
 
@@ -408,7 +408,7 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
     # stream from reaching a control plane that does not exist on the wire.
     monkeypatch.setattr(runner_mod, "Heartbeater", Mock())
     try:
-        exit_code, _tail, _errors, _result_frame = runner_mod._stream_shared_agent_turn(
+        exit_code, _tail, _errors, _result_frame, _reported = runner_mod._stream_shared_agent_turn(
             supervisor=supervisor,
             job=_JOB,
             control=control,

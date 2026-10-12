@@ -253,7 +253,7 @@ def _run_new_chat(
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None)
+        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
