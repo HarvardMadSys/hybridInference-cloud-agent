@@ -101,6 +101,7 @@ def _host(
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
+        'if [ "$1" = compose ] && [ -n "${MANAGER_TOKEN_LOG:-}" ]; then printf \'%s\\n\' "${AGENT_SANDBOX_MANAGER_TOKEN:-}" >> "$MANAGER_TOKEN_LOG"; fi\n'
         'if [ -n "${DOCKER_CALL_LOG:-}" ]; then printf \'%s\\n\' "$*" >> "$DOCKER_CALL_LOG"; fi\n'
         'case " $* " in *" config --environment "*) cat >/dev/null; { if [ -f .env ]; then cat .env; fi; env; } | awk -F= \'{v[$1]=$0} END {for (k in v) print v[k]}\'; exit 0 ;; esac\n'
         'case "$*" in\n'
@@ -370,6 +371,12 @@ def test_existing_host_environment_can_pass_preflight_after_service_rename(tmp_p
     result = _run(env, "preflight")
 
     assert result.returncode == 0, result.stderr
+
+    token_log = tmp_path / "manager-token"
+    env["MANAGER_TOKEN_LOG"] = str(token_log)
+    status = _run(env, "status")
+    assert status.returncode == 0, status.stderr
+    assert token_log.read_text().splitlines()[-1] == "test-sandbox-manager-token"
 
 
 def test_down_drains_runners_then_sandbox_manager_before_compose_removal() -> None:

@@ -106,7 +106,7 @@ raw_env_or_dotenv() {
 }
 
 # Accept existing host .env files while examples and new deployments use the
-# Sandbox Manager names. Compose performs the same fallback in its recipe.
+# Sandbox Manager names. The compose wrapper also supplies the normalized token.
 env_or_dotenv() {
   local name="$1" value legacy
   value="$(raw_env_or_dotenv "$name")"
@@ -195,6 +195,10 @@ COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
 # to answer "can this host isolate a sandbox" because of how the containers are
 # to be labelled.
 compose() {
+  # Nested :? fallbacks are evaluated eagerly by Compose. Normalize the legacy
+  # token here, then let the recipe require the canonical credential as before.
+  local manager_token
+  manager_token="$(env_or_dotenv AGENT_SANDBOX_MANAGER_TOKEN)"
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in
       build) die "artifact deployments cannot build images" ;;
@@ -205,6 +209,7 @@ compose() {
   [[ -n "$COMPOSE_PROJECT" ]] || die \
     "COMPOSE_PROJECT is not set — export it or put it in .env (e.g. freeinference-cloud-agent-sandbox-staging). It is what keeps this stack apart from the other environment on this machine."
   if [[ -f .env ]]; then
+    AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
       -f "$COMPOSE_FILE" \
@@ -214,6 +219,7 @@ compose() {
     # pass a path that does not exist: env-only hosts are an explicitly supported
     # direct-operator path, even though the CD wrapper deliberately requires a
     # deploy-root .env so credentials survive non-interactive service restarts.
+    AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
       -f "$COMPOSE_FILE" "$@"

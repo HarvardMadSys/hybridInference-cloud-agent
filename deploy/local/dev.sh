@@ -20,8 +20,13 @@ compose() {
   LOCAL_HOST_SLOTS=$(local_host_slots)
   AGENT_DEPLOYMENT_SHA=$(local_deployment_sha)
   export LOCAL_SANDBOX_IMAGE LOCAL_HOST_SLOTS AGENT_DEPLOYMENT_SHA
+  manager_token=$(env_file_value AGENT_SANDBOX_MANAGER_TOKEN)
+  if [ -z "$manager_token" ]; then
+    manager_token=$(env_file_value AGENT_WORKSPACE_BROKER_TOKEN)
+  fi
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
+  AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
   $COMPOSE --env-file "$ENV_FILE" --project-name "$(local_project_name)" \
     -f "$REPO_ROOT/deploy/control-plane/docker-compose.yml" \
     -f "$SCRIPT_DIR/docker-compose.yml" "$@"

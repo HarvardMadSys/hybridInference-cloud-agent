@@ -196,7 +196,7 @@ services:
       AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
       # A sandbox-manager-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
-      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:-${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's sandbox manager}}
+      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:?a secret for this host's sandbox manager}
       AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       # Daemon-side path, observed through `docker info`; it is deliberately
       # not mounted into this container. Leave the default. A durable disk is
@@ -322,7 +322,7 @@ services:
       AGENT_SANDBOX_MANAGER_ADVERTISE_URL: ${AGENT_SANDBOX_MANAGER_ADVERTISE_URL:-${AGENT_WORKSPACE_BROKER_ADVERTISE_URL:-}}
       # Must match the sandbox manager service above. It is independent from the
       # enrollment-issued host credential used for heartbeat and claim.
-      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:-${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's sandbox manager}}
+      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:?a secret for this host's sandbox manager}
 
       # Every registered runtime has an exact pinned native-resume adapter;
       # the host advertises capability only after conformance.

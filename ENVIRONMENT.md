@@ -40,6 +40,10 @@ names for new deployments. Existing values remain accepted:
 | `AGENT_SANDBOX_MANAGER_REVERSE_TARGET_PORT` | `AGENT_BROKER_REVERSE_TARGET_PORT` |
 | `AGENT_SANDBOX_MANAGER_STOP_GRACE` | `AGENT_BROKER_STOP_GRACE` |
 
+The supported host and local deployment scripts normalize the old token before
+invoking Compose. For a direct `docker compose` invocation, provide
+`AGENT_SANDBOX_MANAGER_TOKEN`; the recipe still refuses to render without it.
+
 Host activation drains and removes the old service before creating its
 replacement. Its old DNS alias and Python entry point remain available for
 mixed-version deployments. Saved credentials keep their existing encryption
