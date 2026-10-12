@@ -317,7 +317,7 @@ describe('sandbox member visibility and control', () => {
     expect(screen.getByRole('button', { name: 'Refresh details' })).toBeDisabled();
   });
 
-  it('removes only a stopped sandbox from inventory with a reviewed activity fence', async () => {
+  it('removes a stopped sandbox from inventory with a reviewed activity fence', async () => {
     vi.mocked(getAdminSandbox).mockResolvedValue(
       detail({ state: 'stopped', container_id: null, terminal_count: null }),
     );
@@ -366,6 +366,171 @@ describe('sandbox member visibility and control', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Remove from inventory' }));
     expect(archiveAdminSandbox).not.toHaveBeenCalled();
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { state: 'running', host_last_heartbeat_at: '2026-10-10T09:58:29.999Z' },
+    { state: 'running', host_last_heartbeat_at: null },
+    { state: 'provisioning', host_last_heartbeat_at: null, container_id: null },
+    { state: 'starting', host_last_heartbeat_at: null },
+    { state: 'stopping', host_last_heartbeat_at: null },
+    { state: 'stopped_dirty', host_last_heartbeat_at: null },
+    { state: 'lost', host_last_heartbeat_at: null, container_id: null },
+  ] as const)(
+    'removes an idle stale entry without requesting physical deletion: %j',
+    async (overrides) => {
+      const staleDetail = detail(overrides);
+      vi.mocked(getAdminSandbox).mockResolvedValue({
+        ...staleDetail,
+        terminal_activity_error: 'The host workspace broker is unavailable.',
+      });
+      vi.mocked(archiveAdminSandbox).mockResolvedValue(
+        detail({ ...overrides, archived_at: observedAt }),
+      );
+      mount();
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove stale entry' }));
+
+      expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('shared by 2 sessions'));
+      const confirmation = vi.mocked(window.confirm).mock.calls[0][0];
+      expect(confirmation).toContain('This removes only the inventory entry.');
+      expect(confirmation).toContain(
+        'It does not delete any retained container or files and creates no S3 archive.',
+      );
+      expect(confirmation).toContain('Chat history and recorded native state are retained.');
+      expect(confirmation).toContain(
+        'If the host reports the sandbox running or new work resumes, the entry returns to the inventory.',
+      );
+      expect(archiveAdminSandbox).toHaveBeenCalledWith(
+        'sandbox-one',
+        {
+          generation: 4,
+          container_id: staleDetail.sandbox.container_id,
+          last_activity_at: observedAt,
+        },
+        expect.any(AbortSignal),
+        true,
+      );
+      expect(await screen.findByRole('button', { name: 'Restore to inventory' })).toBeEnabled();
+      expect(onChanged).toHaveBeenCalledOnce();
+      expect(stopAdminSandbox).not.toHaveBeenCalled();
+      expect(deleteAdminSandbox).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    observedAt,
+    '2026-10-10T09:58:30.001Z',
+    '2026-10-10T09:58:30.000Z',
+    '2026-10-10T10:01:00Z',
+    'invalid heartbeat',
+  ])('does not treat a fresh or unknown host heartbeat as offline: %s', async (heartbeat) => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(detail({ host_last_heartbeat_at: heartbeat }));
+    mount();
+    expect(await screen.findByRole('button', { name: 'Remove from inventory' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Remove stale entry' })).not.toBeInTheDocument();
+    expect(archiveAdminSandbox).not.toHaveBeenCalled();
+  });
+
+  it('ages the heartbeat from the server observation using elapsed monotonic time', async () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    vi.mocked(getAdminSandbox).mockResolvedValue(
+      detail({ host_last_heartbeat_at: '2026-10-10T09:58:30Z' }),
+    );
+    const view = mount(false);
+    expect(await screen.findByRole('button', { name: 'Remove from inventory' })).toBeDisabled();
+    view.rerender(
+      <SandboxManagement
+        sandboxId="sandbox-one"
+        nowMs={1_001}
+        autoRefresh={false}
+        onDenied={onDenied}
+        onChanged={onChanged}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Remove stale entry' })).toBeEnabled();
+  });
+
+  it.each([
+    { active_attempt_count: 1 },
+    { active_operation_count: 1 },
+    { snapshot_state: 'pending' },
+    { snapshot_state: 'snapshotting' },
+    { snapshot_state: 'importing' },
+    { generation: undefined },
+    { deletion_state: 'pending' },
+    { deletion_state: 'archived' },
+  ] as const)(
+    'preserves activity and identity guards for an offline host: %j',
+    async (overrides) => {
+      vi.mocked(getAdminSandbox).mockResolvedValue(
+        detail({ host_last_heartbeat_at: null, ...overrides }),
+      );
+      mount();
+      expect(await screen.findByRole('button', { name: 'Remove stale entry' })).toBeDisabled();
+      expect(archiveAdminSandbox).not.toHaveBeenCalled();
+      expect(window.confirm).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a stopped offline sandbox on the existing inventory removal path', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(
+      detail({ state: 'stopped', host_last_heartbeat_at: null }),
+    );
+    vi.mocked(archiveAdminSandbox).mockResolvedValue(
+      detail({ state: 'stopped', host_last_heartbeat_at: null, archived_at: observedAt }),
+    );
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from inventory' }));
+    expect(archiveAdminSandbox).toHaveBeenCalledWith(
+      'sandbox-one',
+      { generation: 4, container_id: 'container-one', last_activity_at: observedAt },
+      expect.any(AbortSignal),
+    );
+    expect(await screen.findByRole('button', { name: 'Restore to inventory' })).toBeEnabled();
+  });
+
+  it('does not remove a stale entry when confirmation is cancelled', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(detail({ host_last_heartbeat_at: null }));
+    vi.mocked(window.confirm).mockReturnValue(false);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove stale entry' }));
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(archiveAdminSandbox).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('requires a current reviewed snapshot before removing a stale entry', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(detail({ host_last_heartbeat_at: null }));
+    const view = mount(false);
+    await screen.findByRole('button', { name: 'Remove stale entry' });
+    view.rerender(
+      <SandboxManagement
+        sandboxId="sandbox-one"
+        nowMs={performance.now() + 90_001}
+        autoRefresh={false}
+        onDenied={onDenied}
+        onChanged={onChanged}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Remove stale entry' })).toBeDisabled();
+    expect(screen.getByText('Refresh details before changing this sandbox.')).toBeInTheDocument();
+    expect(archiveAdminSandbox).not.toHaveBeenCalled();
+  });
+
+  it('refreshes instead of removing a stale entry when confirmation outlives the review', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(detail({ host_last_heartbeat_at: null }));
+    mount();
+    await screen.findByRole('button', { name: 'Remove stale entry' });
+    vi.mocked(window.confirm).mockImplementation(() => {
+      vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 90_001);
+      return true;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove stale entry' }));
+    expect(archiveAdminSandbox).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Refresh details before changing this sandbox.',
+    );
+    expect(getAdminSandbox).toHaveBeenCalledTimes(2);
   });
 
   it('restores a removed sandbox using its current identity without changing lifecycle state', async () => {

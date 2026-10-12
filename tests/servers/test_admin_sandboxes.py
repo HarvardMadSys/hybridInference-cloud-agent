@@ -982,11 +982,54 @@ async def test_inventory_controls_pass_review_and_authenticated_actor(
         archived=archived,
         actor_id="admin-token",
         admin_ip="127.0.0.1",
+        allow_stale_host=False,
     )
     if result == "accepted":
         assert response.headers["cache-control"] == "no-store"
         assert (response.json()["sandbox"]["archived_at"] is not None) == archived
         assert "PRIVATE" not in response.text
+    else:
+        queries.detail.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("result", "status"), [("accepted", 200), ("host_online", 409), ("busy", 409), ("stale", 409)]
+)
+async def test_stale_inventory_removal_passes_review_without_contacting_host(setup, result, status):
+    app, queries, _ = setup
+    queries.detail = AsyncMock(return_value=sandbox_detail(archived_at=END))
+    commands = SimpleNamespace(set_admin_archived=AsyncMock(return_value=result))
+    host_pool = SimpleNamespace(get_host=AsyncMock(side_effect=AssertionError("host probe")))
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        sandbox=commands, admin_sandboxes=queries, host_pool=host_pool
+    )
+    app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: False
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{PREFIX}/asbx_other/archive?stale=true",
+            headers=ADMIN,
+            json={
+                "generation": 1,
+                "container_id": "container-one",
+                "last_activity_at": END.isoformat(),
+            },
+        )
+    assert response.status_code == status
+    commands.set_admin_archived.assert_awaited_once_with(
+        sandbox_id="asbx_other",
+        generation=1,
+        container_id="container-one",
+        last_activity_at=END,
+        archived=True,
+        actor_id="admin-token",
+        admin_ip="127.0.0.1",
+        allow_stale_host=True,
+    )
+    host_pool.get_host.assert_not_awaited()
+    if result == "accepted":
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["sandbox"]["state"] == "running"
+        assert response.json()["sandbox"]["archived_at"] is not None
     else:
         queries.detail.assert_not_awaited()
 

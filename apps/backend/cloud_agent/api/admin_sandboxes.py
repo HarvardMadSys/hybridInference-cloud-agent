@@ -162,7 +162,8 @@ async def _confirm_force_delete_stopped(
         elif isinstance(exc.__cause__, httpx.HTTPError):
             message = (
                 "The control plane cannot connect to the owning host's workspace broker. "
-                "Check its advertised URL and reverse SSH tunnel, then retry deletion."
+                "Check its advertised URL and reverse SSH tunnel, then retry deletion. "
+                "If the host is gone, use Remove stale entry once its heartbeat is stale."
             )
         else:
             message = (
@@ -325,6 +326,7 @@ async def _set_admin_archived(
     store: _AdminSandboxesStorage | None,
     *,
     archived: bool,
+    allow_stale_host: bool = False,
 ) -> AdminSandboxDetail:
     """Keep reviewed removal and restore on the same atomic audit boundary."""
     storage = require_store(store)
@@ -336,11 +338,16 @@ async def _set_admin_archived(
         archived=archived,
         actor_id=admin,
         admin_ip=get_client_ip(request),
+        allow_stale_host=allow_stale_host,
     )
     errors = {
         "not_found": (404, "Sandbox not found."),
         "stale": (409, "Sandbox activity or container changed. Refresh before changing it."),
         "not_stopped": (409, "Only a stopped sandbox can be removed from inventory."),
+        "host_online": (
+            409,
+            "The owning host is still reporting. Refresh details or stop the sandbox before removing it.",
+        ),
         "busy": (409, "Sandbox has an active turn, operation, or snapshot. Wait until it is idle."),
     }
     if result != "accepted":
@@ -357,11 +364,17 @@ async def archive_admin_sandbox(
     sandbox_id: str,
     payload: AdminSandboxArchiveRequest,
     request: Request,
+    stale: bool = Query(
+        False,
+        description="Remove only the inventory entry when its host has no fresh heartbeat, retaining native state.",
+    ),
     admin: str = Depends(verify_admin_access),
     store: _AdminSandboxesStorage | None = Depends(get_storage),
 ) -> AdminSandboxDetail:
-    """Remove a stopped sandbox from inventory while retaining native state."""
-    return await _set_admin_archived(sandbox_id, payload, request, admin, store, archived=True)
+    """Remove a stopped or explicitly reviewed stale-host inventory entry."""
+    return await _set_admin_archived(
+        sandbox_id, payload, request, admin, store, archived=True, allow_stale_host=stale
+    )
 
 
 @router.post("/{sandbox_id}/restore", response_model=AdminSandboxDetail)

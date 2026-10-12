@@ -112,12 +112,15 @@ class SandboxRepository(Protocol):
         archived: bool,
         actor_id: str,
         admin_ip: str,
+        allow_stale_host: bool = False,
     ) -> str:
         """Audit a reviewed inventory removal or restore without deleting state.
 
-        Only stopped, quiescent groups may be hidden. A new turn or running
-        host observation makes a removed group visible again automatically.
-        Native sessions, container writable layers and ledger rows survive.
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
         """
         ...
 

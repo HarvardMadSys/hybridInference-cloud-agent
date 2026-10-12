@@ -220,8 +220,9 @@ export function archiveAdminSandbox(
   sandboxId: string,
   reviewed: AdminSandboxInventoryRequest,
   signal?: AbortSignal,
+  stale = false,
 ): Promise<AdminSandboxDetail> {
-  return postSandboxAction(sandboxId, 'archive', reviewed, signal);
+  return postSandboxAction(sandboxId, 'archive', reviewed, signal, stale ? '?stale=true' : '');
 }
 
 export function restoreAdminSandbox(

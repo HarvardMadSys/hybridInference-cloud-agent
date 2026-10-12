@@ -12,6 +12,7 @@ import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
@@ -67,12 +68,15 @@ class PostgresSandboxRepository:
         archived: bool,
         actor_id: str,
         admin_ip: str,
+        allow_stale_host: bool = False,
     ) -> str:
         """Audit a reviewed inventory removal or restore without deleting state.
 
-        Only stopped, quiescent groups may be hidden. A new turn or running
-        host observation makes a removed group visible again automatically.
-        Native sessions, container writable layers and ledger rows survive.
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
@@ -101,8 +105,28 @@ class PostgresSandboxRepository:
                 return "accepted"
             if group["deletion_state"] in {"pending", "archived"}:
                 return "busy"
+            stale_host_removal = archived and allow_stale_host
             if archived:
-                if group["state"] != "stopped" and group["deletion_state"] != "deleted":
+                if stale_host_removal:
+                    # This is a reversible visibility change, so do not add
+                    # host row locks to the lifecycle lock order. A matching
+                    # running observation restores visibility if the host
+                    # returns while or just after this transaction commits.
+                    host_online = await conn.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM agent_runner_hosts
+                            WHERE host = $1
+                              AND last_heartbeat_at >= clock_timestamp()
+                                  - make_interval(secs => $2)
+                        )
+                        """,
+                        group["host"],
+                        FRESH_AFTER_SECONDS,
+                    )
+                    if host_online:
+                        return "host_online"
+                elif group["state"] != "stopped" and group["deletion_state"] != "deleted":
                     return "not_stopped"
                 busy = await conn.fetchval(
                     """
@@ -137,7 +161,8 @@ class PostgresSandboxRepository:
                 actor_id=actor_id,
                 from_state="visible" if archived else "archived",
                 to_state="archived" if archived else "visible",
-                details={"container_present": container_id is not None},
+                details={"container_present": container_id is not None}
+                | ({"stale_host_removal": True} if stale_host_removal else {}),
             )
             await conn.execute(
                 "UPDATE agent_sandboxes "
@@ -163,6 +188,7 @@ class PostgresSandboxRepository:
                         "generation": generation,
                         "container_id": container_id,
                     }
+                    | ({"stale_host_removal": True} if stale_host_removal else {})
                 ),
             )
         return "accepted"

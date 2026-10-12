@@ -531,6 +531,19 @@ failure, verify the [reverse broker route](#the-way-back-the-control-plane-reach
 Control-plane logs record `agent_sandbox_delete_verification_failed` with the
 sandbox, owning host, status code, and failure type without raw broker errors.
 
+**Remove stale entry** is available when the owning host has no heartbeat or
+has not reported for more than 90 seconds. It removes the entry from the default
+admin inventory without contacting the broker, so a retired or unreachable host
+does not leave an entry that can never be cleared. The server rechecks host
+freshness and the reviewed identity, and refuses active turns, workspace
+operations, snapshots, or a pending deletion. The action is audited and
+reversible through **Include removed** and **Restore to inventory**. It preserves
+the recorded lifecycle state, container identity, native state, and chat history,
+without deleting any retained container or files, creating an S3 archive, or
+reclaiming host disk. A matching running host
+observation or new admitted work makes the entry visible again. Restore the
+broker connection to complete S3 archival and physical deletion.
+
 The details show progress, archive location, checksum, size, and any failure.
 Chat history, memberships, execution records, and audit receipts remain in the
 database. Deleted native sessions cannot resume; this operation does not add

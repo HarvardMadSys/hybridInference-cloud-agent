@@ -146,6 +146,40 @@ describe('admin sandbox inventory client', () => {
     },
   );
 
+  it.each([false, true])(
+    'requests stale inventory removal only when explicitly selected: %s',
+    async (stale) => {
+      const response = {
+        sandbox: { state: 'lost', archived_at: 'now' },
+        members: [],
+        observed_at: 'now',
+      };
+      const fetch = vi
+        .spyOn(client, 'fetchWithAuth')
+        .mockResolvedValue(new Response(JSON.stringify(response)));
+      const reviewed = {
+        generation: 3,
+        container_id: null,
+        last_activity_at: '2026-10-10T09:59:00Z',
+      };
+      const controller = new AbortController();
+
+      expect(await archiveAdminSandbox('sandbox/one', reviewed, controller.signal, stale)).toEqual(
+        response,
+      );
+      expect(fetch.mock.calls[0][1]).toBe(
+        `/admin/agent/sandboxes/sandbox%2Fone/archive${stale ? '?stale=true' : ''}`,
+      );
+      expect(fetch.mock.calls[0][2]).toEqual({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reviewed),
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+    },
+  );
+
   it('uses an admin-only uncached read with encoded pagination and abort support', async () => {
     const response = {
       sandboxes: [],

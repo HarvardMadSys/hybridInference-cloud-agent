@@ -19,6 +19,7 @@ import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
 const REFRESH_MS = 30_000;
 const TERMINAL_FRESHNESS_MS = 90_000;
 const REVIEW_FRESHNESS_MS = 90_000;
+const HOST_FRESHNESS_MS = 90_000;
 type SandboxAction = 'stop' | 'archive' | 'restore' | 'delete';
 
 export function SandboxManagement({
@@ -122,6 +123,15 @@ export function SandboxManagement({
           ? 'Wait for the workspace snapshot to finish.'
           : null
     : null;
+  const hostHeartbeat = Date.parse(sandbox?.host_last_heartbeat_at ?? '');
+  const staleInventoryEntry =
+    Boolean(sandbox) &&
+    sandbox?.state !== 'stopped' &&
+    !deletionComplete &&
+    (sandbox?.host_last_heartbeat_at === null ||
+      (Number.isFinite(serverNow) &&
+        Number.isFinite(hostHeartbeat) &&
+        serverNow - hostHeartbeat > HOST_FRESHNESS_MS));
   const forceDelete =
     sandbox?.state === 'running' &&
     reviewBlocked === null &&
@@ -145,7 +155,7 @@ export function SandboxManagement({
             ? 'The current container identity is unavailable.'
             : null);
   const removalBlocked =
-    sandbox?.state !== 'stopped' && !deletionComplete
+    sandbox?.state !== 'stopped' && !deletionComplete && !staleInventoryEntry
       ? 'Wait for the host to confirm a clean stop before removing this sandbox.'
       : idleBlocked;
   const inventoryBlocked =
@@ -191,7 +201,12 @@ export function SandboxManagement({
         deletionComplete
           ? 'Remove this deleted sandbox from the admin inventory? Its S3 archive and chat history remain available. ' +
               'You can restore its inventory entry using Include removed.'
-          : `Remove the stopped sandbox shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} from the admin inventory? ` +
+          : staleInventoryEntry
+            ? `Remove the stale sandbox entry shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} from the admin inventory? ` +
+              'This removes only the inventory entry. It does not delete any retained container or files and creates no S3 archive. ' +
+              'Chat history and recorded native state are retained. ' +
+              'If the host reports the sandbox running or new work resumes, the entry returns to the inventory. You can also restore it using Include removed.'
+            : `Remove the stopped sandbox shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} from the admin inventory? ` +
               'Workspace files, native sessions, and chat history are retained. ' +
               'Resuming a session returns the sandbox to the inventory. You can also restore it using Include removed.',
       )
@@ -226,9 +241,12 @@ export function SandboxManagement({
           sandbox.state === 'running'
             ? await deleteAdminSandbox(sandbox.id, deleteRequest, controller.signal, true)
             : await deleteAdminSandbox(sandbox.id, deleteRequest, controller.signal);
+      } else if (kind === 'archive') {
+        next = staleInventoryEntry
+          ? await archiveAdminSandbox(sandbox.id, reviewed, controller.signal, true)
+          : await archiveAdminSandbox(sandbox.id, reviewed, controller.signal);
       } else {
-        const updateInventory = kind === 'archive' ? archiveAdminSandbox : restoreAdminSandbox;
-        next = await updateInventory(sandbox.id, reviewed, controller.signal);
+        next = await restoreAdminSandbox(sandbox.id, reviewed, controller.signal);
       }
       if (controller.signal.aborted) return;
       setDetail(next);
@@ -302,7 +320,9 @@ export function SandboxManagement({
               Removed from the admin inventory.{' '}
               {deletionComplete
                 ? 'Its S3 archive and chat history remain available.'
-                : 'Workspace files, native sessions, and chat history are retained.'}
+                : sandbox.state !== 'stopped'
+                  ? 'Any retained container and workspace files are unchanged. Chat history and recorded native state remain.'
+                  : 'Workspace files, native sessions, and chat history are retained.'}
             </p>
           )}
           {sandbox.deletion_state === 'pending' && (
@@ -404,7 +424,9 @@ export function SandboxManagement({
                   ? 'Restoring…'
                   : sandbox.archived_at
                     ? 'Restore to inventory'
-                    : 'Remove from inventory'}
+                    : staleInventoryEntry
+                      ? 'Remove stale entry'
+                      : 'Remove from inventory'}
             </button>
             {!controlsBlocked && (
               <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -413,7 +435,9 @@ export function SandboxManagement({
                     ? 'Makes this sandbox visible in the admin inventory again.'
                     : deletionComplete
                       ? 'Hides this deleted sandbox. Its S3 archive and chat history remain available.'
-                      : 'Hides this stopped sandbox. Workspace files, native sessions, and chat history are retained.')}
+                      : staleInventoryEntry
+                        ? 'Removes only the offline host’s inventory entry. Retained containers and files are not deleted; chat history and recorded native state remain. If the host reports it running or new work resumes, the entry returns.'
+                        : 'Hides this stopped sandbox. Workspace files, native sessions, and chat history are retained.')}
               </p>
             )}
           </div>

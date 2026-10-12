@@ -22207,7 +22207,7 @@
     },
     "/admin/agent/sandboxes/{sandbox_id}/archive": {
       "post": {
-        "description": "Remove a stopped sandbox from inventory while retaining native state.",
+        "description": "Remove a stopped or explicitly reviewed stale-host inventory entry.",
         "operationId": "archive_admin_sandbox_admin_agent_sandboxes__sandbox_id__archive_post",
         "parameters": [
           {
@@ -22217,6 +22217,18 @@
             "schema": {
               "title": "Sandbox Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Remove only the inventory entry when its host has no fresh heartbeat, retaining native state.",
+            "in": "query",
+            "name": "stale",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Remove only the inventory entry when its host has no fresh heartbeat, retaining native state.",
+              "title": "Stale",
+              "type": "boolean"
             }
           },
           {
