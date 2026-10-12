@@ -419,10 +419,19 @@ for directory in (".kilo", ".kilocode"):
         for key in [*env, "HOME"]:
             command.extend(["--env", key])
         if runtime == "kilo":
-            # As the member: the container drops every capability, so root
-            # cannot enter the member's 0700 state. Production clears this
-            # directory after closing an HTTP runtime on Fork
-            # (resident_transport._clear_http_member_locks).
+            _mark("spawn: debug config")
+            resolved = subprocess.run(
+                [*command, container, "kilo-freeinference", "debug", "config"],
+                env=child_env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            _mark(f"spawn: debug config exited {resolved.returncode}")
+            assert resolved.returncode == 0, resolved.stderr
+            config = json.loads(resolved.stdout)
+            assert set(config.get("mcp", {})) == {"session"}, config.get("mcp")
+            # PROBE: what `debug config` left behind, listed as the member.
             clear = os.environ.get("MCP_TEST_CLEAR_LOCKS") == "1"
             locks = subprocess.run(
                 [
@@ -450,18 +459,6 @@ for directory in (".kilo", ".kilocode"):
                 f"locks(clear={int(clear)}): "
                 + (locks.stdout + locks.stderr).strip().replace("\n", " | ")[:1500]
             )
-            _mark("spawn: debug config")
-            resolved = subprocess.run(
-                [*command, container, "kilo-freeinference", "debug", "config"],
-                env=child_env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            _mark(f"spawn: debug config exited {resolved.returncode}")
-            assert resolved.returncode == 0, resolved.stderr
-            config = json.loads(resolved.stdout)
-            assert set(config.get("mcp", {})) == {"session"}, config.get("mcp")
         _mark("spawn: " + " ".join(argv)[:120])
         process = subprocess.Popen(
             [*command, container, *argv],
