@@ -435,6 +435,99 @@ async def test_a_publication_record_takes_its_turns_before_their_group(pool, sto
     assert published is not None and published["published_pr_url"] == pr_url
 
 
+async def _close_a_cycle(rival, statement: str, *args) -> None:
+    """Wait for a row the waiting writer holds, which makes it a deadlock's victim.
+
+    The writer is already waiting for a row ``rival`` holds. This side checks
+    for a cycle only after a minute, so Postgres finds it from the writer's side
+    and aborts the writer; this statement then gets its row.
+    """
+    await rival.execute("SET LOCAL deadlock_timeout = '60s'")
+    await asyncio.wait_for(rival.execute(statement, *args), timeout=10)
+
+
+async def test_a_publication_record_picked_as_a_deadlock_victim_is_tried_again(
+    pool, store: Storage
+):
+    """The pull request exists, so a record Postgres aborted is tried again.
+
+    Left unrecorded, the snapshot stayed publishing until the stall reaper
+    failed it for manual review and marked its workspace dirty. The rival here
+    takes the group and then an included turn, the reverse of the lock order.
+    """
+    job, sandbox, publication = await _claimed_for_publication(store)
+    pr_url = "https://github.com/example-org/example-repo/pull/2"
+    publish = None
+    async with pool.acquire() as rival:
+        try:
+            async with rival.transaction():
+                await rival.execute(
+                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                    sandbox["sandbox_id"],
+                )
+                publish = asyncio.create_task(
+                    store.snapshot.record_snapshot_publish(
+                        snapshot_id=publication["snapshot_id"],
+                        pr_url=pr_url,
+                        commit_sha="c" * 40,
+                    )
+                )
+                await _blocked_by(pool, await rival.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(
+                    rival, "SELECT id FROM agent_jobs WHERE id = $1 FOR UPDATE", job["id"]
+                )
+            assert await asyncio.wait_for(publish, timeout=10)
+        finally:
+            await _settle(publish)
+    published = await store.conversation_queries.get_job(job["id"])
+    assert published is not None and published["published_pr_url"] == pr_url
+
+
+async def test_an_event_append_picked_as_a_deadlock_victim_is_tried_again(pool, store: Storage):
+    """A reply Postgres aborted to break a lock cycle is appended on a second try.
+
+    The runner takes a refused append as a lost turn and marks the chat's
+    retained context lost. The rival here takes the conversation and then the
+    attempt, the reverse of the lock order.
+    """
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    append = None
+    async with pool.acquire() as rival:
+        try:
+            async with rival.transaction():
+                await rival.execute(
+                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
+                )
+                append = asyncio.create_task(
+                    store.attempt_commands.append_event(
+                        attempt_id=claim["attempt_id"],
+                        lease_generation=claim["lease_generation"],
+                        event_type="message",
+                        payload={"text": "Reading the failing test."},
+                        event_seq=1,
+                    )
+                )
+                await _blocked_by(pool, await rival.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(
+                    rival,
+                    "SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE",
+                    claim["attempt_id"],
+                )
+            event_id = await asyncio.wait_for(append, timeout=10)
+        finally:
+            await _settle(append)
+    assert event_id is not None
+    async with pool.acquire() as conn:
+        mirrored = await conn.fetch(
+            "SELECT source_event_id FROM agent_thread_messages "
+            "WHERE job_id = $1 AND role = 'assistant'",
+            job["id"],
+        )
+    assert [row["source_event_id"] for row in mirrored] == [event_id]
+
+
 async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
     pool, store: Storage, monkeypatch
 ):

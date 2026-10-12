@@ -16,6 +16,7 @@ import asyncpg
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage.deadlocks import retry_deadlock_victim
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -682,7 +683,23 @@ class PostgresSnapshotRepository:
         Included Agent turns stay succeeded throughout.  Publication is a
         group artifact and must never rewrite a successful model turn as a
         failure merely because GitHub or the broker was unavailable later.
+
+        The pull request exists by the time this runs, so a record the database
+        aborted as a deadlock's victim is tried again: left unrecorded, the
+        stall reaper would fail the snapshot for manual review and mark its
+        workspace dirty.
         """
+        return await retry_deadlock_victim(
+            "record_snapshot_publish",
+            lambda: self._record_snapshot_publish(
+                snapshot_id=snapshot_id, pr_url=pr_url, commit_sha=commit_sha
+            ),
+        )
+
+    async def _record_snapshot_publish(
+        self, *, snapshot_id: int, pr_url: str, commit_sha: str
+    ) -> bool:
+        """Record one publication in one transaction."""
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """

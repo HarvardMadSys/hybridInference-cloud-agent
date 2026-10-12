@@ -50,6 +50,7 @@ from cloud_agent.storage._sql.ledger import (
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.storage.deadlocks import retry_deadlock_victim
 from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
@@ -886,7 +887,32 @@ class PostgresAttemptCommands:
         Returns the global event id (the SSE ``Last-Event-ID`` cursor), or
         ``None`` when the caller lost the lease. The row lock on the attempt
         serializes ``seq`` assignment for the single legitimate writer.
+
+        An append the database aborted as a deadlock's victim is tried again:
+        its runner takes a refused append as a lost turn, and marks the chat's
+        retained context lost.
         """
+        return await retry_deadlock_victim(
+            "append_event",
+            lambda: self._append_event(
+                attempt_id=attempt_id,
+                lease_generation=lease_generation,
+                event_type=event_type,
+                payload=payload,
+                event_seq=event_seq,
+            ),
+        )
+
+    async def _append_event(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        event_type: str,
+        payload: dict[str, Any] | None,
+        event_seq: int | None,
+    ) -> int | None:
+        """Append one event in one transaction."""
         async with self._pool.acquire() as conn, conn.transaction():
             attempt = await conn.fetchrow(
                 "SELECT job_id, status, lease_generation, "
