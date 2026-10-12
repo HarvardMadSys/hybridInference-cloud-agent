@@ -142,7 +142,7 @@ async def chain(monkeypatch, tmp_path):
         "AGENT_DATABASE_URL",
         "postgresql://{user}:{password}@{host}:{port}/{database}".format(**config),
     )
-    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "chain-test-secret")
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "chain-test-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "admin-chain-test")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "chain-session-secret-32-bytes-min")
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
