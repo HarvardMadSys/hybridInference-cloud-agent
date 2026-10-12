@@ -419,6 +419,26 @@ for directory in (".kilo", ".kilocode"):
         for key in [*env, "HOME"]:
             command.extend(["--env", key])
         if runtime == "kilo":
+            locks = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "--user",
+                    "0:0",
+                    container,
+                    "sh",
+                    "-c",
+                    "now=$(date +%s); for d in $(find /agent-state /home/agent-member-0 /tmp "
+                    "-type d -path '*/locks/*' -mindepth 1 2>/dev/null); do "
+                    'hb="$d/heartbeat"; [ -e "$hb" ] || continue; '
+                    'echo "$d age=$((now - $(stat -c %Y "$hb")))s meta=$(cat "$d/meta.json" 2>/dev/null)"; '
+                    "done",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            _mark("locks: " + (locks.stdout.strip().replace("\n", " | ") or "none")[:1500])
             _mark("spawn: debug config")
             resolved = subprocess.run(
                 [*command, container, "kilo-freeinference", "debug", "config"],
