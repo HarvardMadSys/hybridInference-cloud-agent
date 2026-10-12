@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Cloud Agent PostgreSQL",
+      "Group": "Cloud Agent",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "cloudagent",
+      "Username": "cloudagent",
+      "SSLMode": "prefer"
+    }
+  }
+}

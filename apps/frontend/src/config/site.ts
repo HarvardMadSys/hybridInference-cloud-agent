@@ -191,3 +191,39 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
   if (version || deployedAt) site.deployment = { version, deployedAt };
   return site;
 }
+
+function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSiteConfig {
+  if (!value || typeof value !== 'object')
+    throw new SiteConfigError('Invalid application settings.');
+  const saved = value as Record<string, unknown>;
+  const branding = saved.branding as Record<string, unknown> | undefined;
+  const features = saved.features as Record<string, unknown> | undefined;
+  if (!branding || !features || typeof features.rag !== 'boolean') {
+    throw new SiteConfigError('Invalid application settings.');
+  }
+  const env: EnvSource = {
+    [SITE_CONFIG_ENV.version]: metadata[SITE_CONFIG_ENV.version],
+    [SITE_CONFIG_ENV.deployedAt]: metadata[SITE_CONFIG_ENV.deployedAt],
+    [SITE_CONFIG_ENV.featureRag]: String(features.rag),
+  };
+  for (const key of ['appName', 'orgName', 'orgUrl', 'statusUrl', 'gatewayUrl'] as const) {
+    if (typeof branding[key] !== 'string')
+      throw new SiteConfigError('Invalid application settings.');
+    env[SITE_CONFIG_ENV[key]] = branding[key];
+  }
+  return parseRuntimeSiteConfig(env);
+}
+
+/** Keep the application accessible if saved appearance settings cannot be rendered. */
+export function parseSavedSiteConfig(value: unknown, metadata: EnvSource = {}): RuntimeSiteConfig {
+  try {
+    return checkedSavedSiteConfig(value, metadata);
+  } catch {
+    // Never restore old environment branding or carry through unknown response
+    // fields. Only the server-owned deployment identity accompanies defaults.
+    return parseRuntimeSiteConfig({
+      [SITE_CONFIG_ENV.version]: metadata[SITE_CONFIG_ENV.version],
+      [SITE_CONFIG_ENV.deployedAt]: metadata[SITE_CONFIG_ENV.deployedAt],
+    });
+  }
+}

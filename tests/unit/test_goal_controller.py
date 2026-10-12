@@ -11,6 +11,7 @@ was paused, the wakeup that was finished or parked.
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -151,6 +152,7 @@ class FakeWakeups:
             "attempts": 0,
             "detail": None,
             "lease_expires_at": None,
+            "lease_owner": None,
             "not_before": 0.0,
         }
         self.rows.append(row)
@@ -170,6 +172,7 @@ class FakeWakeups:
         for row in due:
             row["attempts"] += 1
             row["lease_expires_at"] = now + 120.0
+            row["lease_owner"] = uuid4().hex
         return [dict(row) for row in due]
 
     async def release_wakeup(
@@ -180,10 +183,17 @@ class FakeWakeups:
         retry_in_seconds: float | None = None,
         detail: str | None = None,
         conn: Any | None = None,
+        lease_owner: str | None = None,
+        restore_attempt: bool = False,
     ) -> None:
         """Give the lease back, parking behind a turn or waiting out a backoff."""
         row = self._row(wakeup_id)
+        if lease_owner is not None and not self._live_lease(row, lease_owner):
+            return
         row["lease_expires_at"] = None
+        row["lease_owner"] = None
+        if restore_attempt:
+            row["attempts"] = max(0, row["attempts"] - 1)
         if retry_in_seconds is not None:
             # A backoff defers ``not_before``, never the lease: "do not touch
             # this yet" and "a worker may have died" are different facts.
@@ -200,13 +210,30 @@ class FakeWakeups:
         processed: bool = True,
         detail: str | None = None,
         conn: Any | None = None,
+        lease_owner: str | None = None,
     ) -> None:
         """Mark the obligation settled, with what was decided about it."""
         row = self._row(wakeup_id)
+        if lease_owner is not None and not self._live_lease(row, lease_owner):
+            return
         row["state"] = "processed" if processed else "pending"
         row["lease_expires_at"] = None
+        row["lease_owner"] = None
         if detail is not None:
             row["detail"] = detail
+
+    async def lock_wakeup(self, *, wakeup_id: str, lease_owner: str, conn: Any) -> bool:
+        """Verify the snapshot still owns the pending wakeup before changing its goal."""
+        assert conn is not None
+        return self._live_lease(self._row(wakeup_id), lease_owner)
+
+    def _live_lease(self, row: dict[str, Any], lease_owner: str) -> bool:
+        return (
+            row["state"] == "pending"
+            and row["lease_owner"] == lease_owner
+            and row["lease_expires_at"] is not None
+            and row["lease_expires_at"] > self._store.clock
+        )
 
     def transaction(self) -> _Transaction:
         """One transaction over the state a whole decision reads and writes."""
@@ -372,6 +399,31 @@ class FakeSourceControl:
         return []
 
 
+class FakeGateway:
+    """The Gateway's Agent access decision for the conversation's owner.
+
+    Allowed unless a case withdraws it. ``unavailable`` makes the lookup fail
+    the way an unreachable Gateway does, which is not an answer at all.
+    """
+
+    def __init__(self) -> None:
+        self.allowed = True
+        self.unavailable = False
+        self.asked: list[str] = []
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        from cloud_agent.gateway import GatewayError
+
+        self.asked.append(user_id)
+        if self.unavailable:
+            raise GatewayError("gateway unreachable")
+        return {
+            "user_id": user_id,
+            "allowed": self.allowed,
+            "permissions": ["agent.use"] if self.allowed else [],
+        }
+
+
 class FakePendingMessages:
     """The owner's waiting messages: none, unless a case puts one in line.
 
@@ -426,6 +478,9 @@ class FakeStore:
         self.conversation_queries = FakeConversationQueries(self)
         self.source_control = FakeSourceControl()
         self.pending_messages = FakePendingMessages(self)
+        #: Not a repository: the consumer is handed the Gateway client beside
+        #: the store, and the cases pass this one.
+        self.gateway = FakeGateway()
 
     def wakeup(self, wakeup_id: str) -> dict[str, Any]:
         return self.goal_wakeups._row(wakeup_id)
@@ -471,7 +526,70 @@ async def _consume(store: FakeStore) -> str:
     """Claim the next due wakeup and judge the goal, as the consumer loop does."""
     claimed = await store.goal_wakeups.claim_wakeups(limit=1)
     assert claimed, "no wakeup was due"
-    return await consume_wakeup(store=store, wakeup=claimed[0])
+    return await consume_wakeup(store=store, gateway=store.gateway, wakeup=claimed[0])
+
+
+async def test_an_expired_exhausted_worker_cannot_cancel_a_recovered_round():
+    """A later successful lease holder wins over the old holder's failure cleanup."""
+    from cloud_agent.goals.controller import _retry_or_pause
+
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1")])
+    row = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    row["attempts"] = MAX_WAKEUP_ATTEMPTS - 1
+    old = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    store.clock += 121
+    current = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    assert old["lease_owner"] != current["lease_owner"]
+    assert (
+        await consume_wakeup(store=store, gateway=store.gateway, wakeup=current)
+        == "queue_work_round"
+    )
+
+    await _retry_or_pause(store, old)
+
+    assert store.goal["state"] == "active"
+    assert len(store.queued_rounds()) == 1
+    assert store.wakeup(row["id"])["state"] == "processed"
+
+
+async def test_an_expired_worker_cannot_release_or_finish_the_current_wakeup():
+    """Both failure backoff and simple completion respect the lease owner."""
+    from cloud_agent.goals.controller import _retry_or_pause
+
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1")])
+    row = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    old = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    store.clock += 121
+    current = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    before = dict(row)
+    await _retry_or_pause(store, old)
+    # The simple "no goal" path must not mark the new holder's wakeup processed.
+    store.goal = None
+    assert await consume_wakeup(store=store, gateway=store.gateway, wakeup=old) == "none"
+    assert row == before
+    assert row["lease_owner"] == current["lease_owner"]
+
+
+async def test_repository_outages_preserve_goal_scheduling_retries(monkeypatch):
+    """An unavailable permission lookup waits without spending the retry budget."""
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.entitlement import RepoAccessUnavailable
+
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1")])
+    row = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    lookup = AsyncMock(side_effect=RepoAccessUnavailable("temporarily unavailable"))
+    monkeypatch.setattr("cloud_agent.goals.controller.require_entitled_repo", lookup)
+    for _ in range(MAX_WAKEUP_ATTEMPTS + 2):
+        assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
+        assert row["state"] == "pending" and row["attempts"] == 0
+        assert store.goal["state"] == "active"
+        assert store.queued_rounds() == []
+        assert await run_goal_wakeups(store=store, gateway=store.gateway) == 0
+        store.clock += 31
+    lookup.side_effect = None
+    assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
+    assert len(store.queued_rounds()) == 1
 
 
 @pytest.fixture(autouse=True)
@@ -531,6 +649,76 @@ async def test_a_finish_wakeup_with_an_absent_report_queues_the_next_work_round(
     assert queued["client_request_id"] == client_request_id_for(
         thread_id=THREAD_ID, goal_id=GOAL_ID, kind="work", trigger_ref="job:job-2"
     )
+
+
+def _finished_round_store() -> tuple[FakeStore, dict[str, Any]]:
+    """An unbounded goal whose last round finished, and the wakeup asking for more."""
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="absent",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    return store, store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+
+
+async def test_a_withdrawn_agent_access_pauses_the_goal_instead_of_queueing(monkeypatch):
+    """An automatic round has no request of the owner's to be refused at.
+
+    Without asking here, an unbounded goal would keep queueing rounds for an
+    owner the Gateway no longer admits. The pause says why, and the repository
+    is not even looked up for an owner who may not use Agent at all.
+    """
+    from unittest.mock import AsyncMock
+
+    lookup = AsyncMock()
+    monkeypatch.setattr("cloud_agent.goals.controller.require_entitled_repo", lookup)
+    store, _ = _finished_round_store()
+    store.gateway.allowed = False
+
+    assert await _consume(store) == "pause"
+
+    assert store.gateway.asked == ["user-1"]
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "access_denied")
+    assert "Agent access has not been granted" in store.goal["pause_detail"]
+    assert store.queued_rounds() == []
+    lookup.assert_not_awaited()
+
+
+async def test_an_unconfirmed_agent_access_retries_without_spending_the_goal():
+    """No answer is not permission, and not a reason to end the owner's goal."""
+    store, row = _finished_round_store()
+    store.gateway.unavailable = True
+
+    for _ in range(MAX_WAKEUP_ATTEMPTS + 2):
+        assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
+        assert row["state"] == "pending" and row["attempts"] == 0
+        assert store.goal["state"] == "active"
+        assert store.queued_rounds() == []
+        store.clock += 31
+    store.gateway.unavailable = False
+    assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
+    assert len(store.queued_rounds()) == 1
+
+
+async def test_a_consumer_with_no_gateway_queues_nothing():
+    """A missing client cannot answer, so it cannot authorize a round either."""
+    store, _ = _finished_round_store()
+
+    assert await run_goal_wakeups(store=store, gateway=None) == 1
+
+    assert store.goal["state"] == "active"
+    assert store.queued_rounds() == []
 
 
 async def test_an_unbounded_goal_queues_round_fifty_one():
@@ -781,7 +969,7 @@ async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_fail
 
     for attempt in range(1, MAX_WAKEUP_ATTEMPTS + 1):
         store.clock += 3_600.0
-        assert await run_goal_wakeups(store=store) == 1
+        assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
         row = store.wakeup(wakeup["id"])
         if attempt < MAX_WAKEUP_ATTEMPTS:
             assert row["state"] == "pending"
@@ -796,6 +984,76 @@ async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_fail
 
     assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "scheduling_failed")
     assert store.rounds() == []
+
+
+@pytest.mark.parametrize(
+    ("current_goal", "trigger_ref", "detail"),
+    [
+        (
+            goal_row(goal_id="goal-2", revision=2, objective="ship something else"),
+            "set:2",
+            "superseded goal",
+        ),
+        (goal_row(revision=3), "resume:3", "superseded revision"),
+    ],
+    ids=["objective-replaced", "paused-and-resumed"],
+)
+async def test_an_exhausted_scheduling_failure_preserves_a_new_goal_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    current_goal: dict[str, Any],
+    trigger_ref: str,
+    detail: str,
+):
+    """A failure belongs to the goal revision that was being scheduled.
+
+    The owner's replacement or pause/resume can commit while a scheduling
+    attempt fails. Its new round and wakeup must survive the old attempt's
+    exhausted retry handler.
+    """
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
+    failed_wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    failed_wakeup["attempts"] = MAX_WAKEUP_ATTEMPTS - 1
+
+    async def fail_after_owner_write(**kwargs: Any) -> None:
+        assert (kwargs["goal_id"], kwargs["revision"]) == (GOAL_ID, 1)
+        store.goal = dict(current_goal)
+        current_round = turn(
+            id="current-round",
+            state="queued",
+            turn_source="goal",
+            goal_id=current_goal["goal_id"],
+            round_kind="work",
+            input_seq_at_create=1,
+            turn_no=2,
+        )
+        current_round["round_goal_revision"] = current_goal["revision"]
+        store.turns.append(current_round)
+        store.goal_wakeups.arm(
+            trigger="owner",
+            trigger_ref=trigger_ref,
+            goal_id=current_goal["goal_id"],
+            revision=current_goal["revision"],
+        )
+        raise RuntimeError("the old scheduling attempt failed")
+
+    monkeypatch.setattr(store.conversation_commands, "create_goal_round", fail_after_owner_write)
+
+    assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
+
+    assert store.goal == current_goal
+    assert [row["id"] for row in store.queued_rounds()] == ["current-round"]
+    failed = store.wakeup(failed_wakeup["id"])
+    assert (failed["state"], failed["detail"], failed["lease_expires_at"]) == (
+        "processed",
+        detail,
+        None,
+    )
+    current_wakeup = store.goal_wakeups.rows[-1]
+    assert (current_wakeup["state"], current_wakeup["attempts"], current_wakeup["detail"]) == (
+        "pending",
+        0,
+        None,
+    )
 
 
 async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads():
@@ -823,7 +1081,7 @@ async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads
     app = RecoveringApp()
     for _ in range(MAX_WAKEUP_ATTEMPTS + 3):
         store.clock += 3_600.0
-        assert await run_goal_wakeups(store=store, github_app=app) == 0
+        assert await run_goal_wakeups(store=store, gateway=store.gateway, github_app=app) == 0
 
     row = store.wakeup(wakeup["id"])
     assert (row["state"], row["attempts"], row["lease_expires_at"]) == ("pending", 0, None)
@@ -831,7 +1089,7 @@ async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads
     assert store.rounds() == []
 
     app.loaded = True
-    assert await run_goal_wakeups(store=store, github_app=app) == 1
+    assert await run_goal_wakeups(store=store, gateway=store.gateway, github_app=app) == 1
     assert store.wakeup(wakeup["id"])["state"] == "processed"
     assert len(store.rounds()) == 1
 

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
+import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi, AgentSessionListOptions } from '@/lib/api/agents';
@@ -12,10 +13,13 @@ const api = vi.hoisted(() => ({
   thread: vi.fn(),
   archive: vi.fn(),
   restore: vi.fn(),
-  archivedJobs: vi.fn(),
   sessions: vi.fn(),
   setArchived: vi.fn(),
   pin: vi.fn(),
+  events: vi.fn(),
+  git: vi.fn(),
+  stream: vi.fn(),
+  replace: vi.fn(),
   pathname: '/',
   params: '',
   user: 'alice',
@@ -23,7 +27,7 @@ const api = vi.hoisted(() => ({
 vi.mock('next/navigation', () => ({
   usePathname: () => api.pathname,
   useSearchParams: () => new URLSearchParams(api.params),
-  useRouter: () => ({ replace: vi.fn() }),
+  useRouter: () => ({ replace: api.replace }),
 }));
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
@@ -35,9 +39,6 @@ vi.mock('@/components/providers', async () => {
     useLocale: () => ({ locale: 'en', t }),
   };
 });
-vi.mock('@/components/features/settings/SettingsLauncher', () => ({
-  SettingsLauncher: () => null,
-}));
 vi.mock('@/lib/api/agents', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/agents')>()),
   listAgentConversations: api.list,
@@ -45,18 +46,31 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentConfig: api.config,
   getAgentJob: api.get,
   getAgentJobThread: api.thread,
+  listAllAgentThreadEvents: api.events,
+  getAgentJobGit: api.git,
+  streamAgentJob: api.stream,
   archiveAgentJob: api.archive,
   restoreAgentJob: api.restore,
-  listAgentJobs: api.archivedJobs,
   listAgentSessions: api.sessions,
   setAgentSessionsArchived: api.setArchived,
   pinAgentJob: api.pin,
   unpinAgentJob: api.pin,
 }));
 import { AgentsSidebar } from './AgentsSidebar';
+import { SkillDialog } from './skills/SkillDialog';
+import { AgentReadProvider } from './AgentReadProvider';
+import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
+import {
+  PUSH_BATCH_MS,
+  receiveHint,
+  receiveJobChange,
+  receiveSync,
+  receiveThreadChange,
+  resetAgentPush,
+} from './agentPush';
 function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   return {
     job: {
@@ -74,7 +88,16 @@ function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   };
 }
 const base = [conversation('a'), conversation('b')];
+function DetailRequestReader() {
+  const { job } = useAgentJob(api.pathname.slice(1));
+  return (
+    <p data-testid="detail-request-reader">
+      {job?.id ?? 'loading'}:{job?.title}
+    </p>
+  );
+}
 beforeEach(() => {
+  resetAgentPush();
   localStorage.clear();
   api.pathname = '/';
   api.params = '';
@@ -90,13 +113,277 @@ beforeEach(() => {
   ]);
   api.get.mockRejectedValue(new Error('not a task'));
   api.thread.mockResolvedValue(null);
+  api.events.mockResolvedValue([]);
+  api.git.mockResolvedValue({ available: false });
   api.archive.mockResolvedValue({});
 });
 afterEach(() => {
   cleanup();
+  resetAgentPush();
+  vi.useRealTimers();
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('shows one Setting link and highlights it on the integrations route', async () => {
+    const view = render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    const setting = screen.getByRole('link', { name: 'Setting' });
+    expect(screen.getAllByText('Setting')).toHaveLength(1);
+    expect(setting).toHaveAttribute('href', '/integrations');
+    expect(setting).not.toHaveAttribute('aria-current');
+    expect(screen.queryByRole('link', { name: /^Integrations?$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Settings?$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    api.pathname = '/integrations';
+    view.rerender(<AgentsSidebar />);
+    expect(screen.getByRole('link', { name: 'Setting' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getAllByRole('link', { name: 'Setting' })).toHaveLength(1);
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.thread).not.toHaveBeenCalled();
+  });
+
+  it('does not resolve the approval inbox route as a conversation job', async () => {
+    api.pathname = '/approvals';
+    render(
+      <AgentReadProvider userId={api.user}>
+        <AgentsSidebar />
+      </AgentReadProvider>,
+    );
+    await screen.findByText('Task a');
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.thread).not.toHaveBeenCalled();
+  });
+
+  it('keeps a late previous-owner response out of the sidebar and detail', async () => {
+    api.pathname = '/a';
+    let resolveOldJob!: (job: AgentJobApi) => void;
+    let resolveOldThread!: (thread: {
+      thread_id: string;
+      title: string;
+      jobs: AgentJobApi[];
+    }) => void;
+    api.get.mockReturnValueOnce(
+      new Promise<AgentJobApi>((resolve) => {
+        resolveOldJob = resolve;
+      }),
+    );
+    api.thread.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOldThread = resolve;
+      }),
+    );
+    const app = () => (
+      <AgentReadProvider userId={api.user}>
+        <AgentsSidebar />
+        <DetailRequestReader key={api.user} />
+      </AgentReadProvider>
+    );
+    const view = render(app());
+    expect(api.get).toHaveBeenCalledOnce();
+    expect(api.thread).toHaveBeenCalledOnce();
+
+    const bobJob = { ...base[0].job, title: 'Bob task', title_source: 'manual' } as AgentJobApi;
+    api.get.mockResolvedValue(bobJob);
+    api.thread.mockResolvedValue({ thread_id: 'thread-a', title: 'Bob task', jobs: [bobJob] });
+    api.list.mockResolvedValue({
+      conversations: [{ ...base[0], job: bobJob, title: 'Bob task' }],
+      next_cursor: null,
+    });
+    api.user = 'bob';
+    view.rerender(app());
+    await waitFor(() =>
+      expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('Bob task'),
+    );
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(api.thread).toHaveBeenCalledTimes(2);
+    await screen.findByRole('link', { name: 'Bob task' });
+
+    const aliceJob = { ...base[0].job, title: 'Alice task', title_source: 'manual' } as AgentJobApi;
+    await act(async () => {
+      resolveOldJob(aliceJob);
+      resolveOldThread({ thread_id: 'thread-a', title: 'Alice task', jobs: [aliceJob] });
+    });
+    expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('Bob task');
+    expect(screen.queryByText('Alice task')).not.toBeInTheDocument();
+  });
+
+  it('shares startup and navigation metadata while preserving the initial owner resync', async () => {
+    api.pathname = '/a';
+    const job = { ...base[0].job, title_source: 'manual' };
+    let resolveJob!: (job: AgentJobApi) => void;
+    let resolveThread!: (thread: { thread_id: string; title: string; jobs: AgentJobApi[] }) => void;
+    api.get.mockReturnValueOnce(
+      new Promise<AgentJobApi>((resolve) => {
+        resolveJob = resolve;
+      }),
+    );
+    api.thread.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveThread = resolve;
+      }),
+    );
+    const app = () => (
+      <AgentReadProvider userId={api.user}>
+        <AgentsSidebar />
+        <DetailRequestReader />
+      </AgentReadProvider>
+    );
+    const view = render(app());
+    expect(api.get).toHaveBeenCalledOnce();
+    expect(api.thread).toHaveBeenCalledOnce();
+    expect(api.events).not.toHaveBeenCalled();
+    await act(async () => resolveJob(job as AgentJobApi));
+    expect(api.events).not.toHaveBeenCalled();
+    await act(async () =>
+      resolveThread({ thread_id: 'thread-a', title: 'Task a', jobs: [job as AgentJobApi] }),
+    );
+    await waitFor(() => expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('a'));
+    expect(api.events).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledOnce();
+
+    api.get.mockImplementation(async (id: string) => ({
+      ...base.find((row) => row.job.id === id)!.job,
+      title_source: 'manual',
+    }));
+    api.thread.mockImplementation(async (id: string) => ({
+      thread_id: `thread-${id}`,
+      title: `Task ${id}`,
+      jobs: [{ ...base.find((row) => row.job.id === id)!.job, title_source: 'manual' }],
+    }));
+    act(() => receiveSync());
+    await waitFor(() => expect(api.projects).toHaveBeenCalledTimes(2));
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(api.thread).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(4);
+
+    api.pathname = '/b';
+    view.rerender(app());
+    await waitFor(() => expect(screen.getByTestId('detail-request-reader')).toHaveTextContent('b'));
+    expect(api.get).toHaveBeenCalledTimes(3);
+    expect(api.thread).toHaveBeenCalledTimes(2);
+    expect(api.events).toHaveBeenCalledTimes(2);
+    expect(api.list).toHaveBeenCalledTimes(6);
+    expect(api.projects).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['project', 'flat'] as const)(
+    'keeps the %s sidebar steady while archiving, navigating and receiving the archive push',
+    async (group) => {
+      localStorage.setItem(
+        sidebarPreferencesKey('alice'),
+        JSON.stringify({ ...DEFAULT_PREFERENCES, group }),
+      );
+      api.pathname = '/a';
+      let archived = false;
+      const pinned = conversation('pinned');
+      pinned.job.pinned_at = '2026-09-10T00:00:00Z';
+      const refreshes: (() => void)[] = [];
+      api.list.mockImplementation(
+        ({ pinned: pins }: { pinned?: boolean }) =>
+          new Promise((resolve) => {
+            const complete = () =>
+              resolve({
+                conversations: pins ? [pinned] : archived ? [base[1]] : base,
+                next_cursor: null,
+              });
+            if (archived) refreshes.push(complete);
+            else complete();
+          }),
+      );
+      api.get.mockResolvedValue(base[0].job);
+      api.thread.mockImplementation(async () => ({
+        jobs: [base[0].job],
+        title: base[0].title,
+        archived_at: archived ? '2026-09-10T00:00:00Z' : null,
+      }));
+      api.archive.mockImplementation(async () => {
+        archived = true;
+        announceAgentSessionsChanged({ threadIds: ['thread-a'], archived: true });
+        return { thread_id: 'thread-a', archived: true };
+      });
+      const view = render(<AgentsSidebar />);
+      const remaining = await screen.findByRole('link', {
+        name: group === 'flat' ? 'Task b · owner/repo' : 'Task b',
+      });
+      const pin = await screen.findByRole('link', { name: 'Task pinned · owner/repo' });
+      await waitFor(() => expect(screen.queryAllByText('Loading…')).toHaveLength(0));
+      const expectSteady = () => {
+        expect(remaining).toBeInTheDocument();
+        expect(pin).toBeInTheDocument();
+        expect(screen.queryByText('Task a')).not.toBeInTheDocument();
+        expect(screen.queryAllByText('Loading…')).toHaveLength(0);
+      };
+
+      fireEvent.click(screen.getByRole('button', { name: 'Archive Task a' }));
+      await waitFor(() => expect(api.replace).toHaveBeenCalledWith('/'));
+      expect(refreshes.length).toBeGreaterThan(0);
+      expectSteady();
+
+      api.pathname = '/';
+      view.rerender(<AgentsSidebar />);
+      expectSteady();
+      await act(async () => refreshes.splice(0).forEach((complete) => complete()));
+      expectSteady();
+
+      vi.useFakeTimers();
+      act(() => {
+        receiveThreadChange({ id: 'thread-a', revision: 1, archived_at: '2026-09-10T00:00:00Z' });
+        vi.advanceTimersByTime(PUSH_BATCH_MS);
+      });
+      expect(refreshes.length).toBeGreaterThan(0);
+      expectSteady();
+      await act(async () => refreshes.splice(0).forEach((complete) => complete()));
+      expectSteady();
+    },
+  );
+
+  it('keeps project and conversation lists steady during tool and usage updates', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    api.list.mockClear();
+    api.projects.mockClear();
+    vi.useFakeTimers();
+
+    for (const kind of ['usage', 'mcp', 'queue', 'publication'] as const) {
+      act(() => {
+        receiveHint(kind, kind === 'queue' || kind === 'publication' ? 'thread-a' : 'a');
+        vi.advanceTimersByTime(PUSH_BATCH_MS);
+      });
+      expect(api.list).not.toHaveBeenCalled();
+      expect(api.projects).not.toHaveBeenCalled();
+      expect(screen.getByText('Task a')).toBeInTheDocument();
+      expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+    }
+  });
+
+  it.each(['job', 'thread', 'resync'] as const)(
+    'refreshes project and conversation lists for a %s change alongside tool activity',
+    async (kind) => {
+      render(<AgentsSidebar />);
+      await screen.findByText('Task a');
+      api.list.mockClear();
+      api.projects.mockClear();
+      vi.useFakeTimers();
+
+      await act(async () => {
+        receiveHint('usage', 'a');
+        receiveHint('mcp', 'a');
+        if (kind === 'job')
+          receiveJobChange({ id: 'a', thread_id: 'thread-a', revision: 1, state: 'running' });
+        else if (kind === 'thread')
+          receiveThreadChange({ id: 'thread-a', revision: 1, title: 'Updated task' });
+        else receiveSync();
+        vi.advanceTimersByTime(PUSH_BATCH_MS);
+      });
+
+      expect(api.projects).toHaveBeenCalledOnce();
+      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ pinned: true }));
+    },
+  );
+
   it('refreshes a delayed automatic title after the conversation is idle', async () => {
     localStorage.setItem(
       sidebarPreferencesKey('alice'),
@@ -391,6 +678,94 @@ describe('sidebar navigation interactions', () => {
     expect(screen.queryByText('Current')).not.toBeInTheDocument();
   });
 
+  it.each([{ ctrlKey: true }, { metaKey: true }])(
+    'preserves a portaled modal focus cycle when search is requested with %j',
+    async (modifier) => {
+      function Workspace() {
+        const [open, setOpen] = useState(true);
+        return open ? (
+          <SkillDialog title="Skills" onClose={() => setOpen(false)}>
+            <input aria-label="Find skills" />
+          </SkillDialog>
+        ) : null;
+      }
+      render(
+        <>
+          <AgentsSidebar />
+          <Workspace />
+        </>,
+      );
+      await screen.findByText('Task a');
+      const input = screen.getByRole('textbox', { name: 'Find skills' });
+      expect(input).toHaveFocus();
+
+      fireEvent.keyDown(input, { key: 'k', ...modifier });
+      await act(async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      });
+
+      expect(input).toHaveFocus();
+      expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Search tasks' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+
+      fireEvent.keyDown(input, { key: 'Tab' });
+      expect(screen.getByRole('button', { name: 'Close skill dialog' })).toHaveFocus();
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: 'k', ...modifier });
+      await waitFor(() =>
+        expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+      );
+    },
+  );
+
+  it('waits until a native dialog closes before moving focus to search', async () => {
+    render(
+      <>
+        <AgentsSidebar />
+        <dialog open aria-label="Task details">
+          <input aria-label="Task title" />
+        </dialog>
+      </>,
+    );
+    await screen.findByText('Task a');
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    input.focus();
+
+    fireEvent.keyDown(input, { key: 'k', ctrlKey: true });
+
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+
+    screen.getByRole('dialog', { name: 'Task details' }).removeAttribute('open');
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
+  });
+
+  it('can search while an inactive modal remains hidden', async () => {
+    render(
+      <>
+        <AgentsSidebar />
+        <div hidden>
+          <div role="dialog" aria-modal="true" aria-label="Inactive dialog" />
+        </div>
+      </>,
+    );
+    await screen.findByText('Task a');
+
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
+  });
+
   it('searches server history including archived results, escapes highlights, and restores grouping', async () => {
     const archived = { ...conversation('old'), archived: true, title: 'Old <img> task' };
     api.list.mockImplementation(
@@ -571,7 +946,6 @@ describe('sidebar navigation interactions', () => {
         next_cursor: null,
       };
     });
-    api.archivedJobs.mockImplementation(async () => (archived ? [old.job] : []));
     api.list.mockImplementation(async ({ q, repo }: { q?: string; repo?: string }) => ({
       // This old task never belongs to the unscoped first page.
       conversations: q

@@ -15,6 +15,7 @@ export function composerOverrides(job: AgentJob, model: string, effort: string) 
 export function ComposerTextarea({
   onKeyDown,
   textareaRef,
+  className,
   ...props
 }: TextareaHTMLAttributes<HTMLTextAreaElement> & {
   /**
@@ -31,6 +32,7 @@ export function ComposerTextarea({
     <textarea
       {...props}
       ref={textareaRef}
+      className={`${className ?? ''} [@media(pointer:coarse)]:text-base`}
       onKeyDown={(event) => {
         // A caller's handler runs first and has the last word: the command menu
         // consumes the keys it owns — including the Enter that would otherwise
@@ -59,12 +61,15 @@ export function ComposerSendButton({
     <button
       type="submit"
       disabled={disabled}
-      className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
+      className="ui-icon-button ui-button-primary ml-auto rounded-xl shadow-sm"
       aria-label={label}
       title={title}
     >
       {busy ? (
-        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+        <span
+          aria-hidden="true"
+          className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
+        />
       ) : (
         <svg
           aria-hidden="true"
@@ -78,5 +83,55 @@ export function ComposerSendButton({
         </svg>
       )}
     </button>
+  );
+}
+
+/** Visible send modes; the parent offers steering only when this draft can use it. */
+export function ComposerMessageActions({
+  label,
+  title,
+  busy,
+  disabled,
+  steerLabel,
+  steerTitle,
+  onSteer,
+}: {
+  label: string;
+  title: string;
+  busy: boolean;
+  disabled: boolean;
+  steerLabel?: string;
+  steerTitle?: string;
+  onSteer?: () => void;
+}) {
+  return (
+    <div className="ml-auto flex shrink-0 items-center gap-1.5">
+      {onSteer && steerLabel ? (
+        <button
+          type="button"
+          onClick={onSteer}
+          disabled={disabled || busy}
+          aria-keyshortcuts="Meta+Enter Control+Enter"
+          title={steerTitle}
+          className="ui-button ui-button-secondary min-h-9 border-border px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
+        >
+          {steerLabel}
+        </button>
+      ) : null}
+      <button
+        type="submit"
+        disabled={disabled || busy}
+        title={title}
+        className="ui-button ui-button-primary min-h-9 px-3 py-1.5 text-xs shadow-sm [@media(pointer:coarse)]:min-h-11"
+      >
+        {busy ? (
+          <span
+            aria-hidden="true"
+            className="h-3 w-3 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
+          />
+        ) : null}
+        {label}
+      </button>
+    </div>
   );
 }

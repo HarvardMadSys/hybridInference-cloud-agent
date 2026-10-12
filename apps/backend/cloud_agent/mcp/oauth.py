@@ -199,6 +199,7 @@ def parse_authorization_server_metadata(
         raise OAuthError(
             "the authorization server metadata is missing an authorization or token endpoint"
         )
+    _validate_authorization_endpoint(authorization_endpoint)
     return AuthorizationServerMetadata(
         issuer=issuer,
         authorization_endpoint=authorization_endpoint,
@@ -223,6 +224,33 @@ def parse_authorization_server_metadata(
         ),
         raw=dict(payload),
     )
+
+
+def _validate_authorization_endpoint(endpoint: str) -> None:
+    """Accept only unambiguous HTTPS destinations for browser authorization.
+
+    This endpoint is navigated by the browser, rather than dialled through the
+    server's egress checks. It can live on another origin, but must not inherit
+    an insecure connector policy or contain browser/Python parsing ambiguities.
+    """
+    try:
+        if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint):
+            raise EndpointRejected("whitespace and control characters are not allowed")
+        if "\\" in endpoint:
+            raise EndpointRejected("backslashes are not allowed")
+        normalized = normalize_url(endpoint)
+        parts = urlsplit(endpoint)
+        if normalized.scheme != "https":
+            raise EndpointRejected("an absolute HTTPS URL is required")
+        if parts.username is not None or parts.password is not None:
+            raise EndpointRejected("URL credentials are not allowed")
+        if "#" in endpoint:
+            raise EndpointRejected("URL fragments are not allowed")
+    except EndpointRejected as exc:
+        raise OAuthError(
+            f"the authorization server has an invalid authorization endpoint: {exc}",
+            kind="protocol_incompatible",
+        ) from exc
 
 
 def resource_metadata_from_challenge(header: str | None) -> str | None:
@@ -252,9 +280,21 @@ def _challenge_parameters(header: str) -> list[tuple[str, str]]:
 
 
 def _same_resource(left: str, right: str) -> bool:
-    """Compare two resource identifiers by origin and path, ignoring case."""
+    """Match the resource identity, including Slack's official transport alias."""
     try:
-        return normalize_url(left).url.rstrip("/") == normalize_url(right).url.rstrip("/")
+        resource = normalize_url(left).url.rstrip("/")
+        endpoint = normalize_url(right).url.rstrip("/")
+        if resource == endpoint:
+            return True
+        # Slack's /mcp transport points to root resource metadata whose OAuth
+        # audience is its origin. Keep this alias bounded to that official pair;
+        # a generic origin match could cross tenant/resource boundaries.
+        return (
+            resource == "https://mcp.slack.com"
+            and endpoint == "https://mcp.slack.com/mcp"
+            and not urlsplit(left).fragment
+            and not urlsplit(right).fragment
+        )
     except EndpointRejected:
         return False
 
@@ -307,7 +347,29 @@ def choose_registration(
     is therefore last.
     """
     if preregistered_client_id:
-        method = "client_secret_basic" if preregistered_client_secret else "none"
+        if preregistered_client_secret:
+            method: str | None = next(
+                (
+                    candidate
+                    for candidate in ("client_secret_basic", "client_secret_post")
+                    if candidate in metadata.token_endpoint_auth_methods_supported
+                ),
+                None,
+            )
+            if method is None:
+                raise OAuthError(
+                    "this authorization server does not support client secret authentication "
+                    "with Basic credentials or form parameters for the registered client.",
+                    kind="client_registration_required",
+                )
+        elif metadata.allows_public_clients():
+            method = "none"
+        else:
+            raise OAuthError(
+                "this authorization server requires a client secret. Provide the registered "
+                "client's secret in the connection's auth settings.",
+                kind="client_registration_required",
+            )
         return ClientIdentity(
             client_id=preregistered_client_id,
             registration="preregistered",
@@ -335,9 +397,10 @@ def choose_registration(
             auth_method="none",
             delete_on_disconnect=True,
         )
+    credentials = "client id" if metadata.allows_public_clients() else "client id and secret"
     raise OAuthError(
-        "this server does not support automatic client registration. Provide a client id "
-        "for it in the connection's auth settings.",
+        "this server does not support automatic client registration. Provide a "
+        f"{credentials} for it in the connection's auth settings.",
         kind="client_registration_required",
     )
 
@@ -467,6 +530,7 @@ class OAuthFlow:
 
     def authorization_url(self) -> str:
         """Build the URL the user's browser is sent to."""
+        _validate_authorization_endpoint(self.metadata.authorization_endpoint)
         params: dict[str, str] = {
             "response_type": "code",
             "client_id": self.client.client_id,
@@ -477,6 +541,11 @@ class OAuthFlow:
         }
         if self.scopes:
             params["scope"] = " ".join(self.scopes)
+        if self.metadata.issuer.rstrip("/") == "https://accounts.google.com":
+            # Google's web OAuth flow requires offline access for a refresh
+            # token. Consent also obtains one when reconnecting a prior grant.
+            params["access_type"] = "offline"
+            params["prompt"] = "consent"
         # RFC 8707: the token is minted for a named resource, which is what
         # stops one server's token being replayed against another's endpoint.
         params["resource"] = self.resource

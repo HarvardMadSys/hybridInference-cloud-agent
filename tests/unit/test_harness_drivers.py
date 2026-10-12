@@ -47,9 +47,12 @@ def test_claude_live_transport_installs_passive_hooks_in_retained_state():
         state_dir="/agent-state",
         spawn_live=lambda _argv, _env: SimpleNamespace(),
         install_tool_hooks=updates.append,
+        claude_config_dir="/home/agent-member-2/.claude",
     )
 
     session = get_driver("claude-code").launch_live(context)
 
     assert updates == [hook_settings(CLAUDE_TOOL_MARKS)]
+    assert session._extra_env["CLAUDE_CONFIG_DIR"] == "/home/agent-member-2/.claude"
+    assert session._argv_template[session._argv_template.index("--setting-sources") + 1] == "user"
     session.close()

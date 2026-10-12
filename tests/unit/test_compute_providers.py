@@ -10,11 +10,15 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
     AcquireRequest,
     ExtendRequest,
+    NodeRegistration,
     OperationIntent,
     ProviderError,
     ResourceRef,
@@ -68,6 +72,28 @@ def resource(**updates: object) -> dict[str, object]:
         },
         **updates,
     }
+
+
+def openssh_user_key() -> str:
+    return (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+
+
+def _profile_list() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "profiles": [
+                {"name": "one-node", "project": "PortalProfiles"},
+                {"name": "small-lan", "project": "PortalProfiles"},
+                {"name": "cloud-agent-node", "project": "research"},
+            ]
+        },
+    )
 
 
 def provider(handler: object) -> CloudLabProvider:
@@ -173,13 +199,51 @@ async def test_cloudlab_attach_collects_full_node_scope_and_manifest_vm_ssh_port
     receipt = await adapter.acquire(AcquireRequest(mode="attach", config=config), intent())
     assert receipt.outcome == "confirmed"
     assert receipt.observation.scope_complete
-    assert receipt.observation.nodes[0].connection.port == 2207
+    connection = receipt.observation.nodes[0].connection
+    assert connection.port == 2207
+    assert connection.known_hosts_ref == "ssh-1:known_hosts"
+    assert connection.verify_host_key and "verify_host_key" not in connection.model_dump(
+        mode="json"
+    )
     assert (
         receipt.observation.nodes[0].instance_identity
         == EXPERIMENT + ":urn:aggregate:vm1:urn:node:1"
     )
     assert all(request.method == "GET" for request in requests)
     assert TOKEN not in receipt.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_explicitly_allows_ssh_without_host_key_verification():
+    def respond(request):
+        if request.url.path.endswith("/manifests"):
+            return httpx.Response(
+                200,
+                json={
+                    "urn:aggregate": '<rspec xmlns="http://www.geni.net/resources/rspec/3"><node client_id="vm1"><services><login authentication="ssh-keys" username="agent" hostname="node.example.org" port="2207"/></services></node></rspec>'
+                },
+            )
+        return httpx.Response(200, json=resource())
+
+    observation = await provider(respond).inspect(
+        ResourceRef(
+            external_id=EXPERIMENT,
+            config={
+                **CONFIG,
+                "ssh_username": "agent",
+                "ssh_credential_ref": "ssh-1",
+                "host_key_source": "known_hosts",
+                "ssh_known_hosts_ref": UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+            },
+        )
+    )
+    connection = observation.nodes[0].connection
+    assert connection.credential_ref == "ssh-1"
+    assert connection.port == 2207
+    assert connection.known_hosts_ref == UNCHECKED_CLOUDLAB_HOST_KEY_REF
+    assert connection.host_key is None
+    assert connection.verify_host_key is False
+    assert "verify_host_key" not in connection.model_dump(mode="json")
 
 
 @pytest.mark.asyncio
@@ -221,6 +285,8 @@ async def test_cloudlab_checks_experiment_name_limit_before_posting(name):
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         return httpx.Response(201, json={"id": EXPERIMENT})
 
@@ -245,11 +311,100 @@ async def test_cloudlab_checks_experiment_name_limit_before_posting(name):
         assert json.loads(requests[0].content)["name"] == name
 
 
+def _provision(name: str | None = None) -> dict[str, object]:
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "one-node",
+        "profile_project": "PortalProfiles",
+    }
+    if name is not None:
+        config["name"] = name
+    return config
+
+
+def _routes(responses: dict[tuple[str, str], httpx.Response]):
+    def respond(request):
+        key = (request.method, request.url.path)
+        if key not in responses:
+            raise AssertionError(key)
+        return responses[key]
+
+    return respond
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_missing_profile_is_rejected_before_create():
+    requests = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json={"profiles": []})
+
+    with pytest.raises(ProviderError, match="has no profile one-node") as caught:
+        await provider(respond).acquire(
+            AcquireRequest(mode="provision", config=_provision()), intent()
+        )
+    assert caught.value.code == "request_rejected"
+    assert requests == [("GET", "/v1/profiles/")]
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_completed_server_error_without_an_experiment_is_a_rejection():
+    responses = {
+        ("GET", "/v1/profiles/"): httpx.Response(
+            200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
+        ),
+        ("POST", "/v1/experiments/"): httpx.Response(
+            500, json={"error": "Internal server error", "code": 500}
+        ),
+        ("GET", "/v1/experiments/"): httpx.Response(200, json={"experiments": []}),
+    }
+    with pytest.raises(ProviderError, match="did not create the experiment") as caught:
+        await provider(_routes(responses)).acquire(
+            AcquireRequest(mode="provision", config=_provision("probe-exp")), intent()
+        )
+    assert caught.value.code == "request_rejected"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_server_error_adopts_the_named_experiment_when_it_exists():
+    responses = {
+        ("GET", "/v1/profiles/"): httpx.Response(
+            200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
+        ),
+        ("POST", "/v1/experiments/"): httpx.Response(
+            500, json={"error": "Internal server error", "code": 500}
+        ),
+        ("GET", "/v1/experiments/"): httpx.Response(
+            200,
+            json={
+                "experiments": [
+                    {"id": EXPERIMENT, "name": "probe-exp", "project": "research"},
+                    {
+                        "id": "11111111-1111-1111-1111-111111111111",
+                        "name": "other",
+                        "project": "research",
+                    },
+                ]
+            },
+        ),
+    }
+    receipt = await provider(_routes(responses)).acquire(
+        AcquireRequest(mode="provision", config=_provision("probe-exp")), intent()
+    )
+    assert receipt.outcome == "pending"
+    assert receipt.resource is not None
+    assert receipt.resource.external_id == EXPERIMENT
+
+
 @pytest.mark.asyncio
 async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contract():
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         if request.url.path == "/v1/experiments":
             return httpx.Response(307, headers={"Location": "/v1/experiments/"})
@@ -274,7 +429,56 @@ async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contr
     assert payload["profile_project"] == "PortalProfiles"
     assert payload["bindings"] == {"hardware": "c220g2"}
     assert "credential_ref" not in payload and "ssh_credential_ref" not in payload
+    assert "sshpubkey" not in payload
     assert requests[0].url.path == "/v1/experiments/"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_provision_installs_the_ssh_users_public_key():
+    requests = []
+
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    public_key = openssh_user_key()
+    adapter = provider(respond)
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "one-node",
+        "profile_project": "PortalProfiles",
+        "ssh_username": "researcher",
+        "ssh_credential_ref": "ssh-1",
+        "ssh_known_hosts_ref": "ssh-1:known_hosts",
+        "ssh_public_key": f"  {public_key}   researcher@lab  ",
+    }
+    receipt = await adapter.acquire(AcquireRequest(mode="provision", config=config), intent())
+    payload = json.loads(requests[0].content)
+    assert payload["sshpubkey"] == f"{public_key} researcher@lab"
+    assert receipt.resource.config["ssh_public_key"] == payload["sshpubkey"]
+    assert TOKEN not in requests[0].content.decode()
+
+
+def test_cloudlab_refuses_a_private_key_in_place_of_the_ssh_user_key():
+    private_key = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    )
+    with pytest.raises(ValidationError):
+        provider(lambda request: httpx.Response(201)).validate_config(
+            "provision",
+            {
+                "credential_ref": "account-1",
+                "project": "research",
+                "profile_name": "one-node",
+                "profile_project": "PortalProfiles",
+                "ssh_public_key": private_key.decode(),
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -282,6 +486,8 @@ async def test_create_timeout_recovery_never_reposts_or_adopts_a_name_collision(
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         raise httpx.ReadTimeout("secret " + TOKEN)
 
@@ -499,6 +705,60 @@ async def test_openssh_uses_pinned_host_keys_and_does_not_place_key_in_arguments
 
 
 @pytest.mark.asyncio
+async def test_openssh_explicitly_unchecked_mode_uses_no_host_key_files(monkeypatch):
+    resolver = AsyncMock()
+    resolver.resolve.return_value = "PRIVATE KEY\n"
+    process = AsyncMock(returncode=0)
+    process.communicate.return_value = (b"identity", b"")
+    captured = {}
+
+    async def launch(*args, **_kwargs):
+        captured["args"] = args
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", launch)
+    connection = SshConnection(
+        address="node.example.org",
+        username="agent",
+        credential_ref="ssh-1",
+        known_hosts_ref=UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+    )
+    assert await OpenSshTransport(resolver).run(connection, "cat /etc/machine-id") == "identity"
+    resolver.resolve.assert_awaited_once_with("ssh-1")
+    args = captured["args"]
+    assert "StrictHostKeyChecking=no" in args
+    assert "UserKnownHostsFile=/dev/null" in args
+    assert "GlobalKnownHostsFile=/dev/null" in args
+    assert not any(str(argument).startswith("UserKnownHostsFile=/tmp/") for argument in args)
+
+
+def test_unchecked_marker_does_not_override_a_registered_host_key():
+    connection = SshConnection(
+        address="node.example.org",
+        username="agent",
+        credential_ref="ssh-1",
+        known_hosts_ref=UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+        host_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG9vcHNpZGFpc3k=",
+    )
+    assert connection.verify_host_key
+
+
+@pytest.mark.asyncio
+async def test_openssh_strict_mode_refuses_missing_host_material_before_launch(monkeypatch):
+    resolver = AsyncMock()
+    resolver.resolve.return_value = "PRIVATE KEY\n"
+    launch = AsyncMock()
+    monkeypatch.setattr("asyncio.create_subprocess_exec", launch)
+    connection = SshConnection(address="node.example.org", username="agent", credential_ref="ssh-1")
+
+    with pytest.raises(ProviderError) as refused:
+        await OpenSshTransport(resolver).run(connection, "cat /etc/machine-id")
+
+    assert refused.value.code == "ssh_configuration"
+    launch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_successful_extend_followed_by_read_failure_is_unknown_not_retryable():
     def respond(request):
         return (
@@ -540,3 +800,144 @@ async def test_http_200_error_body_does_not_acknowledge_extension_or_leak_diagno
     assert TOKEN not in receipt.model_dump_json()
     with pytest.raises(ProviderError):
         await adapter.validate_connection("account-1")
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_sends_boolean_bindings_in_the_portal_string_form():
+    requests = []
+
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "small-lan",
+        "profile_project": "PortalProfiles",
+        "bindings": {
+            "phystype": "r6615",
+            "tempFileSystemMax": True,
+            "useVMs": False,
+            "nodeCount": 1,
+        },
+    }
+    await provider(respond).acquire(AcquireRequest(mode="provision", config=config), intent())
+    assert json.loads(requests[0].content)["bindings"] == {
+        "phystype": "r6615",
+        "tempFileSystemMax": "True",
+        "useVMs": "False",
+        "nodeCount": 1,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("certificate has expired"), httpx.ConnectTimeout("handshake timed out")],
+)
+async def test_a_request_that_never_left_is_retryable_even_when_it_mutates(failure):
+    def respond(request):
+        raise failure
+
+    adapter = provider(respond)
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "small-lan",
+            "profile_project": "PortalProfiles",
+        },
+    )
+    with pytest.raises(ProviderError) as created:
+        await adapter.acquire(request, intent())
+    assert (created.value.code, created.value.retryable) == ("temporarily_unavailable", True)
+    with pytest.raises(ProviderError) as extended:
+        await adapter.extend(
+            ResourceRef(external_id=EXPERIMENT, config=CONFIG),
+            ExtendRequest(target_expires_at=NOW + timedelta(days=1), reason="research"),
+        )
+    assert (extended.value.code, extended.value.retryable) == ("temporarily_unavailable", True)
+    assert TOKEN not in str(created.value) + str(extended.value)
+
+
+REGISTERING = {
+    "credential_ref": "account-1",
+    "project": "research",
+    "profile_name": "cloud-agent-node",
+    "profile_project": "research",
+    "bindings": {"phystype": "r6615"},
+    "ssh_username": "agent",
+    "ssh_credential_ref": "ssh-1",
+    "ssh_known_hosts_ref": "ssh-1:known_hosts",
+    "host_key_source": "registration",
+}
+
+
+@pytest.mark.asyncio
+async def test_the_registration_token_rides_only_on_the_create_request():
+    requests = []
+
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    secret = "r" * 43
+    request = AcquireRequest(
+        mode="provision",
+        config=REGISTERING,
+        registration=NodeRegistration(url="https://example.org/register", token=secret),
+    )
+    receipt = await provider(respond).acquire(request, intent())
+    bindings = json.loads(requests[0].content)["bindings"]
+    assert bindings["registrationUrl"] == "https://example.org/register"
+    assert bindings["registrationToken"] == secret
+    # What the control plane persists never holds the token.
+    assert secret not in receipt.model_dump_json()
+    assert secret not in repr(request)
+
+
+@pytest.mark.asyncio
+async def test_a_registering_node_is_never_created_without_its_token():
+    adapter = provider(lambda request: httpx.Response(201, json={"id": EXPERIMENT}))
+    with pytest.raises(ProviderError) as refused:
+        await adapter.acquire(AcquireRequest(mode="provision", config=REGISTERING), intent())
+    assert refused.value.code == "registration_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_a_registering_node_is_reached_through_its_registered_key_only():
+    def respond(request):
+        if request.url.path.endswith("/manifests"):
+            return httpx.Response(
+                200,
+                json={
+                    "urn:aggregate": '<rspec xmlns="http://www.geni.net/resources/rspec/3"><node client_id="vm1"><services><login authentication="ssh-keys" username="agent" hostname="node.example.org" port="22"/></services></node></rspec>'
+                },
+            )
+        return httpx.Response(200, json=resource())
+
+    config = {**REGISTERING, "external_id": EXPERIMENT}
+    observation = await provider(respond).inspect(
+        ResourceRef(external_id=EXPERIMENT, config=config)
+    )
+    connection = observation.nodes[0].connection
+    assert connection.known_hosts_ref is None and connection.host_key is None
+    assert connection.verify_host_key is True
+
+
+def test_registration_applies_only_to_nodes_this_control_plane_creates():
+    adapter = provider(lambda request: httpx.Response(200, json=resource()))
+    without_list = {
+        key: value for key, value in REGISTERING.items() if key != "ssh_known_hosts_ref"
+    }
+    assert adapter.validate_config("provision", without_list)["host_key_source"] == "registration"
+    with pytest.raises(ProviderError):
+        adapter.validate_config("attach", {**without_list, "external_id": EXPERIMENT})
+    with pytest.raises(ProviderError):
+        adapter.validate_config("provision", {**without_list, "host_key_source": "known_hosts"})

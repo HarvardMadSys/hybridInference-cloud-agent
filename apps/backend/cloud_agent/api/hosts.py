@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
+from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
 from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
@@ -36,6 +37,7 @@ from cloud_agent.schemas import (
     HostHeartbeatResponse,
     HostRegisterRequest,
     HostRegisterResponse,
+    HostSandboxArchiveSettings,
     ResidencyBeat,
     RetainedSandboxStop,
 )
@@ -66,7 +68,8 @@ class _HostsStorage(Protocol):
     sandbox: SandboxRepository
 
 
-router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
+# Host traffic arrives through the tunnel, past the edge's body limits.
+router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"], route_class=HostBodyLimitRoute)
 
 
 def _require_store(store: _HostsStorage | None) -> _HostsStorage:
@@ -211,7 +214,22 @@ async def register_host(
             labels=dict(body.labels),
         )
     except ValueError as exc:
-        if str(exc) != "resource_retiring":
+        error_type = str(exc)
+        if error_type == "host_drain_fenced":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "host_drain_fenced",
+                        "message": (
+                            "This host is held by an automated deployment drain. "
+                            "The enrollment token was consumed; release the drain "
+                            "and issue a new token before retrying."
+                        ),
+                    }
+                },
+            ) from exc
+        if error_type != "resource_retiring":
             raise
         raise HTTPException(
             status_code=409,
@@ -272,11 +290,16 @@ async def heartbeat_host(
         # not a number Postgres will keep.
         settings_applied=reported_values(body.settings_applied),
         settings_local=reported_values(body.settings_local),
+        sandbox_archive_settings_applied_revision=(body.sandbox_archive_settings_applied_revision),
+        sandbox_archive_settings_revision_reported=(
+            "sandbox_archive_settings_applied_revision" in body.model_fields_set
+        ),
     )
     if updated is None:
-        # The row vanished between authentication and the write — a forget
-        # landing mid-request. Refusing is right: this credential now names
-        # nothing.
+        # The row vanished, or its credential changed, between authentication
+        # and the write — a forget, a removal or a re-enrollment landing
+        # mid-request. Refusing is right: this credential now names nothing,
+        # and the residencies below must not be extended on its word.
         raise _unauthorized("This host credential is no longer valid.")
     # Residency beats ride the host heartbeat (design §7): one wire message
     # says "I am here" and "these sandboxes are still mine", generation-scoped
@@ -288,7 +311,7 @@ async def heartbeat_host(
             thread_id=residency_beat.thread_id,
             generation=residency_beat.generation,
             host=updated["host"],
-            ttl_seconds=RESIDENCY_TTL_S,
+            ttl_seconds=residency_ttl_s(),
         )
         if extended and grants is not None:
             # The credential lives exactly as long as the residency_beat: the residency_beat
@@ -310,6 +333,11 @@ async def heartbeat_host(
     # recording that STOPPED transition.
     retained_stops: list[RetainedSandboxStop] = []
     for retained in body.retained_sandboxes or []:
+        diagnostics: dict[str, Any] = {}
+        if retained.resource_usage is not None:
+            diagnostics["resource_usage"] = retained.resource_usage.model_dump(mode="json")
+        if retained.terminal_count is not None:
+            diagnostics["terminal_count"] = retained.terminal_count
         await job_store.sandbox.reconcile_thread_sandbox_observation(
             thread_id=retained.thread_id,
             host=updated["host"],
@@ -320,6 +348,7 @@ async def heartbeat_host(
             activity_active=retained.activity_active,
             idle_remaining_seconds=retained.idle_remaining_seconds,
             members=[member.model_dump() for member in retained.members],
+            **diagnostics,
         )
         for member in retained.members:
             if member.residency_generation <= 0:
@@ -347,7 +376,7 @@ async def heartbeat_host(
                 thread_id=member.thread_id,
                 generation=member.residency_generation,
                 host=updated["host"],
-                ttl_seconds=RESIDENCY_TTL_S,
+                ttl_seconds=residency_ttl_s(),
             )
             if extended and grants is not None:
                 with contextlib.suppress(Exception):
@@ -382,12 +411,14 @@ async def heartbeat_host(
         # carried the host's current one: the host adopts it, and the next beat
         # reports it back as the limit it is now serving.
         slots_desired=updated.get("slots_desired"),
-        # The whole set every time, this server's values over the global ones,
-        # so a value cleared on the admin page reaches the host as an absence
-        # and the host falls back to its own .env for it.
+        # The whole set every time: this server's values over global values
+        # and built-in defaults, so clearing an override never revives its .env.
         settings=merge_admin_values(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
+        ),
+        sandbox_archive_settings=HostSandboxArchiveSettings.model_validate(
+            await job_store.host_pool.sandbox_archive_settings()
         ),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
@@ -401,7 +432,7 @@ async def heartbeat_host(
     )
 
 
-from cloud_agent.application.residency import RESIDENCY_TTL_S
+from cloud_agent.application.residency import residency_ttl_s
 
 
 async def _probed_broker_error(

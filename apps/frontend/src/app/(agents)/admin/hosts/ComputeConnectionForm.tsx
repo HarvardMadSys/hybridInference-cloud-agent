@@ -17,13 +17,17 @@ export default function ComputeConnectionForm({
   connection,
   onSaved,
   onCancel,
+  preserveConfiguration = false,
 }: {
   catalog: ComputeCatalog;
   connection: ComputeConnection;
   onSaved: (connection: ComputeConnection) => void;
   onCancel?: () => void;
+  preserveConfiguration?: boolean;
 }) {
   const provider = catalog.providers.find((item) => item.id === connection.provider_id);
+  const formProvider =
+    preserveConfiguration && provider ? { ...provider, connection_fields: [] } : provider;
   const [draft, setDraft] = useState<CredentialDraft>({
     selection: connection.id,
     name: connection.name,
@@ -37,7 +41,7 @@ export default function ComputeConnectionForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!catalog.secret_store_configured || !provider) {
+  if (!catalog.secret_store_configured || !formProvider) {
     return <p>Credential editing is unavailable.</p>;
   }
 
@@ -50,16 +54,16 @@ export default function ComputeConnectionForm({
         setBusy(true);
         setError(null);
         try {
-          const result = await saveComputeConnection(
-            {
-              name: draft.name,
-              provider_id: provider.id,
-              configuration: parseFields(provider.connection_fields, draft.values),
-              ...(draft.secret ? { secret: draft.secret } : {}),
-              expected_revision: revision,
-            },
-            connection.id,
-          );
+          const request: Parameters<typeof saveComputeConnection>[0] = {
+            name: draft.name,
+            provider_id: formProvider.id,
+            ...(draft.secret ? { secret: draft.secret } : {}),
+            expected_revision: revision,
+          };
+          if (!preserveConfiguration) {
+            request.configuration = parseFields(formProvider.connection_fields, draft.values);
+          }
+          const result = await saveComputeConnection(request, connection.id);
           setDraft((current) => ({ ...current, secret: '' }));
           onSaved(result.connection);
         } catch (error) {
@@ -70,7 +74,7 @@ export default function ComputeConnectionForm({
       }}
     >
       <fieldset disabled={busy} className="space-y-4">
-        <CredentialFields provider={provider} value={draft} onChange={setDraft} editing />
+        <CredentialFields provider={formProvider} value={draft} onChange={setDraft} editing />
         <ErrorNotice error={error} />
         <div className="flex gap-2">
           <button className={primaryClass} disabled={busy} type="submit">

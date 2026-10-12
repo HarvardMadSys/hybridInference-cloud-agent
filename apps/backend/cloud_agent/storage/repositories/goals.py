@@ -23,6 +23,7 @@ from cloud_agent.goals.models import (
     STALLED_AFTER_S,
     GoalConflict,
 )
+from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.goals import (
     CANCEL_QUEUED_GOAL_ROUNDS_SQL,
     EDITED_WHILE_PAUSED_DETAIL,
@@ -64,7 +65,7 @@ _GOAL_COLUMN_NAMES = (
 #: not introduce.
 _GOAL_COLUMNS = ", ".join(_GOAL_COLUMN_NAMES)
 
-#: For reads that join. ``0017`` put ``goal_revision`` on ``agent_jobs`` as well
+#: For reads that join. ``0019`` put ``goal_revision`` on ``agent_jobs`` as well
 #: — the revision *that turn* was created for — so an unqualified name is
 #: ambiguous there, and Postgres refuses the whole statement (42702) rather than
 #: picking one.
@@ -563,11 +564,11 @@ class PostgresGoalRepository:
                         SELECT 1 FROM agent_goal_wakeups w
                         WHERE w.thread_id = t.id AND w.state = 'pending'
                   )
-                  AND t.goal_updated_at > NOW() - make_interval(secs => $1)
+                  AND t.goal_updated_at > clock_timestamp() - make_interval(secs => $1)
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 """,
-                ARM_AFTER_S,
+                number_setting("goals.arm_after_seconds", ARM_AFTER_S),
             )
             # The ids of wakeups this pass made due again. Populated before the
             # arming loop below, which appends the goals it newly armed.
@@ -635,12 +636,12 @@ class PostgresGoalRepository:
                         SELECT 1 FROM agent_goal_wakeups w
                         WHERE w.thread_id = t.id AND w.state = 'pending'
                   )
-                  AND t.goal_updated_at < NOW() - make_interval(secs => $1)
+                  AND t.goal_updated_at < clock_timestamp() - make_interval(secs => $1)
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED
                 """,
-                STALLED_AFTER_S,
+                number_setting("goals.stalled_after_seconds", STALLED_AFTER_S),
             )
             stalled_ids = [str(row["id"]) for row in stalled]
             if stalled_ids:

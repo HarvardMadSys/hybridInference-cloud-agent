@@ -24,7 +24,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cloud_agent.application.pending_messages import settle_queue
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.goals.decision import GoalAction, GoalContext, decide
 from cloud_agent.goals.models import (
     GOAL_REPORT_RUNTIMES,
@@ -34,6 +34,11 @@ from cloud_agent.goals.models import (
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
 from cloud_agent.goals.report import GoalReport, GoalReportParse
+from cloud_agent.owner_access import (
+    AGENT_ACCESS_WITHDRAWN,
+    AgentAccessUnavailable,
+    owner_may_use_agent,
+)
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
@@ -106,11 +111,6 @@ def client_request_id_for(*, thread_id: str, goal_id: str, kind: str, trigger_re
     return f"{CLIENT_REQUEST_PREFIX}:{thread_id}:{goal_id}:{kind}:{trigger_ref}"
 
 
-def finish_trigger_ref(job_id: str) -> str:
-    """The event identity of one turn reaching a terminal state."""
-    return f"job:{job_id}"
-
-
 async def run_goal_wakeups(
     *,
     store: _GoalStore,
@@ -131,6 +131,11 @@ async def run_goal_wakeups(
     owner's goal. Unclaimed, the wakeup waits — the goal stays active, and the
     stall sweep leaves a goal with a pending wakeup alone — until a pass finds
     the App loaded.
+
+    A Gateway that cannot confirm the owner's Agent access is treated the same
+    way as a repository lookup that could not be made: the wakeup goes back
+    with its attempt restored, because an outage is not a reason to end
+    anyone's goal, and nothing is scheduled until the answer is known.
     """
     try:
         app_credentials = github_app.get() if github_app is not None else None
@@ -141,6 +146,31 @@ async def run_goal_wakeups(
         try:
             await consume_wakeup(
                 store=store, wakeup=wakeup, app_credentials=app_credentials, gateway=gateway
+            )
+        except RepoAccessUnavailable:
+            await store.goal_wakeups.release_wakeup(
+                wakeup_id=str(wakeup["id"]),
+                lease_owner=str(wakeup.get("lease_owner") or ""),
+                retry_in_seconds=30.0,
+                restore_attempt=True,
+                detail="repository access is temporarily unavailable; retrying",
+            )
+        except AgentAccessUnavailable:
+            logger.warning(
+                "agent_goal_owner_access_unavailable",
+                extra={
+                    "event": "agent_goal_owner_access_unavailable",
+                    "thread_id": wakeup.get("thread_id"),
+                    "wakeup_id": wakeup.get("id"),
+                },
+                exc_info=True,
+            )
+            await store.goal_wakeups.release_wakeup(
+                wakeup_id=str(wakeup["id"]),
+                lease_owner=str(wakeup.get("lease_owner") or ""),
+                retry_in_seconds=30.0,
+                restore_attempt=True,
+                detail="Agent access could not be confirmed; retrying",
             )
         except Exception:
             logger.warning(
@@ -207,26 +237,38 @@ async def consume_wakeup(
         # Cleared, or never really there. Nothing to decide, and nothing that
         # could authorize work.
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="no goal"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="no goal",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     if str(wakeup.get("goal_id") or "") != str(goal.get("goal_id") or ""):
         # The objective was replaced under this obligation: the wakeup belonged
         # to a goal that no longer exists.
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="superseded goal"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="superseded goal",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     if int(wakeup.get("revision") or 0) != int(goal.get("revision") or 0):
         # The goal moved on — edited, paused, resumed or completed. Whatever
         # this wakeup was going to say has already been said by that write.
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="superseded revision"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="superseded revision",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     if goal.get("state") != "active":
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail=f"goal {goal.get('state')}"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail=f"goal {goal.get('state')}",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     # A person's waiting message goes first. The settlement is the same one
@@ -271,13 +313,12 @@ async def consume_wakeup(
     # A read that may reach the network happens *before* the decision's
     # transaction opens. Holding the conversation's lock across a GitHub call
     # would serialize every finish in the deployment behind one outage.
-    blocked = await _check_access(store, turn, app_credentials=app_credentials)
+    blocked = await _check_access(store, turn, app_credentials=app_credentials, gateway=gateway)
     if blocked is not None:
         return await _stop(
             store,
             wakeup=wakeup,
             thread_id=thread_id,
-            goal=goal,
             action=blocked,
             context=context,
         )
@@ -309,11 +350,13 @@ async def _park(store: _GoalStore, *, wakeup: dict[str, Any], job_id: str) -> No
         # parked on a dead job.
         await store.goal_wakeups.release_wakeup(
             wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
             detail="the turn it was waiting for had already ended",
         )
         return
     await store.goal_wakeups.release_wakeup(
         wakeup_id=str(wakeup["id"]),
+        lease_owner=str(wakeup.get("lease_owner") or ""),
         waiting_job_id=job_id,
         detail="waiting for the turn already in this conversation",
     )
@@ -462,14 +505,25 @@ async def _check_access(
     turn: dict[str, Any] | None,
     *,
     app_credentials: Any | None = None,
+    gateway: Any | None = None,
 ) -> GoalAction | None:
-    """The one eligibility read that may reach outside the database.
+    """The eligibility reads, including the two that reach outside the database.
 
     ``turn`` arrives in one of two shapes — ``latest_turn``'s job-summary
     projection, which carries the thread's ``archived_at``, or the parked
     path's ``get_job``, which carries that *and* the retained sandbox — so the
     two conditions below are live in both, and the sandbox one is the belt to
     the archive route's braces.
+
+    **The owner's Agent access is asked before the repository.** An automatic
+    round is written with no request of the owner's to admit it, so this is the
+    first point at which a goal can learn that its owner's access was
+    withdrawn; without it an unbounded goal keeps queueing rounds for an owner
+    who can no longer open the conversation, and only the claim's own check
+    would stop each one. A denial pauses the goal with the reason. A Gateway
+    that cannot answer raises :class:`AgentAccessUnavailable`, which the
+    consumer turns into a retry — neither an outage nor a missing client lets
+    a round through.
     """
     if turn is None:
         return None
@@ -488,6 +542,20 @@ async def _check_access(
             kind="pause",
             reason="context_lost",
             message=("the conversation's session is gone; it cannot be resumed from a transcript"),
+        )
+    if not await owner_may_use_agent(gateway, user_id=str(turn["user_id"])):
+        logger.warning(
+            "agent_goal_owner_access_withdrawn",
+            extra={
+                "event": "agent_goal_owner_access_withdrawn",
+                "thread_id": turn["thread_id"],
+                "job_id": turn["id"],
+            },
+        )
+        return GoalAction(
+            kind="pause",
+            reason="access_denied",
+            message=AGENT_ACCESS_WITHDRAWN + " Resume the goal once access is restored.",
         )
     try:
         # The caller's own credential minter, not ``None``: with no App
@@ -532,7 +600,10 @@ async def _apply(
     action = decide(context)
     if action.kind == "none":
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="nothing to do"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="nothing to do",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return action.kind
     if action.kind in ("queue_work_round", "queue_repair_round"):
@@ -548,7 +619,6 @@ async def _apply(
         store,
         wakeup=wakeup,
         thread_id=thread_id,
-        goal=goal,
         action=action,
         context=context,
     )
@@ -559,7 +629,6 @@ async def _stop(
     *,
     wakeup: dict[str, Any],
     thread_id: str,
-    goal: dict[str, Any],
     action: GoalAction,
     context: GoalContext,
 ) -> str:
@@ -575,7 +644,17 @@ async def _stop(
     detail = (action.message or "")[:MAX_REASON_CHARS] or None
     decision = store.goal_wakeups.transaction()
     async with decision as conn:
-        stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=goal)
+        # The obligation's identity and revision authorize this stop. In
+        # particular, the retry handler may have read a replacement or resumed
+        # goal after the scheduling attempt failed; that newer read must not
+        # authorize pausing it for the old wakeup's failure.
+        stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=wakeup)
+        if not await store.goal_wakeups.lock_wakeup(
+            wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
+            conn=conn,
+        ):
+            return "none"
         if stale is None and action.kind == "complete":
             stale = await _completion_superseded(
                 store, conn=conn, thread_id=thread_id, context=context
@@ -584,12 +663,16 @@ async def _stop(
             # The owner got there first. Their write stands, and this decision
             # is stale — recorded as such rather than retried.
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail=stale, conn=conn
+                wakeup_id=str(wakeup["id"]),
+                processed=True,
+                detail=stale,
+                conn=conn,
+                lease_owner=str(wakeup.get("lease_owner") or ""),
             )
             return "none"
         written = await store.goals.apply_action(
             thread_id=thread_id,
-            revision=int(goal["revision"]),
+            revision=int(wakeup["revision"]),
             action=action,
             pause_reason=action.reason,
             pause_detail=detail,
@@ -598,11 +681,19 @@ async def _stop(
         )
         if written is None:
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail="superseded", conn=conn
+                wakeup_id=str(wakeup["id"]),
+                processed=True,
+                detail="superseded",
+                conn=conn,
+                lease_owner=str(wakeup.get("lease_owner") or ""),
             )
             return "none"
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail=action.kind, conn=conn
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail=action.kind,
+            conn=conn,
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
     logger.info(
         f"agent_goal_{action.kind}",
@@ -706,9 +797,19 @@ async def _queue_round(
         # built the context and this write, the owner can have paused the goal,
         # replaced the objective, or sent a message.
         stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=goal)
+        if not await store.goal_wakeups.lock_wakeup(
+            wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
+            conn=conn,
+        ):
+            return "none"
         if stale is not None:
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail=stale, conn=conn
+                wakeup_id=str(wakeup["id"]),
+                processed=True,
+                detail=stale,
+                conn=conn,
+                lease_owner=str(wakeup.get("lease_owner") or ""),
             )
             return "none"
         if await store.goals.has_pending_turn(thread_id=thread_id, conn=conn):
@@ -716,6 +817,7 @@ async def _queue_round(
             # goes first; this wakeup waits behind it.
             await store.goal_wakeups.release_wakeup(
                 wakeup_id=str(wakeup["id"]),
+                lease_owner=str(wakeup.get("lease_owner") or ""),
                 waiting_job_id=await store.goals.live_turn_id(thread_id=thread_id, conn=conn),
                 detail="a person's turn arrived first",
                 conn=conn,
@@ -772,6 +874,7 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
     if not is_exhausted(attempts):
         await store.goal_wakeups.release_wakeup(
             wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
             retry_in_seconds=wakeup_backoff(attempts),
             detail="scheduling failed; retrying",
         )
@@ -779,14 +882,16 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
     goal = await store.goals.get_goal(thread_id=str(wakeup["thread_id"]))
     if goal is None or goal.get("state") != "active":
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="scheduling failed"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="scheduling failed",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return
     await _stop(
         store,
         wakeup=wakeup,
         thread_id=str(wakeup["thread_id"]),
-        goal=goal,
         action=GoalAction(
             kind="pause",
             reason="scheduling_failed",
@@ -801,6 +906,5 @@ __all__ = [
     "client_request_id_for",
     "consume_wakeup",
     "continue_after_finish",
-    "finish_trigger_ref",
     "run_goal_wakeups",
 ]

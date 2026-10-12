@@ -8,7 +8,6 @@ enforceable at claim time and inheritable across a thread.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from enum import StrEnum
 
@@ -125,7 +124,9 @@ def default_execution_profile(env: Mapping[str, str] | None = None) -> Execution
     explicit deployment change, and an invalid value refuses job creation
     instead of silently weakening to the trusted profile.
     """
-    source = env if env is not None else os.environ
+    from cloud_agent.settings import settings_environment
+
+    source = env if env is not None else settings_environment()
     raw = (source.get(ENV_DEFAULT_EXECUTION_PROFILE) or ExecutionProfile.TRUSTED_V1).strip()
     try:
         return ExecutionProfile(raw)

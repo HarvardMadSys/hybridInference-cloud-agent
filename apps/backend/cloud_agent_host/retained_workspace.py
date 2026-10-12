@@ -27,7 +27,7 @@ class RetainedWorkspaceError(SandboxError):
 
 
 _READ_PROGRAM = r"""
-import json, os, stat, sys
+import base64, json, os, stat, sys
 
 root_path, relative, max_raw, entries_raw = sys.argv[1:]
 max_bytes = int(max_raw)
@@ -163,8 +163,22 @@ try:
                     content = raw.decode("utf-8")
                 except UnicodeDecodeError:
                     binary = True
+            # Sniff a small set of passive raster formats. Repository HTML
+            # and SVG are never returned as an active preview media type.
+            media_type = None
+            if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                media_type = "image/png"
+            elif raw.startswith(b"\xff\xd8\xff"):
+                media_type = "image/jpeg"
+            elif raw.startswith((b"GIF87a", b"GIF89a")):
+                media_type = "image/gif"
+            elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                media_type = "image/webp"
             emit({
                 "path": relative, "kind": "file", "content": content,
+                "content_base64": base64.b64encode(raw).decode("ascii")
+                    if binary or media_type else None,
+                "media_type": media_type,
                 "size": len(raw), "binary": binary, "truncated": False,
                 "writable": not binary, "source": "workspace",
                 "omitted_reason": "binary" if binary else None,

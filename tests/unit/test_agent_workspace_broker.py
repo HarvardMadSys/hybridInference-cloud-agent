@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+from cloud_agent_host import workspace_broker as broker_mod
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
+from cloud_agent_host.resident_transport import ResidentLaunch
+from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
+from cloud_agent_host.session_supervisor_client import (
+    SessionSupervisorClient,
+    SessionSupervisorError,
+)
 from cloud_agent_host.shared_session_supervisor import (
     SharedSessionDescriptor,
     SharedSessionLease,
@@ -28,13 +39,56 @@ from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
+    SharedTurnRequest,
     TerminalRequest,
     _run_terminal,
     _terminal_sse_frame,
+    _TerminalLimits,
     _TerminalManager,
     _TerminalSession,
     create_app,
 )
+from cloud_agent_shared.host_settings import BROKER_SETTING_KEYS, default_values
+
+
+@pytest.mark.asyncio
+async def test_resource_checkpoint_is_forwarded_before_any_native_event():
+    """A checkpoint persists during a silent tool invocation, before CLI output."""
+    gate = threading.Event()
+    turn_started = threading.Event()
+
+    class QuietTurn:
+        @staticmethod
+        def lines():
+            turn_started.set()
+            gate.wait(2)
+            yield SimpleNamespace(event_type="message", payload={"text": "done"}, raw_line="done")
+
+    supervisor = _SharedSupervisor()
+    supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
+    pending = [{"measurement_id": "sample", "state": "collecting", "report_seq": 1}]
+    supervisor.take_reported_checkpoint = (  # type: ignore[attr-defined]
+        lambda _thread_id: pending.pop() if pending else None
+    )
+    supervisor.abort_turn = lambda *_args: gate.set()  # type: ignore[attr-defined]
+    app = _app(supervisor)
+    endpoint = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/shared-sandboxes/{thread_id}/turn"
+    )
+    response = await endpoint(
+        "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
+    )
+    try:
+        first = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
+        assert first["kind"] == "resource_checkpoint"
+        assert first["turn_resources"]["state"] == "collecting"
+        assert turn_started.wait(1)
+        assert not gate.is_set()
+    finally:
+        gate.set()
+        await response.body_iterator.aclose()
 
 
 class _TerminalProcess(TerminalProcess):
@@ -93,7 +147,9 @@ class _WorkspaceBackend(RetainedChatBackend):
     def spawn_terminal(self, spec, *, rows, cols):
         assert rows > 0 and cols > 0
         self.spawned.append(spec)
-        process = _TerminalProcess()
+        # A shell stays open until it is killed; one that exits at once gives
+        # its slot back, which is not what the capacity tests are about.
+        process = _RunningTerminalProcess()
         self.processes.append(process)
         return process
 
@@ -147,19 +203,66 @@ class _SharedSupervisor:
     def set_idle_timeout_s(self, idle_timeout_s: float) -> None:
         self.idle_timeout_s = idle_timeout_s
 
-    def __init__(self) -> None:
+    def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
         self.imports = self.workspace_backend.imports
         self.started = False
         self.closed = False
+        self.quiesced = False
+        self.shutdown_stopped = False
+        self.shutdown_include_running: bool | None = None
+        self.shutdown_error: Exception | None = None
+        self.pending_archive_work = False
+        self.events = events if events is not None else []
+        self.archive_hook = None
+        self.archive_prepare_hook = None
+        self.archive_invalidate_hook = None
+        self.archive_prepare_start_hook = None
+        self.archive_complete_start_hook = None
+        self.archive_markerless_prepare_hook = None
         self.threads = {"athr_source", "athr_child"}
 
     def start(self):
         self.started = True
+        self.events.append("supervisor.start")
+
+    def quiesce(self):
+        self.quiesced = True
+        self.events.append("supervisor.quiesce")
+
+    def stop_all_for_shutdown(self, *, include_running: bool = True):
+        self.shutdown_stopped = True
+        self.shutdown_include_running = include_running
+        self.events.append("supervisor.stop_all")
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+    def has_pending_archive_work(self) -> bool:
+        return self.pending_archive_work
 
     def close(self):
         self.closed = True
+        self.events.append("supervisor.close")
+
+    def configure_stopped_archive_hook(self, hook):
+        self.archive_hook = hook
+
+    def configure_stopped_archive_prepare_hook(self, hook):
+        self.archive_prepare_hook = hook
+
+    def configure_archive_transition_hooks(
+        self,
+        *,
+        invalidate_final,
+        prepare_start,
+        complete_start,
+        prepare_markerless_final,
+    ):
+        self.archive_invalidate_hook = invalidate_final
+        self.archive_prepare_start_hook = prepare_start
+        self.archive_complete_start_hook = complete_start
+        self.archive_markerless_prepare_hook = prepare_markerless_final
 
     def owns(self, thread_id: str) -> bool:
         return thread_id in self.threads
@@ -170,6 +273,11 @@ class _SharedSupervisor:
         return _descriptor(thread_id)
 
     def list(self):
+        return [_descriptor("athr_source"), _descriptor("athr_child")]
+
+    def list_for_thread(self, thread_id: str):
+        if not self.owns(thread_id):
+            raise SandboxError("unknown member")
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
     def register_manifest(self, spec, members, *, expected_container_id=None):
@@ -235,6 +343,30 @@ class _SharedSupervisor:
         self.calls.append(("snapshot", thread_id))
         return {"patch": "diff --git a/a.txt b/a.txt\n"}
 
+    def pending_questions(self, thread_id: str, *, owner: str):
+        self.calls.append(("questions", thread_id, owner))
+        return [
+            {
+                "request_id": "request-one",
+                "questions": [
+                    {
+                        "id": "approach",
+                        "header": "Approach",
+                        "question": "Choose an approach",
+                        "multiple": False,
+                        "options": [{"label": "First", "description": "First option"}],
+                        "allow_custom": True,
+                    }
+                ],
+            }
+        ]
+
+    def answer_question(self, thread_id: str, **kwargs):
+        self.calls.append(("answer_question", thread_id, kwargs))
+        return InputOutcome(
+            kwargs["owner"] == "attempt:1", None if kwargs["owner"] == "attempt:1" else "turn_ended"
+        )
+
 
 def _launch() -> dict[str, object]:
     """The minimum resident launch the broker's request model accepts."""
@@ -292,6 +424,55 @@ def test_broker_requires_a_container_backend_without_an_injected_supervisor():
         create_app(backend=ProcessBackend(acknowledged_unsafe=True), token="x")
 
 
+class _ArchiveService:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def start(self) -> None:
+        self.events.append("archive.start")
+
+    def close(self) -> None:
+        self.events.append("archive.close")
+
+    def queue_final(self, *_args, **_kwargs) -> None:
+        self.events.append("archive.final")
+
+
+class _ArchiveController(_ArchiveService):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.enabled = False
+        self.revision: int | None = None
+
+    def apply(self, settings):
+        self.enabled = bool(settings["enabled"])
+        self.revision = int(settings["revision"])
+        return self.status()
+
+    def status(self):
+        return {
+            "configured": self.revision is not None,
+            "enabled": self.enabled,
+            "running": True,
+            "applied_revision": self.revision,
+        }
+
+    def prepare_final(self, *_args, **_kwargs) -> None:
+        return
+
+    def invalidate_final(self, *_args, **_kwargs) -> None:
+        return
+
+    def prepare_start(self, *_args, **_kwargs) -> None:
+        return
+
+    def complete_start(self, *_args, **_kwargs) -> None:
+        return
+
+    def prepare_markerless_final_if_disabled(self, *_args, **_kwargs) -> bool:
+        return self.revision is not None and not self.enabled
+
+
 @pytest.mark.asyncio
 async def test_broker_lifespan_preflights_without_a_host_worktree():
     supervisor = _SharedSupervisor()
@@ -313,6 +494,94 @@ async def test_broker_lifespan_preflights_without_a_host_worktree():
     finally:
         monkeypatch.undo()
     assert supervisor.closed is True
+    assert supervisor.shutdown_stopped is False
+
+
+@pytest.mark.asyncio
+async def test_archive_shutdown_quiesces_then_strictly_stops_before_cleanup() -> None:
+    events: list[str] = []
+    supervisor = _SharedSupervisor(events=events)
+    archive = _ArchiveService(events)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_service=archive,  # type: ignore[arg-type]
+    )
+
+    async with app.router.lifespan_context(app):
+        assert supervisor.started is True
+
+    assert events == [
+        "archive.start",
+        "supervisor.start",
+        "supervisor.quiesce",
+        "supervisor.stop_all",
+        "supervisor.close",
+        "archive.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_archive_shutdown_surfaces_strict_stop_failure_before_closing_service() -> None:
+    events: list[str] = []
+    supervisor = _SharedSupervisor(events=events)
+    supervisor.shutdown_error = RuntimeError("native flush failed")
+    archive = _ArchiveService(events)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_service=archive,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="shutdown cleanup failed"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert events[-4:] == [
+        "supervisor.quiesce",
+        "supervisor.stop_all",
+        "supervisor.close",
+        "archive.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_broker_shutdown() -> None:
+    events: list[str] = []
+    supervisor = _SharedSupervisor(events=events)
+    controller = _ArchiveController(events)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_controller=controller,  # type: ignore[arg-type]
+    )
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://broker",
+        ) as client:
+            response = await client.post(
+                "/sandbox-archive-settings",
+                headers={"X-Agent-Workspace-Token": "broker-secret"},
+                json={"settings": {"enabled": False, "revision": 7}},
+            )
+        assert response.status_code == 200
+        assert supervisor.started is True
+        assert supervisor.archive_markerless_prepare_hook is not None
+        assert supervisor.archive_markerless_prepare_hook(None, None) is True
+
+    assert supervisor.shutdown_stopped is True
+    assert supervisor.shutdown_include_running is True
+    assert events[-4:] == [
+        "supervisor.quiesce",
+        "supervisor.stop_all",
+        "supervisor.close",
+        "archive.close",
+    ]
 
 
 @pytest.mark.asyncio
@@ -333,6 +602,307 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
         "athr_source",
         "athr_child",
     }
+
+
+@pytest.mark.asyncio
+async def test_targeted_inventory_is_authenticated_and_isolated_from_full_inventory_failure():
+    supervisor = _SharedSupervisor()
+    calls = []
+
+    def failed_inventory():
+        calls.append(("list",))
+        raise SandboxError("unrelated sandbox reconciliation failed")
+
+    def targeted_inventory(thread_id):
+        calls.append(("list_for_thread", thread_id))
+        return [_descriptor("athr_source"), _descriptor("athr_child")]
+
+    supervisor.list = failed_inventory
+    supervisor.list_for_thread = targeted_inventory
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        denied = await client.get("/sandboxes", params={"thread_id": "athr_child"})
+        assert denied.status_code == 401
+        assert calls == []
+        failed = await client.get("/sandboxes", headers=headers)
+        response = await client.get(
+            "/sandboxes", headers=headers, params={"thread_id": "athr_child"}
+        )
+
+    assert failed.status_code == 503
+    assert response.status_code == 200
+    assert calls == [("list",), ("list_for_thread", "athr_child")]
+    row = response.json()["sandboxes"][0]
+    assert row["thread_id"] == "athr_source"
+    assert {member["thread_id"] for member in row["members"]} == {"athr_source", "athr_child"}
+
+
+@pytest.mark.asyncio
+async def test_targeted_inventory_rejects_unknown_members_without_falling_back_to_full_inventory():
+    supervisor = _SharedSupervisor()
+    supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params={"thread_id": "athr_unknown"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "unknown member"}
+
+
+@pytest.mark.asyncio
+async def test_targeted_shared_status_serializes_force_delete_proof_fields():
+    supervisor = _SharedSupervisor()
+    supervisor.status = lambda thread_id: replace(
+        _descriptor(thread_id),
+        docker_status="stopped",
+        running=False,
+        group_busy=False,
+        busy=False,
+        terminal_count=0,
+        operation_count=0,
+        snapshotting=False,
+    )
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        denied = await client.get("/shared-sandboxes/athr_source")
+        response = await client.get("/shared-sandboxes/athr_source", headers=headers)
+
+    assert denied.status_code == 401
+    assert response.status_code == 200
+    payload = response.json()
+    assert {
+        key: payload[key]
+        for key in (
+            "thread_id",
+            "origin_thread_id",
+            "sandbox_id",
+            "generation",
+            "container_id",
+            "docker_status",
+            "running",
+            "group_busy",
+            "busy",
+            "terminal_count",
+            "operation_count",
+            "snapshotting",
+        )
+    } == {
+        "thread_id": "athr_source",
+        "origin_thread_id": "athr_source",
+        "sandbox_id": "asbx_shared",
+        "generation": 3,
+        "container_id": "container-shared",
+        "docker_status": "stopped",
+        "running": False,
+        "group_busy": False,
+        "busy": False,
+        "terminal_count": 0,
+        "operation_count": 0,
+        "snapshotting": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "athr_source", "athr_child"])
+@pytest.mark.parametrize("origin_count,child_count", [(0, 2), (1, 2), (2, 0), (0, 0)])
+async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
+    origin_count, child_count, thread_id
+):
+    supervisor = _SharedSupervisor()
+    descriptors = [
+        replace(_descriptor("athr_source"), terminal_count=origin_count),
+        replace(_descriptor("athr_child"), terminal_count=child_count),
+    ]
+    supervisor.list = lambda: descriptors
+    supervisor.list_for_thread = lambda _thread_id: descriptors
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params={} if thread_id is None else {"thread_id": thread_id},
+        )
+
+    assert response.status_code == 200
+    rows = response.json()["sandboxes"]
+    assert len(rows) == 1
+    assert rows[0]["thread_id"] == "athr_source"
+    assert rows[0]["terminal_count"] == origin_count + child_count
+
+
+@pytest.mark.asyncio
+async def test_native_question_routes_require_authentication_and_forward_exact_answers():
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    path = "/shared-sandboxes/athr_source/questions"
+    payload = {
+        "owner": "attempt:1",
+        "request_id": "request-one",
+        "answers": {"approach": ["First", "A custom answer"]},
+        "reject": False,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        denied_read = await client.get(path, params={"owner": "attempt:1"})
+        denied_reply = await client.post(path, json=payload)
+        assert supervisor.calls == []
+        pending = await client.get(path, headers=headers, params={"owner": "attempt:1"})
+        answer = await client.post(path, headers=headers, json=payload)
+        reject = await client.post(
+            path, headers=headers, json={**payload, "answers": {}, "reject": True}
+        )
+        stale = await client.post(path, headers=headers, json={**payload, "owner": "attempt:2"})
+
+    assert denied_read.status_code == denied_reply.status_code == 401
+    assert pending.status_code == 200
+    assert pending.json()["questions"][0]["request_id"] == "request-one"
+    assert pending.json()["questions"][0]["questions"][0]["allow_custom"] is True
+    assert answer.json() == reject.json() == {"accepted": True, "reason": None}
+    assert stale.json() == {"accepted": False, "reason": "turn_ended"}
+    assert supervisor.calls == [
+        ("questions", "athr_source", "attempt:1"),
+        ("answer_question", "athr_source", payload),
+        ("answer_question", "athr_source", {**payload, "answers": {}, "reject": True}),
+        ("answer_question", "athr_source", {**payload, "owner": "attempt:2"}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"owner": ""},
+        {"owner": "a" * 129},
+        {"request_id": ""},
+        {"request_id": "r" * 129},
+        {"answers": {"": ["answer"]}},
+        {"answers": {"q" * 129: ["answer"]}},
+        {"answers": {str(i): ["answer"] for i in range(11)}},
+        {"answers": {"question": ["answer"] * 21}},
+        {"answers": {"question": ["a" * 10_001]}},
+        {"answers": {"question": "answer"}},
+    ],
+)
+async def test_native_question_answers_are_bounded_before_transport(invalid):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/questions",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={"owner": "attempt:1", "request_id": "request-one", "answers": {}, **invalid},
+        )
+    assert response.status_code == 422
+    assert supervisor.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", [{}, {"owner": ""}, {"owner": "o" * 129}])
+async def test_native_question_reads_require_a_bounded_owner(params):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/shared-sandboxes/athr_source/questions",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params=params,
+        )
+    assert response.status_code == 422
+    assert supervisor.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [True, False])
+async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running):
+    supervisor = _SharedSupervisor()
+    supervisor.list = lambda: [
+        replace(_descriptor("athr_source"), running=running),
+        replace(_descriptor("athr_child"), running=running),
+    ]
+    app = _app(supervisor)
+    calls = []
+    sample = {"sample_id": "resource-sample", "sample_age_ms": 4000, "memory_bytes": 1024}
+    app.state.sandbox_resource_collector = SimpleNamespace(
+        sync_targets=lambda rows: calls.append(("sync", [dict(row) for row in rows])),
+        latest=lambda container: calls.append(("latest", container)) or sample,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "broker-secret"}
+        )
+    assert response.status_code == 200
+    assert len(calls[0][1]) == 1
+    assert calls[0][1][0]["container_id"] == "container-shared"
+    row = response.json()["sandboxes"][0]
+    if running:
+        assert calls[1:] == [("latest", "container-shared")]
+        assert row["resource_usage"] == sample
+    else:
+        assert len(calls) == 1
+        assert row["resource_usage"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [True, False])
+async def test_targeted_inventory_reads_cached_resources_without_syncing_collection_targets(
+    running,
+):
+    supervisor = _SharedSupervisor()
+    supervisor.list_for_thread = lambda _thread_id: [
+        replace(_descriptor("athr_source"), running=running),
+        replace(_descriptor("athr_child"), running=running),
+    ]
+    app = _app(supervisor)
+    calls = []
+    sample = {"sample_id": "resource-sample", "sample_age_ms": 4000, "memory_bytes": 1024}
+    app.state.sandbox_resource_collector = SimpleNamespace(
+        sync_targets=lambda _rows: pytest.fail("partial inventory must not evict other groups"),
+        latest=lambda container: calls.append(("latest", container)) or sample,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params={"thread_id": "athr_child"},
+        )
+
+    assert response.status_code == 200
+    row = response.json()["sandboxes"][0]
+    assert calls == ([("latest", "container-shared")] if running else [])
+    assert row["resource_usage"] == (sample if running else None)
+
+
+@pytest.mark.asyncio
+async def test_resource_collector_is_owned_and_cleaned_up_by_broker_lifespan(monkeypatch):
+    calls = []
+    collector = SimpleNamespace(
+        start=lambda: calls.append("start"),
+        close=lambda: calls.append("close"),
+    )
+
+    def factory():
+        calls.append("construct")
+        return collector
+
+    monkeypatch.setattr(broker_mod, "SandboxResourceCollector", factory)
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    assert calls == []
+    assert app.state.sandbox_resource_collector is None
+    with pytest.raises(RuntimeError, match="request failure"):
+        async with app.router.lifespan_context(app):
+            assert calls == ["construct", "start"]
+            assert app.state.sandbox_resource_collector is collector
+            raise RuntimeError("request failure")
+    assert calls == ["construct", "start", "close"]
+    assert app.state.sandbox_resource_collector is None
+    assert supervisor.closed
 
 
 @pytest.mark.asyncio
@@ -438,6 +1008,230 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
     assert acquired[1][2] == live
     assert residents[0][2] is None
     assert residents[1][2] == live
+
+
+def _runner_client(app) -> SessionSupervisorClient:
+    """The runner's own client, wired to this broker app in-process.
+
+    The client is synchronous and the app is ASGI, so each request runs the app
+    on an event loop of its own. Every answer the client reads is one the broker
+    produced, never a body written by the test.
+    """
+
+    def forward(request: httpx.Request) -> httpx.Response:
+        async def answer() -> httpx.Response:
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(transport=transport, base_url="http://broker") as broker:
+                answered = await broker.request(
+                    request.method,
+                    request.url.path,
+                    headers=dict(request.headers),
+                    content=request.content,
+                )
+            return httpx.Response(
+                answered.status_code,
+                headers={"content-type": answered.headers.get("content-type", "")},
+                content=answered.content,
+            )
+
+        return asyncio.run(answer())
+
+    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(forward),
+        headers={"X-Agent-Workspace-Token": "broker-secret"},
+    )
+    return client
+
+
+def _resident_launch(**changes: object) -> ResidentLaunch:
+    """What the runner sends for a first turn whose claim bound one MCP server."""
+    fields: dict[str, object] = {
+        **_launch(),
+        "thread_id": "athr_source",
+        "native_session_id": None,
+        "reasoning_effort": None,
+        "mcp_server_ids": ("deepwiki",),
+        # What a launch carries from a host with no MCP relay of its own.
+        "mcp_base_url": "",
+        "mcp_credential": "mcp-token",
+    }
+    fields.update(changes)
+    return ResidentLaunch(**fields)  # type: ignore[arg-type]
+
+
+def test_runner_github_token_survives_broker_roundtrip_without_entering_the_response():
+    launches = []
+
+    class RecordingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            launches.append(launch)
+            return _descriptor(thread_id)
+
+    client = _runner_client(_app(RecordingSupervisor()))
+    try:
+        answer = client.ensure_shared_resident(
+            "athr_source",
+            token="lease",
+            launch=_resident_launch(github_token="sandbox-write-token", github_repo="owner/repo"),
+        )
+    finally:
+        client.close()
+
+    assert launches[0].github_token == "sandbox-write-token"
+    assert launches[0].github_repo == "owner/repo"
+    assert "sandbox-write-token" not in repr(launches[0])
+    assert "sandbox-write-token" not in str(answer)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        RuntimeMCPUnavailableError(
+            "MCP was requested but no relay address was configured for this run"
+        ),
+        RuntimeEffortUnsupportedError(
+            "runtime 'pi' cannot express reasoning effort 'xhigh' "
+            "(declares ['minimal', 'low', 'medium', 'high'])"
+        ),
+    ],
+)
+def test_a_runtime_refusal_reaches_the_runner_in_the_runtimes_own_words(refusal):
+    """Regression: a refused resident launch read as an opaque platform failure.
+
+    The runtime refuses a launch it cannot run as configured, with a reason
+    written for the owner. Neither refusal is a driver or sandbox error, so the
+    broker answered Starlette's plain-text 500, and the turn's error event said
+    only "shared Session Supervisor rejected the lifecycle transition".
+    """
+
+    class _RefusingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            raise refusal
+
+    client = _runner_client(_app(_RefusingSupervisor()))
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.ensure_shared_resident("athr_source", token="lease", launch=_resident_launch())
+    finally:
+        client.close()
+
+    assert raised.value.status_code == 422
+    assert str(raised.value) == str(refusal)
+
+
+def test_an_unexpected_broker_failure_names_its_type_and_route_but_not_its_message():
+    """A failure no route anticipated still answers a body the runner can read.
+
+    The message stays in the broker's log: the same answer reaches the owner's
+    browser through the control plane, which shows only what is safe to show.
+    """
+
+    class _CrashingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            raise OSError(24, "Too many open files", "/var/lib/agent/private-state")
+
+    client = _runner_client(_app(_CrashingSupervisor()))
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.ensure_shared_resident("athr_source", token="lease", launch=_resident_launch())
+    finally:
+        client.close()
+
+    assert raised.value.status_code == 500
+    assert str(raised.value) == (
+        "workspace broker failed unexpectedly "
+        "(OSError in POST /shared-sandboxes/{thread_id}/resident)"
+    )
+
+
+def test_a_request_the_broker_rejects_names_the_field_but_never_its_value():
+    """FastAPI's validation ``detail`` is a list, which the runner used to drop.
+
+    The field path is what makes the rejection actionable. The value is left
+    out because the field likeliest to exceed its bound is a credential.
+    """
+    credential = "grant-" + "x" * 20_000
+    client = _runner_client(_app(_SharedSupervisor()))
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.ensure_shared_resident(
+                "athr_source", token="lease", launch=_resident_launch(credential=credential)
+            )
+    finally:
+        client.close()
+
+    message = str(raised.value)
+    assert raised.value.status_code == 422
+    assert message == (
+        "shared Session Supervisor rejected the lifecycle transition (resident): "
+        "HTTP 422 Unprocessable Entity "
+        "(launch.credential: String should have at most 16384 characters)"
+    )
+    assert "grant-" not in message
+
+
+@pytest.mark.asyncio
+async def test_the_broker_launches_tools_through_its_hosts_own_mcp_relay(monkeypatch):
+    """Like the gateway's, the MCP relay is this host's, whatever a caller names.
+
+    It is the relay the host rules admit for the group, so any other address
+    would only be refused at the bridge. A launch without tools is given none.
+    """
+    launches: list[ResidentLaunch] = []
+
+    class _RecordingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            launches.append(launch)
+            return _descriptor(thread_id)
+
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
+    app = _app(_RecordingSupervisor())
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    with_tools = {
+        **_launch(),
+        "mcp_server_ids": ["deepwiki"],
+        "mcp_base_url": "http://elsewhere:9000",
+        "mcp_credential": "mcp-token",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        for launch in (with_tools, _launch()):
+            answered = await client.post(
+                "/shared-sandboxes/athr_source/resident",
+                headers=headers,
+                json={"token": "lease", "launch": launch},
+            )
+            assert answered.status_code == 200, answered.text
+
+    tools, plain = launches
+    assert tools.mcp_base_url == "http://agent-mcp:8000"
+    assert tools.mcp_credential == "mcp-token"
+    assert plain.mcp_base_url == ""
+
+
+def test_a_crash_an_older_broker_answers_as_plain_text_still_names_the_call():
+    """A broker without the JSON answer, mid-rollout, still yields a findable error."""
+    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(500, text="Internal Server Error")
+        )
+    )
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.settle_shared(
+                "athr_source", token="lease", job_id="ajob_source", context_status="new"
+            )
+    finally:
+        client.close()
+
+    assert raised.value.status_code == 500
+    assert str(raised.value) == (
+        "shared Session Supervisor rejected the lifecycle transition (settle): "
+        "HTTP 500 Internal Server Error"
+    )
 
 
 @pytest.mark.asyncio
@@ -663,7 +1457,7 @@ def test_shared_one_shot_terminal_uses_group_writable_umask():
 
 @pytest.mark.asyncio
 async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
-    """Applied at runtime, answered with what is applied, and cleared back to its own."""
+    """Apply runtime overrides and reset the complete configuration to defaults."""
     supervisor = _SharedSupervisor()
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
@@ -676,6 +1470,7 @@ async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
     )
     headers = {"X-Agent-Workspace-Token": "broker-secret"}
     own = {
+        **default_values(BROKER_SETTING_KEYS),
         "terminal_idle_ttl_s": 1800,
         "terminal_hard_ttl_s": 28800,
         "terminal_max_sessions": 64,
@@ -711,7 +1506,201 @@ async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
     assert supervisor.idle_timeout_s == 1800
 
 
-class _RunningTerminalProcess(_TerminalProcess):
+@pytest.mark.asyncio
+async def test_reset_uses_defaults_after_the_broker_bootstrapped_from_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_TERMINAL_MAX_SESSIONS", "99")
+    monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "600")
+    monkeypatch.setenv("AGENT_TERMINAL_INPUT_MAX_KIB", "2")
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    assert app.state.terminal_manager._max_sessions == 99
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        reset = await client.post("/host-settings", headers=headers, json={"settings": {}})
+
+    assert reset.status_code == 200
+    assert reset.json()["applied"] == default_values(BROKER_SETTING_KEYS)
+    assert reset.json()["local"]["terminal_max_sessions"] == 99
+    assert reset.json()["local"]["chat_idle_timeout_s"] == 600
+    assert reset.json()["local"]["terminal_input_max_kib"] == 2
+    assert app.state.terminal_manager._max_sessions == 64
+    assert supervisor.idle_timeout_s == 1800
+
+
+@pytest.mark.asyncio
+async def test_admin_workspace_terminal_limits_are_advertised_and_enforced(monkeypatch):
+    supervisor = _SharedSupervisor()
+    process = _RunningTerminalProcess()
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn_terminal", lambda *_a, **_k: process)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        configured = await client.post(
+            "/host-settings",
+            headers=headers,
+            json={
+                "settings": {"terminal_max_sessions_per_workspace": 1, "terminal_input_max_kib": 1}
+            },
+        )
+        first = await client.post(
+            "/workspaces/athr_source/terminals", headers=headers, json={"rows": 24, "cols": 80}
+        )
+        second = await client.post(
+            "/workspaces/athr_child/terminals", headers=headers, json={"rows": 24, "cols": 80}
+        )
+        listed = await client.get("/workspaces/athr_child/terminals", headers=headers)
+        terminal_id = first.json()["id"]
+        rejected = await client.post(
+            f"/workspaces/athr_source/terminals/{terminal_id}/input",
+            headers=headers,
+            json={"data": base64.b64encode(b"x" * 1025).decode()},
+        )
+        accepted = await client.post(
+            f"/workspaces/athr_source/terminals/{terminal_id}/input",
+            headers=headers,
+            json={"data": base64.b64encode(b"x" * 1024).decode()},
+        )
+        await client.delete(f"/workspaces/athr_source/terminals/{terminal_id}", headers=headers)
+
+    assert configured.status_code == first.status_code == accepted.status_code == 200
+    assert second.status_code == 409
+    assert rejected.status_code == 413
+    assert listed.json()["max_sessions"] == 1
+    assert listed.json()["max_input_bytes"] == 1024
+    assert [row["id"] for row in listed.json()["terminals"]] == [terminal_id]
+
+
+@pytest.mark.asyncio
+async def test_admin_file_limits_reach_the_retained_workspace_reader_and_writer(monkeypatch):
+    seen: list[dict] = []
+
+    def read(_backend, relative, **kwargs):
+        kwargs.pop("observer", None)
+        seen.append(kwargs)
+        return {"path": relative, "kind": "directory", "entries": []}
+
+    def write(_backend, relative, _content, **kwargs):
+        kwargs.pop("observer", None)
+        seen.append(kwargs)
+        return {"path": relative, "kind": "file", "content": "saved"}
+
+    monkeypatch.setattr("cloud_agent_host.workspace_broker.read_retained_file", read)
+    monkeypatch.setattr("cloud_agent_host.workspace_broker.write_retained_file", write)
+    app = _app(_SharedSupervisor())
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        configured = await client.post(
+            "/host-settings",
+            headers=headers,
+            json={
+                "settings": {
+                    "workspace_file_write_max_mib": 1,
+                    "workspace_file_preview_max_kib": 64,
+                    "workspace_directory_max_entries": 20,
+                }
+            },
+        )
+        listed = await client.get("/workspaces/athr_source/files", headers=headers)
+        saved = await client.put(
+            "/workspaces/athr_source/files?path=a.txt", headers=headers, json={"content": "saved"}
+        )
+
+    assert configured.status_code == listed.status_code == saved.status_code == 200
+    assert seen == [
+        {"max_preview_bytes": 64 * 1024, "max_directory_entries": 20},
+        {
+            "max_write_bytes": 1024 * 1024,
+            "max_preview_bytes": 64 * 1024,
+            "max_directory_entries": 20,
+        },
+    ]
+
+
+def test_lower_terminal_output_limits_apply_to_existing_terminals():
+    manager = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    session = _TerminalSession(
+        terminal_id="term_live", process=_TerminalProcess(), workdir=None, rows=24, cols=80, now=0
+    )
+    manager._sessions["asbx_shared"] = {session.id: session}
+    session._append_output(b"a" * 100)
+    session._append_output(b"b" * 100)
+    session.open_stream()
+
+    manager.configure(
+        idle_ttl_s=1800,
+        hard_ttl_s=28800,
+        max_sessions=8,
+        limits=_TerminalLimits(buffer_bytes=100, buffer_events=2, output_bytes=150, streams=1),
+    )
+
+    assert [(event.kind, event.data) for event in session.events_after(0, wait_s=0)] == [
+        ("reset", b""),
+        ("output", b"b" * 100),
+    ]
+    with pytest.raises(HTTPException) as refused:
+        session.open_stream()
+    assert refused.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch):
+    supervisor = _SharedSupervisor()
+    killed: list[bool] = []
+
+    def spawn(_spec):
+        return SimpleNamespace(
+            lines=lambda: iter(["x" * (1024 * 1024 + 1)]),
+            kill=lambda: killed.append(True),
+            wait=lambda: 0,
+            stderr_text=lambda: "",
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        configured = await client.post(
+            "/host-settings",
+            headers=headers,
+            json={"settings": {"workspace_command_output_max_mib": 1}},
+        )
+        command = await client.post(
+            "/workspaces/athr_source/terminal",
+            headers=headers,
+            json={"command": "print_many_bytes"},
+        )
+
+    assert configured.status_code == 200
+    assert command.status_code == 413
+    assert killed == [True]
+
+
+def test_lower_terminal_total_output_limit_stops_the_process():
+    class LoudTerminal(_TerminalProcess):
+        def chunks(self):
+            yield b"x" * 1025
+
+    process = LoudTerminal()
+    session = _TerminalSession(
+        terminal_id="term_loud",
+        process=process,
+        workdir=None,
+        rows=24,
+        cols=80,
+        now=0,
+        limits=_TerminalLimits(output_bytes=1024),
+    )
+
+    session._pump()
+
+    assert process.killed
+    events = session.events_after(0, wait_s=0)
+    assert any(b"output limit exceeded" in event.data for event in events)
+    assert events[-1].kind == "exit"
+
+
+class _RunningTerminalProcess(_SuspendableTerminalProcess):
     """A shell that stays open, silent, until it is killed."""
 
     def __init__(self) -> None:
@@ -874,6 +1863,180 @@ def test_terminal_idle_guard_cannot_outlive_the_chat_clock(tmp_path):
     )
     assert session.expired(now=109, idle_ttl_s=30, hard_ttl_s=60) is False
     assert session.expired(now=110, idle_ttl_s=30, hard_ttl_s=60) is True
+
+
+class _Spawner:
+    """Hands ``_TerminalManager.create`` the next prepared process."""
+
+    def __init__(self, *processes: TerminalProcess) -> None:
+        self.processes = list(processes)
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {}
+
+    def spawn_terminal(self, _spec, *, rows: int, cols: int) -> TerminalProcess:
+        return self.processes.pop(0)
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "the condition never held"
+        time.sleep(0.01)
+
+
+def _state(
+    terminals: _TerminalManager, terminal_id: str, workspace_id: str = "athr_source"
+) -> str | None:
+    return next(
+        (row["state"] for row in terminals.list(workspace_id) if row["id"] == terminal_id), None
+    )
+
+
+def test_an_exited_shell_gives_back_its_terminal_slot():
+    """`exit` must not leave the workspace stuck at its terminal limit."""
+    terminals = _TerminalManager(
+        idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8, max_sessions_per_workspace=2
+    )
+    running, exited, replacement = (
+        _RunningTerminalProcess(),
+        _TerminalProcess(),  # its output ends at once: the owner typed `exit`
+        _RunningTerminalProcess(),
+    )
+    spawner = _Spawner(running, exited, replacement, _RunningTerminalProcess())
+
+    def create() -> dict:
+        return terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+
+    first = create()
+    gone = create()
+    _wait_for(lambda: _state(terminals, gone["id"]) == "exited")
+    assert [row["id"] for row in terminals.list("athr_source")] == [first["id"], gone["id"]]
+
+    third = create()
+
+    # The exited shell made room and was dropped to stay within the bound.
+    assert [row["id"] for row in terminals.list("athr_source")] == [first["id"], third["id"]]
+    with pytest.raises(HTTPException) as refused:
+        create()
+    assert refused.value.status_code == 409
+    terminals.close()
+
+
+def test_an_exited_shell_stays_listed_while_there_is_room():
+    terminals = _TerminalManager(
+        idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8, max_sessions_per_workspace=4
+    )
+    spawner = _Spawner(_TerminalProcess(), _RunningTerminalProcess())
+    gone = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+    _wait_for(lambda: _state(terminals, gone["id"]) == "exited")
+
+    live = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+
+    assert {row["id"]: row["state"] for row in terminals.list("athr_source")} == {
+        gone["id"]: "exited",
+        live["id"]: "running",
+    }
+    terminals.close()
+
+
+def test_exited_shells_across_workspaces_stay_within_the_broker_limit():
+    """Exited shells keep their output, so the broker-wide bound still holds them."""
+    terminals = _TerminalManager(
+        idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=2, max_sessions_per_workspace=2
+    )
+    oldest = _TerminalProcess()
+    spawner = _Spawner(
+        oldest,
+        _TerminalProcess(),
+        _RunningTerminalProcess(),
+        _RunningTerminalProcess(),
+        _RunningTerminalProcess(),
+    )
+
+    def create(workspace_id: str) -> dict:
+        return terminals.create(workspace_id, "/workspace", rows=24, cols=80, backend=spawner)
+
+    def listed() -> dict[str, list[str]]:
+        return {
+            workspace_id: [row["id"] for row in terminals.list(workspace_id)]
+            for workspace_id in ("athr_one", "athr_two", "athr_three")
+        }
+
+    first = create("athr_one")
+    second = create("athr_two")
+    _wait_for(lambda: _state(terminals, first["id"], "athr_one") == "exited")
+    _wait_for(lambda: _state(terminals, second["id"], "athr_two") == "exited")
+
+    # Neither exited shell refuses a third terminal, but together they would
+    # exceed the broker's bound: the oldest of them, in another chat, goes.
+    live = create("athr_three")
+    assert listed() == {"athr_one": [], "athr_two": [second["id"]], "athr_three": [live["id"]]}
+    assert oldest.killed
+    assert "athr_one" not in terminals._sessions
+
+    another = create("athr_three")
+    assert listed() == {"athr_one": [], "athr_two": [], "athr_three": [live["id"], another["id"]]}
+
+    # Running shells still refuse one past the limit.
+    with pytest.raises(HTTPException) as refused:
+        create("athr_one")
+    assert refused.value.status_code == 503
+    terminals.close()
+
+
+def test_the_descriptor_names_the_shell_the_process_runs():
+    class Bash(_RunningTerminalProcess):
+        shell = "bash"
+
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    spawner = _Spawner(Bash(), _RunningTerminalProcess())
+
+    bash = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+    plain = terminals.create("athr_source", "/workspace", rows=24, cols=80, backend=spawner)
+
+    assert (bash["shell"], plain["shell"]) == ("bash", "sh")
+    terminals.close()
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_stream_first_says_where_its_history_ends(monkeypatch):
+    """A new viewer must know which bytes were produced before it attached."""
+
+    class Finished(_TerminalProcess):
+        def chunks(self):
+            yield b"\x1b[6n"  # a cursor-position query, long since answered
+
+    supervisor = _SharedSupervisor()
+    monkeypatch.setattr(
+        supervisor.workspace_backend, "spawn_terminal", lambda *_a, **_k: Finished()
+    )
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        created = await client.post(
+            "/workspaces/athr_source/terminals", headers=headers, json={"rows": 24, "cols": 80}
+        )
+        terminal_id = created.json()["id"]
+        terminals = app.state.terminal_manager
+        _wait_for(lambda: _state(terminals, terminal_id) == "exited")
+        replay = await client.get(
+            f"/workspaces/athr_source/terminals/{terminal_id}/stream", headers=headers
+        )
+        resumed = await client.get(
+            f"/workspaces/athr_source/terminals/{terminal_id}/stream?after=1", headers=headers
+        )
+
+    output = base64.b64encode(b"\x1b[6n").decode()
+    assert replay.text == (
+        'event: attached\ndata: {"seq":2}\n\n'
+        f'id: 1\nevent: output\ndata: {{"seq":1,"data":"{output}"}}\n\n'
+        'id: 2\nevent: exit\ndata: {"seq":2,"exit_code":0}\n\n'
+    )
+    assert resumed.text == (
+        'event: attached\ndata: {"seq":2}\n\nid: 2\nevent: exit\ndata: {"seq":2,"exit_code":0}\n\n'
+    )
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import os
 import secrets
 import time
 from typing import Any
@@ -35,6 +34,7 @@ import jwt
 from jwt import PyJWKClient
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import setting_env
 
 logger = get_logger(__name__)
 
@@ -59,6 +59,10 @@ USER_AGENT = "hybridinference-cloud-agent"
 #: Passed explicitly to PyJWT so a dependency-default change cannot silently
 #: turn the intended bounded revocation window into an unbounded one.
 JWKS_CACHE_LIFESPAN_S = 5 * 60
+
+#: Bound the JWKS client's synchronous network operations explicitly, matching
+#: the gateway contract client's default request timeout.
+JWKS_FETCH_TIMEOUT_S = 10.0
 
 #: Our own identity session, with a fixed thirty-day expiry.
 #:
@@ -96,6 +100,10 @@ class IdentityNotConfigured(IdentityError):
     """This deployment cannot verify identity at all."""
 
 
+class IdentityUnavailable(IdentityError):
+    """Signing-key infrastructure is temporarily unreachable; no identity was verified."""
+
+
 _jwk_client: PyJWKClient | None = None
 _jwk_client_url: str = ""
 
@@ -108,7 +116,7 @@ def _jwks_client() -> PyJWKClient:
     """
     global _jwk_client, _jwk_client_url
 
-    url = (os.environ.get(ENV_JWKS_URL) or "").strip()
+    url = (setting_env(ENV_JWKS_URL) or "").strip()
     if not url:
         raise IdentityNotConfigured(f"{ENV_JWKS_URL} must be set to verify identity tokens")
     if _jwk_client is None or _jwk_client_url != url:
@@ -134,6 +142,7 @@ def _jwks_client() -> PyJWKClient:
             cache_keys=False,
             cache_jwk_set=True,
             lifespan=JWKS_CACHE_LIFESPAN_S,
+            timeout=JWKS_FETCH_TIMEOUT_S,
             headers={"User-Agent": USER_AGENT},
         )
         _jwk_client_url = url
@@ -149,7 +158,7 @@ def reset_jwks_cache() -> None:
 
 def gateway_issuer() -> str:
     """Return the explicitly configured identity issuer, never the transport URL."""
-    issuer = (os.environ.get(ENV_ISSUER) or "").strip()
+    issuer = (setting_env(ENV_ISSUER) or "").strip()
     if not issuer:
         raise IdentityNotConfigured(f"{ENV_ISSUER} must be set to verify Gateway identity")
     return issuer
@@ -166,6 +175,7 @@ def verify_identity_token(token: str) -> dict[str, Any]:
 
     Raises:
         IdentityNotConfigured: If this deployment has no JWKS URL or issuer.
+        IdentityUnavailable: If the signing-key service cannot be reached.
         IdentityError: If the token is missing, malformed, expired, signed by
             an unknown key, or issued by another issuer or for another audience.
     """
@@ -176,7 +186,14 @@ def verify_identity_token(token: str) -> dict[str, Any]:
         signing_key = _jwks_client().get_signing_key_from_jwt(token)
     except IdentityNotConfigured:
         raise
-    except (jwt.PyJWTError, httpx.HTTPError, Exception) as exc:
+    except (jwt.PyJWKClientConnectionError, httpx.HTTPError, OSError) as exc:
+        # A network failure says nothing about the credential's validity.
+        # Keep it distinct so the BFF can offer retry while still refusing
+        # to mint a session without a verified signing key.
+        raise IdentityUnavailable(
+            "cannot resolve the signing key: identity service unavailable"
+        ) from exc
+    except Exception as exc:
         # An unfetchable or unknown key is a refusal, never a pass. Failing
         # open here would accept any token during a gateway outage.
         raise IdentityError(f"cannot resolve the signing key: {exc}") from exc
@@ -214,7 +231,7 @@ def _session_secret() -> str:
             every other's sessions — and refusing beats warning, which is what
             the JWT library does on its own.
     """
-    secret = (os.environ.get(ENV_SESSION_SECRET) or "").strip()
+    secret = (setting_env(ENV_SESSION_SECRET) or "").strip()
     if not secret:
         raise IdentityNotConfigured(f"{ENV_SESSION_SECRET} must be set to issue sessions")
     if len(secret.encode()) < MIN_SESSION_SECRET_BYTES:

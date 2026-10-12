@@ -17,6 +17,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import {
   accessDenied,
   AdminRequired,
@@ -233,15 +234,16 @@ function UsageView({
 
   const narrowedBy = IDENTITY_KEYS.filter((key) => filters[key]);
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Usage"
+          description="Review token usage and costs across users, sessions, and agent turns."
+        />
         <AdminNavigation current="usage" />
 
         <h2 className="sr-only">Usage</h2>
-        <div className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="ui-card mt-6 flex flex-wrap items-center gap-3 p-3">
           <label className="shrink-0" title={BASIS}>
             <span className="sr-only">Turn created</span>
             <select
@@ -271,12 +273,12 @@ function UsageView({
                 onRemove={() => widen(key)}
               />
             ))}
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex flex-wrap items-center gap-1">
             {!linkError && (
               <Link
                 href={activityHref(filters)}
                 prefetch={false}
-                className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100"
+                className="ui-button ui-button-ghost min-h-11"
               >
                 Open in Activity
                 <ArrowIcon />
@@ -727,7 +729,7 @@ function FilterChip({
   onRemove: () => void;
 }) {
   return (
-    <span className="inline-flex h-7 min-w-0 max-w-xs items-center gap-1.5 rounded-md bg-gray-100 pl-2 pr-1 text-xs text-gray-700 dark:bg-white/5 dark:text-gray-300">
+    <span className="inline-flex min-h-9 min-w-0 max-w-xs items-center gap-1.5 rounded-lg bg-surface-muted pl-3 pr-1 text-xs text-foreground">
       <span className="text-gray-500 dark:text-gray-400">{label}</span>
       <span className="min-w-0 truncate font-mono" title={value}>
         {value}
@@ -736,7 +738,7 @@ function FilterChip({
         type="button"
         onClick={onRemove}
         aria-label={`Remove the ${label.toLowerCase()} filter`}
-        className="rounded p-0.5 text-gray-400 dark:text-gray-500 hover:bg-gray-200 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:hover:bg-white/10 dark:hover:text-gray-100"
+        className="ui-icon-button ui-button-ghost h-8 w-8 shrink-0"
       >
         <svg aria-hidden viewBox="0 0 16 16" fill="none" stroke="currentColor" className="h-3 w-3">
           <path strokeWidth={1.6} strokeLinecap="round" d="M4.5 4.5l7 7m0-7l-7 7" />

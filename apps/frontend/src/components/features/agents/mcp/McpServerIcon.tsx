@@ -6,6 +6,8 @@ import { useState } from 'react';
 // own public assets, matched by publisher ID rather than a display name.
 const SERVICE_ICONS: Record<string, string> = {
   github: 'https://github.githubassets.com/favicons/favicon.svg',
+  slack: 'https://slack.com/favicon.ico',
+  'google-drive': 'https://ssl.gstatic.com/images/branding/product/2x/drive_2020q4_48dp.png',
   context7: 'https://context7.com/favicon.ico',
   playwright: 'https://playwright.dev/img/playwright-logo.svg',
   linear: 'https://linear.app/favicon.ico',

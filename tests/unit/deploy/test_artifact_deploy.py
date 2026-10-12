@@ -17,8 +17,19 @@ import pytest
 import yaml
 from deploy.release import build_recipe
 
+from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_RUNTIME_PINS
+
 REPO = Path(__file__).resolve().parents[3]
 COMMIT = "a" * 40
+# Packaged images already carry their reviewed default pins. Test processes may
+# run under a launcher with its own CLI version; that is not host configuration.
+_RUNTIME_DEFAULT_VARIABLES = {
+    "CLAUDE_CODE_VERSION",
+    "CODEX_VERSION",
+    "PI_VERSION",
+    "OPENCODE_VERSION",
+    "KILO_VERSION",
+}
 
 
 def manifest() -> dict:
@@ -46,7 +57,12 @@ def manifest() -> dict:
         "source_commit": COMMIT,
         "deploy_protocol": "shared-live-exact-sha-v4",
         "artifacts": artifacts,
-        "runtime_catalog": {"codex": {"default": "0.145.0", "versions": ["0.145.0"]}},
+        "runtime_catalog": {
+            "codex": {
+                "default": SHARED_SANDBOX_RUNTIME_PINS["codex"],
+                "versions": [SHARED_SANDBOX_RUNTIME_PINS["codex"]],
+            }
+        },
         "recipe": {
             "url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/test/recipe.tgz",
             "sha256": "b" * 64,
@@ -71,7 +87,10 @@ with log.open("a") as f:
                        "deployed_at": os.getenv("AGENT_WEB_DEPLOYED_AT"),
                        "sandbox": os.getenv("AGENT_SANDBOX_IMAGE"),
                        "edge": os.getenv("AGENT_EDGE_CONFIG_FILE"),
+                       "pgadmin_servers": os.getenv("AGENT_PGADMIN_SERVERS_FILE"),
+                       "pgadmin_entrypoint": os.getenv("AGENT_PGADMIN_ENTRYPOINT_FILE"),
                        "physical_host": os.getenv("AGENT_PHYSICAL_HOST"),
+                       "control_ssh_host": os.getenv("AGENT_CONTROL_PLANE_SSH_HOST"),
                        "runner_host": os.getenv("AGENT_RUNNER_HOST")}) + "\n")
 if "config" in a and "--environment" in a:
     if os.getenv("TEST_REAL_COMPOSE"):
@@ -202,7 +221,7 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     kata_root = tmp_path / "kata-root"
-    kata_root.mkdir()
+    kata_root.mkdir(mode=0o755)
     executable(fake_bin / "docker", f"#!{sys.executable}\n{DOCKER}")
     executable(fake_bin / "git", '#!/bin/sh\necho "git was invoked" >&2\nexit 93\n')
     executable(fake_bin / "curl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_CURL_LOG"\n')
@@ -212,7 +231,14 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         k: v
         for k, v in os.environ.items()
         if not k.startswith(("AGENT_", "COMPOSE_", "TEST_"))
-        and k not in {"DEPLOY_SHA", "REPLICAS", "SIBLING_COMPOSE_PROJECTS", "ALLOW_STRAY_STACK"}
+        and k
+        not in {
+            "DEPLOY_SHA",
+            "REPLICAS",
+            "SIBLING_COMPOSE_PROJECTS",
+            "ALLOW_STRAY_STACK",
+            *_RUNTIME_DEFAULT_VARIABLES,
+        }
     }
     env.update(
         {
@@ -248,6 +274,32 @@ def run(script: Path, env: dict, *arguments: str) -> tuple[subprocess.CompletedP
     return result, calls
 
 
+@pytest.mark.parametrize("custom_definitions", [False, True])
+def test_pgadmin_definitions_resolve_from_recipe_or_operator_override(
+    tmp_path: Path, custom_definitions: bool
+):
+    """The generated Compose file runs outside the extracted recipe directory."""
+    script, env = deployment(tmp_path, "control-plane")
+    definitions = script.parent / "pgadmin-servers.json"
+    entrypoint = script.parent / "pgadmin-entrypoint.py"
+    if custom_definitions:
+        definitions = tmp_path / "custom-servers.json"
+        definitions.write_text('{"Servers": {}}\n')
+        with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
+            config.write(f"AGENT_PGADMIN_SERVERS_FILE={definitions}\n")
+        entrypoint = tmp_path / "custom-pgadmin-entrypoint.py"
+        entrypoint.write_text("# custom pgAdmin entrypoint\n")
+        with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
+            config.write(f"AGENT_PGADMIN_ENTRYPOINT_FILE={entrypoint}\n")
+    result, calls = run(script, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    activation = next(call for call in calls if "--remove-orphans" in call["args"])
+    assert activation["pgadmin_servers"] == str(definitions)
+    assert definitions.is_file()
+    assert activation["pgadmin_entrypoint"] == str(entrypoint)
+    assert entrypoint.is_file()
+
+
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
 def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path, stack: str):
     script, env = deployment(tmp_path, stack)
@@ -273,6 +325,10 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         deployed_at = (state / ".deployed-at").read_text().strip()
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", deployed_at)
         activation = next(c for c in calls if "--remove-orphans" in c["args"])
+        assert (
+            activation["control_ssh_host"]
+            == subprocess.check_output(["hostname", "-f"], text=True).strip()
+        )
         assert activation["deployed_at"] == deployed_at
         preserved = "2026-08-07T12:00:00Z"
         (state / ".deployed-at").write_text(preserved + "\n")
@@ -284,7 +340,11 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert (state / ".shared-live-ready").read_text().strip() == COMMIT
         sandbox = next(a["image"] for a in manifest()["artifacts"] if a["role"] == "sandbox")
         assert any(c["args"] == ["pull", sandbox] for c in calls)
-        drain = next(i for i, c in enumerate(calls) if c["args"][-2:] == ["stop", "runner"])
+        drain = next(
+            i
+            for i, c in enumerate(calls)
+            if c["args"] == ["stop", "--time=-1", "runner-1", "runner-2", "runner-3"]
+        )
         pulls = [
             i
             for i, c in enumerate(calls)
@@ -299,7 +359,51 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert readiness < replace
         assert "--expected-deployment-sha" in calls[readiness]["args"]
         assert COMMIT in calls[readiness]["args"]
+        assert "--draining-host" not in calls[readiness]["args"]
         assert "/agents" in Path(env["TEST_CURL_LOG"]).read_text()
+
+
+@pytest.mark.parametrize("source", ["environment", "dotenv"])
+def test_control_plane_preserves_an_explicit_ssh_address(tmp_path: Path, source: str):
+    script, env = deployment(tmp_path, "control-plane")
+    address = "control-ssh.example.org"
+    if source == "environment":
+        env["AGENT_CONTROL_PLANE_SSH_HOST"] = address
+    else:
+        with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as config:
+            config.write(f"AGENT_CONTROL_PLANE_SSH_HOST={address}\n")
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    activation = next(call for call in calls if "--remove-orphans" in call["args"])
+    assert activation["control_ssh_host"] == address
+
+
+def test_control_plane_defaults_to_node_hostname_when_fqdn_is_unavailable(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    executable(
+        tmp_path / "bin/hostname",
+        '#!/bin/sh\nif [ "$1" = "-f" ]; then exit 1; fi\nprintf "service-node\\n"\n',
+    )
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    activation = next(call for call in calls if "--remove-orphans" in call["args"])
+    assert activation["control_ssh_host"] == "service-node"
+
+
+def test_control_readiness_accepts_the_exact_draining_host(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    env["AGENT_DEPLOY_DRAINING_HOST"] = "runner-draining"
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    readiness = next(call for call in calls if "cloud_agent.deploy_readiness" in call["args"])
+    index = readiness["args"].index("--draining-host")
+    assert readiness["args"][index + 1] == "runner-draining"
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
@@ -565,18 +669,6 @@ def test_the_phases_together_do_what_one_invocation_does(tmp_path: Path, stack: 
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
-def test_no_phase_is_the_whole_deployment_it_always_was(tmp_path: Path, stack: str):
-    """Every existing caller passes a commit and nothing else."""
-    script, env = deployment(tmp_path, stack)
-
-    result, calls = run(script, env)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == COMMIT
-    assert any(replaces_something(c) for c in calls), "it still replaces the stack"
-
-
-@pytest.mark.parametrize("stack", ["control-plane", "host"])
 def test_an_unknown_phase_is_refused_before_anything_runs(tmp_path: Path, stack: str):
     script, env = deployment(tmp_path, stack)
 
@@ -815,6 +907,39 @@ def test_compute_overlay_is_packaged_and_enabled_by_persistent_configuration(tmp
     assert compose_calls
     assert all(overlay in args for args in compose_calls if "config" not in args)
     assert (script.parent / "compute.example.json").is_file()
+
+
+def test_control_plane_generates_one_persistent_compute_encryption_key(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
+    assert "AGENT_COMPUTE_SECRET_KEY=" not in dotenv.read_text()
+
+    first, _ = run(script, env, "--phase", "prepare", COMMIT)
+    assert first.returncode == 0, first.stdout + first.stderr
+    values = dict(line.split("=", 1) for line in dotenv.read_text().splitlines() if "=" in line)
+    generated = values["AGENT_COMPUTE_SECRET_KEY"]
+    assert re.fullmatch(r"[a-f0-9]{64}", generated)
+    assert dotenv.stat().st_mode & 0o077 == 0
+    assert generated not in first.stdout + first.stderr
+
+    second, _ = run(script, env, "--phase", "prepare", COMMIT)
+    assert second.returncode == 0, second.stdout + second.stderr
+    repeated = dict(line.split("=", 1) for line in dotenv.read_text().splitlines() if "=" in line)
+    assert repeated["AGENT_COMPUTE_SECRET_KEY"] == generated
+
+
+def test_control_plane_preserves_an_existing_compute_encryption_key(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
+    existing = "existing-compute-key-material-0123456789"
+    with dotenv.open("a") as output:
+        output.write(f"AGENT_COMPUTE_SECRET_KEY={existing}\n")
+
+    result, _ = run(script, env, "--phase", "prepare", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dotenv.read_text().splitlines().count(f"AGENT_COMPUTE_SECRET_KEY={existing}") == 1
+    assert "generated and persisted" not in result.stdout
 
 
 def test_compute_overlay_gives_credentials_and_mount_only_to_main_control_plane(tmp_path: Path):

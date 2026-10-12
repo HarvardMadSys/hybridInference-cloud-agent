@@ -12,6 +12,7 @@ import { getConversationState, toConversationState } from './conversationState';
 import {
   lifecyclePhaseLabel,
   ownerFailureMessage,
+  siteMisconfiguredReason,
   toDiffFileDetails,
   toDiffFiles,
   toDisplayEvent,
@@ -117,6 +118,21 @@ describe('owner failure wording', () => {
     expect(ownerFailureMessage(detail)).toBe('The sandbox failed while running this response.');
   });
 
+  it('keeps a site misconfiguration in its own words and marks it for an admin', () => {
+    // The runner's SITE_MISCONFIGURED_MCP, verbatim.
+    const detail =
+      'Site misconfigured: this chat uses connected tools, but the server that ran it ' +
+      'has no MCP relay. Ask an admin to finish setting up the site.';
+    expect(ownerFailureMessage(detail)).toBe(detail);
+    const job = toDisplayJob({ ...JOB, state: 'failed', detail }, {});
+    expect(job.stateNote).toBe(detail);
+    expect(job.failureCause).toBe('site_misconfigured');
+    expect(siteMisconfiguredReason(detail)).toBe(
+      'This chat uses connected tools, but the server that ran it has no MCP relay. ' +
+        'Ask an admin to finish setting up the site.',
+    );
+  });
+
   it('distinguishes execution timeout and cancellation from connection failure', () => {
     expect(ownerFailureMessage('shared Agent CLI turn exceeded its execution timeout')).toBe(
       'This response took too long and was stopped.',
@@ -204,6 +220,14 @@ describe('conversation display state', () => {
 });
 
 describe('toDisplayEvent', () => {
+  it('preserves recorded reasoning text separately from assistant output', () => {
+    expect(toDisplayEvent(event(1, 'thinking', { text: 'Check the failing assertion.' }))).toEqual({
+      kind: 'thinking',
+      text: 'Check the failing assertion.',
+      sourceEventId: 1,
+    });
+  });
+
   it('keeps raw runtime protocol events out of the terminal transcript', () => {
     expect(
       toDisplayEvent(
@@ -235,6 +259,39 @@ describe('toDisplayEvent', () => {
   it('renders an interruption without its internal reason', () => {
     const row = toDisplayEvent(event(1, 'attempt_superseded', { reason: 'lease_expired' }));
     expect(row).toEqual({ kind: 'lifecycle', text: 'attempt_superseded', sourceEventId: 1 });
+  });
+
+  it('shows every provider retry with its reported delay and attempt', () => {
+    for (const [attempt, delay] of [
+      [1, 5000],
+      [2, 10000],
+    ]) {
+      const display = toDisplayEvent(
+        event(attempt, 'lifecycle', {
+          phase: 'api_retry',
+          error_status: 503,
+          attempt,
+          max_retries: 10,
+          retry_delay_ms: delay,
+        }),
+      );
+      const text = `Provider temporarily unavailable. Retrying in ${delay / 1000}s (retry ${attempt} of 10).`;
+      expect(display).toEqual({ kind: 'lifecycle', text, sourceEventId: attempt });
+      expect(lifecyclePhaseLabel(text).milestone).toBe(false);
+    }
+  });
+
+  it.each([
+    [{ retry_delay_ms: 0, attempt: 1 }, 'Retrying now (retry 1).'],
+    [{ retry_delay_ms: 4500 }, 'Retrying in 5s.'],
+    [{}, 'Retrying model request.'],
+    [{ retry_delay_ms: -1, attempt: '2', max_retries: Number.NaN }, 'Retrying model request.'],
+  ])('does not invent missing retry timing or counts: %j', (payload, text) => {
+    expect(toDisplayEvent(event(1, 'lifecycle', { phase: 'api_retry', ...payload }))).toEqual({
+      kind: 'lifecycle',
+      text,
+      sourceEventId: 1,
+    });
   });
 
   it('keeps rate-limit warnings while hiding normal allowance events', () => {
@@ -280,12 +337,12 @@ describe('toDisplayEvent', () => {
     expect(toDisplayEvent(event(1, 'diff'))).toBeNull();
   });
 
-  it('reads a command and completion output from normalized Codex events', () => {
+  it('keeps complete tool arguments alongside a compact command and completion output', () => {
     expect(
       toDisplayEvent(
         event(1, 'tool_use', {
           name: 'command_execution',
-          input: { command: 'pytest -q' },
+          input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
           output: '1 passed',
           exit_code: 0,
         }),
@@ -295,6 +352,7 @@ describe('toDisplayEvent', () => {
       tool: 'command_execution',
       id: undefined,
       detail: 'pytest -q',
+      input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
       output: ['1 passed'],
       sourceEventId: 1,
     });
@@ -336,6 +394,235 @@ describe('toDisplayEvent', () => {
       });
       expect(lifecyclePhaseLabel(phase).milestone).toBe(true);
     }
+  });
+});
+
+describe('recorded reasoning', () => {
+  const notification = (
+    id: number,
+    method: string,
+    params: Record<string, unknown>,
+    attemptId = 1,
+  ) =>
+    event(id, 'raw', { protocol: 'codex-app-server', notification: { method, params } }, attemptId);
+
+  it('keeps consecutive reasoning blocks and the answer as distinct rows', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'thinking', { text: 'First recorded block.', usage_id: 'response' }),
+        event(2, 'thinking', { text: 'Second recorded block.', usage_id: 'response' }),
+        event(3, 'message', { text: 'The result.', usage_id: 'response' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      { kind: 'thinking', text: 'First recorded block.', sourceEventId: 1, attemptNo: 1 },
+      { kind: 'thinking', text: 'Second recorded block.', sourceEventId: 2, attemptNo: 1 },
+      { kind: 'message', text: 'The result.', sourceEventId: 3, attemptNo: 1 },
+    ]);
+  });
+
+  it('folds native deltas, snapshots and completion into the first stored row', () => {
+    const events = [
+      notification(1, 'item/started', { item: { id: 'r', type: 'reasoning' } }),
+      notification(2, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'First ' }),
+      notification(3, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'pass.' }),
+    ];
+    const live = toDisplayJob(JOB, { events }).events;
+    expect(live).toEqual([
+      {
+        kind: 'thinking',
+        text: 'First pass.',
+        reasoningBlocks: [{ channel: 'summary', text: 'First pass.' }],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+    const complete = toDisplayJob(JOB, {
+      events: [
+        ...events,
+        notification(4, 'item/updated', {
+          item: { id: 'r', type: 'reasoning', summary: ['A revised plan.'] },
+        }),
+        event(5, 'thinking', { native_item_id: 'r', text: 'The complete plan.' }),
+        event(6, 'message', { text: 'Done.' }),
+      ],
+    }).events;
+    expect(complete).toEqual([
+      {
+        ...live[0],
+        text: 'The complete plan.',
+        reasoningBlocks: [{ channel: 'summary', text: 'The complete plan.' }],
+      },
+      { kind: 'message', text: 'Done.', sourceEventId: 6, attemptNo: 1 },
+    ]);
+  });
+
+  it('preserves summary and detailed reasoning channels through completion', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Short plan.' }),
+        notification(2, 'item/reasoning/textDelta', { itemId: 'r', delta: 'Detailed ' }),
+        notification(3, 'item/reasoning/textDelta', { itemId: 'r', delta: 'reasoning.' }),
+        event(4, 'thinking', { native_item_id: 'r', text: 'Complete summary.' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Complete summary.\n\nDetailed reasoning.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Complete summary.' },
+          { channel: 'reasoning', text: 'Detailed reasoning.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('reads both channels from native item snapshots without normalized completion', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/started', { item: { id: 'r', type: 'reasoning' } }),
+        notification(2, 'item/completed', {
+          item: {
+            id: 'r',
+            type: 'reasoning',
+            summary: ['Summary one.', 'Summary two.'],
+            content: ['Detailed text.'],
+          },
+        }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Summary one.\nSummary two.\n\nDetailed text.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Summary one.\nSummary two.' },
+          { channel: 'reasoning', text: 'Detailed text.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('keeps indexed channel parts ordered through snapshots and later deltas', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/started', {
+          item: { id: 'r', type: 'reasoning', summary: ['First', 'Second'] },
+        }),
+        notification(2, 'item/reasoning/summaryTextDelta', {
+          itemId: 'r',
+          summaryIndex: 0,
+          delta: ' expanded.',
+        }),
+        notification(3, 'item/reasoning/summaryTextDelta', {
+          itemId: 'r',
+          summaryIndex: 1,
+          delta: ' expanded.',
+        }),
+        notification(4, 'item/reasoning/textDelta', {
+          itemId: 'r',
+          contentIndex: 1,
+          delta: 'Later detail.',
+        }),
+        notification(5, 'item/reasoning/textDelta', {
+          itemId: 'r',
+          contentIndex: 0,
+          delta: 'Earlier detail.',
+        }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'First expanded.\nSecond expanded.\n\nEarlier detail.\nLater detail.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'First expanded.\nSecond expanded.' },
+          { channel: 'reasoning', text: 'Earlier detail.\nLater detail.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('scopes reused native IDs and empty statuses to their attempt', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'First.' }),
+        notification(2, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Second.' }, 2),
+        event(3, 'thinking', {}, 2),
+        event(4, 'thinking', {}, 3),
+      ],
+    }).events;
+    expect(rows.map((row) => [row.kind, 'text' in row ? row.text : '', row.attemptNo])).toEqual([
+      ['thinking', 'First.', 1],
+      ['thinking', 'Second.', 2],
+      ['thinking', '', 2],
+      ['thinking', '', 3],
+    ]);
+  });
+
+  it('suppresses delegated reasoning and projects no extra assistant message fragments', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'thinking', { text: 'Delegated plan.', parent_tool_use_id: 'task' }),
+        {
+          ...notification(2, 'item/reasoning/summaryTextDelta', {
+            itemId: 'child',
+            delta: 'Child.',
+          }),
+          payload: {
+            ...notification(2, 'item/reasoning/summaryTextDelta', {
+              itemId: 'child',
+              delta: 'Child.',
+            }).payload,
+            parent_tool_use_id: 'task',
+          },
+        },
+        notification(3, 'item/agentMessage/delta', { itemId: 'm', delta: 'Raw duplicate.' }),
+        event(4, 'raw', { protocol: 'reply-preview', preview_id: 'm', delta: 'The answer.' }),
+        event(5, 'message', { text: 'The answer.', preview_id: 'm', native_item_id: 'm' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      { kind: 'message', text: 'The answer.', previewId: 'm', sourceEventId: 4, attemptNo: 1 },
+    ]);
+  });
+
+  it('joins historical deltas only when the same attempt recorded their native owner', () => {
+    const historical = (id: number, attemptId: number) =>
+      event(
+        id,
+        'raw',
+        {
+          text: JSON.stringify({
+            method: 'item/reasoning/summaryTextDelta',
+            params: { itemId: 'r', delta: 'Partial ' },
+          }),
+        },
+        attemptId,
+      );
+    const rows = toDisplayJob(JOB, {
+      events: [
+        historical(1, 1),
+        historical(2, 2),
+        event(3, 'thinking', { native_item_id: 'r', text: 'Complete.' }, 2),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Complete.',
+        reasoningBlocks: [{ channel: 'summary', text: 'Complete.' }],
+        sourceEventId: 2,
+        attemptNo: 2,
+      },
+    ]);
   });
 });
 
@@ -1026,6 +1313,42 @@ describe('toDisplayJob', () => {
 
     expect(job.prUrl).toBe('https://github.com/o/n/pull/44');
     expect(job.prLabel).toBe('draft PR 44');
+  });
+
+  it('opens the latest session PR when an earlier turn has the closed PR URL', () => {
+    const previous = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 1,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const current = {
+      ...previous,
+      id: 'ajob_2',
+      turn_no: 2,
+      published_pr_url: 'https://github.com/o/n/pull/45',
+    };
+    const job = toDisplayJob(previous, {
+      thread: { thread_id: 'thread_1', jobs: [previous, current], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/45');
+    expect(job.prLabel).toBe('draft PR 45');
+  });
+
+  it('keeps a fresh PR update while the thread read still has the earlier URL', () => {
+    const stale = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 2,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const fresh = { ...stale, published_pr_url: 'https://github.com/o/n/pull/45' };
+    const job = toDisplayJob(fresh, {
+      thread: { thread_id: 'thread_1', jobs: [stale], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/45');
   });
 });
 

@@ -29,15 +29,19 @@ from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
 from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
+from cloud_agent.storage.repositories.pr_archive import PostgresPrArchiveRepository
 from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
 )
 from cloud_agent.storage.repositories.residency import PostgresResidencyRepository
 from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
+from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
 from cloud_agent.storage.repositories.snapshot import PostgresSnapshotRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
+from cloud_agent.storage.repositories.user_memory import PostgresUserMemoryRepository
+from cloud_agent.storage.repositories.web_search import PostgresWebSearchRepository
 
 __all__ = [
     "PostgresAttachmentRepository",
@@ -59,11 +63,15 @@ __all__ = [
     "PostgresMcpConnectionRepository",
     "PostgresOperationMeasurementRepository",
     "PostgresPendingMessageRepository",
+    "PostgresPrArchiveRepository",
     "PostgresProfilingControlRepository",
     "PostgresResidencyRepository",
     "PostgresSandboxRepository",
     "PostgresSessionForkRepository",
+    "PostgresSettingsRepository",
     "PostgresSkillRepository",
     "PostgresSnapshotRepository",
     "PostgresSourceControlRepository",
+    "PostgresUserMemoryRepository",
+    "PostgresWebSearchRepository",
 ]

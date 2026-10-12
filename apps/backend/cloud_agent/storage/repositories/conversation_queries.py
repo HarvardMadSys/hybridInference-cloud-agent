@@ -12,7 +12,9 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.storage._sql.jobs import (
+    CONVERSATION_STATE_SQL,
     JOB_SELECT,
     JOB_SUMMARY_SELECT,
     QUALIFIED_JOB_SUMMARY_COLUMNS,
@@ -125,12 +127,63 @@ class PostgresConversationQueries:
             )
         return job_row_to_dict(row) if row else None
 
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        """Read only an owned job's state and publication URL for its event stream.
+
+        Stream admission checks the full job's ownership and visibility first.
+        Subsequent reads stay scoped to that owner without loading the prompt,
+        conversation configuration, or shared sandbox on each event wake-up.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT state, published_pr_url FROM agent_jobs WHERE id = $1 AND user_id = $2",
+                job_id,
+                user_id,
+            )
+        return JobStreamState(row["state"], row["published_pr_url"]) if row else None
+
+    async def owner_changes(
+        self, *, user_id: str, job_ids: list[str], thread_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The current values an owner's tabs show for these jobs and threads.
+
+        ``jobs`` and ``threads``, each row with its ``revision``. Only rows the
+        owner holds are returned; an id that is missing was removed or is not
+        theirs, and the caller reports it as gone.
+        """
+        jobs: list[asyncpg.Record] = []
+        threads: list[asyncpg.Record] = []
+        async with self._pool.acquire() as conn:
+            if job_ids:
+                jobs = await conn.fetch(
+                    f"""
+                    SELECT j.id, j.thread_id, j.revision, j.state, j.published_pr_url,
+                           {CONVERSATION_STATE_SQL} AS conversation_state
+                    FROM agent_jobs j
+                    WHERE j.user_id = $1 AND j.id = ANY($2::text[])
+                    """,
+                    user_id,
+                    job_ids,
+                )
+            if thread_ids:
+                threads = await conn.fetch(
+                    """
+                    SELECT id, revision, title, title_source, pinned_at, archived_at,
+                           deleted_at, updated_at
+                    FROM agent_threads
+                    WHERE user_id = $1 AND id = ANY($2::text[])
+                    """,
+                    user_id,
+                    thread_ids,
+                )
+        return {"jobs": [dict(row) for row in jobs], "threads": [dict(row) for row in threads]}
+
     async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest turn of this conversation, whatever state it is in.
 
-        Deliberately not :meth:`latest_terminal_turn`: the decision has to be
-        able to see a turn that is still running, because "a person's turn is in
-        flight" is the reason to wait rather than the reason to schedule.
+        Deliberately not only finished turns: the decision has to be able to see
+        a turn that is still running, because "a person's turn is in flight" is
+        the reason to wait rather than the reason to schedule.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -163,40 +216,6 @@ class PostgresConversationQueries:
         )
         return None if row is None else job_row_to_dict(row)
 
-    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The newest finished turn of this conversation, or ``None``.
-
-        The parent an owner-initiated automatic round hangs from. It is not
-        always the newest turn: a queued round can be cancelled, and a
-        conversation resumed afterwards continues the same linear chain from the
-        last turn that actually happened.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"{JOB_SELECT} WHERE j.thread_id = $1 "
-                "AND j.state IN ('succeeded', 'failed', 'cancelled') "
-                # ASC, because ``TRUE > FALSE``: DESC would put the cancelled
-                # turns first, which is the exact opposite of the rule this
-                # orders by. The boolean has to lead — a cancelled round is not
-                # somewhere new work can hang from — and turn_no breaks the tie
-                # among the turns that actually ran.
-                "ORDER BY (j.state = 'cancelled') ASC, j.turn_no DESC LIMIT 1",
-                thread_id,
-            )
-        return None if row is None else job_row_to_dict(row)
-
-    async def latest_assistant_message(self, *, job_id: str) -> str | None:
-        """The last thing this turn said, or ``None`` if it said nothing.
-
-        Ordered by insert, not by time: every assistant message mirrors exactly
-        one ``message`` event, and the insert order *is* the order the runtime
-        emitted them. A turn that produced no assistant text reports ``None``
-        rather than the previous turn's words, which is what makes "no report"
-        distinguishable from "reported".
-        """
-        message = await self.latest_assistant_message_state(job_id=job_id)
-        return None if message is None else message["content"]
-
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         """The last assistant message, and whether the runtime clipped it.
 
@@ -206,6 +225,12 @@ class PostgresConversationQueries:
         clipped one is a message whose answer may have been removed, and reading
         it as silence is exactly the failure the completeness rule exists to
         prevent.
+
+        Ordered by insert, not by time: every assistant message mirrors exactly
+        one ``message`` event, and the insert order *is* the order the runtime
+        emitted them. A turn that produced no assistant text reports ``None``
+        rather than the previous turn's words, which is what makes "no report"
+        distinguishable from "reported".
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -508,7 +533,7 @@ class PostgresConversationQueries:
         """Read a visible thread for the owner's MCP selection surface."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, user_id FROM agent_threads WHERE id = $1 AND deleted_at IS NULL",
+                "SELECT id, user_id, title FROM agent_threads WHERE id = $1 AND deleted_at IS NULL",
                 thread_id,
             )
         return dict(row) if row is not None else None

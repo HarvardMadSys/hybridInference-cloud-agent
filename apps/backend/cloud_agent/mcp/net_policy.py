@@ -52,6 +52,7 @@ _ACTIVE_PINS: ContextVar[Mapping[str, tuple[str, ...]] | None] = ContextVar(
 FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
     {
         "host",
+        "accept-encoding",
         "connection",
         "content-length",
         "cookie",
@@ -71,10 +72,11 @@ FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
 FORBIDDEN_HEADER_PREFIXES: tuple[str, ...] = ("x-forwarded-", "x-real-ip", "forwarded")
 
 #: Addresses that are always refused, whatever the deployment policy says.
-#: Link-local covers the cloud metadata services (``169.254.169.254`` and
-#: ``fd00:ec2::254``); the rest is the platform's own plumbing.
+#: Link-local covers IPv4 cloud metadata services; AWS's IPv6 metadata address
+#: (``fd00:ec2::254``) is blocked explicitly. The rest is the platform's own plumbing.
 ALWAYS_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("::/128"),
     ipaddress.ip_network("ff00::/8"),
@@ -94,7 +96,24 @@ PRIVATE_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
+    # Special-purpose IPv4 space with no public server in it: IETF protocol
+    # assignments, the three documentation ranges, and benchmarking -- which
+    # some networks and fake-IP resolvers use as private space.
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    # Deprecated IPv6 site-local space, and the local-use NAT64 prefix. Where
+    # an operator's translator puts the IPv4 address inside the latter is the
+    # operator's choice, so it cannot be decoded and checked; it is private.
+    ipaddress.ip_network("fec0::/10"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
 )
+
+#: The well-known NAT64 prefix. A translator delivers an address in it to the
+#: IPv4 address in its last 32 bits, which is the address that is checked.
+_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
 
 #: Redirects are followed only to these schemes, and only this many times. A
 #: redirect chain is a way to spend our credential on somebody else's host, so
@@ -138,9 +157,9 @@ class EgressPolicy:
 
     allow_private: bool = False
     allow_plain_http: bool = False
-    #: Extra hosts, exact matches only, that bypass the address checks. For a
-    #: deployment whose connector gateway resolves to a private address the
-    #: operator has decided to trust.
+    #: Extra hosts, exact matches only, that may resolve to private addresses.
+    #: For a deployment whose connector gateway the operator has decided to
+    #: trust. These remain bounded by ALWAYS_BLOCKED_NETWORKS.
     allowed_hosts: frozenset[str] = frozenset()
     max_redirects: int = MAX_REDIRECTS
     #: Hosts a redirect may land on, on top of the request's own origin. Empty
@@ -212,7 +231,10 @@ def normalize_url(raw: str) -> NormalizedEndpoint:
     scheme = parts.scheme.lower()
     host = (parts.hostname or "").lower()
     resolved_port = port or _default_port(scheme)
-    netloc = host if port is None else f"{host}:{port}"
+    # ``hostname`` omits an IPv6 literal's brackets. Keep the bare address for
+    # policy and dial checks, but restore its brackets in URL authorities.
+    authority_host = f"[{host}]" if ":" in host else host
+    netloc = authority_host if port is None else f"{authority_host}:{port}"
     path = parts.path or "/"
     return NormalizedEndpoint(
         url=urlunsplit((scheme, netloc, path, parts.query, "")),
@@ -224,14 +246,39 @@ def normalize_url(raw: str) -> NormalizedEndpoint:
     )
 
 
+def _delivered_to(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    """Every address a packet to ``address`` can end up at, itself included.
+
+    IPv6 has several forms that carry an IPv4 address for a translator or a
+    tunnel to deliver to: IPv4-mapped, NAT64, 6to4 and Teredo. Checking only
+    the IPv6 form would let ``64:ff9b::7f00:1`` reach loopback through a
+    translator, so the IPv4 addresses inside are checked as well. Teredo
+    carries two -- the relay server and the client -- and both are checked.
+    """
+    if not isinstance(address, ipaddress.IPv6Address):
+        return (address,)
+    embedded: list[ipaddress.IPv4Address] = []
+    if address.ipv4_mapped is not None:
+        embedded.append(address.ipv4_mapped)
+    if address in _NAT64_WELL_KNOWN:
+        embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+    if address.sixtofour is not None:
+        embedded.append(address.sixtofour)
+    if address.teredo is not None:
+        embedded.extend(address.teredo)
+    return (address, *embedded)
+
+
 def _blocked_reason(
-    address: ipaddress.IPv4Address | ipaddress.IPv6Address, policy: EgressPolicy
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool
 ) -> str | None:
     """Why one address is refused, or ``None`` when it may be dialled."""
     for network in ALWAYS_BLOCKED_NETWORKS:
         if address.version == network.version and address in network:
             return f"{address} is in a range this platform never dials ({network})"
-    if policy.allow_private:
+    if allow_private:
         return None
     for network in PRIVATE_NETWORKS:
         if address.version == network.version and address in network:
@@ -261,10 +308,6 @@ def check_addresses(
     requests may reach one hostname through different connections, and one
     request's answer must not become another's destination.
     """
-    if host.lower() in policy.allowed_hosts:
-        resolved = tuple(addresses)
-        _pin(host, resolved)
-        return resolved
     resolved = tuple(addresses)
     if not resolved:
         raise EndpointRejected(f"{host} did not resolve to any address", kind="unreachable")
@@ -274,12 +317,14 @@ def check_addresses(
         except ValueError as exc:
             raise EndpointRejected(f"{host} resolved to something that is not an address") from exc
         # An IPv4-mapped IPv6 address (``::ffff:127.0.0.1``) is the classic way
-        # to slip a loopback past an IPv4-only check, so it is unwrapped first.
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-            address = address.ipv4_mapped
-        reason = _blocked_reason(address, policy)
-        if reason is not None:
-            raise EndpointRejected(reason)
+        # to slip a loopback past an IPv4-only check, and NAT64, 6to4 and
+        # Teredo carry an IPv4 address the same way, so each embedded address
+        # is checked alongside the IPv6 one.
+        allow_private = policy.allow_private or host.lower() in policy.allowed_hosts
+        for candidate in _delivered_to(address):
+            reason = _blocked_reason(candidate, allow_private=allow_private)
+            if reason is not None:
+                raise EndpointRejected(reason)
     _pin(host, resolved)
     return resolved
 
@@ -446,6 +491,14 @@ def sanitize_headers(headers: Mapping[str, str], *, max_bytes: int = 8192) -> di
     return cleaned
 
 
+def credential_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Validate credential headers without silently dropping forbidden names."""
+    cleaned = sanitize_headers(headers)
+    if len(cleaned) != len(headers):
+        raise EndpointRejected("a credential cannot use a reserved or forwarding header")
+    return cleaned
+
+
 def resource_covers(resource: str | None, target: str) -> bool:
     """Whether an OAuth ``resource`` value covers the URL being dialled.
 
@@ -476,12 +529,12 @@ def policy_from_environment() -> EgressPolicy:
     private space is reached through a connector, and plain HTTP would put the
     credential on the wire in the clear.
     """
-    import os
+    from cloud_agent.settings import setting_env
 
     return EgressPolicy(
-        allow_private=os.environ.get("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "").lower()
+        allow_private=(setting_env("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "") or "").lower()
         in ("1", "true", "yes"),
-        allow_plain_http=os.environ.get("AGENT_MCP_ALLOW_PLAIN_HTTP", "").lower()
+        allow_plain_http=(setting_env("AGENT_MCP_ALLOW_PLAIN_HTTP", "") or "").lower()
         in ("1", "true", "yes"),
     )
 
@@ -523,6 +576,7 @@ __all__ = [
     "NormalizedEndpoint",
     "UncheckedTarget",
     "check_addresses",
+    "credential_headers",
     "dial_host",
     "dial_spellings",
     "normalize_url",

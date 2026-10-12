@@ -213,7 +213,7 @@ def test_deploy_initializes_with_verified_image_and_only_dedicated_state_mount(
     )
     checking.chmod(0o755)
     root = tmp_path / "root"
-    root.mkdir()
+    root.mkdir(mode=0o755)
     commands = tmp_path / "bin"
     commands.mkdir()
     image_id = "sha256:" + "a" * 64
@@ -231,7 +231,8 @@ def test_deploy_initializes_with_verified_image_and_only_dedicated_state_mount(
         [
             "bash",
             "-c",
-            'set -e; log() { :; }; die() { echo "$*" >&2; exit 1; };\n'
+            'set -e; log() { :; }; die() { echo "$*" >&2; exit 1; }; '
+            'docker() { "$TEST_DOCKER" "$@"; };\n'
             + function
             + '\ninitialize_kata_epoch "trusted-runner:current" kata\n',
         ],
@@ -242,6 +243,7 @@ def test_deploy_initializes_with_verified_image_and_only_dedicated_state_mount(
             "KATA_SETUP_SCRIPT": str(checking),
             "SCRIPT_DIR": str(recipe),
             "EPOCH_TEST_LOG": str(log),
+            "TEST_DOCKER": str(docker),
         },
         text=True,
         capture_output=True,

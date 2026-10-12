@@ -5,9 +5,7 @@ import {
   getAgentJob,
   getAgentJobFiles,
   getAgentJobGit,
-  getAgentJobThread,
   listAllAgentThreadEvents,
-  listAgentJobs,
   listAgentProjects,
   streamAgentJob,
 } from '@/lib/api/agents';
@@ -21,13 +19,23 @@ import type {
   AgentThreadApi,
   AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { toDisplayJob } from './adapt';
+import { createDisplayJobAdapter } from './adapt';
+import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
-import { getConversationState } from './conversationState';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
 import { preserveResolvedTaskTitle, taskTitleNeedsGeneration } from './taskTitles';
+import {
+  onAgentRecordsChanged,
+  overlayPushed,
+  PUSH_FALLBACK_POLL_MS,
+  useAgentPushLive,
+} from './agentPush';
+
+/** First and largest pause before a turn's event stream is opened again. */
+export const STREAM_RETRY_MIN_MS = 1_000;
+export const STREAM_RETRY_MAX_MS = 30_000;
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -111,78 +119,6 @@ export function applyAgentLifecycleEvent(
 // error — the server's SSE cap is finite by design, so a drop is the expected
 // shape and the client resumes from the last event id.
 
-/** List the caller's jobs, refreshed on an interval while any are live. */
-export function useAgentJobList(
-  pollMs = 10_000,
-  archived = false,
-): {
-  jobs: AgentJob[];
-  loading: boolean;
-  error: string | null;
-  reload: () => void;
-} {
-  const [jobs, setJobs] = useState<AgentJob[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const generation = useRef(0);
-
-  const reload = useCallback(() => {
-    generation.current += 1;
-    setTick((value) => value + 1);
-  }, []);
-
-  useEffect(
-    () =>
-      onAgentSessionsChanged((change) => {
-        if (change.deleted || (change.archived !== undefined && change.archived !== archived)) {
-          const changed = new Set(change.threadIds);
-          setJobs((current) => current.filter((job) => !changed.has(job.threadId ?? job.id)));
-        }
-        reload();
-      }),
-    [archived, reload],
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    const requestGeneration = generation.current;
-    listAgentJobs(50, archived)
-      .then((api: AgentJobApi[]) => {
-        if (cancelled || requestGeneration !== generation.current) return;
-        setJobs(api.map((job) => toDisplayJob(job)));
-        setError(null);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled && requestGeneration === generation.current)
-          setError(cause instanceof Error ? cause.message : 'could not load jobs');
-      })
-      .finally(() => {
-        if (!cancelled && requestGeneration === generation.current) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [archived, tick]);
-
-  // Only poll while something can still change; a list of finished jobs does
-  // not need a request every ten seconds.
-  const hasLive = jobs.some(
-    (job) =>
-      getConversationState(job) === 'running' ||
-      getConversationState(job) === 'queued' ||
-      (job.workspaceShared === true &&
-        isActiveWorkspacePublicationState(job.workspacePublicationState)),
-  );
-  useEffect(() => {
-    if (!hasLive) return undefined;
-    const timer = setInterval(reload, pollMs);
-    return () => clearInterval(timer);
-  }, [hasLive, pollMs, reload]);
-
-  return { jobs, loading, error, reload };
-}
-
 /** The caller's projects, for the sidebar's folder tree. */
 export function useAgentProjects(archived = false): {
   projects: AgentProjectApi[];
@@ -227,95 +163,20 @@ export function useAgentProjects(archived = false): {
   return { projects, loading, error, reload };
 }
 
+/** One job, its event log, and its patch — kept live over SSE. */
 /**
- * One project's jobs, fetched on demand.
- *
- * The sidebar's shared job list is a global newest-first page, so a project
- * that has been quiet holds only its most recent turns there. Expanding such a
- * folder pulls that project's own page instead of widening the global one.
+ * Whether a read of the turn's row says that the turn on screen, still active
+ * here, has ended. Such a read is not applied: the turn's own event stream ends
+ * it, after delivering its last events and `job_finished`, which reloads the
+ * conversation. Applying the read would close that stream before them. While
+ * that stream is down, such a read reloads the conversation instead.
  */
-export function useProjectJobs(limit = 200): {
-  jobsByRepo: Map<string, AgentJob[]>;
-  loadingRepos: Set<string>;
-  errorRepos: Map<string, string>;
-  load: (repo: string) => void;
-} {
-  const [jobsByRepo, setJobsByRepo] = useState<Map<string, AgentJob[]>>(new Map());
-  const [loadingRepos, setLoadingRepos] = useState<Set<string>>(new Set());
-  const [errorRepos, setErrorRepos] = useState<Map<string, string>>(new Map());
-  const inFlight = useRef<Map<string, symbol>>(new Map());
-  const requestedRepos = useRef<Set<string>>(new Set());
-
-  const load = useCallback(
-    (repo: string) => {
-      if (inFlight.current.has(repo)) return;
-      requestedRepos.current.add(repo);
-      const request = Symbol(repo);
-      inFlight.current.set(repo, request);
-      setLoadingRepos((current) => new Set(current).add(repo));
-      listAgentJobs(limit, false, repo)
-        .then((api: AgentJobApi[]) => {
-          if (inFlight.current.get(repo) !== request) return;
-          setJobsByRepo((current) =>
-            new Map(current).set(
-              repo,
-              api.map((job) => toDisplayJob(job)),
-            ),
-          );
-          setErrorRepos((current) => {
-            if (!current.has(repo)) return current;
-            const next = new Map(current);
-            next.delete(repo);
-            return next;
-          });
-        })
-        .catch((cause: unknown) => {
-          if (inFlight.current.get(repo) !== request) return;
-          setErrorRepos((current) =>
-            new Map(current).set(
-              repo,
-              cause instanceof Error ? cause.message : 'could not load this project',
-            ),
-          );
-        })
-        .finally(() => {
-          if (inFlight.current.get(repo) !== request) return;
-          inFlight.current.delete(repo);
-          setLoadingRepos((current) => {
-            const next = new Set(current);
-            next.delete(repo);
-            return next;
-          });
-        });
-    },
-    [limit],
+function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): boolean {
+  return (
+    current?.id === latest.id && isActiveJobState(current.state) && !isActiveJobState(latest.state)
   );
-
-  // Completed project pages do not poll. Invalidate both cached rows and any
-  // older request, then refresh every folder the reader has already opened.
-  useEffect(
-    () =>
-      onAgentSessionsChanged(() => {
-        inFlight.current.clear();
-        setJobsByRepo(new Map());
-        setLoadingRepos(new Set());
-        setErrorRepos(new Map());
-        requestedRepos.current.forEach(load);
-      }),
-    [load],
-  );
-
-  useEffect(
-    () => () => {
-      inFlight.current.clear();
-    },
-    [],
-  );
-
-  return { jobsByRepo, loadingRepos, errorRepos, load };
 }
 
-/** One job, its event log, and its patch — kept live over SSE. */
 export function useAgentJob(
   jobId: string,
   {
@@ -346,13 +207,26 @@ export function useAgentJob(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
-  const seen = useRef<Set<number>>(new Set());
+  const reads = useAgentReads();
+  const seen = useRef<Map<number, AgentThreadEventApi>>(new Map());
+  const seenScope = useRef({ jobId, reads });
+  const historyRead = useRef<{
+    jobId: string;
+    events: Map<number, AgentThreadEventApi>;
+    lifecycleEvents: Map<number, AgentThreadEventApi>;
+  } | null>(null);
   const generation = useRef(0);
+  const loadedStreamCursor = useRef<{
+    jobId: string;
+    reads: typeof reads;
+    cursor: number;
+  } | null>(null);
 
   const reload = useCallback(() => {
+    reads.invalidate(jobId);
     generation.current += 1;
     setTick((value) => value + 1);
-  }, []);
+  }, [jobId, reads]);
 
   useEffect(
     () =>
@@ -380,19 +254,70 @@ export function useAgentJob(
     if (!active || !jobId) return undefined;
     let cancelled = false;
     const requestGeneration = generation.current;
-    seen.current = new Set();
+    if (seenScope.current.jobId !== jobId || seenScope.current.reads !== reads) {
+      seen.current = new Map();
+      seenScope.current = { jobId, reads };
+    }
+    const read = {
+      jobId,
+      events: new Map(seen.current),
+      lifecycleEvents: new Map<number, AgentThreadEventApi>(),
+    };
+    historyRead.current = read;
     setPatch(null);
     setLoading(true);
 
-    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId), listAllAgentThreadEvents(jobId)])
-      .then(([job, foundThread, foundEvents]) => {
-        if (cancelled || requestGeneration !== generation.current) return;
-        const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
-        setApi((current) => preserveResolvedTaskTitle(current, job));
+    // The turn's row is read before its events. A turn stores every event
+    // before it ends, so events read after a row that says it ended are all
+    // of them; read alongside, they could predate an end the row then reports,
+    // and the turn would end on screen without its last events.
+    Promise.all([reads.getAgentJob(jobId), reads.getAgentJobThread(jobId)])
+      .then(async ([job, foundThread]) => {
+        if (cancelled || requestGeneration !== generation.current) return null;
+        return [job, foundThread, await listAllAgentThreadEvents(jobId)] as const;
+      })
+      .then((snapshot) => {
+        if (!snapshot || cancelled || requestGeneration !== generation.current) return;
+        const [job, foundThread, foundEvents] = snapshot;
+        // The existing stream stays open during a same-turn reload. Its events
+        // can arrive after the history snapshot was taken but before this read
+        // returns; replacing state with that snapshot would discard them while
+        // the stream's resume cursor has already advanced past them.
+        const merged = new Map(foundEvents.map((event) => [event.id, event]));
+        const replay = new Map(read.lifecycleEvents);
+        for (const [id, event] of read.events) {
+          if (!merged.has(id)) replay.set(id, event);
+        }
+        for (const [id, event] of read.events) merged.set(id, event);
+        const completeEvents = [...merged.values()].sort((left, right) => left.id - right.id);
+        if (historyRead.current === read) historyRead.current = null;
+        const ownEvents = completeEvents.filter((event) => event.job_id === jobId);
+        let cursor = 0;
+        for (const event of ownEvents) cursor = Math.max(cursor, event.id);
+        loadedStreamCursor.current = { jobId, reads, cursor };
+        let latest = overlayPushed(job);
+        // A queued/running row can also predate the lifecycle frame received
+        // during this read. Apply new frames in stream order, while leaving a
+        // terminal row and a newer attempt/publication phase authoritative.
+        if (isActiveJobState(latest.state)) {
+          for (const event of [...replay.values()].sort((a, b) => a.id - b.id)) {
+            if (latest.current_attempt_id != null && event.attempt_id < latest.current_attempt_id)
+              continue;
+            if (
+              latest.state === 'publishing' &&
+              latest.current_attempt_id === event.attempt_id &&
+              event.event_type === 'lifecycle' &&
+              ACTIVE_ATTEMPT_PHASES.has(String(event.payload?.phase))
+            )
+              continue;
+            latest = applyAgentLifecycleEvent(latest, event);
+          }
+        }
+        setApi((current) => preserveResolvedTaskTitle(current, latest));
         setEvents(ownEvents);
-        setThreadEvents(foundEvents);
+        setThreadEvents(completeEvents);
         setThread(foundThread);
-        ownEvents.forEach((event) => seen.current.add(event.id));
+        ownEvents.forEach((event) => seen.current.set(event.id, event));
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -400,13 +325,15 @@ export function useAgentJob(
           setError(cause instanceof Error ? cause.message : 'could not load the job');
       })
       .finally(() => {
+        if (historyRead.current === read) historyRead.current = null;
         if (!cancelled && requestGeneration === generation.current) setLoading(false);
       });
 
     return () => {
       cancelled = true;
+      if (historyRead.current === read) historyRead.current = null;
     };
-  }, [active, jobId, tick]);
+  }, [active, jobId, reads, tick]);
 
   // Diff state belongs to the retained group workspace, not to a per-turn
   // artifact uploaded by the runner. Fork siblings therefore see the same
@@ -432,51 +359,148 @@ export function useAgentJob(
 
   // Live events. Terminal jobs have nothing more to say, so no stream is
   // opened for them at all.
-  const isLive = isActiveJobState(state);
+  // A metadata push can arrive before the initial history read. Subscribe
+  // after that snapshot, resuming only from this owner's selected turn, so
+  // its stored backlog is not transferred and parsed a second time.
+  const loadedCursor = loadedStreamCursor.current;
+  const isLive =
+    isActiveJobState(state) && loadedCursor?.jobId === jobId && loadedCursor.reads === reads;
   const currentTurnNo =
     api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
+  // Whether this turn's own stream is open or opening. Only then is the end of
+  // the turn left to it; while it is down, a read saying the turn ended reads
+  // the conversation whole, which ends it with every event it stored.
+  const streaming = useRef(false);
+  const streamFailures = useRef(0);
+  const [streamAttempt, setStreamAttempt] = useState(0);
+  useEffect(() => {
+    streamFailures.current = 0;
+  }, [jobId]);
   useEffect(() => {
     if (!active || !jobId || !isLive) return undefined;
     const controller = new AbortController();
+    let finished = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    streaming.current = true;
     void streamAgentJob(jobId, {
       signal: controller.signal,
+      lastEventId:
+        loadedStreamCursor.current?.jobId === jobId && loadedStreamCursor.current.reads === reads
+          ? loadedStreamCursor.current.cursor
+          : 0,
       onEvent: (event) => {
+        streamFailures.current = 0;
+        const threadEvent = { ...event, job_id: jobId, turn_no: currentTurnNo };
+        if (historyRead.current?.jobId === jobId) {
+          historyRead.current.events.set(event.id, threadEvent);
+        }
         // The stream can replay across a reconnect, so dedupe on the global id
         // the server assigns rather than assuming each frame is new.
         if (seen.current.has(event.id)) return;
-        seen.current.add(event.id);
+        seen.current.set(event.id, threadEvent);
+        if (historyRead.current?.jobId === jobId) {
+          historyRead.current.lifecycleEvents.set(event.id, threadEvent);
+        }
         setEvents((current) => [...current, event]);
-        setThreadEvents((current) => [
-          ...current,
-          { ...event, job_id: jobId, turn_no: currentTurnNo },
-        ]);
+        setThreadEvents((current) => [...current, threadEvent]);
         // The stream is also the fastest authority for a queued child
         // becoming active; keep the status pill in step without polling.
         setApi((current) => (current ? applyAgentLifecycleEvent(current, event) : current));
       },
-      onFinished: () => reload(),
-    }).catch(() => {
-      // A dropped stream is the expected shape when the server's cap fires;
-      // the reload picks up anything missed.
-      if (!controller.signal.aborted) reload();
+      onFinished: () => {
+        finished = true;
+        streamFailures.current = 0;
+        reload();
+      },
+    })
+      .catch(() => undefined)
+      .then(() => {
+        if (controller.signal.aborted || finished) return;
+        // The stream could not connect, or failed (it reconnects by itself
+        // after a drop mid-stream). Read the conversation again, which ends
+        // the turn if it has ended, and open the stream again after a pause.
+        streaming.current = false;
+        reload();
+        const pause = Math.min(
+          STREAM_RETRY_MAX_MS,
+          STREAM_RETRY_MIN_MS * 2 ** streamFailures.current,
+        );
+        streamFailures.current += 1;
+        retry = setTimeout(() => setStreamAttempt((attempt) => attempt + 1), pause);
+      });
+    return () => {
+      streaming.current = false;
+      controller.abort();
+      clearTimeout(retry);
+    };
+  }, [active, currentTurnNo, jobId, isLive, reads, reload, streamAttempt]);
+
+  // The turn on screen, for the reads below that decide outside a state update.
+  const shownApi = useRef<AgentJobApi | null>(null);
+  useEffect(() => {
+    shownApi.current = api;
+  }, [api]);
+
+  // The owner's change stream reports this conversation's title, and any turn
+  // of it changing. What it sends is patched in at once; the turn's own row is
+  // then read for the fields a push does not carry (detail, goal, attempt).
+  const pushLive = useAgentPushLive();
+  const pushThreadId = api?.id === jobId ? api.thread_id : undefined;
+  useEffect(() => {
+    if (!active || !jobId) return undefined;
+    let cancelled = false;
+    let latestRead = 0;
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      const touched =
+        change.resync ||
+        change.jobs.some(
+          (job) =>
+            job.id === jobId || (pushThreadId !== undefined && job.thread_id === pushThreadId),
+        ) ||
+        change.threads.some((thread) => thread.id === pushThreadId) ||
+        (pushThreadId != null && change.publications.includes(pushThreadId));
+      if (!touched) return;
+      setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
+      const read = ++latestRead;
+      void getAgentJob(jobId)
+        .then((latest) => {
+          if (cancelled || read !== latestRead) return;
+          if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
+            reload();
+            return;
+          }
+          setApi((current) =>
+            endsStreamingTurn(current, latest)
+              ? current
+              : preserveResolvedTaskTitle(current, overlayPushed(latest)),
+          );
+        })
+        .catch(() => {
+          // The next change, or the fallback clock below, reads it again.
+        });
     });
-    return () => controller.abort();
-  }, [active, currentTurnNo, jobId, isLive, reload]);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [active, jobId, pushThreadId, reload]);
 
   // A claim may recover an earlier failed title, including on a follow-up.
   // Outlast the server's bounded 120s retry window without waiting for SSE to end.
+  // While pushes flow, the generated title arrives with its conversation's row.
   const awaitingTitle =
     api?.id === jobId &&
     taskTitleNeedsGeneration(api) &&
     (state === 'running' || state === 'publishing' || state === 'succeeded');
   useEffect(() => {
-    if (!active || !awaitingTitle) return;
+    if (!active || !awaitingTitle || pushLive) return;
     let cancelled = false;
     let requests = 0;
     let pending = false;
     const version = generation.current;
-    const timer = setInterval(() => {
-      if (pending) return;
+    const read = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (pending || requests >= 65) return;
       pending = true;
       if (++requests >= 65) clearInterval(timer);
       void getAgentJob(jobId)
@@ -510,12 +534,15 @@ export function useAgentJob(
         .finally(() => {
           pending = false;
         });
-    }, 2_000);
+    };
+    const timer = setInterval(read, 2_000);
+    document.addEventListener('visibilitychange', read);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
     };
-  }, [active, awaitingTitle, jobId, tick]);
+  }, [active, awaitingTitle, jobId, pushLive, tick]);
 
   // A queued or terminal turn's stream cannot report another turn finishing.
   // Refresh shared activity until this turn takes over or the conversation
@@ -532,12 +559,14 @@ export function useAgentJob(
     (publicationActive ||
       goalActive ||
       (state !== 'running' && state !== 'publishing' && conversationActive));
+  const metadataInterval = pushLive ? PUSH_FALLBACK_POLL_MS : 5_000;
   useEffect(() => {
     if (!active || !jobId || !metadataActive) return undefined;
     let cancelled = false;
     let pending = false;
     const version = generation.current;
-    const timer = setInterval(() => {
+    const read = () => {
+      if (document.visibilityState === 'hidden') return;
       if (pending) return;
       pending = true;
       // These updates change only fields on the job row. Fetching the complete
@@ -545,8 +574,16 @@ export function useAgentJob(
       // briefly reset unrelated UI state for no benefit.
       void getAgentJob(jobId)
         .then((latest) => {
-          if (!cancelled && generation.current === version)
-            setApi((current) => preserveResolvedTaskTitle(current, latest));
+          if (cancelled || generation.current !== version) return;
+          if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
+            reload();
+            return;
+          }
+          setApi((current) =>
+            endsStreamingTurn(current, latest)
+              ? current
+              : preserveResolvedTaskTitle(current, overlayPushed(latest)),
+          );
         })
         .catch(() => {
           // This is a background freshness aid. Keep the last good terminal
@@ -555,12 +592,15 @@ export function useAgentJob(
         .finally(() => {
           pending = false;
         });
-    }, 5_000);
+    };
+    const timer = setInterval(read, metadataInterval);
+    document.addEventListener('visibilitychange', read);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
     };
-  }, [active, jobId, metadataActive, tick]);
+  }, [active, jobId, metadataActive, metadataInterval, reload, tick]);
 
   const visibleThread = useMemo(() => {
     if (!hideForkedHistory || !thread) return thread;
@@ -572,9 +612,14 @@ export function useAgentJob(
       messages: thread.messages.filter((message) => own.has(message.job_id)),
     };
   }, [hideForkedHistory, thread]);
+  const adapter = useMemo(
+    () => ({ jobId, reads, project: createDisplayJobAdapter() }),
+    [jobId, reads],
+  );
   const job = useMemo(
-    () => (api ? toDisplayJob(api, { events, patch, thread: visibleThread, threadEvents }) : null),
-    [api, events, patch, visibleThread, threadEvents],
+    () =>
+      api ? adapter.project(api, { events, patch, thread: visibleThread, threadEvents }) : null,
+    [adapter, api, events, patch, visibleThread, threadEvents],
   );
   // The turn rows come from the thread read, which is a snapshot: a live
   // attempt replacement updates `api` and would otherwise leave the inspector
@@ -607,12 +652,17 @@ export interface WorkspaceFilesState {
   directories: Record<string, WorkspaceDirectory>;
   expanded: Record<string, boolean>;
   selected: string | null;
+  /** A directly opened folder remains browsable even when a parent listing omits it. */
+  directoryPath: string | null;
   file: AgentJobFileApi | AgentJobSymlinkApi | null;
   fileLoading: boolean;
   fileError: string | null;
   source: 'workspace' | null;
   toggleDirectory: (path: string) => void;
+  retryDirectory: (path: string) => void;
   openFile: (path: string) => void;
+  retryFile: () => void;
+  showRootDirectory: () => void;
   closeFile: () => void;
   reload: () => void;
 }
@@ -625,7 +675,8 @@ const filesError = (cause: unknown): string =>
  *
  * Each directory is one request, cached under its path, so expanding a folder
  * never discards the rest of the tree. A refresh (job state change, or a save)
- * refetches the root, every open folder and the open file — nothing else.
+ * refetches the root, every open folder and the open file. Closed folders are
+ * marked stale and refetched when they are next opened.
  */
 export function useWorkspaceFiles(
   jobId: string,
@@ -635,6 +686,7 @@ export function useWorkspaceFiles(
   const [directories, setDirectories] = useState<Record<string, WorkspaceDirectory>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<string | null>(null);
+  const [directoryPath, setDirectoryPath] = useState<string | null>(null);
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -645,6 +697,9 @@ export function useWorkspaceFiles(
   // A refresh invalidates every in-flight request: results from an older
   // generation belong to a workspace state the user is no longer looking at.
   const generation = useRef(0);
+  const directoryGenerations = useRef(new Map<string, number>());
+  const directoryRequests = useRef(new Map<string, { generation: number; request: number }>());
+  const directoryRequest = useRef(0);
   const fileRequest = useRef(0);
   const alive = useRef(true);
   const expandedRef = useRef(expanded);
@@ -665,13 +720,21 @@ export function useWorkspaceFiles(
   const loadDirectory = useCallback(
     async (path: string) => {
       const mine = generation.current;
+      if (directoryRequests.current.get(path)?.generation === mine) return;
+      const request = ++directoryRequest.current;
+      directoryRequests.current.set(path, { generation: mine, request });
+      const isCurrent = () =>
+        alive.current &&
+        mine === generation.current &&
+        directoryRequests.current.get(path)?.request === request;
       setDirectories((current) => ({
         ...current,
         [path]: { entries: current[path]?.entries ?? null, loading: true, error: null },
       }));
       try {
         const node = await getAgentJobFiles(jobId, path);
-        if (!alive.current || mine !== generation.current) return;
+        if (!isCurrent()) return;
+        directoryGenerations.current.set(path, mine);
         setDirectories((current) => ({
           ...current,
           [path]: {
@@ -682,11 +745,14 @@ export function useWorkspaceFiles(
         }));
         if (path === '') setSource(node.source ?? null);
       } catch (cause) {
-        if (!alive.current || mine !== generation.current) return;
+        if (!isCurrent()) return;
         setDirectories((current) => ({
           ...current,
           [path]: { entries: null, loading: false, error: filesError(cause) },
         }));
+      } finally {
+        if (directoryRequests.current.get(path)?.request === request)
+          directoryRequests.current.delete(path);
       }
     },
     [jobId],
@@ -704,14 +770,28 @@ export function useWorkspaceFiles(
         const node = await getAgentJobFiles(jobId, path);
         if (!isCurrent()) return;
         if (node.kind === 'directory') {
-          // The entry turned out to be a directory — show it in the tree.
+          // A typed folder may have parents that the tree has never loaded.
+          // Reveal them too, using the path accepted by the workspace API.
+          const parts = node.path.split('/').filter(Boolean);
+          const ancestors = parts.map((_, index) => parts.slice(0, index + 1).join('/'));
+          directoryRequests.current.delete(node.path);
+          directoryGenerations.current.set(node.path, mine);
           setDirectories((current) => ({
             ...current,
-            [path]: { entries: node.entries ?? [], loading: false, error: null },
+            [node.path]: { entries: node.entries ?? [], loading: false, error: null },
           }));
-          setExpanded((current) => ({ ...current, [path]: true }));
+          setExpanded((current) => ({
+            ...current,
+            ...Object.fromEntries(ancestors.map((ancestor) => [ancestor, true])),
+          }));
+          for (const ancestor of ancestors.slice(0, -1)) {
+            if (directoryGenerations.current.get(ancestor) !== mine) void loadDirectory(ancestor);
+          }
           setSelected(null);
+          setDirectoryPath(node.path);
+          selectedRef.current = null;
           setFile(null);
+          if (node.source) setSource(node.source);
         } else {
           setFile(node);
         }
@@ -723,7 +803,7 @@ export function useWorkspaceFiles(
         if (isCurrent()) setFileLoading(false);
       }
     },
-    [jobId],
+    [jobId, loadDirectory],
   );
 
   useEffect(() => {
@@ -745,13 +825,21 @@ export function useWorkspaceFiles(
     (path: string) => {
       const open = Boolean(expanded[path]);
       setExpanded((current) => ({ ...current, [path]: !open }));
-      if (!open && !directories[path]?.entries) void loadDirectory(path);
+      if (
+        !open &&
+        (!directories[path]?.entries ||
+          directoryGenerations.current.get(path) !== generation.current) &&
+        directoryRequests.current.get(path)?.generation !== generation.current
+      ) {
+        void loadDirectory(path);
+      }
     },
     [directories, expanded, loadDirectory],
   );
 
   const openFile = useCallback(
     (path: string) => {
+      selectedRef.current = path;
       setSelected(path);
       setFile(null);
       void loadFile(path);
@@ -761,22 +849,45 @@ export function useWorkspaceFiles(
 
   const closeFile = useCallback(() => {
     fileRequest.current += 1;
+    selectedRef.current = null;
     setSelected(null);
     setFile(null);
     setFileLoading(false);
     setFileError(null);
   }, []);
 
+  const retryDirectory = useCallback((path: string) => void loadDirectory(path), [loadDirectory]);
+  const retryFile = useCallback(() => {
+    if (selectedRef.current) void loadFile(selectedRef.current);
+  }, [loadFile]);
+  const showRootDirectory = useCallback(() => {
+    setDirectoryPath(null);
+    // A path read can resolve to either a file or a folder. Returning to the
+    // root supersedes that navigation, so a late folder must not focus the
+    // tree again. Keep an already loaded preview beside the root tree.
+    fileRequest.current += 1;
+    setFileLoading(false);
+    if (!file) {
+      selectedRef.current = null;
+      setSelected(null);
+      setFileError(null);
+    }
+  }, [file]);
+
   return {
     directories,
     expanded,
     selected,
+    directoryPath,
     file,
     fileLoading,
     fileError,
     source,
     toggleDirectory,
+    retryDirectory,
     openFile,
+    retryFile,
+    showRootDirectory,
     closeFile,
     reload,
   };

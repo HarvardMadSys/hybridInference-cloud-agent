@@ -18,6 +18,8 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AddComputeServer from './AddComputeServer';
+import CloudLabAutoscaling from './CloudLabAutoscaling';
+import ComputeSetup from './ComputeSetup';
 import ServerAccess from './ServerAccess';
 import ServerActions from './ServerActions';
 import ComputeResourcePanel from './ComputeResourcePanel';
@@ -35,13 +37,25 @@ import {
 
 type OpenPanel =
   | { kind: 'add' }
+  | { kind: 'setup' }
+  | { kind: 'autoscaling' }
   | { kind: 'operations' }
   | { kind: 'resource'; id: string }
   | { kind: 'host'; hosts: string[]; name: string }
   | { kind: 'operation'; id: string }
   | null;
 
-const FINISHED = new Set(['succeeded', 'cancelled', 'failed']);
+const IN_FLIGHT = new Set(['pending', 'running', 'waiting']);
+
+function withoutSupersededInspections(operations: ComputeOperation[]): ComputeOperation[] {
+  const inspectedAllocations = new Set<string>();
+  return operations.filter((operation) => {
+    if (operation.kind !== 'inspect' || operation.allocation_id === null) return true;
+    if (inspectedAllocations.has(operation.allocation_id)) return false;
+    inspectedAllocations.add(operation.allocation_id);
+    return true;
+  });
+}
 
 export default function ComputeResources({
   onHostsChanged,
@@ -74,6 +88,7 @@ export default function ComputeResources({
   const [allocations, setAllocations] = useState<ComputeAllocation[]>([]);
   const [operations, setOperations] = useState<ComputeOperation[]>([]);
   const [panel, setPanel] = useState<OpenPanel>(null);
+  const [addSetupOpen, setAddSetupOpen] = useState(false);
   const [serverTab, setServerTab] = useState<
     'overview' | 'lease' | 'activity' | 'access' | 'retire'
   >('overview');
@@ -86,6 +101,9 @@ export default function ComputeResources({
   const [showAllOperations, setShowAllOperations] = useState(false);
   const generation = useRef(0);
   const mounted = useRef(true);
+  const addPanelTitle = useRef<HTMLHeadingElement>(null);
+  const configureSetupButton = useRef<HTMLButtonElement>(null);
+  const addReturnFocus = useRef<'configure' | 'title' | null>(null);
   const previousOperations = useRef<ComputeOperation[]>([]);
   const hostsChanged = useRef(onHostsChanged);
   hostsChanged.current = onHostsChanged;
@@ -132,9 +150,9 @@ export default function ComputeResources({
       if (
         ops.value.operations.some(
           (next) =>
-            FINISHED.has(next.state) &&
+            !IN_FLIGHT.has(next.state) &&
             previousOperations.current.some(
-              (before) => before.id === next.id && before.state !== next.state,
+              (before) => before.id === next.id && IN_FLIGHT.has(before.state),
             ),
         )
       ) {
@@ -158,6 +176,18 @@ export default function ComputeResources({
       clearInterval(timer);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (panel?.kind !== 'add') return;
+    if (addSetupOpen) {
+      addPanelTitle.current?.focus();
+      return;
+    }
+    const target = addReturnFocus.current;
+    addReturnFocus.current = null;
+    if (target === 'configure') configureSetupButton.current?.focus();
+    else if (target === 'title') addPanelTitle.current?.focus();
+  }, [addSetupOpen, panel]);
 
   const receiveOperation = (operation: ComputeOperation, submitted = true) => {
     generation.current += 1;
@@ -186,6 +216,10 @@ export default function ComputeResources({
   function closeServer() {
     setPanel(null);
     onHostControlsClosed?.();
+  }
+  function returnFromAddSetup() {
+    addReturnFocus.current = 'configure';
+    setAddSetupOpen(false);
   }
   function openOperation(id: string) {
     setOperationOrigin(panel);
@@ -227,8 +261,14 @@ export default function ComputeResources({
   const operationAllocation = allocations.find(
     (item) => item.id === currentOperation?.allocation_id,
   );
-  const pending = operations.filter((item) => !FINISHED.has(item.state));
-  const shownOperations = showAllOperations ? operations : pending;
+  // Each scheduled inspection replaces the previous observation for that server.
+  // Keep the durable attempts in the API, but do not let recurring failures fill
+  // either activity view with copies of the same current condition.
+  const visibleOperations = withoutSupersededInspections(operations);
+  const pending = visibleOperations.filter(
+    (item) => IN_FLIGHT.has(item.state) || item.allowed_actions.length > 0,
+  );
+  const shownOperations = showAllOperations ? visibleOperations : pending;
 
   const resourceActions = [];
   if (catalog)
@@ -249,18 +289,40 @@ export default function ComputeResources({
     );
 
   return (
-    <section className="mt-8" aria-label="Servers">
+    <section className="mt-6" aria-label="Servers">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">Servers</h2>
+        <h2 className="text-sm font-semibold text-foreground">Server inventory</h2>
         <div className="flex flex-wrap items-center gap-2">
           <button
-            className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/5"
+            className={buttonClass}
+            type="button"
+            onClick={() => {
+              addReturnFocus.current = null;
+              setAddSetupOpen(false);
+              setPanel({ kind: 'setup' });
+            }}
+          >
+            Server setup
+          </button>
+          <button
+            className={buttonClass}
+            type="button"
+            onClick={() => {
+              addReturnFocus.current = null;
+              setAddSetupOpen(false);
+              setPanel({ kind: 'autoscaling' });
+            }}
+          >
+            Auto-scaling
+          </button>
+          <button
+            className={buttonClass}
             type="button"
             onClick={() => setPanel({ kind: 'operations' })}
           >
             Activity
             {pending.length > 0 && (
-              <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
                 {pending.length} active
               </span>
             )}
@@ -268,11 +330,15 @@ export default function ComputeResources({
           <button
             className={primaryClass}
             type="button"
-            onClick={() => setPanel({ kind: 'add' })}
+            onClick={() => {
+              addReturnFocus.current = null;
+              setAddSetupOpen(false);
+              setPanel({ kind: 'add' });
+            }}
             aria-label="Add server"
             disabled={!catalog?.providers.length || !catalog.secret_store_configured}
           >
-            + Add server
+            Add server
           </button>
         </div>
       </div>
@@ -344,14 +410,61 @@ export default function ComputeResources({
         </Panel>
       )}
 
-      {panel?.kind === 'add' && catalog && (
-        <Panel title="Add server" onClose={() => setPanel(null)}>
-          <AddComputeServer
+      {panel?.kind === 'autoscaling' && catalog && (
+        <Panel title="CloudLab auto-scaling" onClose={() => setPanel(null)}>
+          <CloudLabAutoscaling
             catalog={catalog}
             connections={connections}
-            onOperation={receiveOperation}
-            onConnectionSaved={saveConnectionInList}
+            activeHost={selectedHost}
           />
+        </Panel>
+      )}
+
+      {panel?.kind === 'setup' && (
+        <Panel title="Server setup" onClose={() => setPanel(null)}>
+          <ComputeSetup
+            connections={connections}
+            onSaved={() => {
+              addReturnFocus.current = 'title';
+              setAddSetupOpen(false);
+              setPanel({ kind: 'add' });
+              void refresh();
+            }}
+          />
+        </Panel>
+      )}
+
+      {panel?.kind === 'add' && catalog && (
+        <Panel
+          title={addSetupOpen ? 'Server setup' : 'Add server'}
+          onClose={() => {
+            addReturnFocus.current = null;
+            setAddSetupOpen(false);
+            setPanel(null);
+          }}
+          onBack={addSetupOpen ? returnFromAddSetup : undefined}
+          titleRef={addPanelTitle}
+        >
+          <div hidden={addSetupOpen}>
+            <AddComputeServer
+              catalog={catalog}
+              connections={connections}
+              onOperation={receiveOperation}
+              onConnectionSaved={saveConnectionInList}
+              onConfigureSetup={() => setAddSetupOpen(true)}
+              configureSetupButtonRef={configureSetupButton}
+            />
+          </div>
+          {addSetupOpen && (
+            <ComputeSetup
+              connections={connections}
+              onSaved={() => {
+                addReturnFocus.current = 'title';
+                setAddSetupOpen(false);
+                void refresh();
+              }}
+            />
+          )}
         </Panel>
       )}
       {panel?.kind === 'host' && (
@@ -453,13 +566,14 @@ export default function ComputeResources({
             />
           </div>
           <div hidden={serverTab !== 'activity'}>
-            {operations.filter((operation) => operation.allocation_id === currentAllocation.id)
-              .length === 0 && (
+            {visibleOperations.filter(
+              (operation) => operation.allocation_id === currentAllocation.id,
+            ).length === 0 && (
               <p className="py-6 text-sm text-gray-500 dark:text-gray-400">
                 No operations for this server.
               </p>
             )}
-            {operations
+            {visibleOperations
               .filter((operation) => operation.allocation_id === currentAllocation.id)
               .map((operation) => (
                 <button

@@ -24,12 +24,17 @@ from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.external.compute_provider import ProviderError
 from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request models.
     AddComputeConnection,
+    AddDeploymentProfile,
     AddServerRequest,
+    AutomaticDeploymentSetup,
+    CloudLabDefaults,
     ComputeOperationAction,
     ExtendComputeRequest,
     ImportComputeRequest,
     ResolveComputeOperation,
     RetireComputeRequest,
+    RotateComputeRequest,
+    UpdateCloudLabAutoscaling,
     UpdateComputeConnection,
     UpdateComputePolicy,
 )
@@ -45,6 +50,7 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
         409,
         "The deployment profile is already used by another managed resource.",
     ),
+    "deployment_profile_exists": (409, "A deployment profile with this ID already exists."),
     "resource_already_managed": (409, "This resource already belongs to a managed allocation."),
     "operation_not_resolvable": (409, "This operation can no longer adopt an external result."),
     "record_not_found": (404, "The resource no longer exists."),
@@ -65,6 +71,63 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
     "resource_identity_changed": (409, "The resource identity changed and requires review."),
     "host_identity_conflict": (409, "This Host identity is already bound to another resource."),
     "invalid_operation_state": (409, "The operation state no longer allows this action."),
+    "rotation_in_progress": (409, "This server is already moving to a replacement node."),
+    "rotation_switching": (
+        409,
+        "The old node is stopped or the Host already moved; wait for the move or its rollback.",
+    ),
+    "deployment_profile_reserved": (
+        409,
+        "The deployment profile is reserved for CloudLab autoscaling.",
+    ),
+    "autoscaling_profile_in_use": (
+        409,
+        "A selected deployment profile is already used by a manual resource.",
+    ),
+    "autoscaling_profile_unavailable": (
+        409,
+        "No reserved deployment profile is available for another host.",
+    ),
+    "autoscaling_connection_unverified": (
+        409,
+        "Both autoscaling connections must still be verified.",
+    ),
+    "autoscaling_connection_in_use": (
+        409,
+        "Pause autoscaling and resolve any running acquisition before changing this connection.",
+    ),
+    "autoscaling_placement_pinned": (
+        409,
+        "Set host placement to Automatic before enabling or running autoscaling.",
+    ),
+    "autoscaling_runtime_conflict": (
+        409,
+        "Autoscaling state changed; the controller will retry from a fresh snapshot.",
+    ),
+    "autoscaling_disabled": (409, "CloudLab autoscaling is paused."),
+    "autoscaling_acquire_blocked": (
+        409,
+        "A previous autoscaling acquisition needs administrator attention.",
+    ),
+    "autoscaling_operation_in_flight": (
+        409,
+        "An autoscaling lifecycle operation is already in progress.",
+    ),
+    "autoscaling_at_capacity": (409, "Autoscaling is already at maximum capacity."),
+    "autoscaling_scale_down_disabled": (409, "Automatic scale-down is disabled."),
+    "autoscaling_member_not_found": (404, "The autoscaling member no longer exists."),
+    "autoscaling_member_not_retirable": (
+        409,
+        "The autoscaling member is not in a safe state for retirement.",
+    ),
+    "autoscaling_member_not_idle": (
+        409,
+        "The autoscaling member became busy and cannot be retired.",
+    ),
+    "autoscaling_minimum_capacity": (
+        409,
+        "Retirement would reduce the pool below its configured minimum.",
+    ),
 }
 
 
@@ -117,7 +180,16 @@ class CredentialSafeRoute(APIRoute):
         return safe_handler
 
 
-router = APIRouter(prefix="/admin/agent", route_class=CredentialSafeRoute)
+# The guard is on the router, not only on each route: a route added to this
+# surface inherits it, so the next compute action cannot ship without one by
+# omission. Mutating routes keep their per-route ``actor`` parameter for the
+# audit trail — FastAPI runs a shared dependency once per request, so the two
+# do not double-ask the gateway.
+router = APIRouter(
+    prefix="/admin/agent",
+    route_class=CredentialSafeRoute,
+    dependencies=[Depends(verify_admin_access)],
+)
 
 
 def get_compute_commands(request: Request) -> ComputeCommands:
@@ -146,16 +218,104 @@ async def _audit(request: Request, actor: str, action: str, **identifiers: str) 
 
 @router.get("/compute-providers")
 async def providers(
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """List enabled resource providers and public deployment choices."""
-    return commands.catalog()
+    return await commands.catalog()
+
+
+@router.post("/compute-deployment-profiles", status_code=201)
+async def create_deployment_profile(
+    request: Request,
+    payload: AddDeploymentProfile,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Save a write-only deployment bundle and encrypted Host inputs."""
+    profile = await commands.create_deployment_profile(payload)
+    await _audit(request, actor, "profile.create", profile_id=profile["id"])
+    return {"profile": profile}
+
+
+@router.get("/compute-automatic-setup")
+async def automatic_setup_status(
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Expose deployed-release readiness without exposing generated setup inputs."""
+    return await commands.automatic_setup_status()
+
+
+@router.post("/compute-deployment-profiles/automatic", status_code=201)
+async def create_automatic_setup(
+    request: Request,
+    payload: AutomaticDeploymentSetup,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Generate recoverable encrypted setups through explicitly selected SSH access."""
+    result = await commands.create_automatic_setup(payload)
+    await _audit(
+        request,
+        actor,
+        "profile.automatic_create",
+        profile_id=",".join(profile["id"] for profile in result["profiles"]),
+    )
+    return result
+
+
+@router.get("/compute-defaults/cloudlab")
+async def cloudlab_defaults(
+    _actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Read non-secret defaults for new CloudLab servers."""
+    return {"defaults": await commands.cloudlab_defaults()}
+
+
+@router.put("/compute-defaults/cloudlab")
+async def set_cloudlab_defaults(
+    request: Request,
+    payload: CloudLabDefaults,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Replace non-secret defaults for new CloudLab servers."""
+    defaults = await commands.set_cloudlab_defaults(payload)
+    await _audit(request, actor, "cloudlab_defaults.set")
+    return {"defaults": defaults}
+
+
+@router.get("/compute-autoscaling/cloudlab")
+async def cloudlab_autoscaling(
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Read the safe autoscaling policy, controller status and owned members."""
+    return await commands.cloudlab_autoscaling()
+
+
+@router.get("/compute-availability/cloudlab")
+async def cloudlab_preferred_nodes(
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """List fresh, plentiful CloudLab node types from the public inventory."""
+    return await commands.cloudlab_preferred_nodes()
+
+
+@router.put("/compute-autoscaling/cloudlab")
+async def set_cloudlab_autoscaling(
+    request: Request,
+    payload: UpdateCloudLabAutoscaling,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Compare and replace the singleton CloudLab autoscaling policy."""
+    result = await commands.set_cloudlab_autoscaling(payload, actor=actor)
+    await _audit(request, actor, "cloudlab_autoscaling.set")
+    return result
 
 
 @router.get("/compute-connections")
 async def connections(
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """List connection metadata without plaintext credentials or ciphertext."""
@@ -204,7 +364,6 @@ async def validate_connection(
 
 @router.get("/servers")
 async def servers(
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read current allocations, Host bindings, and global placement from storage."""
@@ -284,6 +443,26 @@ async def extend(
     return {"operation": operation}
 
 
+@router.post("/compute-allocations/{allocation_id}/rotate", status_code=202)
+async def rotate(
+    allocation_id: str,
+    request: Request,
+    payload: RotateComputeRequest,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Queue a move of the server's Host to a replacement node now."""
+    operation = await commands.rotate(allocation_id, payload, actor=actor)
+    await _audit(
+        request,
+        actor,
+        "allocation.rotate",
+        allocation_id=allocation_id,
+        operation_id=operation["id"],
+    )
+    return {"operation": operation}
+
+
 @router.post("/compute-allocations/{allocation_id}/retire", status_code=202)
 async def retire(
     allocation_id: str,
@@ -307,7 +486,6 @@ async def retire(
 @router.get("/compute-allocations/{allocation_id}/retirement-impact")
 async def retirement_impact(
     allocation_id: str,
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read the full resource scope and blockers before requesting retirement."""
@@ -317,7 +495,6 @@ async def retirement_impact(
 @router.get("/compute-operations")
 async def operations(
     request_id: str | None = Query(default=None, max_length=128),
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Recover recent operations or one request whose response was lost."""
@@ -334,7 +511,6 @@ async def _operation(commands: ComputeCommands, operation_id: str) -> dict[str, 
 @router.get("/compute-operations/{operation_id}")
 async def operation(
     operation_id: str,
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read safe durable progress for a resource operation."""

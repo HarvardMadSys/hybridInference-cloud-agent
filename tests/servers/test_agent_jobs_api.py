@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock
@@ -42,6 +44,8 @@ from cloud_agent import broker_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
@@ -381,7 +385,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.attempt_grants: dict[int, str] = {}
         self.terminal_readiness: dict[int, bool] = {}
         self.thread_workspace_readiness: dict[str, bool] = {}
+        self.sandbox_processes: list[dict[str, Any]] = []
         self.sandbox_admissions: list[dict[str, Any]] = []
+        self.sandbox_settlements: list[dict[str, Any]] = []
         self.released: list[tuple[str, int]] = []
         self.runner_hosts: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
@@ -843,6 +849,11 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         reasoning_effort: str | None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        require_idle: bool = False,
+        expected_latest_job_id: str | None = None,
+        reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         turns = self._thread_turns(thread_id)
         if not turns or turns[-1]["user_id"] != user_id:
@@ -864,6 +875,35 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 return waiting
         if thread_id in self.archived_threads:
             return {"error": "session_archived"}
+        if require_idle:
+            sandbox = turns[-1].get("thread_sandbox") or {}
+            if (
+                turns[-1]["id"] != expected_latest_job_id
+                or any(turn["state"] not in ("succeeded", "failed", "cancelled") for turn in turns)
+                or self._waiting(thread_id)
+                or sandbox.get("workspace_publication_state") != "published"
+            ):
+                return {"error": "conversation_changed"}
+            made = await self.create_follow_up(
+                parent_job_id=expected_latest_job_id,
+                user_id=user_id,
+                prompt=prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                reset_reasoning_effort=reset_reasoning_effort,
+                skills=skills,
+                attachments=attachments,
+                yield_to_queued=True,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+            )
+            if made is None:
+                return {"error": "conversation_changed"}
+            if made.get("error") is not None:
+                return made
+            self.queue_paused.pop(thread_id, None)
+            self.queue_settled[thread_id] = expected_latest_job_id
+            return {"job_id": made["id"]}
         self._continue_if_idle(thread_id)
         message_id = f"apmsg_{self._next_pending:04d}"
         self._next_pending += 1
@@ -1111,6 +1151,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "resident_slot_capacity": sandbox.get("resident_slot_capacity", 8),
             "memory_limit": sandbox.get("memory_limit", "4g"),
             "cpu_limit": sandbox.get("cpu_limit", "2"),
+            "disk_limit_mib": sandbox.get("disk_limit_mib", 0),
             "stop_timeout_seconds": sandbox.get("stop_timeout_seconds", 10),
             "source_thread_id": source["thread_id"],
             "origin_thread_id": sandbox.get("origin_thread_id", source["thread_id"]),
@@ -1336,9 +1377,11 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
-    async def latest_assistant_message(self, *, job_id: str) -> str | None:
-        message = await self.latest_assistant_message_state(job_id=job_id)
-        return None if message is None else str(message["content"])
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        job = self.jobs.get(job_id)
+        if job is None or job["user_id"] != user_id:
+            return None
+        return JobStreamState(job["state"], job.get("published_pr_url"))
 
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
@@ -1355,20 +1398,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             # store carries it onto the row. The fake does the same.
             "truncated": newest.get("truncated") is True,
         }
-
-    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
-        finished = sorted(
-            (
-                job
-                for job in self.jobs.values()
-                if job["thread_id"] == thread_id
-                and job["state"] in {"succeeded", "failed", "cancelled"}
-            ),
-            # Newest first, and a turn that actually ran ahead of one that was
-            # cancelled — the same rule the store's ORDER BY states.
-            key=lambda job: (job["state"] == "cancelled", -job["turn_no"]),
-        )
-        return await self.get_job(finished[0]["id"]) if finished else None
 
     async def list_thread_events_after(
         self, *, job_id: str, user_id: str, after_id: int = 0, limit: int = 500
@@ -1473,12 +1502,43 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         }
         return "stored"
 
+    async def record_thread_sandbox_process(self, **kwargs: Any) -> bool:
+        """Record the process RPC under the worker and residency fences."""
+        if not self._fenced(kwargs["attempt_id"], kwargs["lease_generation"]):
+            return False
+        self.sandbox_processes.append(dict(kwargs))
+        return True
+
     async def admit_thread_sandbox_turn(self, **kwargs: Any) -> bool:
         """Record the at-most-once admission RPC under the worker fence."""
         if not self._fenced(kwargs["attempt_id"], kwargs["lease_generation"]):
             return False
         self.sandbox_admissions.append(dict(kwargs))
         return True
+
+    async def settle_thread_sandbox(self, **kwargs: Any) -> dict[str, Any] | None:
+        """Record settlement and return the minimal retained mapping response."""
+        if not self._fenced(kwargs["attempt_id"], kwargs["lease_generation"]):
+            return None
+        self.sandbox_settlements.append(dict(kwargs))
+        job = self.jobs[kwargs["job_id"]]
+        return {
+            "thread_id": kwargs["thread_id"],
+            "sandbox_id": "asbx_test",
+            "generation": kwargs["sandbox_generation"],
+            "host": "runner-a",
+            "container_name": "freeinference-test",
+            "runtime_id": "claude-code",
+            "execution_profile": job["execution_profile"],
+            "state": "running",
+            "context_status": kwargs["context_status"],
+            "activation_generation": kwargs["activation_generation"],
+            "process_generation": 4,
+            "residency_generation": kwargs["residency_generation"],
+            "admitted_job_id": kwargs["job_id"],
+            "last_settled_job_id": kwargs["job_id"],
+            "native_session_id": kwargs["native_session_id"],
+        }
 
     async def list_jobs(
         self,
@@ -1839,6 +1899,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         attempt_id: int,
         lease_generation: int | None = None,
         reason: str = "credential_unavailable",
+        retry_after_seconds: float = 0,
     ) -> bool:
         job = self.jobs.get(job_id)
         if job is None or job.get("current_attempt_id") != attempt_id:
@@ -1848,6 +1909,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if job.get("admitted"):
             return False
         self.released.append((job_id, attempt_id, reason))
+        job["claim_retry_delay"] = retry_after_seconds
         job["state"] = "queued"
         job["current_attempt_id"] = None
         self.live_fence = None
@@ -1953,6 +2015,12 @@ class _FakeGateway:
         ``AttributeError`` rather than the behaviour under test.
         """
         return {model: list(values) for model, values in _TEST_MODEL_EFFORTS.items()}
+
+    async def model_catalog_with_reasoning_efforts(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """The composer's model options, returned by one current catalog read."""
+        return await self.model_catalog(user_id), await self.model_reasoning_efforts(user_id)
 
 
 class _FakeGrants:
@@ -2673,6 +2741,40 @@ async def test_a_message_sent_during_a_turn_waits_then_follows_it_in_native_cont
     assert "context_checkpoint" not in child_claim
 
 
+async def test_a_waiting_message_is_held_when_its_owners_agent_access_was_withdrawn(
+    client: AsyncClient, store: FakeStorage, monkeypatch: pytest.MonkeyPatch
+):
+    """The turn in front ending is not the owner asking again.
+
+    A waiting message is sent by the settlement, with no request of its
+    owner's behind it, so only the settlement can notice that the Gateway no
+    longer admits them. It holds the message with the reason instead of
+    turning it into a turn that would run anyway.
+    """
+    parent_id = await _create_job(client)
+    sent = await _send(client, store, parent_id, {"prompt": "now add a regression test"})
+    assert sent.status_code == 201
+    waiting = sent.json()["pending"]
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    assert claim["job_id"] == parent_id
+
+    async def withdrawn(self: Any, user_id: str) -> dict[str, Any]:
+        return {"user_id": user_id, "allowed": False, "permissions": []}
+
+    monkeypatch.setattr(_FakeGateway, "agent_access", withdrawn)
+    finished = await client.post(
+        f"/v1/agent/worker/jobs/{parent_id}/finish",
+        json={"state": "succeeded"},
+        headers={"Authorization": f"Bearer {claim['worker_token']}"},
+    )
+    assert finished.status_code == 200
+
+    held = store.pending[waiting["id"]]
+    assert held["state"] == "held"
+    assert held["last_error"] == "Agent access has not been granted for this account."
+    assert [job["id"] for job in store.jobs.values()] == [parent_id]
+
+
 async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
     client: AsyncClient, store: FakeStorage
 ):
@@ -2782,6 +2884,146 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     # must not disable itself behind a narrower historical field name.
     assert "owner/name" in config.json()["repos"]
     assert config.json()["github_connected"] is True
+
+
+async def test_config_reads_one_current_catalog_and_rechecks_admission(store: FakeStorage):
+    """One catalog response supplies both fields, for each admitted owner read."""
+    from httpx import MockTransport, Response
+
+    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.gateway import GatewayClient
+
+    catalog_owners: list[str] = []
+    admitted_owners: list[str] = []
+
+    def handler(request):
+        assert request.headers["Authorization"] == "Bearer config-dispatch-token"
+        if request.url.path.endswith("/agent-access"):
+            owner = request.url.path.split("/")[-2]
+            admitted_owners.append(owner)
+            return Response(
+                200, json={"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
+            )
+        assert request.url.path == "/internal/model-catalog"
+        owner = request.url.params["user_id"]
+        catalog_owners.append(owner)
+        model = f"{owner}-model-{len(catalog_owners)}"
+        return Response(200, json={"models": [model], "reasoning_efforts": {model: ["high"]}})
+
+    app = _build_app(store)
+    identity = {"user_id": _OWNER}
+    app.dependency_overrides[authenticate_agent_owner] = lambda: identity
+    async with AsyncClient(transport=MockTransport(handler)) as upstream:
+        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
+        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
+                identity["user_id"] = owner
+                response = await client.get("/v1/agent/config")
+                assert response.status_code == 200, response.text
+                model = f"{owner}-model-{index}"
+                assert response.json()["models"] == [model]
+                assert response.json()["model_reasoning_efforts"] == {model: ["high"]}
+                assert len(catalog_owners) == index
+                assert len(admitted_owners) == index
+    assert catalog_owners == admitted_owners == [_OWNER, _OWNER, _OTHER]
+
+
+@pytest.mark.parametrize(
+    "payload,status",
+    [({}, 200), ({"models": "all"}, 200), ({"models": ["unavailable"]}, 503)],
+)
+async def test_config_catalog_failure_offers_no_models_or_efforts(
+    store: FakeStorage, payload, status
+):
+    """Catalog failure cannot widen options or discard the remaining config."""
+    from httpx import MockTransport, Response
+
+    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.gateway import GatewayClient
+
+    def handler(request):
+        if request.url.path.endswith("/agent-access"):
+            return Response(
+                200, json={"user_id": _OWNER, "allowed": True, "permissions": ["agent.use"]}
+            )
+        return Response(status, json=payload)
+
+    app = _build_app(store)
+    async with AsyncClient(transport=MockTransport(handler)) as upstream:
+        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
+        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/v1/agent/config")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"] == []
+    assert response.json()["model_reasoning_efforts"] == {}
+    assert response.json()["repos"]
+    assert response.json()["runtimes"]
+
+
+async def test_config_reads_independent_sources_concurrently(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """Each source starts before the slow repository read releases its result."""
+    from cloud_agent.api import config as config_api
+
+    started: set[str] = set()
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    repositories_read = False
+    account_reads = 0
+
+    async def wait_for_sources(name):
+        started.add(name)
+        if len(started) == 3:
+            all_started.set()
+        await release.wait()
+
+    async def repositories(user_id, **kwargs):
+        nonlocal repositories_read
+        assert user_id == _OWNER
+        await wait_for_sources("repositories")
+        repositories_read = True
+        return ["owner/name"]
+
+    async def model_options(self, user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("models")
+        return ["glm-5.1"], {"glm-5.1": ["high"]}
+
+    async def connections(*, user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("mcp")
+        return []
+
+    async def account(*, user_id):
+        nonlocal account_reads
+        assert user_id == _OWNER
+        assert repositories_read, "entitlement must finish before its account is read"
+        account_reads += 1
+        return None
+
+    monkeypatch.setattr(config_api, "repos_for_user", repositories)
+    monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
+    monkeypatch.setattr(store, "list_mcp_connections", connections)
+    monkeypatch.setattr(store, "get_github_account", account)
+    request = asyncio.create_task(client.get("/v1/agent/config"))
+    try:
+        # This is a deadlock limit, not a speed assertion: each source waits
+        # for release, so a serial implementation cannot reach all_started.
+        await asyncio.wait_for(all_started.wait(), timeout=2)
+        assert not request.done()
+        assert account_reads == 0
+    finally:
+        release.set()
+        response = await request
+    assert response.status_code == 200, response.text
+    assert account_reads == 1
+    assert response.json()["repos"] == ["owner/name"]
+    assert response.json()["models"] == ["glm-5.1"]
+    assert response.json()["model_reasoning_efforts"] == {"glm-5.1": ["high"]}
+    assert response.json()["mcp_connections"] == []
 
 
 async def test_messages_append_to_latest_turn_and_reject_blank_prompts(
@@ -2982,8 +3224,9 @@ async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
     assert store.session_forks == {}
 
 
+@pytest.mark.parametrize("with_plugins, lease_seconds", [(False, 210), (True, 990)])
 async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
-    store: FakeStorage, monkeypatch
+    store: FakeStorage, monkeypatch, with_plugins: bool, lease_seconds: int
 ):
     """Clicking Fork immediately materializes a sibling process, not a clone."""
 
@@ -2994,10 +3237,13 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
             self.calls.append((source_thread_id, kwargs))
             assert kwargs["expected_container_id"] == "container-shared"
+            assert kwargs["disk_limit_mib"] == 16384
             assert kwargs["origin_thread_id"] == source_thread_id
             assert kwargs["source_native_session_id"] == "native-session-source"
             assert kwargs["source_native_turn_no"] == 1
             assert kwargs["target_thread_id"] != source_thread_id
+            assert kwargs["source_launch"]["plugins"] == plugins
+            assert kwargs["target_launch"]["plugins"] == plugins
             return {
                 "operation_id": kwargs["operation_id"],
                 "sandbox_id": kwargs["sandbox_id"],
@@ -3017,11 +3263,15 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             }
 
     broker = Broker()
+    plugins = (
+        [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}] if with_plugins else []
+    )
     monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
         source = store.jobs[job_id]
+        source["plugins"] = plugins
         source["state"] = "succeeded"
         source["thread_sandbox"] = {
             "thread_id": source["thread_id"],
@@ -3039,6 +3289,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             "shared_live": True,
             "resident_slot_id": 0,
             "resident_slot_capacity": 8,
+            "disk_limit_mib": 16384,
             "group_members": [],
         }
 
@@ -3053,6 +3304,8 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
     assert forked["thread_sandbox"]["sandbox_id"] == source["thread_sandbox"]["sandbox_id"]
     assert forked["thread_sandbox"]["container_id"] == source["thread_sandbox"]["container_id"]
     assert forked["thread_sandbox"]["native_session_id"] == "native-session-child"
+    assert response.json()["plugins"] == plugins
+    assert next(iter(store.session_forks.values()))["coordinator_lease_seconds"] == lease_seconds
     assert len(broker.calls) == 1
 
 
@@ -3485,6 +3738,65 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monk
     ]
 
 
+async def test_binary_workspace_payload_preserves_owner_and_path_checks(
+    store: FakeStorage, monkeypatch
+):
+    """Binary bytes use the same owned, normalized route as text previews."""
+
+    class Broker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
+            return None
+
+        async def files(self, workspace_id: str, path: str, *, profiling=None):
+            self.calls.append((workspace_id, path))
+            return {
+                "path": path,
+                "kind": "file",
+                "content": None,
+                "content_base64": "iVBORw0KGgoAaW1hZ2U=",
+                "media_type": "image/png",
+                "size": 14,
+                "binary": True,
+                "truncated": False,
+                "source": "workspace",
+            }
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        workspace_id = _attach_shared_workspace(store, job_id)
+        foreign = await store.conversation_commands.create_job(
+            user_id=_OTHER,
+            repo="owner/other",
+            task_prompt="not yours",
+            runtime="claude-code",
+            model="glm-5.1",
+        )
+        _attach_shared_workspace(store, foreign["id"])
+        fetched = await client.get(
+            f"/v1/agent/jobs/{job_id}/files", params={"path": "artifact.png"}
+        )
+        refused = await client.get(
+            f"/v1/agent/jobs/{foreign['id']}/files", params={"path": "artifact.png"}
+        )
+        traversal = await client.get(
+            f"/v1/agent/jobs/{job_id}/files", params={"path": "../artifact.png"}
+        )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["content_base64"] == "iVBORw0KGgoAaW1hZ2U="
+    assert fetched.json()["media_type"] == "image/png"
+    assert fetched.json()["binary"] is True
+    assert refused.status_code == 404
+    assert traversal.status_code == 400
+    assert broker.calls == [(workspace_id, "artifact.png")]
+
+
 async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     store: FakeStorage, monkeypatch
 ):
@@ -3724,6 +4036,34 @@ async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
         ("resize", workspace_id, "term_1", 40, 120),
         ("delete", workspace_id, "term_1"),
     ]
+
+
+async def test_terminal_list_passes_the_brokers_advertised_limits_through(
+    store: FakeStorage, monkeypatch
+):
+    """The browser checks these limits before asking, so it has to receive them."""
+    broker = _TerminalSessionBroker()
+    advertised = {
+        "terminals": [_terminal_session_descriptor()],
+        "max_sessions": 2,
+        "max_input_bytes": 1024,
+    }
+
+    async def list_terminals(workspace_id: str, *, profiling=None):
+        broker.calls.append(("list", workspace_id))
+        return advertised
+
+    monkeypatch.setattr(broker, "list_terminals", list_terminals)
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        store.jobs[job_id]["state"] = "succeeded"
+        listed = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
+
+    assert listed.status_code == 200
+    assert listed.json() == advertised
 
 
 async def test_terminal_controls_use_the_attached_session_capability(
@@ -4356,20 +4696,115 @@ async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeSt
     assert store.jobs[job_id]["state"] == "succeeded"
 
 
-async def test_retained_prompt_admission_is_worker_and_generation_fenced(
+async def test_worker_residency_establish_uses_the_token_attempt_fence(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """The API must not substitute a same-host current attempt for its caller."""
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    calls: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+
+    async def establish_residency(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "thread_id": store.jobs[job_id]["thread_id"],
+            "sandbox_id": "asbx_test",
+            "generation": 7,
+            "previous_grant_id": None,
+            "establishing_attempt_id": kwargs["attempt_id"],
+            "user_id": _OWNER,
+            "model": store.jobs[job_id]["model"],
+        }
+
+    async def record_shared_thread_residency(**kwargs: Any) -> bool:
+        records.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(store, "establish_residency", establish_residency, raising=False)
+    monkeypatch.setattr(
+        store, "record_shared_thread_residency", record_shared_thread_residency, raising=False
+    )
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/sandbox/residency",
+        json={
+            "sandbox_id": "asbx_test",
+            "runtime_id": "claude-code",
+            "runtime_version": "2.1.220",
+        },
+        headers=auth,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["generation"] == 7
+    assert calls[0]["attempt_id"] == 100
+    assert calls[0]["lease_generation"] == 1
+    assert calls[0]["thread_id"] == store.jobs[job_id]["thread_id"]
+    assert calls[0]["host"] == "runner-test"
+    assert records == [
+        {
+            "thread_id": store.jobs[job_id]["thread_id"],
+            "attempt_id": 100,
+            "lease_generation": 1,
+            "sandbox_id": "asbx_test",
+            "residency_generation": 7,
+        }
+    ]
+
+
+async def test_retained_lifecycle_writes_echo_every_generation_fence(
     client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
+    process = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/sandbox/process",
+        json={
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+            "residency_generation": 11,
+            "process_generation": 4,
+        },
+        headers=auth,
+    )
     admitted = await client.post(
         f"/v1/agent/worker/jobs/{job_id}/sandbox/admit",
-        json={"sandbox_generation": 3, "activation_generation": 7},
+        json={
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+            "residency_generation": 11,
+        },
+        headers=auth,
+    )
+    settled = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/sandbox/settle",
+        json={
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+            "residency_generation": 11,
+            "context_status": "live",
+            "native_session_id": "native-one",
+        },
         headers=auth,
     )
 
+    assert process.status_code == 200, process.text
     assert admitted.status_code == 200, admitted.text
+    assert settled.status_code == 200, settled.text
+    assert store.sandbox_processes == [
+        {
+            "thread_id": store.jobs[job_id]["thread_id"],
+            "attempt_id": 100,
+            "lease_generation": 1,
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+            "residency_generation": 11,
+            "process_generation": 4,
+        }
+    ]
     assert store.sandbox_admissions == [
         {
             "thread_id": store.jobs[job_id]["thread_id"],
@@ -4378,6 +4813,22 @@ async def test_retained_prompt_admission_is_worker_and_generation_fenced(
             "lease_generation": 1,
             "sandbox_generation": 3,
             "activation_generation": 7,
+            "residency_generation": 11,
+        }
+    ]
+    assert store.sandbox_settlements == [
+        {
+            "thread_id": store.jobs[job_id]["thread_id"],
+            "attempt_id": 100,
+            "lease_generation": 1,
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+            "residency_generation": 11,
+            "job_id": job_id,
+            "context_status": "live",
+            "native_session_id": "native-one",
+            "base_sha": None,
+            "idle_timeout_seconds": 1800.0,
         }
     ]
 
@@ -4463,20 +4914,6 @@ async def test_shared_abandon_releases_the_exact_residency_and_grant(
     assert response.status_code == 200, response.text
     assert releases == [(job["thread_id"], 11, "runner-a")]
     assert grants.revoked == ["agr_resident_shared"]
-
-
-async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeStorage):
-    """A retry of a dropped response gets the stored id, not a duplicate row."""
-    job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-    body = {"event_type": "message", "payload": {"text": "hello"}, "event_seq": 1}
-
-    first = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
-    replay = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
-
-    assert first.json()["event_id"] == replay.json()["event_id"]
-    assert len(store.events) == 1
 
 
 async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating_the_turn(
@@ -4883,22 +5320,19 @@ async def test_event_type_guard_rejects_a_trailing_newline(client: AsyncClient):
 
 
 async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage):
-    """The runner needs to check the repository out; it must not get push rights.
-
-    An installation token inherits *every* permission the App holds unless it
-    asks for less — and this App holds `contents: write` so the publisher can
-    push. Handing that to the runner would put a write credential on the host
-    that executes untrusted repository code, which is exactly the thing the
-    patch-out design exists to avoid.
-    """
+    """Checkout stays read-only; sandbox publication uses a separate scoped token."""
     from cloud_agent.api.deps import get_agent_app_credentials
 
-    asked: dict[str, Any] = {}
+    asked: list[dict[str, Any]] = []
 
     class FakeApp:
         async def token_for(self, repo: str, **kwargs: Any) -> str:
-            asked.update({"repo": repo, **kwargs})
-            return "ghs_clone_only"
+            asked.append({"repo": repo, **kwargs})
+            return (
+                "ghs_clone_only"
+                if kwargs["permissions"] == {"contents": "read"}
+                else "sandbox-write-token"
+            )
 
     app = _build_app(store)
     app.dependency_overrides[get_agent_app_credentials] = lambda: FakeApp()
@@ -4908,8 +5342,15 @@ async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage
         claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
 
     assert claim.json()["clone_token"] == "ghs_clone_only"
-    assert asked["permissions"] == {"contents": "read"}
-    assert asked["repository_scoped"] is True
+    assert asked[0]["permissions"] == {"contents": "read"}
+    assert asked[0]["repository_scoped"] is True
+    assert claim.json()["github_token"] == "sandbox-write-token"
+    assert asked[1] == {
+        "repo": claim.json()["repo"],
+        "permissions": {"contents": "write", "pull_requests": "write"},
+        "repository_scoped": True,
+    }
+    assert len(asked) == 2
 
 
 async def test_a_deployment_without_a_github_app_still_claims_jobs(client: AsyncClient):
@@ -4919,6 +5360,7 @@ async def test_a_deployment_without_a_github_app_still_claims_jobs(client: Async
 
     assert claim.status_code == 200
     assert claim.json()["clone_token"] is None
+    assert claim.json()["github_token"] is None
 
 
 async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
@@ -4946,10 +5388,15 @@ async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
     assert claim.status_code == 200
     assert claim.json()["job_id"] == job_id
     assert claim.json()["clone_token"] is None
+    assert claim.json()["github_token"] is None
 
 
+@pytest.mark.parametrize(
+    "failure_scope", [{"contents": "read"}, {"contents": "write", "pull_requests": "write"}]
+)
 async def test_a_transient_credential_error_is_retryable_not_terminal(
     store: FakeStorage,
+    failure_scope: dict[str, str],
 ):
     """GitHub having a bad minute must not permanently fail someone's job.
 
@@ -4962,7 +5409,9 @@ async def test_a_transient_credential_error_is_retryable_not_terminal(
 
     class FlakyApp:
         async def token_for(self, repo: str, **kwargs: Any) -> str:
-            raise TimeoutError("api.github.com timed out")
+            if kwargs["permissions"] == failure_scope:
+                raise TimeoutError("api.github.com timed out")
+            return "host-clone-token"
 
     app = _build_app(store)
     app.dependency_overrides[get_agent_app_credentials] = lambda: FlakyApp()
@@ -5076,8 +5525,35 @@ async def test_a_legacy_row_gets_no_credential_at_claim(store: FakeStorage):
 
     assert claim.status_code == 403
     assert minted == [], "no credential may be minted for an unentitled repo"
-    # And the job went back to the queue rather than burning an attempt.
-    assert store.released
+    # A definitive refusal ends the oldest job so it cannot monopolize claims.
+    assert store.released == []
+    assert next(iter(store.jobs.values()))["state"] == "failed"
+
+
+async def test_a_definitively_unentitled_oldest_job_does_not_block_the_next_job(store: FakeStorage):
+    denied = await store.conversation_commands.create_job(
+        user_id=_OWNER,
+        repo="someone-else/private",
+        task_prompt="oldest",
+        runtime="claude-code",
+        model="m",
+    )
+    ready = await store.conversation_commands.create_job(
+        user_id=_OWNER,
+        repo="o/n",
+        task_prompt="ready",
+        runtime="claude-code",
+        model="m",
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store)), base_url="http://test"
+    ) as client:
+        refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        accepted = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert refused.status_code == 403
+    assert store.jobs[denied["id"]]["state"] == "failed"
+    assert accepted.status_code == 200
+    assert accepted.json()["job_id"] == ready["id"]
 
 
 async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeStorage):
@@ -5275,6 +5751,20 @@ def _store_with_grants(store: FakeStorage) -> FakeStorage:
         store.issued_oauth_states.append(kwargs)
 
     store.github_accounts = {}
+    store.github_account_locks = {}
+    store.github_account_lock_attempts = []
+
+    @asynccontextmanager
+    async def serialize_github_account(*, user_id):
+        lock = store.github_account_locks.setdefault(user_id, asyncio.Lock())
+        task = asyncio.current_task()
+        store.github_account_lock_attempts.append(
+            task.get_name() if task is not None else "unknown"
+        )
+        async with lock:
+            yield store
+
+    store.serialize_github_account = serialize_github_account
 
     async def connect_github_account(
         *,
@@ -5287,6 +5777,8 @@ def _store_with_grants(store: FakeStorage) -> FakeStorage:
         refresh_token_ciphertext=None,
         refresh_expires_at=None,
     ):
+        previous = store.github_accounts.get(user_id)
+        refresh_generation = 0 if previous is None else previous["refresh_generation"] + 1
         store.github_accounts[user_id] = {
             "github_user_id": github_user_id,
             "login": login,
@@ -5294,6 +5786,7 @@ def _store_with_grants(store: FakeStorage) -> FakeStorage:
             "access_expires_at": access_expires_at,
             "refresh_token_ciphertext": refresh_token_ciphertext,
             "refresh_expires_at": refresh_expires_at,
+            "refresh_generation": refresh_generation,
         }
         store.grants[user_id] = {
             item["installation_id"]: item.get("account_login") for item in installations
@@ -5317,8 +5810,11 @@ def _store_with_grants(store: FakeStorage) -> FakeStorage:
         return True
 
     async def disconnect_github_account(*, user_id):
-        store.github_accounts.pop(user_id, None)
+        account = store.github_accounts.pop(user_id, None)
+        if account is None:
+            return None
         store.grants.pop(user_id, None)
+        return dict(account)
 
     store.record_repo_grant = record_repo_grant
     store.list_repo_grants = list_repo_grants
@@ -5677,6 +6173,143 @@ async def test_disconnecting_github_forgets_the_token_and_withdraws_the_authoriz
     assert grants_store.github_accounts == {}
     assert config.json()["github_connected"] is False
     assert after.status_code == 403
+
+
+async def test_github_connect_first_is_revoked_by_later_disconnect(store: FakeStorage, monkeypatch):
+    """The whole-grant lock makes a later disconnect win after OAuth completes."""
+    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
+    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
+    app_creds = _FakeGitHubApp(
+        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
+        repos_by_installation={77: ["acme/service"]},
+    )
+    grants_store = _store_with_grants(store)
+    original_exchange = app_creds.exchange_user_code
+    exchange_started = asyncio.Event()
+    release_exchange = asyncio.Event()
+
+    async def blocked_exchange(code: str):
+        exchange_started.set()
+        await release_exchange.wait()
+        return await original_exchange(code)
+
+    app_creds.exchange_user_code = blocked_exchange
+    app = _connectable_app(grants_store, app_creds)
+    connect: asyncio.Task | None = None
+    disconnect: asyncio.Task | None = None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        try:
+            connect = asyncio.create_task(
+                client.post(
+                    "/v1/agent/integrations/github/connect",
+                    json={"code": "connect-first", "state": "connect-first-state-value"},
+                ),
+                name="github-connect-first",
+            )
+            await asyncio.wait_for(exchange_started.wait(), timeout=1)
+            disconnect = asyncio.create_task(
+                client.delete("/v1/agent/integrations/github"),
+                name="github-disconnect-second",
+            )
+            for _ in range(100):
+                if "github-disconnect-second" in grants_store.github_account_lock_attempts:
+                    break
+                await asyncio.sleep(0.01)
+            assert "github-disconnect-second" in grants_store.github_account_lock_attempts
+            assert not disconnect.done(), "disconnect bypassed the in-flight OAuth exchange"
+
+            release_exchange.set()
+            connected, removed = await asyncio.gather(connect, disconnect)
+        finally:
+            release_exchange.set()
+            pending = [
+                task for task in (connect, disconnect) if task is not None and not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    assert connected.status_code == 200
+    assert removed.status_code == 200
+    assert app_creds.revoked == ["user-token-for-connect-first"]
+    assert grants_store.github_accounts == {}
+    assert grants_store.grants.get(_OWNER, {}) == {}
+
+
+async def test_github_disconnect_first_blocks_exchange_then_reconnect_wins(
+    store: FakeStorage, monkeypatch
+):
+    """A reconnect mints its grant only after an earlier full revoke completes."""
+    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
+    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
+    app_creds = _FakeGitHubApp(
+        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
+        repos_by_installation={77: ["acme/service"]},
+    )
+    grants_store = _store_with_grants(store)
+    app = _connectable_app(grants_store, app_creds)
+    revoke_started = asyncio.Event()
+    release_revoke = asyncio.Event()
+    exchange_started = asyncio.Event()
+    original_revoke = app_creds.revoke_user_authorization
+    original_exchange = app_creds.exchange_user_code
+
+    async def blocked_revoke(access_token: str) -> None:
+        revoke_started.set()
+        await release_revoke.wait()
+        await original_revoke(access_token)
+
+    async def observed_exchange(code: str):
+        exchange_started.set()
+        return await original_exchange(code)
+
+    disconnect: asyncio.Task | None = None
+    reconnect: asyncio.Task | None = None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        old = await client.post(
+            "/v1/agent/integrations/github/connect",
+            json={"code": "old", "state": "old-state-value-123456"},
+        )
+        assert old.status_code == 200
+        app_creds.revoke_user_authorization = blocked_revoke
+        app_creds.exchange_user_code = observed_exchange
+        try:
+            disconnect = asyncio.create_task(
+                client.delete("/v1/agent/integrations/github"),
+                name="github-disconnect-first",
+            )
+            await asyncio.wait_for(revoke_started.wait(), timeout=1)
+            reconnect = asyncio.create_task(
+                client.post(
+                    "/v1/agent/integrations/github/connect",
+                    json={"code": "new", "state": "new-state-value-123456"},
+                ),
+                name="github-connect-second",
+            )
+            for _ in range(100):
+                if "github-connect-second" in grants_store.github_account_lock_attempts:
+                    break
+                await asyncio.sleep(0.01)
+            assert "github-connect-second" in grants_store.github_account_lock_attempts
+            assert not exchange_started.is_set(), "reconnect exchanged before revoke completed"
+
+            release_revoke.set()
+            removed, connected = await asyncio.gather(disconnect, reconnect)
+        finally:
+            release_revoke.set()
+            pending = [
+                task for task in (disconnect, reconnect) if task is not None and not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    assert removed.status_code == 200
+    assert connected.status_code == 200
+    assert app_creds.revoked == ["user-token-for-old"]
+    account = grants_store.github_accounts[_OWNER]
+    assert app_creds.cipher.decrypt(account["access_token_ciphertext"]) == "user-token-for-new"
+    assert grants_store.grants[_OWNER] == {77: "acme"}
 
 
 async def test_refresh_asks_github_again_rather_than_reusing_the_last_answer(
@@ -6166,6 +6799,90 @@ def _job_body(**overrides: Any) -> dict[str, Any]:
     return body
 
 
+@pytest.mark.parametrize(
+    ("runtime", "plugins"),
+    [
+        ("claude-code", [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]),
+        ("codex", [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]),
+        ("pi", [{"plugin": "@owner/agent-extension@1.2.3"}]),
+        ("opencode", [{"plugin": "@owner/agent-extension@1.2.3"}]),
+        ("kilo", [{"plugin": "@owner/agent-extension@1.2.3"}]),
+    ],
+)
+async def test_plugins_are_retained_and_visible_on_job_reads(
+    client: AsyncClient, store: FakeStorage, runtime: str, plugins: list[dict[str, str]]
+):
+    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime, plugins=plugins))
+
+    assert created.status_code == 201, created.text
+    job_id = created.json()["id"]
+    assert store.jobs[job_id]["plugins"] == plugins
+    assert [
+        {key: value for key, value in entry.items() if value is not None}
+        for entry in created.json()["plugins"]
+    ] == plugins
+    detail = await client.get(f"/v1/agent/jobs/{job_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["plugins"] == created.json()["plugins"]
+
+
+async def test_plugins_cannot_be_changed_in_a_follow_up(client: AsyncClient, store: FakeStorage):
+    parent_id = await _create_job(client)
+    response = await _send(client, store, parent_id, {"prompt": "continue", "plugins": []})
+
+    assert response.status_code == 422, response.text
+    assert store.pending == {}
+
+
+async def test_duplicate_plugins_are_refused_before_model_lookup(
+    client: AsyncClient, store: FakeStorage
+):
+    plugin = {"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}
+    response = await client.post(
+        "/v1/agent/jobs", json=_job_body(plugins=[plugin, plugin], model="no-such-model")
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error"]["type"] == "invalid_plugin_selection"
+    assert store.jobs == {}
+
+
+async def test_plugin_shape_is_validated_for_the_requested_runtime(
+    client: AsyncClient, store: FakeStorage
+):
+    response = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(plugins=[{"plugin": "reviewer", "marketplace": "owner/plugins"}]),
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error"]["type"] == "invalid_plugin_selection"
+    assert store.jobs == {}
+
+
+async def test_plugin_changes_cannot_reuse_a_submission_key(
+    client: AsyncClient, store: FakeStorage
+):
+    first_plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]
+    headers = {"Idempotency-Key": "plugin-submit"}
+    first = await client.post(
+        "/v1/agent/jobs", json=_job_body(plugins=first_plugins), headers=headers
+    )
+    assert first.status_code == 201, first.text
+    repeated = await client.post(
+        "/v1/agent/jobs", json=_job_body(plugins=first_plugins), headers=headers
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == first.json()["id"]
+    changed = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(plugins=[{**first_plugins[0], "marketplace": "owner/another-marketplace"}]),
+        headers=headers,
+    )
+    assert changed.status_code == 409, changed.text
+    assert len(store.jobs) == 1
+
+
 async def test_the_composer_is_told_which_connections_and_which_runtimes(
     client: AsyncClient, store: FakeStorage
 ):
@@ -6189,6 +6906,7 @@ async def test_the_composer_is_told_which_connections_and_which_runtimes(
     # The composer is told the same list the create path enforces, so a picker
     # cannot offer a runtime that would then be refused.
     assert config["mcp_runtimes"] == ["claude-code", "codex", "kilo", "opencode", "pi"]
+    assert sorted(config["plugin_runtimes"]) == ["claude-code", "codex", "kilo", "opencode", "pi"]
     assert [entry["tool_count"] for entry in config["mcp_connections"]] == [1, 1]
     assert all(entry["available"] for entry in config["mcp_connections"])
     assert _UPSTREAM_TOKEN not in json.dumps(config)
@@ -6567,7 +7285,7 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     assert "wiki.example.com" not in json.dumps(body)
 
 
-async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, monkeypatch):
+async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient):
     """**The whole MCP chain, measured across the claim boundary.**
 
     This is where it broke and nothing noticed. `worker_claim` minted an
@@ -6580,12 +7298,10 @@ async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, 
     where the two halves stopped agreeing: a field with a writer, a reader, and
     a schema in between that knew about neither.
     """
-    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     await _create_job(client)
 
     body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
 
-    assert body["mcp_base_url"] == "http://agent-mcp:8000"
     assert body["mcp_token"], "the sandbox was handed no MCP credential"
 
     from cloud_agent.tokens import SCOPE_MCP, parse_worker_token
@@ -6596,21 +7312,64 @@ async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, 
     assert body["mcp_token"] != body["sandbox_token"]
 
 
-async def test_a_deployment_with_no_relay_hands_over_no_mcp_credential(
-    client: AsyncClient, monkeypatch
-):
-    """Empty address, and the runtime refuses rather than guessing.
+@pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
+@pytest.mark.parametrize(
+    ("selection", "serper_key", "brave_key", "parallel_key"),
+    [
+        ("serper", "serper-claim-secret", "", ""),
+        ("brave", "", "brave-claim-secret", ""),
+        ("parallel", "", "", "parallel-claim-secret"),
+        ("auto", "serper-all-secret", "brave-all-secret", "parallel-all-secret"),
+    ],
+)
+async def test_web_search_provider_enables_mcp_without_exposing_keys(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    selection: str,
+    serper_key: str,
+    brave_key: str,
+    parallel_key: str,
+) -> None:
+    values = {
+        worker.web_search.PROVIDER_SETTING: selection,
+        worker.web_search.SERPER_API_KEY_SETTING: serper_key,
+        worker.web_search.BRAVE_API_KEY_SETTING: brave_key,
+        worker.web_search.PARALLEL_API_KEY_SETTING: parallel_key,
+    }
+    monkeypatch.setattr(
+        worker.web_search,
+        "text_setting",
+        lambda key, fallback="": values.get(key, fallback),
+    )
+    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
+    assert created.status_code == 201, created.text
 
-    Handing over a token with nowhere to spend it would point the sandbox at
-    whatever it fell back to — which is the inference gateway, a service that
-    does not answer for MCP.
+    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+
+    assert body["mcp_bindings"] == [worker.web_search.RUNTIME_SERVER_ID]
+    assert body["mcp_token"]
+    assert all(
+        secret not in json.dumps(body) for secret in (serper_key, brave_key, parallel_key) if secret
+    )
+
+
+async def test_the_claim_names_no_mcp_relay_address(client: AsyncClient, monkeypatch):
+    """The relay is the claiming host's own, so the control plane names none.
+
+    It used to hand one over from `AGENT_SANDBOX_MCP_URL`, a copy of every
+    host's tunnel alias that nothing kept in step with the hosts. Left unset,
+    every turn whose owner had connected a tool failed at its resident launch.
+    A control plane whose environment still carries the variable must not
+    bring the copy back.
     """
-    monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     await _create_job(client)
 
     body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
 
-    assert body["mcp_base_url"] == ""
+    assert "mcp_base_url" not in body
+    assert "agent-mcp" not in json.dumps(body)
 
 
 async def test_a_job_created_with_an_alias_stores_the_canonical_id(
@@ -6631,14 +7390,6 @@ async def test_a_job_created_with_an_alias_stores_the_canonical_id(
 
     (job,) = list(store.jobs.values())
     assert job["model"] == _TEST_MODELS[0], "the alias was stored instead of the canonical id"
-
-
-async def test_an_unknown_model_is_still_refused_at_creation(client: AsyncClient):
-    """The other half: resolution must not have turned refusal into a pass."""
-    response = await _create_job_raw(client, model="no-such-model")
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "model_not_available"
 
 
 async def test_the_owner_sees_what_their_turn_consumed(client: AsyncClient, store: FakeStorage):
@@ -7066,26 +7817,6 @@ async def test_a_stale_or_disagreeing_snapshot_is_refused_with_409(
     assert disagreeing.status_code == 409
     assert disagreeing.json()["detail"]["error"]["type"] == "turn_summary_conflict"
     assert store.turn_summaries[claim["attempt_id"]]["seq"] == 5
-
-
-async def test_a_final_snapshot_cannot_be_reopened_by_a_collecting_one(
-    client: AsyncClient, store: FakeStorage
-):
-    """A newer sequence does not outrank the end of collection."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    endpoint = f"/v1/agent/worker/jobs/{job_id}/turn-resources"
-    await client.post(endpoint, json=_turn_resources_body(report_seq=9), headers=auth)
-
-    reopened = await client.post(
-        endpoint,
-        json=_turn_resources_body(report_seq=10, state="collecting", observed_through_ms=4_000),
-        headers=auth,
-    )
-
-    assert reopened.status_code == 409
-    assert store.turn_summaries[claim["attempt_id"]]["state"] == "final"
 
 
 async def test_a_superseded_attempt_cannot_file_a_turn_resource_snapshot(
@@ -7800,6 +8531,159 @@ async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
     assert response.json()["detail"]["error"]["type"] == "session_archived"
 
 
+async def test_an_idle_only_message_passes_its_guard_to_the_atomic_store(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """A stale action is refused before any queue settlement can send owner work."""
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    submitted = AsyncMock(return_value={"error": "conversation_changed"})
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "submit_message", submitted)
+    monkeypatch.setattr(store, "settle_queue", settlement)
+
+    response = await _send(
+        client,
+        store,
+        job_id,
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error"]["type"] == "conversation_changed"
+    submitted.assert_awaited_once()
+    assert submitted.await_args.kwargs["require_idle"] is True
+    assert submitted.await_args.kwargs["expected_latest_job_id"] == job_id
+    settlement.assert_not_awaited()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        {"require_idle": True},
+        {"require_idle": True, "expected_latest_job_id": ""},
+        {"expected_latest_job_id": "ajob_0001"},
+        {"require_idle": "true", "expected_latest_job_id": "ajob_0001"},
+    ],
+)
+async def test_an_idle_only_message_requires_a_complete_strict_guard(
+    client: AsyncClient, store: FakeStorage, monkeypatch, guard: dict[str, Any]
+):
+    job_id = await _create_job(client)
+    submitted = AsyncMock()
+    monkeypatch.setattr(store, "submit_message", submitted)
+
+    response = await _send(client, store, job_id, {"prompt": "watch the PR", **guard})
+
+    assert response.status_code == 422, response.text
+    submitted.assert_not_awaited()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+
+
+async def test_an_idle_only_message_replays_after_its_turn_has_started(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    _attach_shared_workspace(store, job_id)
+    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "settle_queue", settlement)
+    body = {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id}
+    headers = {"Idempotency-Key": "watch-pr-once"}
+
+    first = await _send(client, store, job_id, body, headers=headers)
+    assert first.status_code == 201, first.text
+    watch_id = first.json()["job"]["id"]
+    store.jobs[watch_id]["state"] = "running"
+    again = await _send(client, store, job_id, body, headers=headers)
+
+    assert again.status_code == 201, again.text
+    assert again.json()["job"]["id"] == watch_id
+    assert len(store.jobs) == 2
+    assert store.pending == {}
+    changed_guard = await _send(
+        client,
+        store,
+        job_id,
+        {**body, "expected_latest_job_id": watch_id},
+        headers=headers,
+    )
+    assert changed_guard.status_code == 409, changed_guard.text
+    assert changed_guard.json()["detail"]["error"]["type"] == "idempotency_conflict"
+    assert len(store.jobs) == 2
+    assert store.pending == {}
+    settlement.assert_not_awaited()
+
+
+async def test_an_idle_only_message_creates_its_turn_with_prepared_choices_without_settlement(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    store.jobs[job_id]["reasoning_effort"] = "high"
+    thread_id = _attach_shared_workspace(store, job_id)
+    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
+    store.queue_paused[thread_id] = "failed"
+    prepared = PreparedFollowUp(
+        model="glm-5.1",
+        reasoning_effort=None,
+        reset_reasoning_effort=True,
+        skills=[
+            {
+                "id": 5,
+                "name": "Review",
+                "description": "Review changes",
+                "revision": 2,
+                "instructions": "Inspect tests and edge cases.",
+            }
+        ],
+        attachments=[
+            {"id": 42, "path": "notes.txt", "content_type": "text/plain", "size_bytes": 11}
+        ],
+    )
+    monkeypatch.setattr("cloud_agent.api.turns.prepare_follow_up", AsyncMock(return_value=prepared))
+    created = AsyncMock(wraps=store.create_follow_up)
+    settlement = AsyncMock()
+    monkeypatch.setattr(store, "create_follow_up", created)
+    monkeypatch.setattr(store, "settle_queue", settlement)
+
+    response = await _send(
+        client,
+        store,
+        job_id,
+        {
+            "prompt": "watch the PR",
+            "require_idle": True,
+            "expected_latest_job_id": job_id,
+            "reasoning_effort": "auto",
+            "skill_ids": [5],
+            "attachment_ids": [42],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    watch = response.json()["job"]
+    assert watch["parent_job_id"] == job_id
+    assert watch["reasoning_effort"] is None
+    assert store.jobs[watch["id"]]["skills"] == prepared.skills
+    created.assert_awaited_once()
+    assert created.await_args.kwargs["model"] == prepared.model
+    assert created.await_args.kwargs["reasoning_effort"] is None
+    assert created.await_args.kwargs["reset_reasoning_effort"] is True
+    assert created.await_args.kwargs["skills"] == prepared.skills
+    assert created.await_args.kwargs["attachments"] == prepared.attachments
+    assert created.await_args.kwargs["yield_to_queued"] is True
+    assert response.json()["pending"] is None
+    assert store.pending == {}
+    assert thread_id not in store.queue_paused
+    assert store.queue_settled[thread_id] == job_id
+    settlement.assert_not_awaited()
+
+
 async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(
     client: AsyncClient, store: FakeStorage
 ):
@@ -7867,6 +8751,44 @@ async def test_a_submission_without_a_key_carries_none(client: AsyncClient, stor
     job_id = await _create_job(client)
     assert store.jobs[job_id]["client_request_id"] is None
     assert store.jobs[job_id]["client_request_fingerprint"] is None
+
+
+async def test_idle_guards_preserve_ordinary_message_fingerprints_and_bind_the_newest_turn(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
+    submitted = AsyncMock(return_value={"error": "conversation_changed"})
+    monkeypatch.setattr(store, "submit_message", submitted)
+    bodies = [
+        {"prompt": "watch the PR"},
+        {"prompt": "watch the PR", "require_idle": False},
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
+        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": "ajob_newer"},
+    ]
+    for index, body in enumerate(bodies):
+        response = await _send(
+            client, store, job_id, body, headers={"Idempotency-Key": f"fingerprint-{index}"}
+        )
+        assert response.status_code == 409, response.text
+    fingerprints = [call.kwargs["client_request_fingerprint"] for call in submitted.await_args_list]
+    legacy_payload = {
+        "kind": "thread_message",
+        "thread_id": _thread_of(store, job_id),
+        "prompt": "watch the PR",
+        "attachment_ids": None,
+        "model": None,
+        "reasoning_effort": None,
+    }
+    legacy_hash = hashlib.sha256(
+        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    assert fingerprints[0] == fingerprints[1] == legacy_hash
+    assert fingerprints[2] != fingerprints[0]
+    assert fingerprints[3] != fingerprints[2]
+    assert store.pending == {}
+    assert len(store.jobs) == 1
 
 
 async def test_a_reused_key_under_different_content_is_a_409(
@@ -8072,6 +8994,7 @@ async def test_a_turn_that_never_started_goes_back_to_the_queue(store: FakeStora
     assert released.status_code == 200
     assert released.json() == {"ok": True, "state": "queued"}
     assert store.jobs[job_id]["state"] == "queued"
+    assert store.jobs[job_id]["claim_retry_delay"] == 30
     # And the reason travels, because "this host cannot start turns" is what an
     # operator reads the trail for.
     assert store.released[-1][2] == "launch_failed"

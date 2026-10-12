@@ -105,6 +105,14 @@ describe('reading anchors', () => {
     expect(restoreScrollTop(anchor!, TURNS, grown, 5000)).toBe(720);
   });
 
+  it('preserves the offset inside a turn when there are no row anchors', () => {
+    const anchor = readingAnchorOf(TURNS, [], 1000, 1096);
+    expect(anchor).toMatchObject({ turnKey: 't2', offset: -600 });
+    expect(restoreScrollTop(anchor!, TURNS, [], 5000)).toBe(1000);
+    const grown = TURNS.map((turn) => ({ ...turn, top: turn.top + 120 }));
+    expect(restoreScrollTop(anchor!, grown, [], 5000)).toBe(1120);
+  });
+
   it('falls back to the turn opening when the row disappears', () => {
     // An attempt switch or a folded tool result can take the row with it.
     const anchor = readingAnchorOf(TURNS, blocks, 420, 500);

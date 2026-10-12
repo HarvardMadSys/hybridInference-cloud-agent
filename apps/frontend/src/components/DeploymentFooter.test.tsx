@@ -24,7 +24,7 @@ it('shows the release version and deployment date with their full values accessi
   );
   const footer = screen.getByRole('contentinfo');
   expect(footer).toHaveTextContent('Version: abcdef0');
-  expect(footer).toHaveTextContent('Deployed: 2026-08-07 UTC');
+  expect(footer).toHaveTextContent('Deployed: 2026-08-07 UTC · 2:30 PM EDT');
   expect(screen.getByTitle(sha)).toHaveTextContent('abcdef0');
   expect(screen.getByTitle('2026-08-07T18:30:00.000Z')).toHaveAttribute(
     'datetime',

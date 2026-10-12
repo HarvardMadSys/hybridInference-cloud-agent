@@ -32,7 +32,9 @@ The properties worth more than the rest, each with its own case:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -340,6 +342,49 @@ async def test_sign_in_sets_an_httponly_session_cookie(client_and_gateway):
     assert claims["exp"] - claims["iat"] == identity.SESSION_TTL_S
 
 
+async def test_a_slow_jwks_fetch_does_not_block_other_requests(
+    client_and_gateway, monkeypatch, key
+):
+    """A cold JWKS cache must not stall every request on the API worker."""
+    client, gateway = client_and_gateway
+    started = await _begin(client)
+    loop = asyncio.get_running_loop()
+    fetching = asyncio.Event()
+    release_fetch = threading.Event()
+
+    class _SlowClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def get_signing_key_from_jwt(self, token: str):
+            loop.call_soon_threadsafe(fetching.set)
+            if not release_fetch.wait(timeout=5):
+                raise TimeoutError("test did not release the JWKS fetch")
+            return _FakeSigningKey(key.public_key())
+
+    monkeypatch.setattr(identity, "PyJWKClient", _SlowClient)
+    callback = asyncio.create_task(
+        client.get(
+            "/v1/session/callback",
+            params={"code": "the-code", "state": _state_from(started)},
+        )
+    )
+    try:
+        await asyncio.wait_for(fetching.wait(), timeout=2)
+        assert not callback.done(), "the JWKS fetch should still be waiting"
+        response = await asyncio.wait_for(client.get("/v1/session/me"), timeout=2)
+        assert response.status_code == 401
+        assert not callback.done(), "the unrelated request must finish before JWKS does"
+        assert gateway.access_asked == []
+    finally:
+        release_fetch.set()
+        result = await asyncio.wait_for(callback, timeout=2)
+
+    assert result.status_code == 303
+    assert gateway.access_asked == [_USER]
+    assert identity.verify_session(client.cookies[identity.SESSION_COOKIE])["sub"] == _USER
+
+
 async def test_the_code_is_exchanged_here_and_the_token_never_reaches_the_browser(
     client_and_gateway,
 ):
@@ -539,6 +584,37 @@ async def test_an_unreachable_gateway_mints_no_session(key):
     }
     assert not client.cookies.get(identity.SESSION_COOKIE)
     assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+
+
+@pytest.mark.parametrize("web_base", [_WEB_BASE_URL, ""])
+async def test_a_signing_key_fetch_outage_offers_retry_and_mints_no_session(
+    monkeypatch, key, web_base
+):
+    """A valid exchanged token cannot be judged while its public key is unavailable."""
+    monkeypatch.setenv(session_router.ENV_WEB_BASE_URL, web_base)
+
+    class Unreachable:
+        def get_signing_key_from_jwt(self, token):
+            raise jwt.PyJWKClientConnectionError("private-upstream-error-sentinel")
+
+    monkeypatch.setattr(identity, "_jwks_client", lambda: Unreachable())
+    gateway = _FakeGateway(identity_token=_identity_token(key))
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+    ) as client:
+        response = await _sign_in(client, return_to="/jobs/42")
+        assert not client.cookies.get(identity.SESSION_COOKIE)
+        if web_base:
+            assert response.status_code == 303
+            assert parse_qs(urlparse(response.headers["location"]).query) == {
+                "sign_in_error": ["temporary"],
+                "return_to": ["/jobs/42"],
+            }
+            assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+        else:
+            assert response.status_code == 503
+        assert "private-upstream-error-sentinel" not in response.text
+    assert gateway.access_asked == []
 
 
 async def test_a_token_for_another_audience_is_refused(key):

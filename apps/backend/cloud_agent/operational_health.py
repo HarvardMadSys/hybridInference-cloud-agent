@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from cloud_agent.settings import number_setting, setting_env
+
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository
 
@@ -28,23 +30,41 @@ def queue_alarm(snapshot: dict[str, int]) -> str:
 
 async def deliver_alert(event: str, snapshot: dict[str, int]) -> None:
     """Deliver counts only to the operator-configured webhook, if present."""
-    url = os.environ.get(ENV_ALERT_WEBHOOK, "").strip()
+    await _post(
+        {
+            "text": f"Cloud Agent: {event}",
+            "event": event,
+            "deployment_sha": os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
+            "queue": snapshot,
+        }
+    )
+
+
+async def deliver_event(event: str, details: dict[str, str]) -> None:
+    """Deliver one named event with identifiers and reason codes, never remote output."""
+    summary = ", ".join(f"{key}={value}" for key, value in details.items())
+    await _post(
+        {
+            "text": f"Cloud Agent: {event}" + (f" ({summary})" if summary else ""),
+            "event": event,
+            "deployment_sha": os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
+            "details": details,
+        }
+    )
+
+
+async def _post(payload: dict[str, object]) -> None:
+    url = (setting_env(ENV_ALERT_WEBHOOK) or "").strip()
     if not url:
         return
     async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
-        response = await client.post(
-            url,
-            json={
-                "text": f"Cloud Agent: {event}",
-                "event": event,
-                "deployment_sha": os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
-                "queue": snapshot,
-            },
-        )
+        response = await client.post(url, json=payload)
         response.raise_for_status()
 
 
-async def monitor_queue(store: HostPoolRepository, *, interval_seconds: float = 60) -> None:
+async def monitor_queue(
+    store: HostPoolRepository, *, interval_seconds: float | None = None
+) -> None:
     """Report persistent failures, recovery and a bounded reminder.
 
     Two consecutive observations suppress one transient database failure.
@@ -56,7 +76,11 @@ async def monitor_queue(store: HostPoolRepository, *, interval_seconds: float = 
     observed = ""
     last_sent = 0.0
     while True:
-        await asyncio.sleep(interval_seconds)
+        await asyncio.sleep(
+            interval_seconds
+            if interval_seconds is not None
+            else number_setting("queue_monitor_interval_s", 60.0)
+        )
         snapshot: dict[str, int] = {}
         try:
             async with asyncio.timeout(15):
@@ -69,7 +93,10 @@ async def monitor_queue(store: HostPoolRepository, *, interval_seconds: float = 
         if event != observed:
             observed = event
             continue
-        if event == previous and (not event or time.monotonic() - last_sent < 1800):
+        if event == previous and (
+            not event
+            or time.monotonic() - last_sent < number_setting("queue_alert_cooldown_s", 1800.0)
+        ):
             continue
         notification = event or "queue_recovered"
         logger.log(

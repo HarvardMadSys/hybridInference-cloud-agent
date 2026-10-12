@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.ports.external.compute_provider import UNCHECKED_CLOUDLAB_HOST_KEY_REF
 from cloud_agent.schemas_compute import RenewalPolicy
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent.compute_registry import ComputeProviderRegistry
     from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
@@ -21,7 +25,7 @@ class ServerQueries:
         registry: ComputeProviderRegistry,
         secrets: ComputeSecretStore,
         *,
-        observation_seconds: int,
+        observation_seconds: int | Callable[[], int],
     ) -> None:
         self.repository = repository
         self.registry = registry
@@ -40,6 +44,7 @@ class ServerQueries:
         caps = entry.provider.capabilities() if entry else None
         reasons: list[dict[str, str]] = []
         actions: list[str] = []
+        autoscaling_owned = bool(row.get("autoscaling_owned"))
         terminal = row.get("observed_state") in {"terminated", "absent"} or bool(
             row.get("release_committed_at")
         )
@@ -47,13 +52,23 @@ class ServerQueries:
             reasons.append(
                 {"code": "provider_unavailable", "message": "Provider is not configured."}
             )
-        if row.get("observation_error"):
+        if row.get("observation_error") and row.get("observed_state") not in {
+            "terminated",
+            "absent",
+        }:
             reasons.append(
                 {"code": "observation_stale", "message": "Resource observation needs refresh."}
             )
         if not terminal and caps:
-            if caps.can_extend:
+            if caps.can_extend and not autoscaling_owned:
                 actions.append("policy")
+            if autoscaling_owned:
+                reasons.append(
+                    {
+                        "code": "autoscaling_managed",
+                        "message": "Renewal policy and node replacement are managed by CloudLab autoscaling.",
+                    }
+                )
             if row.get("management_mode") == "manage" and self.secrets.configured:
                 if row.get("external_id") and caps.can_extend:
                     actions.append("extend")
@@ -63,7 +78,7 @@ class ServerQueries:
                     reasons.append(
                         {
                             "code": "inventory_unavailable",
-                            "message": "Attach a deployment profile and verified SSH connection before release.",
+                            "message": "Attach a deployment profile and configured SSH connection before release.",
                         }
                     )
             else:
@@ -71,6 +86,25 @@ class ServerQueries:
                     {"code": "unmanaged_scope", "message": "Resource lifecycle is not managed."}
                 )
         hosts = row.get("hosts") or []
+        policy = RenewalPolicy.model_validate(row.get("policy") or {})
+        rotation: dict[str, Any] | None = row.get("rotation") or None
+        moving = rotation is not None and rotation["state"] not in {
+            "succeeded",
+            "failed",
+            "cancelled",
+        }
+        if (
+            "retire" in actions
+            and row.get("mode") == "provision"
+            and caps is not None
+            and "provision" in caps.acquisition_modes
+            and (row.get("configuration") or {}).get("host_key_source") == "registration"
+            and policy.node_types
+            and len(hosts) == 1
+            and not moving
+            and not autoscaling_owned
+        ):
+            actions.append("rotate")
         nodes = [
             {
                 "id": node["id"],
@@ -84,6 +118,16 @@ class ServerQueries:
             }
             for node in row.get("nodes", [])
         ]
+        configuration = row.get("configuration") or {}
+        ssh_host_key_policy: str | None = None
+        if row["provider_id"] == "cloudlab":
+            if configuration.get("host_key_source") == "registration":
+                ssh_host_key_policy = "registration"
+            elif configuration.get("ssh_known_hosts_ref") == UNCHECKED_CLOUDLAB_HOST_KEY_REF:
+                ssh_host_key_policy = "unchecked"
+            else:
+                # Missing policy data is a legacy strict-known-hosts allocation.
+                ssh_host_key_policy = "known_hosts"
         return {
             "id": row["id"],
             "name": row["name"],
@@ -92,23 +136,70 @@ class ServerQueries:
             # the rest of provider configuration remain private.
             "connection_id": row.get("connection_id"),
             "ssh_connection_id": row.get("ssh_connection_id"),
+            "sandbox_storage_path": (
+                (row.get("deployment_profile") or {}).get("sandbox_storage_path")
+                or (row.get("deployment_profile") or {}).get("data_mount")
+            ),
+            "ssh_host_key_policy": ssh_host_key_policy,
             "state": row.get("observed_state", "unknown"),
             "external_id": row.get("external_id"),
             "expires_at": row.get("expires_at"),
             "expiration_known": row.get("expiration_known", False),
             "observed_at": row.get("observed_at"),
             "check_interval_seconds": (
-                self.observation_seconds
+                (
+                    self.observation_seconds()
+                    if callable(self.observation_seconds)
+                    else self.observation_seconds
+                )
                 if not terminal and row.get("external_id") and entry and self.secrets.configured
                 else None
             ),
-            "policy": RenewalPolicy.model_validate(row.get("policy") or {}).model_dump(),
+            "policy": policy.model_dump(),
+            "created_at": row.get("created_at"),
+            # A replacement node took this Host over from that allocation.
+            "predecessor_id": row.get("predecessor_id"),
+            "rotation": self._rotation_view(
+                row, policy, rotation, autoscaling_owned=autoscaling_owned
+            ),
             "revision": row["revision"],
             "management_mode": row.get("management_mode", "observe"),
             "desired_state": row.get("desired_state", "present"),
             "allowed_actions": actions,
             "blocked_reasons": reasons,
             "nodes": nodes,
+        }
+
+    @staticmethod
+    def _rotation_view(
+        row: dict[str, Any],
+        policy: RenewalPolicy,
+        rotation: dict[str, Any] | None,
+        *,
+        autoscaling_owned: bool,
+    ) -> dict[str, Any]:
+        """When the node is next renewed or replaced, and how the last move went."""
+        expires, created = row.get("expires_at"), row.get("created_at")
+        decide_at = (
+            expires - timedelta(seconds=policy.renew_before_seconds)
+            if policy.enabled and isinstance(expires, datetime)
+            else None
+        )
+        replace_after = (
+            created + timedelta(seconds=policy.max_node_age_seconds)
+            if policy.rotation_enabled and not autoscaling_owned and isinstance(created, datetime)
+            else None
+        )
+        return {
+            "enabled": policy.rotation_enabled and not autoscaling_owned,
+            "decide_at": decide_at,
+            "replace_after": replace_after,
+            "last": None
+            if rotation is None
+            else {
+                key: rotation.get(key)
+                for key in ("id", "state", "step", "message", "updated_at", "completed_at")
+            },
         }
 
     async def retirement_impact(self, allocation_id: str) -> dict[str, Any]:

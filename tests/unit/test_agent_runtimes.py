@@ -69,6 +69,97 @@ def test_tool_use_carries_name_and_input():
     assert tool_use.payload["input"] == {"cmd": "pwd"}
 
 
+@pytest.mark.parametrize("content_blocks", [False, True])
+def test_claude_task_create_preserves_the_assigned_id_in_structured_output(content_blocks):
+    """A native result links a task's recorded name to subsequent ID updates."""
+    runtime = ClaudeCodeRuntime()
+    input_fields = {"subject": "Build", "description": "Build the notification helper."}
+    tool_use = runtime.parse_event(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "create-call",
+                            "name": "TaskCreate",
+                            "input": input_fields,
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    acknowledgement = "Task #1 created successfully: Build"
+    content = [{"type": "text", "text": acknowledgement}] if content_blocks else acknowledgement
+    structured_output = {"task": {"id": "1", "subject": "Build"}}
+    result = runtime.parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "create-call",
+                            "content": content,
+                        }
+                    ]
+                },
+                "tool_use_result": structured_output,
+            }
+        )
+    )
+
+    assert tool_use.payload["input"] == input_fields
+    assert result.event_type == "tool_result"
+    assert result.payload == {
+        "tool_use_id": tool_use.payload["id"],
+        "is_error": False,
+        "content": json.dumps(content) if content_blocks else acknowledgement,
+        "structured_output": structured_output,
+    }
+
+
+@pytest.mark.parametrize("metadata", [None, "not structured", 1, False])
+def test_claude_tool_result_omits_unstructured_metadata(metadata):
+    """Malformed optional result metadata never replaces the native content."""
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call", "content": "Tool output"}
+                    ]
+                },
+                "tool_use_result": metadata,
+            }
+        )
+    )
+    assert event.payload == {"tool_use_id": "call", "is_error": False, "content": "Tool output"}
+
+
+def test_claude_replayed_user_message_does_not_republish_structured_output():
+    """Native stdin echoes remain ignored even when they contain result data."""
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "isReplay": True,
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call", "content": "Tool output"}
+                    ]
+                },
+                "tool_use_result": {"task": {"id": "1", "subject": "Build"}},
+            }
+        )
+    )
+    assert event is None
+
+
 def test_final_result_reports_cost_as_untrusted():
     """The runtime's self-reported cost is exposed but labelled as such."""
     runtime = ClaudeCodeRuntime()
@@ -131,6 +222,79 @@ def test_a_claude_error_result_says_why(result, text):
     assert event.payload["text"] == text
 
 
+@pytest.mark.parametrize("is_error", [None, False])
+def test_terminal_api_failure_overrides_the_success_subtype(is_error):
+    failure = {
+        "type": "result",
+        "subtype": "success",
+        "terminal_reason": "api_error",
+        "api_error_status": 503,
+        "result": "API Error: 503 No provider is currently available for model 'kimi-k3'.",
+        "usage": {"input_tokens": 5},
+    }
+    if is_error is not None:
+        failure["is_error"] = is_error
+    event = ClaudeCodeRuntime().parse_event(json.dumps(failure))
+    assert event.event_type == "error"
+    assert event.payload["terminal_reason"] == "api_error"
+    assert event.payload["api_error_status"] == 503
+    assert event.payload["text"] == failure["result"]
+    assert event.payload["usage"] == {"input_tokens": 5}
+    assert event.payload["usage_scope"] == "attempt"
+
+
+def test_successful_terminal_reason_remains_a_result():
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "subtype": "success", "terminal_reason": "end_turn"})
+    )
+    assert event.event_type == "lifecycle"
+    assert event.payload["phase"] == "result"
+
+
+@pytest.mark.parametrize("is_error", [None, False])
+def test_terminal_api_failure_uses_errors_when_result_is_absent(is_error):
+    failure = {
+        "type": "result",
+        "subtype": "success",
+        "terminal_reason": "api_error",
+        "api_error_status": 503,
+        "errors": ["No provider is currently available"],
+    }
+    if is_error is not None:
+        failure["is_error"] = is_error
+    event = ClaudeCodeRuntime().parse_event(json.dumps(failure))
+
+    assert event.event_type == "error"
+    assert event.payload["text"] == "No provider is currently available"
+    assert event.payload["terminal_reason"] == "api_error"
+    assert event.payload["api_error_status"] == 503
+
+
+def test_api_retry_notices_report_each_attempt_and_delay():
+    runtime = ClaudeCodeRuntime()
+    for attempt, delay_ms in [(1, 5000), (2, 10000)]:
+        event = runtime.parse_event(
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "api_retry",
+                    "attempt": attempt,
+                    "max_retries": 10,
+                    "retry_delay_ms": delay_ms,
+                    "error_status": 503,
+                }
+            )
+        )
+        assert event.event_type == "lifecycle"
+        assert event.payload == {
+            "phase": "api_retry",
+            "attempt": attempt,
+            "max_retries": 10,
+            "retry_delay_ms": delay_ms,
+            "error_status": 503,
+        }
+
+
 @pytest.mark.parametrize("kind", ["text", "thinking", "tool_result", "result"])
 def test_claude_transcript_preserves_content_past_4000_characters(kind):
     """A long answer or tool result must survive normalization in full."""
@@ -172,6 +336,78 @@ def test_claude_assistant_blocks_keep_the_response_identity(kind):
     )
     assert event.payload["usage_id"] == "msg_shared"
     assert event.payload["usage"] == usage
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking", "tool_use"])
+def test_claude_subagent_blocks_keep_the_parent_call_identity(kind):
+    """Child activity retains its recorded owner without changing native ids."""
+    block = {"type": kind, kind: "Child reply"}
+    if kind == "tool_use":
+        block = {"type": kind, "id": "child-tool", "name": "Read", "input": {"path": "a.py"}}
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "assistant",
+                "parent_tool_use_id": "parent-agent-call",
+                "message": {
+                    "id": "child-message",
+                    "content": [block],
+                    "usage": {"input_tokens": 3},
+                },
+            }
+        )
+    )
+    assert event.payload["parent_tool_use_id"] == "parent-agent-call"
+    assert event.payload["usage_id"] == "child-message"
+    if kind == "tool_use":
+        assert event.payload["id"] == "child-tool"
+        assert event.payload["input"] == {"path": "a.py"}
+    else:
+        assert event.payload["text"] == "Child reply"
+        assert "preview_id" not in event.payload
+
+
+def test_claude_subagent_tool_result_keeps_the_parent_call_identity():
+    """Results remain paired to the child tool and attributable to its agent."""
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "parent_tool_use_id": "parent-agent-call",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "child-tool",
+                            "content": "Child tool output",
+                            "is_error": True,
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    assert event.payload == {
+        "tool_use_id": "child-tool",
+        "is_error": True,
+        "content": "Child tool output",
+        "parent_tool_use_id": "parent-agent-call",
+    }
+
+
+@pytest.mark.parametrize("parent", [None, "", 1, {"id": "untrusted"}])
+@pytest.mark.parametrize("kind", ["assistant", "user"])
+def test_claude_does_not_invent_a_parent_call_identity(parent, kind):
+    """Only a nonempty recorded string identifies a parent agent call."""
+    block = (
+        {"type": "tool_use", "id": "t", "name": "Read", "input": {}}
+        if kind == "assistant"
+        else {"type": "tool_result", "tool_use_id": "t", "content": "ok"}
+    )
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": kind, "parent_tool_use_id": parent, "message": {"content": [block]}})
+    )
+    assert "parent_tool_use_id" not in event.payload
 
 
 @pytest.mark.parametrize("is_error", [False, True])
@@ -430,6 +666,45 @@ def test_pi_usage_reports_tokens_without_claiming_a_cost():
     assert runtime.capabilities().cost_report is False
 
 
+def test_pi_names_each_response_so_its_gateway_request_can_be_found():
+    """Every block of one response, and its usage, carry pi's ``responseId``.
+
+    pi repeats the partial assistant message on each ``message_update``; the
+    fixture keeps only its ``responseId``. Against the gateway that id is the
+    chat-completion id the request is logged under, so it is what the
+    inspector asks the gateway for.
+    """
+    runtime = PiRuntime()
+    events = [e for line in _pi_contract_lines() if (e := runtime.parse_event(line))]
+    assert [
+        (e.event_type, e.payload.get("usage_id"))
+        for e in events
+        if e.event_type in {"thinking", "tool_use", "message", "usage"}
+    ] == [
+        ("thinking", "synthetic-response-1"),
+        ("tool_use", "synthetic-response-1"),
+        ("usage", "synthetic-response-1"),
+        ("message", "synthetic-response-2"),
+        ("usage", "synthetic-response-2"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "message", [None, {"role": "assistant"}, {"responseId": ""}, {"responseId": 7}]
+)
+def test_pi_without_a_response_id_claims_no_identity(message):
+    """A response pi could not name stays unattributed rather than blank."""
+    record: dict[str, object] = {
+        "type": "message_update",
+        "assistantMessageEvent": {"type": "text_end", "contentIndex": 0, "content": "hi"},
+    }
+    if message is not None:
+        record["message"] = message
+    event = PiRuntime().parse_event(json.dumps(record))
+    assert event.event_type == "message"
+    assert "usage_id" not in event.payload
+
+
 def test_pi_unknown_block_kind_is_reported_once_not_per_token():
     """A new sub-event degrades to one diagnostic, not one row per delta."""
     runtime = PiRuntime()
@@ -464,10 +739,29 @@ def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     # Ignore both user-level and committed .mcp.json servers. Platform MCP is
     # supplied explicitly later; the effective set here must stay empty.
     assert "--strict-mcp-config" in argv
+    assert argv[argv.index("--setting-sources") + 1] == "user"
     assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example.com"
     assert env["ANTHROPIC_API_KEY"] == "ajt.a.b"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_claude_native_requests_use_bounded_extended_retries(live):
+    runtime = ClaudeCodeRuntime()
+    settings = {
+        "workdir": "/w",
+        "model": "kimi-k3",
+        "gateway_base_url": "http://gateway",
+        "credential": "inference-credential",
+    }
+    _argv, env = (
+        runtime.prepare_live(**settings)
+        if live
+        else runtime.prepare(task_prompt="do it", **settings)
+    )
+    assert env["CLAUDE_CODE_MAX_RETRIES"] == "15"
+    assert env["CLAUDE_CODE_RETRY_WATCHDOG"] == "0"
 
 
 def test_codex_prepare_and_config_target_the_gateway():

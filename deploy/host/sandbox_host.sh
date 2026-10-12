@@ -41,10 +41,16 @@
 #   AGENT_EGRESS_CHAT_NETWORK_POOL this deployment's own RFC1918 pool for group bridges
 #   AGENT_EGRESS_DNS_SERVER        the one IPv4 resolver sandboxes may reach
 #
-# Restrict the tunnel key on the gateway host — it needs one forwarded port and
-# no shell:
+# Each tunnel key gets its own account on the far host, one authorized_keys
+# line there, and that account's Match block from
+# deploy/host/sshd-tunnels.conf.example; Admin → Servers → Server setup
+# generates all of it. The inference key needs one forwarded port and no shell:
 #
 #   command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... agent-tunnel
+#
+# The control-plane key also names the one reverse listener it may open:
+#
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8000",permitlisten="172.24.0.1:18092" ssh-ed25519 AAAA... agent-control
 
 set -Eeuo pipefail
 
@@ -1777,8 +1783,45 @@ cmd_prepare() {
   check_candidate
 }
 
-# The half that replaces things: invalidate the marker, drain the runners,
-# start the target generation and prove it.
+# Resolve every project-owned process before mutating any of them, then let
+# each process finish its own bounded shutdown work. In particular the broker
+# archives every retained group from its lifespan finalizer; a Compose grace
+# period cannot safely represent that serial work.
+drain_runners_then_broker() {
+  local runner_ids_text broker_ids_text
+  local -a runner_ids=()
+  local -a broker_ids=()
+  if ! runner_ids_text="$(compose ps -q runner)"; then
+    die "could not resolve the existing runner containers; refusing to stop the stack"
+  fi
+  if ! broker_ids_text="$(compose ps -q workspace-broker)"; then
+    die "could not resolve the existing workspace-broker containers; refusing to stop the stack"
+  fi
+  if [[ -n "$runner_ids_text" ]]; then
+    mapfile -t runner_ids <<< "$runner_ids_text"
+  fi
+  if [[ -n "$broker_ids_text" ]]; then
+    mapfile -t broker_ids <<< "$broker_ids_text"
+  fi
+  if (( ${#runner_ids[@]} > 0 )); then
+    # The runner treats SIGTERM as a drain: it stops claiming, waits for every
+    # child turn, then exits. Ask the Engine to wait indefinitely so activation
+    # can never turn that graceful drain into SIGKILL. Resolve the IDs through
+    # Compose first so this cannot stop an unrelated container on the host.
+    log "draining existing runners without a forced-kill deadline"
+    docker stop --time=-1 "${runner_ids[@]}"
+  fi
+  if (( ${#broker_ids[@]} > 0 )); then
+    # Runners settle first because active turns still use the broker. Once they
+    # have gone, SIGTERM runs the broker lifespan finalizer and its own archive
+    # deadlines govern every retained group instead of Compose's fixed grace.
+    log "draining the existing workspace broker without a forced-kill deadline"
+    docker stop --time=-1 "${broker_ids[@]}"
+  fi
+}
+
+# The half that replaces things: invalidate the marker, drain the runners and
+# broker, start the target generation and prove it.
 #
 # Assumes `prepare` has run in this deployment root — for the same release, on
 # this machine. It does not re-check that, because the check would be the
@@ -1798,10 +1841,7 @@ cmd_activate() {
   # container that comes up before the checks finish report `unverified`
   # instead of the previous deployment's reading.
   prepare_storage_verdict
-  if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
-    log "draining existing runners before replacing their workspace broker"
-    compose stop runner
-  fi
+  drain_runners_then_broker
 
   log "starting the three purpose-scoped tunnels, broker, and the runner service"
   # `--remove-orphans` because a renamed service leaves its old container
@@ -1896,9 +1936,12 @@ cmd_status() {
 }
 
 cmd_down() {
+  if [[ $# -gt 0 ]]; then
+    die "'down' takes no arguments"
+  fi
+  drain_runners_then_broker
   compose down
-  log "stopped. Jobs that were running were interrupted; they are retried when"
-  log "their lease expires."
+  log "stopped after runners settled and the workspace broker finished cleanup."
 }
 
 cmd_mark_ready() {
@@ -1912,7 +1955,7 @@ case "${1:-}" in
   preflight) cmd_preflight ;;
   check) cmd_check 0 ;;
   status) cmd_status ;;
-  down) cmd_down ;;
+  down) shift; cmd_down "$@" ;;
   mark-ready) shift; cmd_mark_ready "$@" ;;
   *) die "usage: $0 {up|prepare|activate|preflight|check|status|down|mark-ready SHA}" ;;
 esac

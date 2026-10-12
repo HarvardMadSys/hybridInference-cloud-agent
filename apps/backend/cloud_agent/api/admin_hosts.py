@@ -48,17 +48,25 @@ from cloud_agent.host_pool import (
     HOST_ONLINE,
 )
 from cloud_agent.schemas import (
+    AcquireHostDrainFenceRequest,
     AgentRunnerHost,
     IssueHostEnrollTokenRequest,
     IssueHostEnrollTokenResponse,
     ListAgentRunnerHostsResponse,
+    ReleaseHostDrainFenceRequest,
+    SandboxArchiveSettingsResponse,
     SetActiveAgentRunnerHostRequest,
     SetHostSettingsRequest,
     SetHostSlotsRequest,
     SetRuntimeVersionRequest,
+    SetSandboxArchiveSettingsRequest,
     host_setting_definitions,
 )
 from cloud_agent_shared.host_settings import admin_values, reported_values
+from cloud_agent_shared.sandbox_archive_settings import (
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -93,7 +101,12 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-router = APIRouter(prefix="/admin", dependencies=[Depends(_no_store)])
+# The guard is on the router, not only on each route: a route added to this
+# surface inherits it, so the next pool action cannot ship without one by
+# omission. Mutating routes keep their per-route ``_admin_id`` parameter for
+# the audit trail — FastAPI runs a shared dependency once per request, so the
+# two do not double-ask the gateway.
+router = APIRouter(prefix="/admin", dependencies=[Depends(_no_store), Depends(verify_admin_access)])
 
 _Result = TypeVar("_Result")
 
@@ -146,6 +159,13 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         runner_version=row.get("runner_version"),
         broker_url=row.get("broker_url"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
+        drain_fence_token=row.get("drain_fence_token"),
+        drain_fence_status_before=row.get("drain_fence_status_before"),
+        drain_fence_active=bool(row.get("drain_fence_active")),
+        # Unlike the phase-G display fields above, this is a required protocol
+        # generation. The migration backfills it before this API may start;
+        # silently defaulting it would make a partial CAS contract look usable.
+        drain_fence_epoch=row["drain_fence_epoch"],
         sandbox_runtime=row.get("sandbox_runtime"),
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
@@ -164,6 +184,9 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         settings_desired=admin_values(row.get("settings_desired")),
         settings_applied=reported_values(row.get("settings_applied")),
         settings_local=reported_values(row.get("settings_local")),
+        sandbox_archive_settings_applied_revision=row.get(
+            "sandbox_archive_settings_applied_revision"
+        ),
     )
 
 
@@ -289,7 +312,7 @@ async def set_agent_host_settings(
 
     Each host picks the values up from its next heartbeat answer, except where
     a value set for that server wins. ``null`` clears a setting, and each host
-    goes back to its own ``.env`` or built-in default for it.
+    goes back to the deployment's built-in default for it.
 
     **Saving is not applying.** Each host reports what it applied, and the page
     shows the hosts that have not caught up yet. Nothing running is
@@ -314,6 +337,115 @@ async def set_agent_host_settings(
     return await _snapshot(job_store.host_pool)
 
 
+@router.get(
+    "/agent/sandbox-archive-settings",
+    response_model=SandboxArchiveSettingsResponse,
+)
+async def get_sandbox_archive_settings(
+    _admin_id: str = Depends(verify_admin_access),
+    store: _AdminHostsStorage | None = Depends(get_storage),
+) -> SandboxArchiveSettingsResponse:
+    """Read the one database-backed archive policy shared by every host."""
+    values = await _require_store(store).host_pool.sandbox_archive_settings()
+    return SandboxArchiveSettingsResponse.model_validate(values)
+
+
+def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | str]:
+    """Keep a complete, non-secret policy snapshot in the admin audit row."""
+    snapshot: dict[str, bool | int | str] = {
+        key: values[key]
+        for key in (
+            "enabled",
+            "region",
+            "kms_key_arn",
+            "expected_bucket_owner",
+            "max_archive_bytes",
+            "multipart_threshold_bytes",
+            "multipart_part_bytes",
+        )
+    }
+    snapshot["aws_access_key_id"] = str(values.get("aws_access_key_id") or "")
+    configured = values.get("aws_secret_access_key_configured")
+    if configured is None:
+        configured = bool(values.get("aws_secret_access_key"))
+    snapshot["aws_secret_access_key_configured"] = bool(configured)
+    return snapshot
+
+
+@router.put(
+    "/agent/sandbox-archive-settings",
+    response_model=SandboxArchiveSettingsResponse,
+)
+async def set_sandbox_archive_settings(
+    request: Request,
+    payload: SetSandboxArchiveSettingsRequest,
+    _admin_id: str = Depends(verify_admin_access),
+    store: _AdminHostsStorage | None = Depends(get_storage),
+) -> SandboxArchiveSettingsResponse:
+    """Atomically replace the archive policy; hosts apply it on their next beat.
+
+    The destination is fixed in server code. A saved access key is encrypted
+    at rest and is not returned. With no key, brokers authenticate with their
+    workload identity and still require the bucket owner and KMS key.
+    """
+    job_store = _require_store(store)
+    previous = await job_store.host_pool.sandbox_archive_settings()
+    settings = payload.model_dump(exclude={"revision"})
+    if (
+        settings["aws_access_key_id"]
+        and not settings["aws_secret_access_key"]
+        and previous.get("aws_access_key_id") == settings["aws_access_key_id"]
+        and previous.get("aws_secret_access_key")
+    ):
+        settings["aws_secret_access_key"] = previous["aws_secret_access_key"]
+    try:
+        SandboxArchivePolicy(
+            enabled=settings["enabled"],
+            region=settings["region"],
+            kms_key_arn=settings["kms_key_arn"],
+            expected_bucket_owner=settings["expected_bucket_owner"],
+            aws_access_key_id=settings["aws_access_key_id"],
+            aws_secret_access_key=settings["aws_secret_access_key"],
+            max_archive_bytes=settings["max_archive_bytes"],
+            multipart_threshold_bytes=settings["multipart_threshold_bytes"],
+            multipart_part_bytes=settings["multipart_part_bytes"],
+            revision=payload.revision,
+        )
+    except SandboxArchivePolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        updated = await job_store.host_pool.set_sandbox_archive_settings(
+            expected_revision=payload.revision,
+            settings=settings,
+        )
+    except SandboxArchivePolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Sandbox archive settings changed since this page loaded; reload and retry.",
+        )
+    changed = updated.pop("_changed", False) is True
+    if "aws_secret_access_key_configured" not in updated:
+        updated["aws_secret_access_key_configured"] = bool(updated.get("aws_secret_access_key"))
+    if changed:
+        await log_admin_action(
+            job_store,
+            get_client_ip(request),
+            "agent.sandbox_archive_settings.set",
+            None,
+            {
+                "old_revision": previous["revision"],
+                "new_revision": updated["revision"],
+                "old_settings": _archive_audit_snapshot(previous),
+                "new_settings": _archive_audit_snapshot(updated),
+            },
+            actor_id=_admin_id,
+        )
+    updated.pop("aws_secret_access_key", None)
+    return SandboxArchiveSettingsResponse.model_validate(updated)
+
+
 @router.put("/agent/runner-hosts/{host}/settings", response_model=ListAgentRunnerHostsResponse)
 async def set_agent_runner_host_settings(
     request: Request,
@@ -325,7 +457,7 @@ async def set_agent_runner_host_settings(
     """Set or clear runtime settings for one server, over the global values.
 
     A value set here wins over the one set for every server. ``null`` clears
-    it, and the server goes back to the global value, or to its own when there
+    it, and the server goes back to the global value, or the built-in default when there
     is none. Applied from the host's next heartbeat, like the global values,
     and kept through heartbeats and re-enrollment.
     """
@@ -452,11 +584,19 @@ async def _set_status(
     action: str,
     job_store: _AdminHostsStorage,
     actor_id: str,
+    force: bool = False,
 ) -> ListAgentRunnerHostsResponse:
     """Apply one table-driven status change, or say why it was refused."""
-    await _apply(HostCommands(job_store.host_pool).set_status(host=host, status=status))
+    await _apply(
+        HostCommands(job_store.host_pool).set_status(host=host, status=status, force=force)
+    )
     await log_admin_action(
-        job_store, get_client_ip(request), action, None, {"host": host}, actor_id=actor_id
+        job_store,
+        get_client_ip(request),
+        action,
+        None,
+        {"host": host, "force": force},
+        actor_id=actor_id,
     )
     return await _snapshot(job_store.host_pool)
 
@@ -465,6 +605,7 @@ async def _set_status(
 async def drain_agent_runner_host(
     request: Request,
     host: str,
+    payload: AcquireHostDrainFenceRequest | None = None,
     _admin_id: str = Depends(verify_admin_access),
     store: _AdminHostsStorage | None = Depends(get_storage),
 ) -> ListAgentRunnerHostsResponse:
@@ -476,12 +617,31 @@ async def drain_agent_runner_host(
     counter that walks down to zero, which is the number ``remove`` refuses to
     act before.
     """
+    job_store = _require_store(store)
+    if payload is not None:
+        await _apply(
+            HostCommands(job_store.host_pool).acquire_drain_fence(
+                host=host,
+                expected_fence_token=payload.expected_fence_token,
+                expected_fence_epoch=payload.expected_fence_epoch,
+                fence_token=payload.fence_token,
+            )
+        )
+        await log_admin_action(
+            job_store,
+            get_client_ip(request),
+            "agent.runner_host.drain",
+            None,
+            {"host": host},
+            actor_id=_admin_id,
+        )
+        return await _snapshot(job_store.host_pool)
     return await _set_status(
         request,
         host=host,
         status=HOST_DRAINING,
         action="agent.runner_host.drain",
-        job_store=_require_store(store),
+        job_store=job_store,
         actor_id=_admin_id,
     )
 
@@ -490,6 +650,14 @@ async def drain_agent_runner_host(
 async def undrain_agent_runner_host(
     request: Request,
     host: str,
+    payload: ReleaseHostDrainFenceRequest | None = None,
+    force: bool = Query(
+        False,
+        description=(
+            "Override an active deployment fence. A forced legacy transition clears its "
+            "ownership and idempotency receipt."
+        ),
+    ),
     _admin_id: str = Depends(verify_admin_access),
     store: _AdminHostsStorage | None = Depends(get_storage),
 ) -> ListAgentRunnerHostsResponse:
@@ -499,13 +667,35 @@ async def undrain_agent_runner_host(
     to be sure about before making, and the whole value of draining is that it
     is the safe thing to try first.
     """
+    job_store = _require_store(store)
+    if payload is not None:
+        if force:
+            raise HTTPException(
+                status_code=400,
+                detail="force cannot be combined with a fenced drain release.",
+            )
+        await _apply(
+            HostCommands(job_store.host_pool).release_drain_fence(
+                host=host, fence_token=payload.fence_token
+            )
+        )
+        await log_admin_action(
+            job_store,
+            get_client_ip(request),
+            "agent.runner_host.undrain",
+            None,
+            {"host": host},
+            actor_id=_admin_id,
+        )
+        return await _snapshot(job_store.host_pool)
     return await _set_status(
         request,
         host=host,
         status=HOST_ONLINE,
         action="agent.runner_host.undrain",
-        job_store=_require_store(store),
+        job_store=job_store,
         actor_id=_admin_id,
+        force=force,
     )
 
 
@@ -516,10 +706,11 @@ async def remove_agent_runner_host(
     force: bool = Query(
         False,
         description=(
-            "Remove a host that is still running attempts. Those attempts are "
-            "not stopped — nothing here can reach them — they are left to their "
-            "leases. An indeterminate retained-chat activation is marked LOST "
-            "instead of replayed."
+            "Remove a host that is still running attempts. Their leases expire "
+            "at once, so the removed machine can no longer heartbeat, renew "
+            "grants, establish residencies or call tools for them; the next "
+            "reaper pass requeues them or, for an indeterminate retained-chat "
+            "activation, marks the chat LOST instead of replaying it."
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
@@ -533,10 +724,14 @@ async def remove_agent_runner_host(
     minutes later. Being told "it is still busy" is the difference between
     draining first and finding out afterwards.
 
-    Forced removal is the deliberate version of the same thing. Lease fencing
-    rejects later writes from the superseded worker. A retained activation is
-    not replayed because the platform cannot know whether its prompt ran, so
-    that chat is marked LOST when the lease expires.
+    Forced removal is the deliberate version of the same thing, and it ends
+    that work rather than waiting for it: the revocation expires the host's
+    attempt and residency leases in the same transaction. The attempts' worker
+    tokens name no host, so a lease left to run would be one the removed
+    machine could keep renewing. Lease fencing then rejects every later write
+    from it, and the reaper supersedes the attempts and revokes their grants
+    on its next pass. A retained activation is not replayed because the
+    platform cannot know whether its prompt ran, so that chat is marked LOST.
 
     The row survives, disabled. ``agent_attempts.host_id`` points at it, and
     "where did this job run" should not become unanswerable because the machine

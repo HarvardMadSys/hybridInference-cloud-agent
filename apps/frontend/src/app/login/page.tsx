@@ -13,11 +13,10 @@
 // hijack; it also gives a deployment whose sign-in is misconfigured nowhere to
 // say so.
 //
-// Deliberately plain. Product copy and a public landing page are a separate
-// piece of work; this is the smallest page that names the app, names the
-// authority, and gets out of the way.
+// The sign-in authority stays visible before the visitor leaves this app.
 
 import { Suspense } from 'react';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { signInUrl } from '@/lib/auth/signin';
@@ -50,20 +49,29 @@ function LoginContent() {
   const authority = authorityName(branding.gatewayUrl);
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6">
-        <div className="w-full max-w-sm text-center">
-          <h1 className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
+    <div lang="en" className="flex min-h-screen flex-col bg-surface-muted">
+      <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-8">
+        <section
+          aria-labelledby="welcome-heading"
+          className="rounded-xl border border-border bg-surface p-5"
+        >
+          <h1 className="text-sm font-semibold tracking-tight text-foreground">
             {branding.appName}
           </h1>
-          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+          <h2
+            id="welcome-heading"
+            className="mt-3 text-lg font-semibold tracking-tight text-foreground"
+          >
+            Sign in
+          </h2>
+          <p className="mt-1 text-sm leading-5 text-muted">
             Run coding agents in sandboxed containers against your repositories.
           </p>
 
           {hasError && (
             <p
               role="alert"
-              className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+              className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
             >
               {expired
                 ? 'This sign-in has expired or is no longer valid. Please start again.'
@@ -77,26 +85,35 @@ function LoginContent() {
           {(!hasError || temporary || expired) && (
             <>
               {/* A plain link, not a button with a handler: the destination is a
-                server route that answers with a redirect, and a full
-                navigation is what it expects. */}
+                  server route that answers with a redirect, and a full
+                  navigation is what it expects. */}
               <a
                 href={signInUrl(returnTo)}
-                className="mt-6 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+                className="mt-4 inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-center text-sm font-medium text-accent-foreground transition hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
-                {expired
-                  ? 'Start again'
-                  : temporary
-                    ? 'Try again'
-                    : `Sign in${authority ? ` with ${authority}` : ''}`}
+                <span className="min-w-0 break-words">
+                  {expired
+                    ? 'Start again'
+                    : temporary
+                      ? 'Try again'
+                      : `Sign in${authority ? ` with ${authority}` : ''}`}
+                </span>
               </a>
-              <p className="mt-4 text-xs text-gray-400 dark:text-gray-500">
+              <p className="mt-3 break-words text-xs leading-5 text-muted">
                 {authority
                   ? `You will be sent to ${authority} to authorize this app. It never sees your password.`
                   : 'You will be sent to your identity provider to authorize this app.'}
               </p>
             </>
           )}
-        </div>
+          <p className="mt-4 text-xs text-muted">
+            Service administrators:{' '}
+            <Link href="/setup" className="underline">
+              configure missing settings
+            </Link>
+            .
+          </p>
+        </section>
       </main>
       <DeploymentFooter />
     </div>

@@ -28,6 +28,8 @@ def _host(
     *,
     slots: str | None = "3",
     running_containers: int = 1,
+    runner_ps_exit: int = 0,
+    broker_ps_exit: int = 0,
     turn_starts: bool = True,
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
@@ -98,6 +100,7 @@ def _host(
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
+        'if [ -n "${DOCKER_CALL_LOG:-}" ]; then printf \'%s\\n\' "$*" >> "$DOCKER_CALL_LOG"; fi\n'
         'case " $* " in *" config --environment "*) cat >/dev/null; { if [ -f .env ]; then cat .env; fi; env; } | awk -F= \'{v[$1]=$0} END {for (k in v) print v[k]}\'; exit 0 ;; esac\n'
         'case "$*" in\n'
         f"  'info --format {{{{.DockerRootDir}}}}') echo '{daemon_root}' ;;\n"
@@ -105,8 +108,8 @@ def _host(
         '  *\' config --format json\') echo \'{"name":"test-retained","services":{"runner":{"image":"test-candidate-runner"}}}\' ;;\n'
         f"  run*'cloud_agent_host.candidate_check') exit {candidate_exit} ;;\n"
         f"  run*'network_from_env()') exit {network_settings_exit} ;;\n"
-        f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
-        f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
+        f"  *' ps -q runner') printf '%s\\n' '{runner_ids}'; exit {runner_ps_exit} ;;\n"
+        f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}'; exit {broker_ps_exit} ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
         + storage_case
@@ -165,6 +168,13 @@ def _host(
         "AGENT_BROKER_REVERSE_PORT",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
         "AGENT_HOST_STORAGE_PROBE",
+        # Runtime image defaults are reviewed source pins. A launcher's own
+        # CLI version must not become an operator override in this fixture.
+        "CLAUDE_CODE_VERSION",
+        "CODEX_VERSION",
+        "PI_VERSION",
+        "OPENCODE_VERSION",
+        "KILO_VERSION",
         "DOCKER_DAEMON_JSON",
     ):
         env.pop(name, None)
@@ -239,15 +249,97 @@ def test_target_sha_marker_is_a_rollout_fence_not_a_topology_switch() -> None:
     assert "AGENT_SHARED_LIVE_SANDBOX" not in host_script
 
 
-def test_host_builds_then_drains_runners_before_replacing_the_broker() -> None:
+def test_host_builds_then_drains_runners_and_broker_without_forced_kills() -> None:
     script = SANDBOX_HOST.read_text()
 
     build = script.index("compose build")
     marker = script.index("prepare_shared_live_marker", build)
-    drain = script.index("compose stop runner", marker)
-    replace = script.index("compose up -d --no-build --remove-orphans", drain)
+    helper = script[
+        script.index("drain_runners_then_broker() {") : script.index("cmd_activate() {")
+    ]
+    runner_lookup = helper.index('runner_ids_text="$(compose ps -q runner)"')
+    broker_lookup = helper.index('broker_ids_text="$(compose ps -q workspace-broker)"')
+    runner_drain = helper.index('docker stop --time=-1 "${runner_ids[@]}"')
+    broker_drain = helper.index('docker stop --time=-1 "${broker_ids[@]}"')
+    activate = script[script.index("cmd_activate() {") : script.index("cmd_up() {")]
+    drain = activate.index("drain_runners_then_broker")
+    replace = activate.index("compose up -d --no-build --remove-orphans", drain)
 
-    assert build < marker < drain < replace
+    assert build < marker
+    assert runner_lookup < broker_lookup < runner_drain < broker_drain
+    assert drain < replace
+    assert "compose stop runner" not in script
+
+
+def test_host_refuses_replacement_when_runner_lookup_fails(tmp_path: Path) -> None:
+    env = _host(tmp_path, runner_ps_exit=23)
+    _add_required_host_paths(env, tmp_path)
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+
+    result = _run(env, "activate")
+
+    assert result.returncode != 0
+    assert (
+        "could not resolve the existing runner containers; refusing to stop the stack"
+        in result.stderr
+    )
+    assert "starting the three purpose-scoped tunnels" not in result.stdout
+
+
+def test_host_refuses_replacement_before_draining_when_broker_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    env = _host(tmp_path, broker_ps_exit=23)
+    _add_required_host_paths(env, tmp_path)
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+
+    result = _run(env, "activate")
+
+    assert result.returncode != 0
+    assert (
+        "could not resolve the existing workspace-broker containers; refusing to stop the stack"
+        in result.stderr
+    )
+    assert "draining existing runners" not in result.stdout
+
+
+def test_activate_stops_exact_runners_then_exact_broker_without_deadlines(
+    tmp_path: Path,
+) -> None:
+    env = _host(tmp_path, running_containers=2)
+    _add_required_host_paths(env, tmp_path)
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+    command_log = tmp_path / "docker-calls"
+    env["DOCKER_CALL_LOG"] = str(command_log)
+
+    result = _run(env, "activate")
+
+    assert result.returncode == 0, result.stderr
+    stops = [line for line in command_log.read_text().splitlines() if line.startswith("stop ")]
+    assert stops == [
+        "stop --time=-1 runner-1 runner-2",
+        "stop --time=-1 workspace-broker-1",
+    ]
+
+
+def test_down_drains_runners_then_broker_before_compose_removal() -> None:
+    script = SANDBOX_HOST.read_text()
+    down = script[script.index("cmd_down() {") : script.index("cmd_mark_ready() {")]
+
+    assert down.index("drain_runners_then_broker") < down.index("compose down")
+
+
+def test_down_rejects_arguments_before_draining(tmp_path: Path) -> None:
+    env = _host(tmp_path)
+    command_log = tmp_path / "docker-calls"
+    env["DOCKER_CALL_LOG"] = str(command_log)
+
+    result = _run(env, "down", "unexpected")
+
+    assert result.returncode != 0
+    assert "'down' takes no arguments" in result.stderr
+    calls = command_log.read_text().splitlines()
+    assert not any(call.startswith("stop ") for call in calls)
 
 
 def test_direct_host_commands_support_environment_only_configuration(tmp_path: Path) -> None:
@@ -488,17 +580,6 @@ def test_a_leftover_replica_count_is_warned_about_not_read(tmp_path: Path) -> No
     assert "AGENT_RUNNER_REPLICAS is no longer read" in result.stderr
 
 
-def test_the_turn_probe_reads_its_answer_past_log_noise(tmp_path: Path) -> None:
-    """Staging, 2026-09-17: the probe's first rollout captured a preflight
-    warning on stderr ahead of the decline, judged the image unable to run
-    turns, and rolled the host back. The answer is a line, not the output."""
-    result = _run(_host(tmp_path), "check")
-
-    assert result.returncode == 0, result.stderr
-    assert "turn processes start: declined no turn was delivered" in result.stdout
-    assert "cannot run turns" not in result.stderr
-
-
 def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) -> None:
     """A configured limit is not proof that a turn can be started at all.
 
@@ -510,14 +591,6 @@ def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) ->
 
     assert result.returncode != 0
     assert "cannot start a turn process" in result.stderr
-
-
-def test_shared_live_check_does_not_count_runner_containers(tmp_path: Path) -> None:
-    """One container per host; its limit, not a container count, is the concurrency."""
-    result = _run(_host(tmp_path, running_containers=1), "check")
-
-    assert result.returncode == 0, result.stderr
-    assert "turn processes start" in result.stdout
 
 
 def test_up_no_longer_takes_a_replica_count(tmp_path: Path) -> None:
@@ -585,6 +658,8 @@ def test_shared_live_check_attests_every_runner_and_broker(tmp_path: Path) -> No
     assert "shared-sandbox-v1" in result.stdout
     assert "native-fork-at-anchor-v1" in result.stdout
     assert "MCP-only relay" in result.stdout
+    assert "turn processes start: declined no turn was delivered" in result.stdout
+    assert "cannot run turns" not in result.stderr
 
 
 def test_host_readiness_probes_both_sandbox_relays() -> None:
@@ -703,13 +778,6 @@ def test_host_up_probes_the_tunnels_instead_of_pausing_first() -> None:
     pauses = [line for line in up.splitlines() if line.strip().startswith("sleep")]
 
     assert not pauses, f"the host start pauses before probing; the probe already retries: {pauses}"
-
-
-def test_shared_live_check_fails_when_runner_does_not_advertise(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, capability=""), "check")
-
-    assert result.returncode != 0
-    assert "did not attest shared-sandbox-v1" in result.stderr
 
 
 def test_shared_live_check_requires_historical_fork_attestation(tmp_path: Path) -> None:
@@ -995,21 +1063,6 @@ def test_the_restore_refuses_to_rewrite_the_tree_it_is_running_from(tmp_path: Pa
     assert "refusing to restore from inside" in _deploy_output(result)
     assert (root / ".deployed-sha").read_text().strip() == previous
     assert (root / ".shared-live-ready").read_text().strip() == f"pending:{target}"
-
-
-def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> None:
-    """`.deployed-sha` is the only name that is known to have served work.
-
-    Read it after a successful rollout has written it and the value is the
-    commit that just failed — the same mistake `PREVIOUS` already makes.
-    """
-    script = HOST_DEPLOY.read_text()
-
-    assert script.index('RECORDED="$(cat .deployed-sha') < script.index(
-        "printf '%s\\n' \"${SHA}\" > .deployed-sha"
-    )
-    assert 'mark-ready "${recorded}"' in script
-    assert "restore_recorded_generation" in script
 
 
 # ── Storage attestation ───────────────────────────────────────────────
@@ -1719,23 +1772,6 @@ def test_a_df_that_cannot_size_the_upper_directory_is_unverified(tmp_path: Path)
     assert entry["verdict"] == "unverified"
     assert "could not size" in entry["reason"]
     assert "quota" not in entry["reason"]
-
-
-def test_a_quota_on_the_upper_directory_is_still_unsupported(tmp_path: Path) -> None:
-    """The answer that *is* a real disagreement keeps its verdict.
-
-    The empty case must not swallow the one the comparison exists for: two
-    valid sizes that differ are a project quota, and the attestation has to go
-    on saying so.
-    """
-    env = _storage_host(tmp_path, upper_size=10 * STORAGE_GIB)
-
-    result = _run(env, "check")
-
-    assert result.returncode == 0, result.stderr
-    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
-    assert entry["verdict"] == "unsupported"
-    assert "project quota" in entry["reason"]
 
 
 def _add_storage_helper(

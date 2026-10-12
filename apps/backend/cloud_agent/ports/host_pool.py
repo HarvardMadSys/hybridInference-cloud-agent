@@ -14,13 +14,30 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
+    from uuid import UUID
 
 
 class HostPoolRepository(Protocol):
     """Port: the runner-host pool and its enrollment."""
 
+    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:
+        """Observe new-group demand and capacity without claiming work.
+
+        The queue count deliberately excludes jobs whose thread already owns
+        a retained sandbox: another machine cannot serve those turns. Free
+        slots include only fresh, enrolled hosts that may create a new group
+        under the same durable compute fences as the claim path. Unmatched
+        demand is the exact capability/profile matching against those slots;
+        once an owned fresh template exists, work that no such template can
+        run is omitted from scale-up pressure. No job identifiers or job
+        requirements leave this projection. The result also carries raw host
+        telemetry for conservative per-host slot sizing; callers must not
+        treat a stale sample as evidence for an increase.
+        """
+        ...
+
     async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
-        """Observe ten-minute queue stalls without claiming or changing jobs.
+        """Observe configured queue stalls without claiming or changing jobs.
 
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
@@ -137,6 +154,8 @@ class HostPoolRepository(Protocol):
         runtime_versions_available: dict[str, list[str]] | None = None,
         settings_applied: Mapping[str, int | float] | None = None,
         settings_local: Mapping[str, int | float] | None = None,
+        sandbox_archive_settings_applied_revision: int | None = None,
+        sandbox_archive_settings_revision_reported: bool = False,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -171,7 +190,8 @@ class HostPoolRepository(Protocol):
         Args:
             host: The authenticated host name.
             credential_hash: Digest the request authenticated with. The
-                capacity write is refused unless the row still holds it.
+                archive revision, capacity write, and legacy settings import
+                are refused unless the row still holds it.
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
@@ -188,18 +208,18 @@ class HostPoolRepository(Protocol):
             runtime_versions: Default CLI version per runtime.
             runtime_versions_available: Every CLI version its image holds.
             settings_applied: The runtime settings the host is applying now.
-            settings_local: What its own environment would give it with no
-                admin value. Either ``None`` leaves what is stored in place.
+            settings_local: Legacy environment observations, imported once as
+                per-host overrides. Either ``None`` leaves the report in place.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.
         """
         ...
 
-    async def set_host_status(self, *, host: str, status: str) -> str:
+    async def set_host_status(self, *, host: str, status: str, force: bool = False) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.
 
-        Returns ``"ok"``, ``"unknown"`` or ``"invalid"``. The table is consulted
+        Returns ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"fenced"``. The table is consulted
         inside the transaction that writes, on a locked row: checking it in the
         caller means an admin draining a host and the reaper marking it offline
         can both read ``online`` and both write, and the loser's decision is the
@@ -207,11 +227,39 @@ class HostPoolRepository(Protocol):
         """
         ...
 
+    async def acquire_host_drain_fence(
+        self,
+        *,
+        host: str,
+        expected_fence_token: UUID | None,
+        expected_fence_epoch: UUID | None,
+        fence_token: UUID,
+    ) -> tuple[str, str | None, UUID | None]:
+        """CAS an expected deployment-drain owner and epoch to ``fence_token``.
+
+        Exact requested-token retries are resolved before the expected owner
+        and epoch are compared. The row lock covers observation and mutation.
+        ``status_before`` is returned only for ``"ok"``; other outcomes
+        are ``"unknown"``, ``"invalid"``, ``"manual"``, ``"stale"``
+        and ``"released"``. The epoch is absent only for an unknown host.
+        """
+        ...
+
+    async def release_host_drain_fence(
+        self, *, host: str, fence_token: UUID
+    ) -> tuple[str, UUID | None]:
+        """Put the exact active drain owner online, retaining its receipt.
+
+        Returns the outcome and current post-update epoch. Outcomes are
+        ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"stale"``.
+        """
+        ...
+
     async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
         """Ask a host to run ``slots`` turns at once, or with ``None`` its default.
 
-        Returns ``"ok"`` or ``"unknown"``. Nothing here starts or stops
-        anything: the host reads the value off its next heartbeat answer,
+        Returns ``"ok"``, ``"unknown"`` or ``"autoscaling_managed"``. Nothing
+        here starts or stops anything: the host reads the value off its next heartbeat answer,
         serves it as its limit, and reports it back as ``slots_total``. The
         claim honours the lower of the two from the next poll on, so a number
         the host has not confirmed admits nothing extra and a lowered one takes
@@ -231,7 +279,7 @@ class HostPoolRepository(Protocol):
         """Set or clear runtime settings for one server, over the global values.
 
         ``changes`` names only the settings to change, and ``None`` clears one
-        so the global value, or the host's own, applies again. Settings it does
+        so the global value, or the built-in default, applies again. Settings it does
         not name keep their values. The host applies the result from its next
         heartbeat answer.
 
@@ -378,7 +426,7 @@ class HostPoolRepository(Protocol):
         """The runtime settings set for every server, as stored.
 
         A server's own values win over these, and a setting set nowhere falls
-        back to the host's environment. Read through
+        back to the built-in default. Read through
         ``cloud_agent_shared.host_settings.admin_values``, which drops anything
         a release can no longer apply.
         """
@@ -395,6 +443,19 @@ class HostPoolRepository(Protocol):
         another setting. Returns the values before the change, for the audit
         record.
         """
+        ...
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        """Return the normalized deployment-wide archive policy and its timestamp."""
+        ...
+
+    async def set_sandbox_archive_settings(
+        self,
+        *,
+        expected_revision: int,
+        settings: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Atomically replace the archive policy, or return ``None`` on a stale revision."""
         ...
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:
@@ -417,10 +478,14 @@ class HostPoolRepository(Protocol):
         """Drop a host from the pool. A runner still polling re-adds itself.
 
         Returns ``"deleted"`` or ``"unknown"``; refuses ``"active"``,
+        ``"fenced"``,
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
-        A disabled attached machine without external release capability may
-        be deregistered after dependency checks; this never shuts it down.
+        A sandbox whose deletion has completed is an audit row: it keeps the
+        host name and does not block forgetting. A live group, or one whose
+        deletion failed or is still in progress, does. A disabled attached
+        machine without external release capability may be deregistered after
+        dependency checks; this never shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the

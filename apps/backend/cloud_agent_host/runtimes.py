@@ -540,6 +540,11 @@ class ClaudeCodeRuntime(AgentRuntime):
             # it. Unconditional, including for a job with no MCP servers —
             # which is where an injected one would be least expected.
             "--strict-mcp-config",
+            # Fork siblings share the repository, so its project/local
+            # settings are untrusted launch input. Only the member's private
+            # user settings (including platform-installed hooks) are loaded.
+            "--setting-sources",
+            "user",
             # The sandbox IS the boundary, so an interactive permission prompt
             # inside it has nothing left to protect — it only guarantees the
             # agent cannot do the work. Without this the CLI denies every write
@@ -571,6 +576,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             # subagent definition. `inherit` skips that override, allowing
             # Explore to pick an ungranted default (e.g. opus for DeepSeek).
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            # The pinned CLI retries transient inference failures inside the
+            # current native turn with exponential backoff and jitter. Extend
+            # its default request budget without replaying the user's prompt;
+            # disabling the watchdog keeps exhaustion bounded.
+            "CLAUDE_CODE_MAX_RETRIES": "15",
+            "CLAUDE_CODE_RETRY_WATCHDOG": "0",
             # Telemetry and auto-update are switched off explicitly. The
             # sandbox reaches the public web, so nothing else stops the CLI
             # phoning home or replacing itself in the middle of a job.
@@ -623,6 +634,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         prompt_at = argv.index("-p")
         del argv[prompt_at : prompt_at + 2]
         argv[1:1] = ["-p", "--input-format", "stream-json", "--replay-user-messages"]
+        # AskUserQuestion and ExitPlanMode require owner interaction even in bypassPermissions.
+        # The pinned CLI sends its can_use_tool request over this control
+        # channel, and the live turn answers it with the owner's choices.
+        argv += ["--permission-prompt-tool", "stdio"]
         return argv, env
 
     @staticmethod
@@ -659,6 +674,19 @@ class ClaudeCodeRuntime(AgentRuntime):
         kind = event.get("type")
         if kind == "system":
             subtype = str(event.get("subtype") or "system").strip() or "system"
+            if subtype == "api_retry":
+                # Each notice describes a new request attempt and its wait;
+                # suppressing repeated subtypes would hide the retry progress.
+                return NormalizedEvent(
+                    LIFECYCLE,
+                    {
+                        "phase": "api_retry",
+                        "attempt": event.get("attempt"),
+                        "max_retries": event.get("max_retries"),
+                        "retry_delay_ms": event.get("retry_delay_ms"),
+                        "error_status": event.get("error_status"),
+                    },
+                )
             if subtype not in self.MILESTONE_SUBTYPES:
                 # Not discarded outright: the first occurrence is kept as a raw
                 # diagnostic so a subtype nobody has classified yet is still
@@ -755,6 +783,12 @@ class ClaudeCodeRuntime(AgentRuntime):
         # The CLI emits text and parallel tools as separate blocks of one
         # response, each repeating its usage. Keep the identity for counting.
         usage_fields = {"usage": usage or None, "usage_id": message.get("id")}
+        parent_tool_use_id = event.get("parent_tool_use_id")
+        if isinstance(parent_tool_use_id, str) and parent_tool_use_id:
+            # The enclosing Task/Agent call owns these blocks. Keep that
+            # recorded relationship so the UI can distinguish a child agent's
+            # activity and reply from the conversation's own answer.
+            usage_fields["parent_tool_use_id"] = parent_tool_use_id
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -798,6 +832,20 @@ class ClaudeCodeRuntime(AgentRuntime):
             # accounts for it, and it is nothing new to report.
             return None
         blocks = (event.get("message") or {}).get("content") or []
+        parent_tool_use_id = event.get("parent_tool_use_id")
+        parent_fields = (
+            {"parent_tool_use_id": parent_tool_use_id}
+            if isinstance(parent_tool_use_id, str) and parent_tool_use_id
+            else {}
+        )
+        # Native tools carry their structured result outside the content block.
+        # TaskCreate's assigned task ID is here rather than in its input.
+        structured_output = event.get("tool_use_result")
+        result_fields = (
+            {"structured_output": structured_output}
+            if isinstance(structured_output, (dict, list))
+            else {}
+        )
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 content = block.get("content")
@@ -807,6 +855,8 @@ class ClaudeCodeRuntime(AgentRuntime):
                         "tool_use_id": block.get("tool_use_id"),
                         "is_error": bool(block.get("is_error")),
                         "content": _payload_text(content),
+                        **parent_fields,
+                        **result_fields,
                     },
                 )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})
@@ -816,7 +866,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         # Result usage is the total for this query (one platform attempt),
         # including failed queries. It supersedes provisional block usage.
         usage_fields = {"usage": event.get("usage") or None, "usage_scope": "attempt"}
-        if event.get("is_error"):
+        if event.get("is_error") or event.get("terminal_reason") == "api_error":
             # An API failure arrives as subtype "success" with the reason in
             # ``result``; the error subtypes carry it in ``errors`` instead
             # (both verified against the pinned 2.1.220).
@@ -831,6 +881,8 @@ class ClaudeCodeRuntime(AgentRuntime):
                 ERROR,
                 {
                     "subtype": event.get("subtype"),
+                    "terminal_reason": event.get("terminal_reason"),
+                    "api_error_status": event.get("api_error_status"),
                     "text": text[:2000],
                     **usage_fields,
                 },
@@ -922,10 +974,9 @@ class CodexRuntime(AgentRuntime):
         root-owned system requirements before the CLI starts, for both exec
         and app-server. Repository configuration cannot admit another server.
 
-        Mirrors the invocation this repository already runs in production
-        (.github/workflows/codex-oncall.yml), because that one is known to work
-        against this gateway. Three things it gets right that the first pass
-        here did not:
+        Mirrors the invocation the gateway's Codex on-call workflow ran in
+        production, because that one was known to work against this gateway.
+        Three things it gets right that the first pass here did not:
 
         - the model rides ``--model``. The previous version set ``CODEX_MODEL``,
           which is not a variable the CLI reads, so the owner's model choice was
@@ -1289,8 +1340,9 @@ class PiRuntime(GenericRuntime):
         self._reported_subtypes: set[str] = set()
         self.session_id: str | None = None
         self._preview = ReplyPreview(clock)
-        # pi's messages carry no id on the wire; counting them gives each text
-        # block a preview id that its ``text_end`` can name again.
+        # pi gives its messages no id of its own, and the provider's
+        # ``responseId`` is absent from ``message_start``; counting messages
+        # gives each text block a preview id that its ``text_end`` can name again.
         self._message_no = 0
 
     def prepare(
@@ -1461,8 +1513,9 @@ class PiRuntime(GenericRuntime):
             self._reported_subtypes.add(subtype)
             return self._raw(line, f"unclassified message_update subtype {subtype!r}")
 
+        response = self._response_identity(event)
         if subtype == "thinking_end":
-            return NormalizedEvent(THINKING, {"text": _truncate(update.get("content"))})
+            return NormalizedEvent(THINKING, {"text": _truncate(update.get("content")), **response})
         if subtype == "text_end":
             # The one event the owner is actually waiting for: `message` is
             # what the control plane copies into agent_thread_messages, which
@@ -1475,6 +1528,7 @@ class PiRuntime(GenericRuntime):
                     "text": _truncate(update.get("content")),
                     "truncated": _clipped(update.get("content")),
                     "preview_id": preview_id,
+                    **response,
                 },
             )
         tool_call = update.get("toolCall")
@@ -1488,8 +1542,23 @@ class PiRuntime(GenericRuntime):
                 # Keyed `input` like every other adapter, because that is what
                 # the UI reads to render the command.
                 "input": tool_call.get("arguments"),
+                **response,
             },
         )
+
+    @staticmethod
+    def _response_identity(event: dict[str, Any]) -> dict[str, str]:
+        """Name the provider response a message belongs to, when pi recorded it.
+
+        pi copies the first stream chunk's id into ``responseId`` and repeats
+        the message on every ``message_update`` and ``message_end``. Against
+        the gateway that is the chat-completion id it logs for the request, so
+        ``usage_id`` joins a message to its measured request, as Claude Code's
+        native ``message.id`` does.
+        """
+        message = event.get("message")
+        response_id = message.get("responseId") if isinstance(message, dict) else None
+        return {"usage_id": response_id} if isinstance(response_id, str) and response_id else {}
 
     def _preview_id(self, update: dict[str, Any]) -> str:
         return f"message-{self._message_no}:{update.get('contentIndex')}"
@@ -1527,6 +1596,7 @@ class PiRuntime(GenericRuntime):
                     "total_tokens": usage.get("totalTokens"),
                     "model": message.get("model"),
                     "text": (f"{usage.get('input', 0)} in / {usage.get('output', 0)} out tokens"),
+                    **self._response_identity(event),
                 },
             )
         # role="user" is the prompt echoed back; the owner wrote it, and the

@@ -26,14 +26,22 @@ vi.mock('@/lib/api/compute', () => ({
   createComputeServer: vi.fn(),
   preflightComputeServer: vi.fn(),
   importComputeResource: vi.fn(),
+  saveComputeDeploymentProfile: vi.fn(),
+  getComputeAutomaticSetup: vi.fn(),
+  createAutomaticComputeSetup: vi.fn(),
   saveComputeConnection: vi.fn(),
   validateComputeConnection: vi.fn(),
   setComputePolicy: vi.fn(),
   getRetirementImpact: vi.fn(),
   extendComputeAllocation: vi.fn(),
   retireComputeAllocation: vi.fn(),
+  rotateComputeAllocation: vi.fn(),
   actOnComputeOperation: vi.fn(),
   resolveComputeOperation: vi.fn(),
+}));
+
+vi.mock('./CloudLabAutoscaling', () => ({
+  default: () => <p>CloudLab auto-scaling controls</p>,
 }));
 
 const catalog: ComputeCatalog = {
@@ -65,6 +73,19 @@ const catalog: ComputeCatalog = {
           modes: ['attach'],
           required: true,
         },
+        {
+          key: 'host_key_source',
+          label: 'SSH host-key checking',
+          type: 'select',
+          default: 'none',
+          advanced: true,
+          deployment_only: true,
+          modes: ['provision'],
+          options: [
+            { value: 'none', label: 'Do not verify the CloudLab host' },
+            { value: 'registration', label: 'Registered by the node at first boot' },
+          ],
+        },
       ],
       connection_fields: [],
       secret_label: 'Portal API token',
@@ -93,6 +114,15 @@ const connections: ComputeConnection[] = [
     blocked_reasons: [],
   },
 ];
+const cloudLabSshKey: ComputeConnection = {
+  ...connections[0],
+  configuration: {},
+  status: 'unverified',
+  blocked_reasons: [
+    { code: 'connection_unverified', message: 'Validate this connection before deployment.' },
+  ],
+};
+
 function operation(over: Partial<ComputeOperation> = {}): ComputeOperation {
   return {
     id: 'op-a',
@@ -130,6 +160,10 @@ function allocation(over: Partial<ComputeAllocation> = {}): ComputeAllocation {
       extend_to_horizon_seconds: 14400,
       stop_new_groups_before_seconds: 1800,
       stop_claims_before_seconds: 300,
+      rotation_enabled: false,
+      max_node_age_seconds: 604800,
+      node_types: [],
+      node_type_binding: 'phystype',
       reason: '',
     },
     ...over,
@@ -155,6 +189,11 @@ beforeEach(() => {
     observed_at: '2026-10-04T08:00:00Z',
   });
   vi.mocked(api.getComputeOperations).mockResolvedValue({ operations: [] });
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+  });
 });
 afterEach(cleanup);
 
@@ -172,6 +211,9 @@ function renderAdd(onOperation = vi.fn(), testCatalog = catalog, saved = connect
 function fillSshForm() {
   fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Test server' } });
   fireEvent.change(screen.getByLabelText('Host address'), { target: { value: 'host.example' } });
+  fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+    target: { value: '/mnt/user-data' },
+  });
 }
 
 describe('server acquisition UI', () => {
@@ -181,7 +223,13 @@ describe('server acquisition UI', () => {
     const receive = renderAdd();
     expect(screen.queryByLabelText('Agent deployment')).not.toBeInTheDocument();
     expect(screen.queryByText('Deployment settings')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('');
+    expect(screen.getByLabelText('Sandbox storage path')).toBeRequired();
+    expect(screen.getByRole('region', { name: 'Sandbox storage' })).toBeVisible();
     fillSshForm();
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: ' /mnt/custom-data/ ' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(receive).toHaveBeenCalledWith(next, true));
     expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -190,6 +238,7 @@ describe('server acquisition UI', () => {
         mode: 'attach',
         connection_id: 'ssh-account',
         configuration: { address: 'host.example' },
+        sandbox_storage_path: '/mnt/custom-data',
       }),
     );
     expect(vi.mocked(api.createComputeServer).mock.calls[0][0]).not.toHaveProperty(
@@ -208,6 +257,9 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -216,11 +268,152 @@ describe('server acquisition UI', () => {
           mode: 'provision',
           connection_id: 'cloudlab-account',
           ssh_connection_id: 'ssh-account',
-          configuration: { project: 'FAST25-AE', profile: 'small-lan' },
+          configuration: { project: 'FAST25-AE', profile: 'small-lan', host_key_source: 'none' },
+          sandbox_storage_path: '/mnt/cloudlab-data',
         }),
       ),
     );
   });
+
+  it('keeps verified host keys when an older catalog does not advertise unchecked CloudLab SSH', () => {
+    const providers = catalog.providers.map((provider) => {
+      if (provider.id !== 'cloudlab') return provider;
+      return {
+        ...provider,
+        fields: provider.fields.map((field) => {
+          if (field.key !== 'host_key_source') return field;
+          return {
+            ...field,
+            default: 'known_hosts',
+            options: [
+              { value: 'known_hosts', label: 'Verified list on the SSH connection' },
+              {
+                value: 'registration',
+                label: 'Registered by the node at first boot',
+              },
+            ],
+          };
+        }),
+      };
+    });
+    const oldCatalog: ComputeCatalog = { ...catalog, providers };
+    renderAdd(vi.fn(), oldCatalog, []);
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    expect(screen.getByLabelText('Verified host keys')).toBeInTheDocument();
+    expect(
+      screen.queryByText('CloudLab SSH host identity will not be verified.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('warns when connect-existing ignores a previously selected registration policy', () => {
+    renderAdd();
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(screen.getByLabelText('SSH host-key checking'), {
+      target: { value: 'registration' },
+    });
+    expect(
+      screen.queryByText('CloudLab SSH host identity will not be verified.'),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
+
+    expect(
+      screen.getByText('CloudLab SSH host identity will not be verified.'),
+    ).toBeInTheDocument();
+  });
+
+  it('prefills CloudLab fields from the provider catalog defaults', async () => {
+    const withDefaults: ComputeCatalog = {
+      ...catalog,
+      providers: catalog.providers.map((provider) => ({
+        ...provider,
+        fields: provider.fields.map((field) =>
+          field.key === 'project'
+            ? { ...field, default: 'FAST25-AE' }
+            : field.key === 'profile'
+              ? { ...field, default: 'small-lan' }
+              : field,
+        ),
+      })),
+    };
+    vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
+    renderAdd(vi.fn(), withDefaults);
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+
+    expect(screen.getByLabelText('Project')).toHaveValue('FAST25-AE');
+    expect(screen.getByLabelText('Profile')).toHaveValue('small-lan');
+    fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+
+    await waitFor(() =>
+      expect(api.createComputeServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          configuration: { project: 'FAST25-AE', profile: 'small-lan', host_key_source: 'none' },
+        }),
+      ),
+    );
+  });
+
+  it.each([
+    '',
+    'data/sandboxes',
+    '////',
+    '/mnt/data//sandboxes',
+    '/mnt/./data',
+    '/mnt/../data',
+    '/mnt/data disk',
+    '/mnt/data;touch',
+    '/mnt',
+    '/etc',
+    '/etc/sandboxes',
+    '/var/lib',
+    '/var/lib/docker',
+    '/var/lib/docker/sandboxes',
+    '/var/lib/containerd/sandboxes',
+    '/var/lib/cloud-agent/sandboxes',
+    '/var/lib/hybridinference/sandboxes',
+    `/mnt/${'a'.repeat(4092)}`,
+  ])('rejects invalid sandbox storage path %j before saving credentials', async (path) => {
+    renderAdd(vi.fn(), catalog, []);
+    fillSshForm();
+    const storage = screen.getByLabelText('Sandbox storage path');
+    fireEvent.change(storage, { target: { value: path } });
+    fireEvent.change(screen.getByLabelText('SSH private key'), {
+      target: { value: 'unsaved-private-key' },
+    });
+    fireEvent.submit(storage.closest('form')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sandbox storage path');
+    expect(storage).toHaveAttribute('aria-invalid', 'true');
+    expect(storage).toHaveFocus();
+    expect(api.saveComputeConnection).not.toHaveBeenCalled();
+    expect(api.createComputeServer).not.toHaveBeenCalled();
+    expect(api.getComputeOperations).not.toHaveBeenCalled();
+  });
+
+  it.each(['/', ' / '])(
+    'rejects root storage path %j without falling back to defaults',
+    async (path) => {
+      renderAdd(vi.fn(), catalog, []);
+      fillSshForm();
+      const storage = screen.getByLabelText('Sandbox storage path');
+      fireEvent.change(storage, { target: { value: path } });
+      fireEvent.change(screen.getByLabelText('SSH private key'), {
+        target: { value: 'unsaved-private-key' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Sandbox storage path must point to a dedicated mounted data disk outside system and service directories.',
+      );
+      expect(storage).toHaveAttribute('aria-invalid', 'true');
+      expect(storage).toHaveFocus();
+      expect(api.saveComputeConnection).not.toHaveBeenCalled();
+      expect(api.createComputeServer).not.toHaveBeenCalled();
+      expect(api.getComputeOperations).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
@@ -256,6 +449,9 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     const advanced = screen.getByText('Advanced options');
     const details = advanced.closest('details')!;
     expect(details).not.toHaveAttribute('open');
@@ -272,6 +468,7 @@ describe('server acquisition UI', () => {
             profile: 'small-lan',
             group: 'research',
             bindings: {},
+            host_key_source: 'none',
           },
         }),
       ),
@@ -415,18 +612,28 @@ describe('server acquisition UI', () => {
     });
     renderAdd(vi.fn(), observedCatalog, [connections[1]]);
     fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'No server setup is configured. Configure it before this server can run sandboxes.',
+    );
+    expect(screen.getByRole('button', { name: 'Create server' })).toBeDisabled();
     fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
     fireEvent.change(screen.getByLabelText('Server name'), {
       target: { value: 'Observed experiment' },
     });
     fireEvent.change(screen.getByLabelText('Experiment ID'), { target: { value: 'experiment-a' } });
     fireEvent.change(screen.getByLabelText('CloudLab SSH user'), { target: { value: 'unused' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/unused-data' },
+    });
     fireEvent.click(screen.getByText('Advanced options'));
     fireEvent.click(
       screen.getByRole('checkbox', { name: 'Only track this resource (skip server setup)' }),
     );
+    expect(screen.queryByText(/No server setup is configured/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText('CloudLab SSH user')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('SSH private key')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import resource' })).toBeEnabled();
+    expect(screen.queryByLabelText('Sandbox storage path')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Import resource' }));
     await waitFor(() =>
       expect(api.importComputeResource).toHaveBeenCalledWith(
@@ -439,13 +646,18 @@ describe('server acquisition UI', () => {
     expect(vi.mocked(api.importComputeResource).mock.calls[0][0]).not.toHaveProperty(
       'ssh_connection_id',
     );
+    expect(vi.mocked(api.importComputeResource).mock.calls[0][0]).not.toHaveProperty(
+      'sandbox_storage_path',
+    );
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.saveComputeConnection).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole('radio', { name: 'Create new' })).toBeEnabled());
     fireEvent.click(screen.getByRole('radio', { name: 'Create new' }));
     expect(screen.getByRole('button', { name: 'Create server' })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('No server setup is configured.');
     expect(screen.queryByRole('button', { name: 'Import resource' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('SSH private key')).toBeInTheDocument();
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/mnt/unused-data');
   });
 
   it('recovers an acquisition whose response was lost instead of issuing another create', async () => {
@@ -493,7 +705,7 @@ describe('server acquisition UI', () => {
     vi.mocked(api.saveComputeConnection)
       .mockResolvedValueOnce({ connection: connections[1] })
       .mockRejectedValueOnce(new Error('SSH key rejected'))
-      .mockResolvedValueOnce({ connection: connections[0] });
+      .mockResolvedValueOnce({ connection: cloudLabSshKey });
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     render(
       <AddComputeServer
@@ -504,15 +716,33 @@ describe('server acquisition UI', () => {
       />,
     );
     fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    expect(screen.queryByLabelText('Verified host keys')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Research' } });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small' } });
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/cloudlab-data' },
+    });
     fireEvent.change(screen.getByLabelText('Portal API token'), {
       target: { value: 'cloud-token' },
     });
     fireEvent.change(screen.getByLabelText('SSH private key'), { target: { value: 'ssh-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
     await screen.findByText('SSH key rejected');
+    expect(
+      screen.getByText('CloudLab SSH host identity will not be verified.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('Validate this connection before deployment.'),
+    ).not.toBeInTheDocument();
+    expect(api.saveComputeConnection).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        provider_id: 'existing_ssh',
+        configuration: {},
+        secret: 'ssh-key',
+      }),
+    );
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.getComputeOperations).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Change CloudLab account' })).toBeInTheDocument();
@@ -554,6 +784,7 @@ describe('connection credentials', () => {
     const local = vi.spyOn(Storage.prototype, 'setItem');
     render(<ComputeConnectionForm catalog={catalog} connection={connections[0]} onSaved={saved} />);
     fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'Lab key' } });
+    expect(screen.getByLabelText('Verified host keys')).toHaveValue('verified-public-key');
     fireEvent.change(screen.getByLabelText('SSH private key'), {
       target: { value: 'sensitive-private-key' },
     });
@@ -594,6 +825,29 @@ describe('connection credentials', () => {
 });
 
 describe('resource management', () => {
+  it('shows the saved sandbox storage path in server details when configured', () => {
+    const { rerender } = render(
+      <ComputeResourcePanel
+        allocation={allocation({ sandbox_storage_path: '/mnt/user-data' })}
+        section="details"
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Sandbox storage path').closest('div')).toHaveTextContent(
+      '/mnt/user-data',
+    );
+    rerender(
+      <ComputeResourcePanel
+        allocation={allocation({ sandbox_storage_path: null })}
+        section="details"
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Sandbox storage path')).not.toBeInTheDocument();
+  });
+
   it('shows the configured check interval without promising the next execution time', () => {
     const { rerender } = render(
       <ComputeResourcePanel
@@ -680,6 +934,119 @@ describe('resource management', () => {
     expect(api.retireComputeAllocation).not.toHaveBeenCalled();
   });
 
+  it('saves replacement timing and ordered node types without moving a node', async () => {
+    const resource = allocation();
+    vi.mocked(api.setComputePolicy).mockImplementation(async (_id, policy) => ({
+      allocation: { ...resource, policy, revision: 3 },
+    }));
+    render(<ComputeResourcePanel allocation={resource} onSaved={vi.fn()} onOperation={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText('Request renewal automatically'));
+    fireEvent.click(screen.getByLabelText(/Move to a new node when renewal/));
+    fireEvent.change(screen.getByLabelText('Node types to use, newest first'), {
+      target: { value: 'r6615, c6620  d6515' },
+    });
+    fireEvent.change(screen.getByLabelText('Renewal reason'), {
+      target: { value: 'Keep evaluation sessions' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save renewal policy' }));
+    await waitFor(() =>
+      expect(api.setComputePolicy).toHaveBeenCalledWith(
+        resource.id,
+        expect.objectContaining({
+          enabled: true,
+          rotation_enabled: true,
+          renew_before_seconds: 10800,
+          max_node_age_seconds: 604800,
+          node_types: ['r6615', 'c6620', 'd6515'],
+        }),
+        2,
+        undefined,
+      ),
+    );
+    expect(api.rotateComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('disables replacement together with automatic renewal', async () => {
+    const resource = allocation();
+    resource.policy = {
+      ...resource.policy,
+      enabled: true,
+      rotation_enabled: true,
+      node_types: ['r6615'],
+      reason: 'Keep evaluation sessions',
+    };
+    vi.mocked(api.setComputePolicy).mockImplementation(async (_id, policy) => ({
+      allocation: { ...resource, policy, revision: 3 },
+    }));
+    render(<ComputeResourcePanel allocation={resource} onSaved={vi.fn()} onOperation={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText('Request renewal automatically'));
+    expect(screen.getByLabelText(/Move to a new node when renewal/)).not.toBeChecked();
+    expect(screen.getByLabelText(/Move to a new node when renewal/)).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save renewal policy' }));
+    await waitFor(() =>
+      expect(api.setComputePolicy).toHaveBeenCalledWith(
+        resource.id,
+        expect.objectContaining({ enabled: false, rotation_enabled: false }),
+        2,
+        undefined,
+      ),
+    );
+  });
+
+  it('recovers a submitted replacement after the response is lost', async () => {
+    vi.mocked(api.rotateComputeAllocation).mockRejectedValue(new Error('Connection lost'));
+    const moved = operation({ kind: 'rotate', state: 'waiting' });
+    vi.mocked(api.getComputeOperations).mockImplementation(async (requestId) => ({
+      operations: [{ ...moved, request_id: requestId! }],
+    }));
+    const onOperation = vi.fn();
+    render(
+      <ComputeResourcePanel
+        allocation={allocation({ allowed_actions: ['rotate'] })}
+        onSaved={vi.fn()}
+        onOperation={onOperation}
+      />,
+    );
+    fireEvent.click(screen.getByText('Replace node now'));
+    fireEvent.click(screen.getByRole('button', { name: 'Start replacement' }));
+    await waitFor(() => expect(onOperation).toHaveBeenCalled());
+    const request = vi.mocked(api.rotateComputeAllocation).mock.calls[0][1];
+    expect(request.expected_revision).toBe(2);
+    expect(api.getComputeOperations).toHaveBeenCalledWith(request.request_id);
+    expect(onOperation).toHaveBeenCalledWith({ ...moved, request_id: request.request_id });
+    expect(api.rotateComputeAllocation).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows the replacement status and suppresses unsupported actions', () => {
+    render(
+      <ComputeResourcePanel
+        allocation={allocation({
+          allowed_actions: [],
+          rotation: {
+            enabled: true,
+            decide_at: '2026-10-10T10:00:00Z',
+            replace_after: '2026-10-15T10:00:00Z',
+            last: {
+              id: 'move-a',
+              state: 'blocked',
+              step: 'selecting_candidate',
+              message: 'No replacement node could be prepared.',
+              updated_at: '2026-10-10T11:00:00Z',
+              completed_at: null,
+            },
+          },
+        })}
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Last move needs attention/)).toHaveTextContent(
+      'No replacement node could be prepared.',
+    );
+    expect(screen.queryByRole('button', { name: 'Start replacement' })).not.toBeInTheDocument();
+  });
+
   it('does not show unsupported lease actions for an SSH resource', () => {
     render(
       <ComputeResourcePanel
@@ -698,7 +1065,71 @@ describe('resource management', () => {
 });
 
 describe('resource dashboard', () => {
-  it('shows actual retained locations separately and recovers ongoing operations on page open', async () => {
+  it('opens auto-scaling without replacing the manual allocation flow', async () => {
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add server' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-scaling' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab auto-scaling' });
+    expect(within(dialog).getByText('CloudLab auto-scaling controls')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close panel' }));
+    expect(screen.getByRole('button', { name: 'Add server' })).toBeEnabled();
+  });
+
+  it('shows only the newest periodic inspection for each server', async () => {
+    vi.mocked(api.getComputeOperations).mockResolvedValue({
+      operations: [
+        operation({
+          id: 'inspect-newest',
+          kind: 'inspect',
+          state: 'blocked',
+          message: "CloudLab cannot confirm this experiment's existence or visibility",
+          updated_at: '2026-10-04T08:05:00Z',
+        }),
+        operation({
+          id: 'inspect-older',
+          kind: 'inspect',
+          state: 'blocked',
+          message: "CloudLab cannot confirm this experiment's existence or visibility",
+          updated_at: '2026-10-04T08:03:00Z',
+        }),
+        operation({ id: 'acquire-original', state: 'succeeded' }),
+      ],
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
+    expect(screen.getByText('No active operations.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show recent operations' }));
+    expect(
+      screen.getAllByRole('button', { name: /inspect · CloudLab experiment · blocked/ }),
+    ).toHaveLength(1);
+    expect(
+      screen.getByRole('button', { name: /acquire · CloudLab experiment · succeeded/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps failed operations with recovery actions in the default Activity view', async () => {
+    vi.mocked(api.getComputeOperations).mockResolvedValue({
+      operations: [
+        operation({
+          state: 'failed',
+          message: 'CloudLab had no matching capacity',
+          allowed_actions: ['retry', 'cancel'],
+        }),
+      ],
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
+
+    expect(
+      screen.getByRole('button', { name: /acquire · CloudLab experiment · failed/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps settled non-actionable operations in recent Activity only', async () => {
     vi.mocked(api.getComputeOperations).mockResolvedValue({
       operations: [
         operation({
@@ -712,7 +1143,9 @@ describe('resource dashboard', () => {
     const oldServer = await screen.findByRole('listitem', { name: /old-host/ });
     expect(within(oldServer).getByText('3 sandboxes')).toBeInTheDocument();
     expect(within(oldServer).getByText('draining')).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
+    expect(screen.getByText('No active operations.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show recent operations' }));
     fireEvent.click(
       await screen.findByRole('button', { name: /acquire · CloudLab experiment · unknown/ }),
     );
@@ -783,6 +1216,104 @@ describe('resource dashboard', () => {
     expect(within(cloudRow).queryByText('Current target')).not.toBeInTheDocument();
     expect(within(cloudRow).getByText('5 sandboxes')).toBeInTheDocument();
     expect(within(oldRow).getByText('3 sandboxes')).toBeInTheDocument();
+  });
+
+  it('hides released resources without letting their old host bindings conceal live inventory', async () => {
+    const staleObservation = {
+      code: 'observation_stale',
+      message: 'Resource observation needs refresh.',
+    };
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({
+          id: 'current-resource',
+          name: 'Current CloudLab',
+          external_id: 'current-experiment',
+          expires_at: '2099-10-05T08:00:00Z',
+        }),
+        allocation({
+          id: 'released-resource',
+          name: 'Released CloudLab',
+          state: 'terminated',
+          external_id: 'released-experiment',
+          expires_at: '2000-10-05T08:00:00Z',
+          blocked_reasons: [staleObservation],
+          nodes: [{ id: 'released-node', name: 'old node', hosts: ['old-host'] }],
+        }),
+        allocation({
+          id: 'absent-resource',
+          name: 'Absent CloudLab',
+          state: 'absent',
+          external_id: 'absent-experiment',
+          expires_at: '2000-10-05T08:00:00Z',
+          blocked_reasons: [staleObservation],
+          nodes: [],
+        }),
+      ],
+      hosts: [
+        {
+          host: 'old-host',
+          status: 'online',
+          retained_groups: 3,
+          allocation_id: null,
+          compute_node_id: null,
+        },
+      ],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+
+    const table = await screen.findByRole('list', { name: 'Server inventory' });
+    expect(within(table).getAllByRole('listitem')).toHaveLength(2);
+    expect(screen.getByRole('listitem', { name: 'Current CloudLab' })).toBeInTheDocument();
+    expect(screen.getByRole('listitem', { name: 'old-host' })).toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'Released CloudLab' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'Absent CloudLab' })).not.toBeInTheDocument();
+
+    const showReleased = screen.getByRole('button', { name: 'Show released (2)' });
+    expect(showReleased).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(showReleased);
+
+    const released = screen.getByRole('listitem', { name: 'Released CloudLab' });
+    const absent = screen.getByRole('listitem', { name: 'Absent CloudLab' });
+    expect(within(released).getByText('Released')).toBeInTheDocument();
+    expect(within(absent).getByText('Disconnected')).toBeInTheDocument();
+    expect(screen.queryByText(staleObservation.message)).not.toBeInTheDocument();
+    expect(screen.queryByText('Deadline passed')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hide released' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide released' }));
+    expect(screen.queryByRole('listitem', { name: 'Released CloudLab' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'Absent CloudLab' })).not.toBeInTheDocument();
+  });
+
+  it('describes an empty active inventory when every resource is released', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({
+          id: 'released-resource',
+          name: 'Released CloudLab',
+          state: 'terminated',
+        }),
+      ],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+
+    expect(
+      await screen.findByText('No active servers. Released servers are hidden.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Add your first server to run sandboxes.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show released (1)' }));
+    expect(screen.getByRole('listitem', { name: 'Released CloudLab' })).toBeInTheDocument();
   });
 
   it('opens one management panel for all enrollments of the selected machine', async () => {
@@ -943,6 +1474,47 @@ describe('resource dashboard', () => {
     expect(within(row).queryByText('Online')).not.toBeInTheDocument();
   });
 
+  it('opens server setup from the missing-profile CloudLab callout', async () => {
+    vi.mocked(api.getComputeProviders).mockResolvedValue({
+      ...catalog,
+      deployment_profiles: [],
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    const addServer = screen.getByRole('button', { name: 'Add server' });
+    await waitFor(() => expect(addServer).toBeEnabled());
+    fireEvent.click(addServer);
+    const addDialog = screen.getByRole('dialog', { name: 'Add server' });
+    fireEvent.click(within(addDialog).getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(within(addDialog).getByLabelText('Server name'), {
+      target: { value: 'Preserved CloudLab server' },
+    });
+    expect(within(addDialog).getByRole('button', { name: 'Create server' })).toBeDisabled();
+    expect(within(addDialog).getByRole('alert')).toHaveTextContent(
+      'No server setup is configured. Configure it before this server can run sandboxes.',
+    );
+    const configureSetup = within(addDialog).getByRole('button', {
+      name: 'Configure server setup',
+    });
+    fireEvent.click(configureSetup);
+    expect(screen.queryByRole('dialog', { name: 'Add server' })).not.toBeInTheDocument();
+    const setupDialog = screen.getByRole('dialog', { name: 'Server setup' });
+    await waitFor(() =>
+      expect(within(setupDialog).getByRole('heading', { name: 'Server setup' })).toHaveFocus(),
+    );
+    fireEvent.click(within(setupDialog).getByRole('button', { name: '← Back' }));
+    const restoredDialog = screen.getByRole('dialog', { name: 'Add server' });
+    const restoredConfigureSetup = within(restoredDialog).getByRole('button', {
+      name: 'Configure server setup',
+    });
+    expect(restoredConfigureSetup).toBe(configureSetup);
+    await waitFor(() => expect(restoredConfigureSetup).toHaveFocus());
+    expect(within(restoredDialog).getByRole('radio', { name: /CloudLab/ })).toBeChecked();
+    expect(within(restoredDialog).getByLabelText('Server name')).toHaveValue(
+      'Preserved CloudLab server',
+    );
+    expect(api.createComputeServer).not.toHaveBeenCalled();
+  });
+
   it('adds a key inline and reuses it after a failed server request without losing the draft', async () => {
     vi.mocked(api.saveComputeConnection).mockResolvedValue({
       connection: { ...connections[0], id: 'new-key' },
@@ -961,6 +1533,9 @@ describe('resource dashboard', () => {
     });
     fireEvent.change(within(dialog).getByLabelText('Host address'), {
       target: { value: 'host.example' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('Sandbox storage path'), {
+      target: { value: '/mnt/user-data' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Change SSH key' }));
     fireEvent.change(within(dialog).getByLabelText('Use SSH key'), {
@@ -1020,6 +1595,74 @@ describe('resource dashboard', () => {
     expect(within(dialog).queryByLabelText('Portal API token')).not.toBeInTheDocument();
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
     expect(api.createComputeServer).not.toHaveBeenCalled();
+  });
+
+  it('treats a key-only SSH credential as valid only in its CloudLab server context', async () => {
+    vi.mocked(api.getComputeConnections).mockResolvedValue({
+      connections: [cloudLabSshKey, connections[1]],
+    });
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [allocation({ ssh_host_key_policy: 'unchecked' })],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    vi.mocked(api.saveComputeConnection).mockResolvedValue({
+      connection: { ...cloudLabSshKey, name: 'Rotated key', revision: 2 },
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Access settings' }));
+
+    expect(
+      within(dialog).getByText('SSH host-key checking is disabled for this CloudLab server.'),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText('Validate this connection before deployment.'),
+    ).not.toBeInTheDocument();
+    expect(within(dialog).getAllByRole('button', { name: 'Check' })).toHaveLength(1);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit SSH key' }));
+    expect(within(dialog).getByLabelText('SSH private key')).toHaveValue('');
+    expect(within(dialog).queryByLabelText('Verified host keys')).not.toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText('Key name'), {
+      target: { value: 'Rotated key' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    await within(dialog).findByText('Access settings saved.');
+
+    expect(api.saveComputeConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Rotated key',
+        expected_revision: 1,
+      }),
+      'ssh-account',
+    );
+    expect(vi.mocked(api.saveComputeConnection).mock.calls[0][0]).not.toHaveProperty(
+      'configuration',
+    );
+    expect(api.validateComputeConnection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a key-only SSH credential strict when the allocation policy is unavailable', async () => {
+    vi.mocked(api.getComputeConnections).mockResolvedValue({
+      connections: [cloudLabSshKey, connections[1]],
+    });
+
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Access settings' }));
+
+    expect(
+      within(dialog).getByText('Validate this connection before deployment.'),
+    ).toBeInTheDocument();
+    expect(within(dialog).getAllByRole('button', { name: 'Check' })).toHaveLength(2);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit SSH key' }));
+
+    expect(within(dialog).getByLabelText('Verified host keys')).toHaveValue('');
   });
 
   it('keeps old Host management independent when resource management is not configured', async () => {

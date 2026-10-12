@@ -1,6 +1,18 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
+// Setup notices have their own tests; this page uses a configured deployment.
+vi.mock('@/lib/api/adminSettings', () => ({
+  getAgentAdminSettings: async () => ({
+    revision: 1,
+    definitions: [],
+    values: {},
+    secret_configured: {},
+    bootstrap: [],
+    setup: { required: false, groups: [], bootstrap_missing: [] },
+  }),
+}));
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useSyncExternalStore } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -255,6 +267,7 @@ function control(overrides: Partial<ProfilingControlSnapshot> = {}): ProfilingCo
 
 function host(overrides: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
+    drain_fence_epoch: '00000000-0000-0000-0000-000000000001',
     host: 'host-a',
     active: true,
     last_worker_id: 'worker-1',

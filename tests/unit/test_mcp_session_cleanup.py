@@ -304,6 +304,7 @@ async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(mo
     monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", built)
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
     monkeypatch.setattr("asyncpg.create_pool", AsyncMock(return_value=AsyncMock()))
+    monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
         "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
     )

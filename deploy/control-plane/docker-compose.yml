@@ -30,6 +30,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     command: ["alembic", "upgrade", "head"]
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
@@ -43,55 +45,79 @@ services:
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     restart: unless-stopped
+    labels:
+      io.hybridinference.deployment.sha: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
     ports:
       # Loopback by default. This service terminates no TLS and authenticates
       # sessions with a cookie; putting it on a public interface without a
       # proxy in front would serve that cookie over plain HTTP.
       - "${AGENT_CONTROL_PLANE_BIND:-127.0.0.1}:${AGENT_CONTROL_PLANE_PORT:-8000}:8000"
     environment:
+      # Optional pgAdmin service, reached only through the admin-checked API.
+      AGENT_PGADMIN_URL: ${AGENT_PGADMIN_URL:-}
+      AGENT_PGADMIN_PUBLIC_URL: ${AGENT_PGADMIN_PUBLIC_URL:-}
+      AGENT_PGADMIN_BOOTSTRAP_DIR: ${AGENT_PGADMIN_BOOTSTRAP_DIR:-}
+      AGENT_PGADMIN_BOOTSTRAP_URL: ${AGENT_PGADMIN_BOOTSTRAP_URL:-}
+      AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL: ${AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL:-}
       # --- Database ---------------------------------------------------------
       # A database this service owns outright. Sharing the gateway's would
       # reintroduce exactly the coupling the split removes.
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
 
       # --- The gateway, over HTTP only --------------------------------------
-      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:?origin of the FreeInference gateway}
-      GATEWAY_JWKS_URL: ${GATEWAY_JWKS_URL:?the gateway origin plus /v1/identity/jwks}
+      # Optional after the one-time import: saved Admin settings are authoritative.
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-}
+      GATEWAY_JWKS_URL: ${GATEWAY_JWKS_URL:-}
       # Authorizes this service to mint and revoke inference grants. A service
       # credential: it must never reach a sandbox or a browser.
-      GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:?shared with the gateway, distinct per environment}
+      GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:-}
       GATEWAY_GRANT_BASE_PATH: ${GATEWAY_GRANT_BASE_PATH:-/internal/agent-grants}
       GATEWAY_GRANT_BINDING_ID: ${GATEWAY_GRANT_BINDING_ID:-}
       # The exact identity authority, independent of the transport URL. Both
       # listeners compare it with the same database binding during startup.
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
       # The consent page a sign-in starts at. Server-side: the whole PKCE round
       # trip is assembled in the control plane now, so the web app no longer
       # needs its own copy of this.
-      GATEWAY_AUTHORIZE_URL: ${GATEWAY_AUTHORIZE_URL:?the gateway origin plus /authorize}
+      GATEWAY_AUTHORIZE_URL: ${GATEWAY_AUTHORIZE_URL:-}
       # Where the gateway sends the browser back — this service's callback, as
       # the public internet addresses it, and **byte-identical to an entry in
       # the gateway's IDENTITY_ALLOWED_REDIRECTS**, which is matched as an exact
       # string. Configured rather than derived from request headers so that
       # whatever sits in front of this service cannot decide where sign-in
       # returns to.
-      AGENT_SESSION_REDIRECT_URI: ${AGENT_SESSION_REDIRECT_URI:?public URL of /v1/session/callback, allowlisted at the gateway}
+      AGENT_SESSION_REDIRECT_URI: ${AGENT_SESSION_REDIRECT_URI:-}
       # Where the browser lands once the cookie is set: the web app's public
       # origin including any base path, e.g. https://example.org/agents.
-      AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:?public origin of the web app, including any base path}
+      AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:-}
 
       # --- This service's own secrets ---------------------------------------
-      # Required, never defaulted. A default here is a deployment that looks
-      # configured and is signing with a value in a public git repository.
-      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
-      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
-      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
+      # Legacy values are imported once. Missing runtime keys are configured
+      # through administrator setup; no service uses a default signing secret.
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
+      # Editable first-time Server setup defaults. The deployer supplies the
+      # physical node's SSH hostname; a container hostname is not an SSH target.
+      AGENT_CONTROL_PLANE_SSH_HOST: ${AGENT_CONTROL_PLANE_SSH_HOST:-}
+      # Omit when the gateway API hostname is also its SSH address.
+      AGENT_GATEWAY_SSH_HOST: ${AGENT_GATEWAY_SSH_HOST:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Imported once into admin Settings; subsequent changes are made there.
+      AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}
+      AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
+      AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
+      AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
+      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
       # Mount the operator configuration using docker-compose.compute.yml.
       AGENT_COMPUTE_CONFIG: ${AGENT_COMPUTE_CONFIG:-}
@@ -111,6 +137,16 @@ services:
       # quota every on-call analysis runs under.
       AGENT_ONCALL_DISPATCH_TOKEN: ${AGENT_ONCALL_DISPATCH_TOKEN:-}
       AGENT_ONCALL_USER_ID: ${AGENT_ONCALL_USER_ID:-}
+
+      # --- Sandbox deletion archives ---------------------------------------
+      # Imported once; subsequent bucket/endpoint changes use Admin Settings.
+      AGENT_SANDBOX_ARCHIVE_S3_BUCKET: ${AGENT_SANDBOX_ARCHIVE_S3_BUCKET:-}
+      AGENT_SANDBOX_ARCHIVE_S3_REGION: ${AGENT_SANDBOX_ARCHIVE_S3_REGION:-}
+      AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT: ${AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT:-}
+      AGENT_SANDBOX_ARCHIVE_S3_PREFIX: ${AGENT_SANDBOX_ARCHIVE_S3_PREFIX:-sandbox-archives}
+      # The standard SDK credential chain prefers an IAM workload role.
+      # Configure environment or shared-profile credentials in a private
+      # main-service override; never add them to hosts, sandboxes or MCP relay.
 
       # --- Behaviour switches ----------------------------------------------
       # Both default to the safe answer, so an operator who sets neither gets a
@@ -170,12 +206,11 @@ services:
       # There is no registry variable here any more: a deployment-configured
       # server list is the team-MCP feature this product does not offer, and
       # its credentials were one identity shared by every user who could create
-      # a job. The relay below stays for the per-user connections that replace
-      # it; until those exist it resolves nothing.
+      # a job. The relay serves the per-user connections that replaced it.
       #
-      # Where a *sandbox* reaches the relay — a host-local alias, not this
-      # container's own address, which is why it cannot be derived here.
-      AGENT_SANDBOX_MCP_URL: ${AGENT_SANDBOX_MCP_URL:-}
+      # Nor is there a relay address. A sandbox reaches the relay through its
+      # host's own MCP tunnel, and each host hands its sandboxes that address
+      # itself: the one its network rules admit.
 
       # The browser-facing address this service builds OAuth callbacks from.
       # Configured rather than derived from the request: a redirect URI is
@@ -186,6 +221,9 @@ services:
       # Optional override; otherwise MCP reuses the public API prefix from
       # AGENT_SESSION_REDIRECT_URI, which this deployment already requires.
       AGENT_MCP_PUBLIC_BASE_URL: ${AGENT_MCP_PUBLIC_BASE_URL:-}
+      # Optional legacy import; configure the managed app in Admin Settings.
+      AGENT_MCP_GITHUB_CLIENT_ID: ${AGENT_MCP_GITHUB_CLIENT_ID:-}
+      AGENT_MCP_GITHUB_CLIENT_SECRET: ${AGENT_MCP_GITHUB_CLIENT_SECRET:-}
 
       # Both widen what a user-added MCP connection may dial, and both are off
       # by default. Private space is reachable only through a user connector;
@@ -197,7 +235,7 @@ services:
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' workspace brokers. Per-host
       # broker addresses come from each host's registration row, not from here.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?shared with every enrolled host workspace broker}
+      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:-}
       # Which hosts a registering machine may name as its broker. The token
       # above is shared across the pool, so an address accepted at
       # registration is an address that receives a credential good for every
@@ -205,6 +243,7 @@ services:
       # check existed — a multi-host pool should name its machines here.
       AGENT_BROKER_URL_ALLOWED_HOSTS: ${AGENT_BROKER_URL_ALLOWED_HOSTS:-}
     volumes:
+      - agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap
       # The GitHub App key, read-only, as a file. `AGENT_GITHUB_APP_PRIVATE_KEY_PATH`
       # names a path *inside* this container, so setting it without mounting
       # anything produces a service that starts, offers Integrations, and fails
@@ -231,6 +270,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     command:
       - uvicorn
       - cloud_agent.app:create_mcp_app
@@ -246,13 +287,16 @@ services:
       - "${AGENT_MCP_RELAY_BIND:-127.0.0.1}:${AGENT_MCP_RELAY_PORT:-8001}:8001"
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
-      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
+      # Both listeners decrypt the shared admin settings using the same key.
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       # The relay resolves each owner's stored MCP connection and therefore
       # must decrypt it under the same key/domain as the main control-plane
       # listener. Without this, health stays green but every connected server
       # is reported as unavailable at the first tool call.
-      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32 random bytes, unique per environment}
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:
@@ -302,6 +346,7 @@ services:
     # legitimate configuration and hide the corresponding link; an illegal one
     # is refused at render time rather than silently dropped.
     environment:
+      AGENT_CONTROL_PLANE_URL: http://control-plane:8000
       AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}
       AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
@@ -347,6 +392,38 @@ services:
     networks: [control-plane]
     restart: unless-stopped
 
+  # Optional database UI. No host port: every browser request must cross the
+  # control plane's current agent.admin check, then pgAdmin's own login.
+  pgadmin:
+    profiles: [pgadmin]
+    image: dpage/pgadmin4:9.18@sha256:c332c5f6dfba995d9ebc4af261d93506d6876085d712eaaa3defc8dd1a3f26de
+    restart: unless-stopped
+    entrypoint: ["/venv/bin/python3", "/pgadmin-entrypoint.py"]
+    group_add: ["10001"]
+    environment:
+      PGADMIN_DISABLE_POSTFIX: "1"
+      PGADMIN_LISTEN_PORT: "5050"
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+      PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: "1"
+      PGADMIN_CONFIG_SESSION_COOKIE_SECURE: ${AGENT_PGADMIN_COOKIE_SECURE:-True}
+    volumes:
+      - agent-pgadmin:/var/lib/pgadmin
+      - agent-pgadmin-bootstrap:/run/cloud-agent/pgadmin-bootstrap:ro
+      - ${AGENT_PGADMIN_ENTRYPOINT_FILE:-./pgadmin-entrypoint.py}:/pgadmin-entrypoint.py:ro
+      - ${AGENT_PGADMIN_SERVERS_FILE:-./pgadmin-servers.json}:/pgadmin4/servers.json:ro
+    depends_on:
+      control-plane:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks: [control-plane]
+    healthcheck:
+      test: ["CMD", "/venv/bin/python3", "-c", "from pathlib import Path; import urllib.request; (Path('/var/lib/pgadmin/pgadmin4.db').exists() or Path('/run/cloud-agent/pgadmin-bootstrap/email').exists()) and urllib.request.urlopen('http://127.0.0.1:5050/misc/ping', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -383,3 +460,5 @@ networks:
 
 volumes:
   agent-postgres:
+  agent-pgadmin:
+  agent-pgadmin-bootstrap:

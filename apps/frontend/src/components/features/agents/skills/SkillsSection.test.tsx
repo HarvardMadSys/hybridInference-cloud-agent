@@ -3,6 +3,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api/skills';
+import { getAgentConfig } from '@/lib/api/agents';
+import { DEFAULT_SKILL_LIMITS } from '@/lib/skillLimits';
 import { SkillsSection } from './SkillsSection';
 import { SkillPicker } from './SkillPicker';
 import { SkillImportDialog } from './SkillImportDialog';
@@ -16,6 +18,7 @@ vi.mock('@/lib/api/skills', () => ({
   previewSkillImport: vi.fn(),
   importGitHubSkill: vi.fn(),
 }));
+vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
 const skill: api.SkillApi = {
   id: 1,
   name: 'Code review',
@@ -30,8 +33,60 @@ const skill: api.SkillApi = {
   updated_at: '2026-09-17T00:00:00Z',
 };
 beforeEach(() => {
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    repos: [],
+    runtimes: [],
+    models: [],
+    github_connected: false,
+    github_install_url: null,
+    skill_limits: DEFAULT_SKILL_LIMITS,
+  });
   vi.mocked(api.listSkills).mockResolvedValue([skill]);
   vi.mocked(api.getSkill).mockResolvedValue(skill);
+});
+
+it('advertises and checks the current server skill size in the editor', async () => {
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    repos: [],
+    runtimes: [],
+    models: [],
+    github_connected: false,
+    github_install_url: null,
+    skill_limits: { ...DEFAULT_SKILL_LIMITS, max_skill_bytes: 8 },
+  });
+  render(<SkillsSection />);
+  await screen.findByRole('button', { name: 'Manage Code review' });
+  fireEvent.click(screen.getByRole('button', { name: 'Create skill' }));
+  const dialog = within(screen.getByRole('dialog', { name: 'Create skill' }));
+  await dialog.findByText('Markdown supported · up to 8 B.');
+  fireEvent.change(dialog.getByLabelText('Name'), { target: { value: 'Review' } });
+  fireEvent.change(dialog.getByLabelText(/^Description/), { target: { value: 'Review' } });
+  fireEvent.change(dialog.getByLabelText(/^Instructions/), { target: { value: '字字字' } });
+  fireEvent.click(dialog.getByRole('button', { name: 'Create skill' }));
+  expect(await dialog.findByRole('alert')).toHaveTextContent('no larger than 8 B');
+  expect(api.createSkill).not.toHaveBeenCalled();
+});
+
+it('checks the current server upload limit before reading a skill document', async () => {
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    repos: [],
+    runtimes: [],
+    models: [],
+    github_connected: false,
+    github_install_url: null,
+    skill_limits: { ...DEFAULT_SKILL_LIMITS, max_skill_bytes: 4 },
+  });
+  render(<SkillImportDialog onClose={vi.fn()} onSaved={vi.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Upload SKILL.md' }));
+  await screen.findByText(/Up to 4 B/);
+  const file = new File(['hello'], 'SKILL.md', { type: 'text/markdown' });
+  const read = vi.fn().mockResolvedValue('hello');
+  Object.defineProperty(file, 'text', { value: read });
+  fireEvent.change(screen.getByLabelText(/^Skill file/), { target: { files: [file] } });
+  fireEvent.click(screen.getByRole('button', { name: 'Preview skill' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('no larger than 4 B');
+  expect(read).not.toHaveBeenCalled();
+  expect(api.previewSkillImport).not.toHaveBeenCalled();
 });
 afterEach(() => {
   cleanup();

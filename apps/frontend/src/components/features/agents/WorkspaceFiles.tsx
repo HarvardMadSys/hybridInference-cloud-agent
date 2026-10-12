@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
-import type { AgentJobFileEntryApi } from '@/lib/api/agents';
+import { useT } from '@/components/providers';
+import type { AgentJobFileApi, AgentJobFileEntryApi } from '@/lib/api/agents';
 
 import { highlightCode, TOKEN_CLASS, type CodeToken } from '@/lib/codeHighlight';
 import type { AgentJob } from './types';
@@ -234,6 +235,7 @@ function TreeLevel({
   expanded,
   selected,
   onToggle,
+  onRetry,
   onOpen,
 }: {
   path: string;
@@ -242,20 +244,28 @@ function TreeLevel({
   expanded: Record<string, boolean>;
   selected: string | null;
   onToggle: (path: string) => void;
+  onRetry: (path: string) => void;
   onOpen: (path: string) => void;
 }) {
+  const t = useT();
   const state = directories[path];
   const indent = { paddingLeft: `${0.5 + depth * 0.875}rem` };
 
   if (state?.error) {
     return (
-      <p
-        role="alert"
-        style={indent}
-        className="py-1 pr-2 text-[11px] text-red-600 dark:text-red-400"
-      >
-        {state.error}
-      </p>
+      <div style={indent} className="space-y-1 py-1 pr-2 text-[11px]">
+        <p role="alert" className="text-red-600 dark:text-red-400">
+          {state.error}
+        </p>
+        <button
+          type="button"
+          onClick={() => onRetry(path)}
+          aria-label={t('workspaceFiles.retryFolder', { path: path || '/' })}
+          className="rounded px-2 py-1 text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-gray-300 dark:hover:bg-white/10"
+        >
+          {t('workspaceFiles.retry')}
+        </button>
+      </div>
     );
   }
   if (!state?.entries) {
@@ -285,9 +295,12 @@ function TreeLevel({
               type="button"
               onClick={() => (isDirectory ? onToggle(entry.path) : onOpen(entry.path))}
               aria-expanded={isDirectory ? open : undefined}
-              title={entry.name}
+              aria-current={active ? 'true' : undefined}
+              aria-label={entry.path}
+              data-workspace-file={isDirectory ? undefined : entry.path}
+              title={entry.path}
               style={indent}
-              className={`flex w-full items-center gap-2 rounded-md py-[5px] pr-2 text-left text-[13px] ${
+              className={`ui-focus-ring flex min-h-8 w-full items-center gap-2 rounded-md py-[5px] pr-2 text-left text-[13px] ${
                 active
                   ? 'bg-gray-200/60 dark:bg-white/10 text-gray-900 dark:text-gray-50'
                   : 'text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'
@@ -305,6 +318,7 @@ function TreeLevel({
                 expanded={expanded}
                 selected={selected}
                 onToggle={onToggle}
+                onRetry={onRetry}
                 onOpen={onOpen}
               />
             ) : null}
@@ -345,17 +359,27 @@ function ChangedList({
           key={row.path}
           type="button"
           onClick={() => onOpen(row.path)}
+          aria-label={row.path}
+          aria-current={selected === row.path ? 'true' : undefined}
+          data-workspace-file={row.path}
           title={row.path}
-          className={`flex w-full items-center gap-2 rounded-md py-[5px] pl-2 pr-2 text-left text-[13px] ${
+          className={`ui-focus-ring flex min-h-10 w-full items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left text-[13px] ${
             selected === row.path
               ? 'bg-gray-200/60 dark:bg-white/10 text-gray-900 dark:text-gray-50'
               : 'text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'
           }`}
         >
           <FileGlyph name={basename(row.path)} />
-          <span className="min-w-0 flex-1 truncate">{basename(row.path)}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block break-all">{basename(row.path)}</span>
+            {dirname(row.path) ? (
+              <span className="mt-0.5 block break-all text-[11px] text-muted">
+                {dirname(row.path)}
+              </span>
+            ) : null}
+          </span>
           {row.stat ? (
-            <span className="shrink-0 font-mono text-[10px] text-gray-400 dark:text-gray-500">
+            <span aria-hidden="true" className="shrink-0 font-mono text-[10px] text-muted">
               <span className="text-emerald-600 dark:text-emerald-400">+{row.stat.add}</span>{' '}
               <span className="text-red-500 dark:text-red-400">−{row.stat.del}</span>
             </span>
@@ -435,6 +459,76 @@ function PaneMessage({ children }: { children: React.ReactNode }) {
   );
 }
 
+const PREVIEW_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Keep authorized bytes local to this pane, and release them on navigation. */
+function useFileAssets(file: AgentJobFileApi | null) {
+  const [assets, setAssets] = useState<{
+    file: AgentJobFileApi;
+    download: string;
+    preview: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (
+      !file ||
+      file.truncated ||
+      file.status === 'deleted' ||
+      typeof URL.createObjectURL !== 'function'
+    ) {
+      setAssets(null);
+      return;
+    }
+    let body: BlobPart;
+    if (file.content_base64 != null) {
+      try {
+        body = Uint8Array.from(atob(file.content_base64), (char) => char.charCodeAt(0));
+      } catch {
+        setAssets(null);
+        return;
+      }
+    } else if (!file.binary && file.content != null) {
+      body = file.content;
+    } else {
+      setAssets(null);
+      return;
+    }
+    // Downloads deliberately carry no active document media type: an HTML
+    // or SVG file is useful to save, but must not execute in this UI's origin.
+    const download = URL.createObjectURL(new Blob([body], { type: 'application/octet-stream' }));
+    const preview =
+      file.content_base64 != null && file.media_type && PREVIEW_IMAGE_TYPES.has(file.media_type)
+        ? URL.createObjectURL(new Blob([body], { type: file.media_type }))
+        : null;
+    setAssets({ file, download, preview });
+    return () => {
+      URL.revokeObjectURL(download);
+      if (preview) URL.revokeObjectURL(preview);
+    };
+  }, [file]);
+
+  return assets?.file === file ? assets : null;
+}
+
+function ImagePreview({ path, url }: { path: string; url: string }) {
+  const t = useT();
+  const [failed, setFailed] = useState(false);
+  return failed ? (
+    <PaneMessage>{t('workspaceFiles.imageFailed')}</PaneMessage>
+  ) : (
+    <div className="flex min-h-0 items-center justify-center p-4">
+      {/* The source is a bounded authorized Blob, not a remote image to optimize. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={url}
+        alt={t('workspaceFiles.previewAlt', { name: basename(path) })}
+        onError={() => setFailed(true)}
+        className="max-h-[28rem] max-w-full rounded object-contain"
+      />
+    </div>
+  );
+}
+
 /**
  * Two-pane workspace browser: a lazily expanded tree beside a file viewer.
  *
@@ -468,26 +562,110 @@ export function useSettledCount(value: number, delayMs: number = DIFF_SETTLE_MS)
   return settled;
 }
 
-export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean }) {
+export function WorkspaceFiles({
+  job,
+  active,
+  requestedPath,
+  requestToken,
+}: {
+  job: AgentJob;
+  active: boolean;
+  requestedPath?: string | null;
+  /** Increment to reopen the same path after a new conversation action. */
+  requestToken?: number;
+}) {
+  const t = useT();
   const settledDiffCount = useSettledCount(job.diffFiles.length);
   const {
     directories,
     expanded,
     selected,
+    directoryPath,
     file,
     fileLoading,
     fileError,
     source,
     toggleDirectory,
+    retryDirectory,
     openFile,
+    retryFile,
+    showRootDirectory,
     closeFile,
     reload,
   } = useWorkspaceFiles(job.id, active, `${job.state}:${settledDiffCount}`);
+  const assets = useFileAssets(file?.kind === 'file' ? file : null);
+  const processedRequest = useRef<{
+    jobId: string;
+    path: string;
+    token: number | undefined;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!requestedPath) {
+      processedRequest.current = null;
+      return;
+    }
+    if (!active) return;
+    const previous = processedRequest.current;
+    if (
+      previous?.jobId === job.id &&
+      previous.path === requestedPath &&
+      previous.token === requestToken
+    ) {
+      return;
+    }
+    processedRequest.current = { jobId: job.id, path: requestedPath, token: requestToken };
+    openFile(requestedPath);
+  }, [active, job.id, requestedPath, requestToken, openFile]);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [paneWidth, setPaneWidth] = useState(0);
   const [mode, setMode] = useState<SidebarMode>('files');
+  const listId = useId();
+  const [pathInput, setPathInput] = useState('');
+  const [copying, setCopying] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<{ error: boolean; text: string } | null>(null);
+  // Clipboard promises belong to the selection they started from.
+  const copyScope = useMemo(() => ({ jobId: job.id, selected, file }), [job.id, selected, file]);
+  const currentCopyScope = useRef(copyScope);
+  currentCopyScope.current = copyScope;
+  const mounted = useRef(true);
   const paneRef = useRef<HTMLElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const tabRefs = useRef<Partial<Record<SidebarMode, HTMLButtonElement | null>>>({});
+  const focusPreview = useRef(false);
+  const returnPath = useRef<string | null>(null);
+  const focusList = useRef(false);
+
+  useEffect(() => {
+    setCopyNotice(null);
+    setCopying(false);
+  }, [copyScope]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  async function copy(value: string, kind: 'path' | 'contents') {
+    const scope = currentCopyScope.current;
+    setCopyNotice(null);
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(value);
+      if (mounted.current && currentCopyScope.current === scope)
+        setCopyNotice({
+          error: false,
+          text: t(kind === 'path' ? 'workspaceFiles.pathCopied' : 'workspaceFiles.contentsCopied'),
+        });
+    } catch {
+      if (mounted.current && currentCopyScope.current === scope)
+        setCopyNotice({ error: true, text: t('workspaceFiles.copyFailed') });
+    } finally {
+      if (mounted.current && currentCopyScope.current === scope) setCopying(false);
+    }
+  }
 
   const root = directories[''];
   // The workspace pane is user-resizable, so whether there is room for two
@@ -497,6 +675,39 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
   // When it is not, the tree and the file take turns and the header button
   // walks back to the tree.
   const showTree = sidebarOpen && !(narrow && selected);
+
+  function chooseFile(path: string) {
+    returnPath.current = path;
+    focusPreview.current = narrow;
+    openFile(path);
+  }
+
+  function returnToList() {
+    returnPath.current = selected;
+    focusList.current = true;
+    setSidebarOpen(true);
+    closeFile();
+  }
+
+  useEffect(() => {
+    if (!active) return;
+    if (narrow && focusPreview.current && !fileLoading) {
+      focusPreview.current = false;
+      if (selected) previewRef.current?.focus({ preventScroll: true });
+      // A typed path can open a folder instead of a preview. Keep keyboard
+      // focus in the visible list after its contents replace the pending read.
+      else focusList.current = true;
+    }
+    if (showTree && focusList.current) {
+      focusList.current = false;
+      const panel = document.getElementById(`${listId}-panel-${mode}`);
+      const row = Array.from(
+        panel?.querySelectorAll<HTMLButtonElement>('[data-workspace-file]') ?? [],
+      ).find((button) => button.dataset.workspaceFile === returnPath.current);
+      (row ?? tabRefs.current[mode])?.focus({ preventScroll: true });
+      row?.scrollIntoView?.({ block: 'nearest' });
+    }
+  }, [active, fileLoading, listId, mode, narrow, selected, showTree]);
 
   const attachPane = useCallback((node: HTMLElement | null) => {
     paneRef.current = node;
@@ -522,7 +733,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
     };
   }, []);
 
-  const sourceLabel = root?.error
+  const sourceLabel = directories[directoryPath ?? '']?.error
     ? 'Unavailable'
     : (file?.source ?? source) === 'workspace'
       ? null
@@ -534,37 +745,53 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
       aria-label="Workspace files"
       className="flex h-[36rem] max-h-[calc(100vh-11rem)] flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
     >
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-gray-200 dark:border-white/10 bg-gray-50/70 dark:bg-gray-900/60 px-2.5">
-        <button
-          type="button"
-          onClick={() => (narrow && selected ? closeFile() : setSidebarOpen((open) => !open))}
-          aria-label={showTree ? 'Hide file tree' : 'Show file tree'}
-          aria-pressed={showTree}
-          className={`shrink-0 rounded-md p-1.5 ${
-            showTree
-              ? 'bg-gray-200/70 dark:bg-white/10 text-gray-700 dark:text-gray-300'
-              : 'text-gray-400 dark:text-gray-500 hover:bg-gray-200/50 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200'
-          }`}
-        >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.8}
-            className="h-4 w-4"
+      <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-border bg-surface-muted px-2.5 py-2">
+        {narrow && selected ? (
+          <button
+            type="button"
+            onClick={returnToList}
+            aria-label="Back to file list"
+            className="ui-button ui-button-ghost shrink-0 px-2 text-xs"
           >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </button>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+              <path
+                d="m14 6-6 6 6 6"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Back
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((open) => !open)}
+            aria-label={showTree ? 'Hide file tree' : 'Show file tree'}
+            aria-pressed={showTree}
+            className={`ui-icon-button ui-button-ghost shrink-0 ${showTree ? 'bg-surface-hover text-foreground' : ''}`}
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              className="h-4 w-4"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+        )}
 
         {selected ? (
-          <span className="flex min-w-0 items-baseline gap-2">
-            <span className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-50">
+          <span className="min-w-0 flex-1" title={selected}>
+            <span className="block break-all text-[13px] font-medium text-foreground">
               {basename(selected)}
             </span>
-            {dirname(selected) && !narrow ? (
-              <span className="truncate text-[11px] text-gray-400 dark:text-gray-500">
+            {dirname(selected) ? (
+              <span className="mt-0.5 block break-all text-[11px] text-muted">
                 {dirname(selected)}
               </span>
             ) : null}
@@ -578,7 +805,55 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
             {sourceLabel}
           </span>
         ) : null}
+        {selected ? (
+          <button
+            type="button"
+            disabled={copying}
+            onClick={() => void copy(selected, 'path')}
+            className="ml-auto shrink-0 rounded px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/10"
+          >
+            {t('workspaceFiles.copyPath')}
+          </button>
+        ) : null}
       </div>
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!pathInput || !active) return;
+          setSidebarOpen(true);
+          setMode('files');
+          chooseFile(pathInput);
+        }}
+        className="flex shrink-0 items-center gap-2 border-b border-gray-200 px-3 py-2 dark:border-white/10"
+      >
+        <input
+          type="text"
+          value={pathInput}
+          onChange={(event) => setPathInput(event.target.value)}
+          aria-label={t('workspaceFiles.pathLabel')}
+          placeholder={t('workspaceFiles.pathPlaceholder')}
+          maxLength={4096}
+          spellCheck={false}
+          autoComplete="off"
+          className="min-w-0 flex-1 rounded-md border border-gray-200 bg-transparent px-2 py-1.5 font-mono text-xs text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-white/10 dark:text-gray-100 dark:placeholder:text-gray-500"
+        />
+        <button
+          type="submit"
+          disabled={!pathInput || !active}
+          className="shrink-0 rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
+        >
+          {t('workspaceFiles.openPath')}
+        </button>
+      </form>
+      {copyNotice ? (
+        <p
+          role={copyNotice.error ? 'alert' : 'status'}
+          className={`shrink-0 px-3 py-1 text-[11px] ${copyNotice.error ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-300'}`}
+        >
+          {copyNotice.text}
+        </p>
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         {showTree ? (
@@ -587,42 +862,62 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
               narrow ? 'w-full' : 'w-56'
             }`}
           >
-            <div
-              role="tablist"
-              aria-label="File list"
-              className="flex shrink-0 items-center gap-3 border-b border-gray-200 dark:border-white/10 px-3 py-2 text-[12px]"
-            >
-              {(
-                [
-                  ['files', 'Files'],
-                  ['changes', 'Changes'],
-                ] as Array<[SidebarMode, string]>
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === key}
-                  onClick={() => setMode(key)}
-                  className={
-                    mode === key
-                      ? 'font-medium text-gray-900 dark:text-gray-50'
-                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'
-                  }
-                >
-                  {label}
-                  {key === 'changes' && job.diffFiles.length ? (
-                    <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">
-                      {job.diffFiles.length}
-                    </span>
-                  ) : null}
-                </button>
-              ))}
+            <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 text-[12px]">
+              <div
+                role="tablist"
+                aria-label="File list"
+                className="flex min-w-0 items-center gap-1"
+              >
+                {(
+                  [
+                    ['files', 'Files'],
+                    ['changes', 'Changes'],
+                  ] as Array<[SidebarMode, string]>
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    ref={(node) => {
+                      tabRefs.current[key] = node;
+                    }}
+                    id={`${listId}-tab-${key}`}
+                    role="tab"
+                    aria-selected={mode === key}
+                    aria-controls={`${listId}-panel-${key}`}
+                    tabIndex={mode === key ? 0 : -1}
+                    onClick={() => setMode(key)}
+                    onKeyDown={(event) => {
+                      const next =
+                        event.key === 'Home'
+                          ? 'files'
+                          : event.key === 'End'
+                            ? 'changes'
+                            : ['ArrowLeft', 'ArrowRight'].includes(event.key)
+                              ? key === 'files'
+                                ? 'changes'
+                                : 'files'
+                              : null;
+                      if (!next) return;
+                      event.preventDefault();
+                      setMode(next);
+                      tabRefs.current[next]?.focus();
+                    }}
+                    className="ui-tab min-h-10 px-2 font-medium"
+                  >
+                    {label}
+                    {key === 'changes' && job.diffFiles.length ? (
+                      <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">
+                        {job.diffFiles.length}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={reload}
                 aria-label="Refresh files"
-                className="ml-auto rounded p-1 text-gray-400 dark:text-gray-500 hover:bg-gray-200/60 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200"
+                className="ui-icon-button ui-button-ghost ml-auto"
               >
                 <svg
                   aria-hidden="true"
@@ -640,48 +935,103 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
                 </svg>
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto px-1 py-1">
+            {directoryPath && mode === 'files' ? (
+              <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 px-2 py-1.5 text-[11px] dark:border-white/10">
+                <button
+                  type="button"
+                  onClick={showRootDirectory}
+                  className="shrink-0 rounded px-1 py-1 text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-gray-300 dark:hover:bg-white/10"
+                >
+                  {t('workspaceFiles.root')}
+                </button>
+                <span
+                  title={directoryPath}
+                  className="min-w-0 truncate font-mono text-gray-500 dark:text-gray-400"
+                >
+                  {directoryPath}
+                </span>
+              </div>
+            ) : null}
+            <div
+              id={`${listId}-panel-files`}
+              role="tabpanel"
+              aria-labelledby={`${listId}-tab-files`}
+              hidden={mode !== 'files'}
+              className="min-h-0 flex-1 overflow-auto px-1 py-1"
+            >
               {mode === 'files' ? (
                 <TreeLevel
-                  path=""
+                  path={directoryPath ?? ''}
                   depth={0}
                   directories={directories}
                   expanded={expanded}
                   selected={selected}
                   onToggle={toggleDirectory}
-                  onOpen={openFile}
+                  onRetry={retryDirectory}
+                  onOpen={chooseFile}
                 />
-              ) : (
-                <ChangedList job={job} selected={selected} onOpen={openFile} />
-              )}
+              ) : null}
+            </div>
+            <div
+              id={`${listId}-panel-changes`}
+              role="tabpanel"
+              aria-labelledby={`${listId}-tab-changes`}
+              hidden={mode !== 'changes'}
+              className="min-h-0 flex-1 overflow-auto px-1 py-1"
+            >
+              {mode === 'changes' ? (
+                <ChangedList job={job} selected={selected} onOpen={chooseFile} />
+              ) : null}
             </div>
           </aside>
         ) : null}
 
         <div
-          className={`min-w-0 flex-1 overflow-auto bg-white dark:bg-gray-900 ${showTree && narrow ? 'hidden' : ''}`}
+          ref={previewRef}
+          role="region"
+          aria-label={selected ? `Preview of ${selected}` : 'File preview'}
+          aria-busy={fileLoading}
+          tabIndex={selected ? 0 : -1}
+          onKeyDown={(event) => {
+            if (narrow && selected && event.key === 'Escape' && !event.defaultPrevented) {
+              event.preventDefault();
+              event.stopPropagation();
+              returnToList();
+            }
+          }}
+          className={`ui-focus-ring min-w-0 flex-1 overflow-auto bg-surface -outline-offset-2 ${showTree && narrow ? 'hidden' : ''}`}
         >
           {fileLoading ? (
             <PaneMessage>Loading file…</PaneMessage>
           ) : fileError ? (
             <PaneMessage>
-              <span role="alert" className="text-red-600 dark:text-red-400">
-                {fileError}
+              <span className="flex flex-col items-center gap-3">
+                <span role="alert" className="text-red-600 dark:text-red-400">
+                  {fileError}
+                </span>
+                <button
+                  type="button"
+                  onClick={retryFile}
+                  aria-label={t('workspaceFiles.retryFile')}
+                  className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/5"
+                >
+                  {t('workspaceFiles.retry')}
+                </button>
               </span>
             </PaneMessage>
           ) : !selected || !file ? (
             <PaneMessage>
-              {root?.error ? (
+              {directoryPath === null && root?.error ? (
                 <span className="flex flex-col items-center gap-3">
                   <span role="alert" className="text-red-600 dark:text-red-400">
                     {root.error}
                   </span>
                   <button
                     type="button"
-                    onClick={reload}
+                    onClick={() => retryDirectory('')}
                     className="rounded-md border border-gray-200 dark:border-white/10 px-3 py-1.5 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5"
                   >
-                    Try again
+                    {t('workspaceFiles.retry')}
                   </button>
                 </span>
               ) : (
@@ -692,8 +1042,6 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
             <PaneMessage>Symlinks are not previewed.</PaneMessage>
           ) : file.status === 'deleted' ? (
             <PaneMessage>This file was deleted by the run.</PaneMessage>
-          ) : file.binary ? (
-            <PaneMessage>Binary files cannot be previewed.</PaneMessage>
           ) : (
             <>
               <div className="flex items-center gap-2 border-b border-gray-100 dark:border-white/5 px-4 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
@@ -702,8 +1050,39 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
                   <span className={`font-medium ${statusClass(file.status)}`}>{file.status}</span>
                 ) : null}
                 {file.truncated ? <span>Preview truncated</span> : null}
+                {!file.binary && !file.truncated && file.content !== null ? (
+                  <button
+                    type="button"
+                    disabled={copying}
+                    onClick={() => void copy(file.content!, 'contents')}
+                    className="ml-auto rounded px-2 py-1 font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/10"
+                  >
+                    {t('workspaceFiles.copyContents')}
+                  </button>
+                ) : null}
+                {assets?.download ? (
+                  <a
+                    href={assets.download}
+                    download={basename(file.path)}
+                    className="ml-auto rounded px-2 py-1 font-medium text-gray-600 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 dark:text-gray-300 dark:hover:bg-white/10"
+                  >
+                    {t('workspaceFiles.download')}
+                  </a>
+                ) : null}
               </div>
-              <CodeView path={file.path} content={file.content ?? ''} />
+              {file.truncated && file.content == null ? (
+                <PaneMessage>{t('workspaceFiles.tooLarge')}</PaneMessage>
+              ) : assets?.preview ? (
+                <ImagePreview key={assets.preview} path={file.path} url={assets.preview} />
+              ) : file.binary ? (
+                <PaneMessage>
+                  {assets?.download
+                    ? t('workspaceFiles.binaryPreview')
+                    : t('workspaceFiles.binaryMissing')}
+                </PaneMessage>
+              ) : (
+                <CodeView path={file.path} content={file.content ?? ''} />
+              )}
             </>
           )}
         </div>

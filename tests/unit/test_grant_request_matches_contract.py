@@ -10,7 +10,7 @@ request agreed.
 An extra field is the quiet half of the failure. The loud half arrives the day
 the gateway sets `extra="forbid"` and every mint starts returning 422.
 
-`contracts/inference-grants.openapi.yaml` is the transcription of the gateway's
+`gateway_contracts/inference-grants.openapi.yaml` is the transcription of the gateway's
 router. Comparing against it is not the client checked against itself: the
 schema is edited when the gateway's contract changes, the client when this
 service's needs change, and this test is where those two edits have to meet.

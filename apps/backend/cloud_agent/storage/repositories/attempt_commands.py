@@ -8,13 +8,13 @@ they were, and only the class holding them changed.
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING, Any, Literal
 
 import asyncpg
 
 from cloud_agent.domain.execution import (
     ATTEMPT_ABORTED,
-    ATTEMPT_RUNNING,
     CANCELLED,
     EVENT_ATTEMPT_ABORTED,
     EVENT_ATTEMPT_SUPERSEDED,
@@ -32,20 +32,33 @@ from cloud_agent.execution_profiles import (
     shared_sandbox_claim_attested,
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
+from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
-from cloud_agent.storage._sql.hosts import host_slots_exhausted, release_host_slot
+from cloud_agent.storage._sql.hosts import (
+    LIVE_ATTEMPT_HOST,
+    host_slots_exhausted,
+    release_host_slot,
+)
 from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_COLUMNS,
     fail_discontinuous_follow_ups,
     fail_unrunnable_follow_ups,
     lock_conversation_by_job,
 )
+from cloud_agent.storage._sql.ledger import (
+    REQUEST_ATTEMPT_LEDGER_REFRESH_SQL,
+    carries_model_usage,
+)
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.task_titles import thread_title_needs_generation
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_CAPABILITY,
+    SandboxArchivePolicyError,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.goals.report import GoalReportEnvelope
@@ -64,6 +77,25 @@ class PostgresAttemptCommands:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+
+    @staticmethod
+    async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
+        """Lock an attempt first, then test its lease against the post-wait wall clock."""
+        locked = await conn.fetchval(
+            "SELECT id FROM agent_attempts "
+            "WHERE id = $1 AND ($2::bigint IS NULL OR lease_generation = $2) AND status = 'running' "
+            "FOR UPDATE",
+            attempt_id,
+            lease_generation,
+        )
+        if locked is None:
+            return False
+        return bool(
+            await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
+                attempt_id,
+            )
+        )
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
@@ -142,6 +174,10 @@ class PostgresAttemptCommands:
         runtime_versions_available = attestation.get("runtime_versions_available")
         if not isinstance(runtime_versions_available, dict):
             runtime_versions_available = {}
+        runner_capabilities = attestation.get("runner_capabilities")
+        if not isinstance(runner_capabilities, list):
+            runner_capabilities = []
+        attested_archive_revision = attestation.get("sandbox_archive_settings_applied_revision")
         host_kernel = attestation.get("host_kernel")
         guest_kernel = attestation.get("guest_kernel")
         shared_attestation = shared_sandbox_claim_attested(
@@ -153,7 +189,11 @@ class PostgresAttemptCommands:
             return None
         async with self._pool.acquire() as conn, conn.transaction():
             policy = await conn.fetchrow(
-                "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id FOR SHARE"
+                """
+                SELECT active_host, runtime_versions, sandbox_archive_settings,
+                       sandbox_archive_revision
+                FROM agent_runner_policy WHERE id FOR SHARE
+                """
             )
             await lock_compute_topology(conn)
             resource_new, resource_claims = await host_compute_admission(conn, host)
@@ -166,6 +206,7 @@ class PostgresAttemptCommands:
             pin_allows_new_sandbox = resource_new and (active_host is None or host == active_host)
             host_row = await conn.fetchrow(
                 "SELECT status, capabilities, slots_total, slots_used, slots_desired, "
+                "sandbox_archive_settings_applied_revision, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
                 "AS credential_matches "
                 "FROM agent_runner_hosts WHERE host = $1",
@@ -179,7 +220,30 @@ class PostgresAttemptCommands:
                 return None
             if host_slots_exhausted(host_row):
                 return None
-            capabilities = host_row["capabilities"]
+            capabilities = load_json(host_row["capabilities"]) or []
+            archive_raw = (
+                {}
+                if policy is None
+                else {
+                    **(load_json(policy["sandbox_archive_settings"]) or {}),
+                    "revision": policy["sandbox_archive_revision"],
+                }
+            )
+            try:
+                archive_policy = load_stored_archive_policy(archive_raw)
+            except SandboxArchivePolicyError:
+                return None
+            archive_required = archive_policy.enabled
+            archive_revision = archive_policy.revision
+            if archive_required and (
+                SANDBOX_ARCHIVE_CAPABILITY not in capabilities
+                or host_row["sandbox_archive_settings_applied_revision"] != archive_revision
+                or SANDBOX_ARCHIVE_CAPABILITY not in runner_capabilities
+                or isinstance(attested_archive_revision, bool)
+                or not isinstance(attested_archive_revision, int)
+                or attested_archive_revision != archive_revision
+            ):
+                return None
             credential_matches = bool(host_row["credential_matches"])
             secure_attestation = bool(
                 credential_matches
@@ -198,6 +262,7 @@ class PostgresAttemptCommands:
                 JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
+                  AND (j.claim_retry_at IS NULL OR j.claim_retry_at <= clock_timestamp())
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_jobs earlier
                         WHERE earlier.thread_id = j.thread_id
@@ -241,6 +306,11 @@ class PostgresAttemptCommands:
                         OR (
                             s.host = $2
                             AND $6::boolean
+                            AND NOT EXISTS (
+                                SELECT 1 FROM agent_sandboxes deleting
+                                WHERE deleting.id = s.sandbox_id
+                                  AND deleting.deletion_state IN ('pending', 'archived', 'deleted')
+                            )
                             AND s.fork_operation_id IS NULL
                             AND s.context_status <> 'lost'
                             AND s.native_state <> 'lost'
@@ -254,7 +324,7 @@ class PostgresAttemptCommands:
                 LIMIT 1
                 FOR UPDATE OF j SKIP LOCKED
                 """,
-                capabilities,
+                json.dumps(capabilities),
                 host,
                 secure_attestation,
                 shared_attestation,
@@ -264,6 +334,21 @@ class PostgresAttemptCommands:
             if job_row is None:
                 return None
             job_id = job_row["id"]
+            thread_sandbox = load_json(job_row["thread_sandbox"])
+            if isinstance(thread_sandbox, dict):
+                # Serialize a retained claim with an administrative stop. A
+                # claim committed first is visible to the stop's busy check;
+                # a stop committed first leaves this job queued.
+                claimable = await conn.fetchval(
+                    "SELECT state IN ('provisioning', 'starting', 'running', 'stopped') "
+                    "AND stop_requested_at IS NULL "
+                    "AND deletion_state NOT IN ('pending', 'archived', 'deleted') "
+                    "FROM agent_sandboxes "
+                    "WHERE id = $1 FOR SHARE",
+                    thread_sandbox["sandbox_id"],
+                )
+                if not claimable:
+                    return None
             # The atomic half of the slot claim. Under READ COMMITTED two
             # claims hitting the same host row serialize and the loser
             # re-evaluates capacity against the winner's committed value.
@@ -276,10 +361,20 @@ class PostgresAttemptCommands:
                   AND (slots_total IS NULL OR slots_used < slots_total)
                   AND (slots_desired IS NULL OR slots_used < slots_desired)
                   AND credential_hash = $2
+                  AND (
+                        $3::boolean
+                        OR (
+                            sandbox_archive_settings_applied_revision = $4
+                            AND capabilities @> $5::jsonb
+                        )
+                  )
                 RETURNING slots_used
                 """,
                 host,
                 host_credential_hash,
+                not archive_required,
+                archive_revision,
+                json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
             )
             if took_slot is None:
                 return None
@@ -287,7 +382,6 @@ class PostgresAttemptCommands:
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
                 job_id,
             )
-            thread_sandbox = load_json(job_row["thread_sandbox"])
             # A thread keeps the version it started on; see
             # ``resolve_runtime_version``. Read here, inside the claim, because
             # the answer must be the one the attempt is stamped with — the
@@ -329,7 +423,7 @@ class PostgresAttemptCommands:
                      lease_expires_at, base_sha, host_id,
                      sandbox_runtime, sandbox_image_digest, runtime_version,
                      host_kernel, guest_kernel)
-                VALUES ($1, $13, $2, $3, $4, NOW() + make_interval(secs => $5), $6, $7,
+                VALUES ($1, $13, $2, $3, $4, clock_timestamp() + make_interval(secs => $5), $6, $7,
                         $8, $9, $10, $11, $12)
                 RETURNING id, attempt_no, lease_generation,
                           sandbox_runtime, sandbox_image_digest, runtime_version
@@ -350,13 +444,14 @@ class PostgresAttemptCommands:
             )
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2, "
+                "claim_retry_at = NULL, "
                 "updated_at = NOW() WHERE id = $1",
                 job_id,
                 attempt["id"],
             )
             # Nothing is charged here. What this goal has spent is *derived*
             # from the rounds that have actually started — see
-            # ``PostgresGoalRepository._ROUNDS_USED_SQL`` — so a round costs
+            # ``storage._sql.goals.ROUNDS_USED_SQL`` — so a round costs
             # nothing until this INSERT runs and costs once however often it is
             # retried. Keeping a counter here meant this statement also had to
             # update ``agent_threads`` while already holding this job's row
@@ -389,6 +484,7 @@ class PostgresAttemptCommands:
         attempt_id: int,
         lease_generation: int | None = None,
         reason: str = "credential_unavailable",
+        retry_after_seconds: float = 0,
     ) -> bool:
         """Hand a just-claimed job back to the queue without spending a retry.
 
@@ -415,15 +511,23 @@ class PostgresAttemptCommands:
         why: history is append-only, and "this one never started" is exactly
         the kind of thing an operator later needs to see. It simply does not
         count — see the retry budget in :meth:`reap_expired`.
+
+        ``retry_after_seconds`` delays eligibility after transient failures,
+        allowing later queued jobs to run while this job's dependency recovers.
+        Raises ``ValueError`` when the delay is not finite and nonnegative.
         """
+        if not math.isfinite(retry_after_seconds) or retry_after_seconds < 0:
+            raise ValueError("claim retry delay must be finite and nonnegative")
         async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return False
             released_row = await conn.fetchrow(
                 """
                 UPDATE agent_attempts
                 SET status = $2, finished_at = NOW()
                 WHERE id = $1 AND status = 'running'
                   AND ($3::bigint IS NULL OR lease_generation = $3)
-                  AND lease_expires_at > NOW()
+                  AND lease_expires_at > clock_timestamp()
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_thread_sandbox_memberships m
                         WHERE m.admitted_job_id = agent_attempts.job_id
@@ -473,12 +577,15 @@ class PostgresAttemptCommands:
                     goal_report_outcome = CASE WHEN cancel_requested
                                                THEN goal_report_outcome END,
                     current_attempt_id = NULL,
+                    claim_retry_at = CASE WHEN cancel_requested OR $3::double precision = 0 THEN NULL
+                                         ELSE clock_timestamp() + make_interval(secs => $3) END,
                     updated_at = NOW()
                 WHERE id = $1 AND current_attempt_id = $2 AND state = 'running'
                 RETURNING state
                 """,
                 released,
                 attempt_id,
+                retry_after_seconds,
             )
             # All close-attempt paths take locks in attempt -> job -> host
             # order. Previously transition took job -> attempt while this path
@@ -507,15 +614,23 @@ class PostgresAttemptCommands:
         (superseded, finished, or generation mismatch) — the worker must stop
         immediately. On success also returns ``cancel_requested`` so workers
         learn about cancellation without extra polling.
+
+        The machine the attempt runs on must also still be enrolled. The
+        worker token proves only the fence, and outlives the host credential
+        it was issued under; without this predicate a removed host could keep
+        its leases — and with them everything they renew — alive forever.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return {"ok": False}
             job_id = await conn.fetchval(
-                """
-                UPDATE agent_attempts
-                SET lease_expires_at = NOW() + make_interval(secs => $3)
-                WHERE id = $1 AND lease_generation = $2 AND status = 'running'
-                  AND lease_expires_at > NOW()
-                RETURNING job_id
+                f"""
+                UPDATE agent_attempts a
+                SET lease_expires_at = clock_timestamp() + make_interval(secs => $3)
+                WHERE a.id = $1 AND a.lease_generation = $2 AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp()
+                  AND {LIVE_ATTEMPT_HOST}
+                RETURNING a.job_id
                 """,
                 attempt_id,
                 lease_generation,
@@ -569,18 +684,7 @@ class PostgresAttemptCommands:
             # Lock the attempt before its job, matching release_claim and the
             # reaper. Without an explicit first lock, the job UPDATE below and
             # a concurrent abort can each hold the row the other needs.
-            live_attempt = await conn.fetchval(
-                """
-                SELECT id
-                FROM agent_attempts
-                WHERE id = $1 AND lease_generation = $2
-                  AND status = 'running' AND lease_expires_at > NOW()
-                FOR UPDATE
-                """,
-                attempt_id,
-                lease_generation,
-            )
-            if live_attempt is None:
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
                 return False
             # Then the conversation, before any job row: the terminal sweep below
             # can pause this conversation's goal, and that write has to be taken
@@ -749,7 +853,7 @@ class PostgresAttemptCommands:
                                      )
                                     THEN COALESCE(
                                         g.idle_deadline,
-                                        NOW() + make_interval(secs => g.idle_timeout_seconds)
+                                        clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
                                     )
                                     ELSE NULL
                                 END,
@@ -815,18 +919,12 @@ class PostgresAttemptCommands:
         serializes ``seq`` assignment for the single legitimate writer.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return None
             attempt = await conn.fetchrow(
-                "SELECT job_id, status, lease_generation, "
-                "lease_expires_at <= NOW() AS expired "
-                "FROM agent_attempts WHERE id = $1 FOR UPDATE",
-                attempt_id,
+                "SELECT job_id FROM agent_attempts WHERE id = $1", attempt_id
             )
-            if (
-                attempt is None
-                or attempt["status"] != ATTEMPT_RUNNING
-                or attempt["lease_generation"] != lease_generation
-                or attempt["expired"]
-            ):
+            if attempt is None:
                 return None
             phase = (payload or {}).get("phase") if event_type == "lifecycle" else None
             if phase == "workspace_ready":
@@ -839,7 +937,7 @@ class PostgresAttemptCommands:
                     "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1",
                     attempt_id,
                 )
-            return await insert_event(
+            event_id = await insert_event(
                 conn,
                 job_id=attempt["job_id"],
                 attempt_id=attempt_id,
@@ -847,6 +945,11 @@ class PostgresAttemptCommands:
                 payload=payload,
                 client_seq=event_seq,
             )
+            if carries_model_usage(event_type, payload):
+                # A model call just finished: read its usage now rather than
+                # when a page next asks, so every open tab is pushed the total.
+                await conn.execute(REQUEST_ATTEMPT_LEDGER_REFRESH_SQL, attempt_id)
+            return event_id
 
     async def record_continuity_mode(
         self,
@@ -857,7 +960,9 @@ class PostgresAttemptCommands:
         context_status: str | None = None,
     ) -> bool:
         """Stamp the diagnostic rung and optional product context semantic."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return False
             return bool(
                 await conn.fetchval(
                     """
@@ -865,7 +970,7 @@ class PostgresAttemptCommands:
                     SET continuity_mode = COALESCE($3, continuity_mode),
                         context_status = COALESCE($4, context_status)
                     WHERE id = $1 AND lease_generation = $2
-                      AND status = 'running' AND lease_expires_at > NOW()
+                      AND status = 'running' AND lease_expires_at > clock_timestamp()
                     RETURNING id
                     """,
                     attempt_id,
@@ -903,6 +1008,8 @@ class PostgresAttemptCommands:
         tool_calls = rollup.get("tool_calls") or []
         processes = rollup.get("processes") or []
         async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return False
             recorded = bool(
                 await conn.fetchval(
                     """
@@ -910,7 +1017,7 @@ class PostgresAttemptCommands:
                         SELECT id, job_id
                         FROM agent_attempts
                         WHERE id = $1 AND lease_generation = $2
-                          AND status = 'running' AND lease_expires_at > NOW()
+                          AND status = 'running' AND lease_expires_at > clock_timestamp()
                     )
                     INSERT INTO agent_attempt_resources (
                         attempt_id, job_id, cpu_usec, mem_peak_bytes, mem_avg_bytes,
@@ -1117,15 +1224,10 @@ class PostgresAttemptCommands:
             # what makes the read-decide-write below atomic: two concurrent
             # checkpoints of the same attempt serialize here, so the second
             # one sees what the first wrote instead of racing it.
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return "lease_lost"
             fenced = await conn.fetchrow(
-                """
-                SELECT id, job_id FROM agent_attempts
-                WHERE id = $1 AND lease_generation = $2
-                  AND status = 'running' AND lease_expires_at > NOW()
-                FOR UPDATE
-                """,
-                attempt_id,
-                lease_generation,
+                "SELECT job_id FROM agent_attempts WHERE id = $1", attempt_id
             )
             if fenced is None:
                 return "lease_lost"
@@ -1325,7 +1427,7 @@ class PostgresAttemptCommands:
                     JOIN agent_sandboxes sandbox
                       ON sandbox.id = member.sandbox_id
                 ) ON member.thread_id = j.thread_id
-                WHERE a.status = 'running' AND a.lease_expires_at < NOW()
+                WHERE a.status = 'running' AND a.lease_expires_at < clock_timestamp()
                 ORDER BY a.id
                 -- The conversation is locked here, with the attempt and the
                 -- job, rather than reached for later when this pass pauses a
@@ -1451,7 +1553,7 @@ class PostgresAttemptCommands:
                                           AND peer.context_status <> 'lost'
                                           AND peer.native_state <> 'lost'
                                      )
-                                    THEN NOW() + make_interval(
+                                    THEN clock_timestamp() + make_interval(
                                         secs => g.idle_timeout_seconds
                                     )
                                     ELSE NULL
@@ -1601,10 +1703,10 @@ class PostgresAttemptCommands:
                 if action in TERMINAL_STATES:
                     # Every terminal reaper outcome is a turn that did not end
                     # workably from the goal's point of view. The ordinary
-                    # finish path decides the goal in ``maybe_continue_goal``;
-                    # a reaped turn never reaches it, so it is decided here —
-                    # and the only safe decision is to stop and wait for the
-                    # owner.
+                    # finish path arms the goal's next step in
+                    # ``arm_finish_wakeup``; a reaped turn never reaches it,
+                    # so it is decided here — and the only safe decision is
+                    # to stop and wait for the owner.
                     await goal_after_terminal(
                         conn, job_id=job_id, thread_id=row["thread_id"], state=action
                     )
@@ -1667,7 +1769,7 @@ class PostgresAttemptCommands:
                     SELECT 1 FROM agent_attempts a
                     WHERE a.id = $2 AND a.lease_generation = $6
                       AND a.status = 'running'
-                      AND a.lease_expires_at > NOW()
+                      AND a.lease_expires_at > clock_timestamp()
               )
             RETURNING j.id, j.thread_id, j.goal_id, j.goal_revision,
                       j.turn_source, j.parent_job_id

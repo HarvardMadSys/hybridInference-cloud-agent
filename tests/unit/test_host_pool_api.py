@@ -18,7 +18,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -44,6 +44,7 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent_shared.host_settings import default_values
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -63,6 +64,18 @@ class FakeHostPoolStore(AllCapabilities):
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
         self.global_settings: dict[str, Any] = {}
+        self.archive_settings: dict[str, Any] = {
+            "enabled": False,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+            "region": "",
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+            "revision": 0,
+            "updated_at": datetime.now(UTC),
+        }
         self.establish_answer: dict[str, Any] | None = None
         self.linked: list[tuple[str, int, str]] = []
         self.link_ok = True
@@ -113,6 +126,10 @@ class FakeHostPoolStore(AllCapabilities):
             "runner_version": None,
             "broker_url": None,
             "last_heartbeat_at": None,
+            "drain_fence_token": None,
+            "drain_fence_status_before": None,
+            "drain_fence_active": False,
+            "drain_fence_epoch": uuid4(),
             "sandbox_runtime": None,
             "sandbox_image_digest": None,
             "runtime_versions": None,
@@ -140,6 +157,9 @@ class FakeHostPoolStore(AllCapabilities):
         runner_version: str | None = None,
         labels: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        existing = self.rows.get(host)
+        if existing is not None and existing["drain_fence_active"]:
+            raise ValueError("host_drain_fenced")
         return self.seed(
             host,
             status=HOST_ENROLLING,
@@ -182,12 +202,15 @@ class FakeHostPoolStore(AllCapabilities):
         runtime_versions_available: dict[str, list[str]] | None = None,
         settings_applied: dict[str, Any] | None = None,
         settings_local: dict[str, Any] | None = None,
+        sandbox_archive_settings_applied_revision: int | None = None,
+        sandbox_archive_settings_revision_reported: bool = False,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
             row["status"] = HOST_ONLINE
+            row["drain_fence_epoch"] = uuid4()
         row["last_heartbeat_at"] = datetime.now(UTC)
         for field, value in (
             ("slots_total", slots_total),
@@ -211,6 +234,10 @@ class FakeHostPoolStore(AllCapabilities):
             row["labels"]["physical_host"] = physical_host
         if capabilities is not None:
             row["capabilities"] = normalize_capabilities(capabilities)
+        if sandbox_archive_settings_revision_reported:
+            row["sandbox_archive_settings_applied_revision"] = (
+                sandbox_archive_settings_applied_revision
+            )
         if capacity is not None and capacity_sample_age_ms is not None:
             self._apply_capacity(
                 row,
@@ -252,25 +279,116 @@ class FakeHostPoolStore(AllCapabilities):
         row = self.rows.get(host)
         return None if row is None else dict(row)
 
-    async def set_host_status(self, *, host: str, status: str) -> str:
+    async def set_host_status(self, *, host: str, status: str, force: bool = False) -> str:
         row = self.rows.get(host)
         if row is None:
             return "unknown"
+        if row["drain_fence_active"]:
+            if row["status"] == HOST_DRAINING and status == HOST_DRAINING:
+                return "ok"
+            if not force:
+                return "fenced"
         if not transition_allowed(row["status"], status):
             return "invalid"
+        previous = (
+            row["status"],
+            row["drain_fence_token"],
+            row["drain_fence_status_before"],
+            row["drain_fence_active"],
+        )
         row["status"] = status
+        row["drain_fence_token"] = None
+        row["drain_fence_status_before"] = None
+        row["drain_fence_active"] = False
+        current = (
+            row["status"],
+            row["drain_fence_token"],
+            row["drain_fence_status_before"],
+            row["drain_fence_active"],
+        )
+        if current != previous:
+            row["drain_fence_epoch"] = uuid4()
         return "ok"
+
+    async def acquire_host_drain_fence(
+        self,
+        *,
+        host: str,
+        expected_fence_token: Any | None,
+        expected_fence_epoch: Any,
+        fence_token: Any,
+    ) -> tuple[str, str | None, Any | None]:
+        row = self.rows.get(host)
+        if row is None:
+            return "unknown", None, None
+        epoch = row["drain_fence_epoch"]
+        # Exact-owner retries are idempotent even after the successful write
+        # rotated the epoch; the token check therefore precedes both CAS inputs.
+        if row["drain_fence_token"] == fence_token:
+            if row["drain_fence_active"] and row["status"] == HOST_DRAINING:
+                return "ok", row["drain_fence_status_before"], epoch
+            if not row["drain_fence_active"]:
+                return "released", None, epoch
+            return "invalid", None, epoch
+        if row["drain_fence_token"] != expected_fence_token or epoch != expected_fence_epoch:
+            return "stale", None, epoch
+        if row["status"] == HOST_DRAINING and not row["drain_fence_active"]:
+            return "manual", None, epoch
+        if row["status"] not in (HOST_ONLINE, HOST_DRAINING):
+            return "invalid", None, epoch
+        status_before = row["status"]
+        row.update(
+            status=HOST_DRAINING,
+            drain_fence_token=fence_token,
+            drain_fence_status_before=status_before,
+            drain_fence_active=True,
+            drain_fence_epoch=uuid4(),
+        )
+        return "ok", status_before, row["drain_fence_epoch"]
+
+    async def release_host_drain_fence(
+        self, *, host: str, fence_token: Any
+    ) -> tuple[str, Any | None]:
+        row = self.rows.get(host)
+        if row is None:
+            return "unknown", None
+        epoch = row["drain_fence_epoch"]
+        if row["drain_fence_token"] != fence_token:
+            return "stale", epoch
+        if row["drain_fence_active"]:
+            if row["status"] != HOST_DRAINING:
+                return "invalid", epoch
+            row["status"] = HOST_ONLINE
+            row["drain_fence_active"] = False
+            row["drain_fence_epoch"] = uuid4()
+            return "ok", row["drain_fence_epoch"]
+        return "ok", epoch
 
     async def remove_host(self, *, host: str, force: bool = False) -> str:
         row = self.rows.get(host)
         if row is None:
             return "unknown"
+        if row["drain_fence_active"] and not force:
+            return "fenced"
         if row["slots_used"] > 0 and not force:
             return "busy"
         row["status"] = HOST_DISABLED
         row["credential_hash"] = None
         row["enrolled"] = False
+        row["drain_fence_token"] = None
+        row["drain_fence_status_before"] = None
+        row["drain_fence_active"] = False
+        row["drain_fence_epoch"] = uuid4()
         return "ok"
+
+    async def forget_runner_host(self, *, host: str) -> str:
+        row = self.rows.get(host)
+        if row is None:
+            return "unknown"
+        if row["drain_fence_active"]:
+            return "fenced"
+        del self.rows[host]
+        return "deleted"
 
     async def runner_pool(
         self,
@@ -280,6 +398,9 @@ class FakeHostPoolStore(AllCapabilities):
 
     async def host_settings(self) -> dict[str, Any]:
         return dict(self.global_settings)
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        return dict(self.archive_settings)
 
     async def host_capacity_history(
         self, *, host: str, range_seconds: int
@@ -317,7 +438,18 @@ class FakeHostPoolStore(AllCapabilities):
     # the store said — mint on establish, revoke the predecessor, renew on the
     # beat that extends, revoke on release.
 
-    async def establish_residency(self, **_kwargs: Any) -> dict[str, Any] | None:
+    async def establish_residency(
+        self,
+        *,
+        thread_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        host: str,
+        runtime_id: str,
+        runtime_version: str | None,
+        ttl_seconds: float,
+        sandbox_id: str | None = None,
+    ) -> dict[str, Any] | None:
         return self.establish_answer
 
     async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
@@ -621,6 +753,51 @@ async def test_a_rebuilt_machine_re_enrols_under_its_own_name(client):
     assert store.rows["runner-a"]["credential_hash"] == hash_secret(new)
 
 
+async def test_reenrollment_cannot_clear_an_active_deployment_fence(client):
+    async_client, store = client
+    old_credential = await _enroll(async_client, store, name="runner-a")
+    store.rows["runner-a"]["status"] = HOST_ONLINE
+    token = uuid4()
+    expected_epoch = store.rows["runner-a"]["drain_fence_epoch"]
+    acquired = await store.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=expected_epoch,
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    assert acquired[2] != expected_epoch
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token",
+        json={"host": "runner-a"},
+        headers=ADMIN,
+    )
+    enroll_token = issued.json()["enroll_token"]
+
+    refused = await async_client.post(
+        "/v1/agent/host/register",
+        json=_registration_body(enroll_token, "runner-a"),
+    )
+    replay = await async_client.post(
+        "/v1/agent/host/register",
+        json=_registration_body(enroll_token, "runner-a"),
+    )
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"]["type"] == "host_drain_fenced"
+    assert replay.status_code == 401
+    row = store.rows["runner-a"]
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] == token
+    assert row["drain_fence_active"] is True
+    assert row["credential_hash"] == hash_secret(old_credential)
+
+    released = await store.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert released[0] == "ok"
+    replacement = await _enroll(async_client, store, name="runner-a")
+    assert store.rows["runner-a"]["credential_hash"] == hash_secret(replacement)
+
+
 async def test_an_expired_enrollment_token_is_refused(client):
     async_client, store = client
     issued = await async_client.post(
@@ -856,7 +1033,7 @@ async def test_a_heartbeat_answers_with_the_requested_limit(client):
 
 
 async def test_a_heartbeat_answers_with_this_servers_settings_over_the_global_ones(client):
-    """The whole set each time, so a cleared value reaches the host as an absence."""
+    """Every answer includes defaults, globals and the server's winning overrides."""
     async_client, store = client
     credential = await _enroll(async_client, store)
     auth = {"Authorization": f"Bearer {credential}"}
@@ -864,12 +1041,20 @@ async def test_a_heartbeat_answers_with_this_servers_settings_over_the_global_on
     store.rows["runner-a"]["settings_desired"] = {"agent_timeout_s": 900}
 
     body = (await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)).json()
-    assert body["settings"] == {"agent_timeout_s": 900, "terminal_max_sessions": 32}
+    assert body["settings"] == {
+        **default_values(),
+        "agent_timeout_s": 900,
+        "terminal_max_sessions": 32,
+    }
 
     store.rows["runner-a"]["settings_desired"] = {}
     store.global_settings = {"agent_timeout_s": 7200}
     body = (await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)).json()
-    assert body["settings"] == {"agent_timeout_s": 7200}
+    assert body["settings"] == {**default_values(), "agent_timeout_s": 7200}
+
+    store.global_settings = {}
+    body = (await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)).json()
+    assert body["settings"] == default_values()
 
 
 async def test_a_heartbeat_never_sends_a_stored_value_the_host_could_not_apply(client):
@@ -886,7 +1071,7 @@ async def test_a_heartbeat_never_sends_a_stored_value_the_host_could_not_apply(c
         )
     ).json()
 
-    assert body["settings"] == {"agent_timeout_s": 900}
+    assert body["settings"] == {**default_values(), "agent_timeout_s": 900}
 
 
 async def test_a_heartbeat_stores_the_settings_report_reduced_to_known_numbers(client):
@@ -906,6 +1091,63 @@ async def test_a_heartbeat_stores_the_settings_report_reduced_to_known_numbers(c
     row = store.rows["runner-a"]
     assert row["settings_applied"] == {"agent_timeout_s": 900}
     assert row["settings_local"] == {"agent_timeout_s": 3600, "chat_idle_timeout_s": 15.5}
+
+
+async def test_a_heartbeat_delivers_archive_policy_and_tracks_exact_broker_revision(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    auth = {"Authorization": f"Bearer {credential}"}
+    store.archive_settings.update(
+        enabled=True,
+        region="us-east-1",
+        kms_key_arn=("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"),
+        expected_bucket_owner="123456789012",
+        revision=4,
+    )
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"sandbox_archive_settings_applied_revision": 4},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    delivered = response.json()["sandbox_archive_settings"]
+    assert delivered["revision"] == 4
+    assert delivered["enabled"] is True
+    assert "aws_access_key_id" not in delivered
+    assert "aws_secret_access_key" not in delivered
+    assert "aws_secret_access_key_configured" not in delivered
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    assert listed["hosts"][0]["sandbox_archive_settings_applied_revision"] == 4
+
+
+async def test_explicit_null_archive_revision_clears_stale_state_but_omission_does_not(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    auth = {"Authorization": f"Bearer {credential}"}
+    store.rows["runner-a"]["sandbox_archive_settings_applied_revision"] = 9
+
+    assert (
+        await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)
+    ).status_code == 200
+    assert store.rows["runner-a"]["sandbox_archive_settings_applied_revision"] == 9
+
+    assert (
+        await async_client.post(
+            "/v1/agent/host/heartbeat",
+            json={"sandbox_archive_settings_applied_revision": None},
+            headers=auth,
+        )
+    ).status_code == 200
+    assert store.rows["runner-a"]["sandbox_archive_settings_applied_revision"] is None
+
+    invalid = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"sandbox_archive_settings_applied_revision": True},
+        headers=auth,
+    )
+    assert invalid.status_code == 422
 
 
 async def test_a_heartbeat_without_a_credential_is_refused(client):
@@ -1077,6 +1319,7 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
                 # helper) are attested separately from runtime binaries.
                 "helper_versions": {},
                 "runner_capabilities": [],
+                "sandbox_archive_settings_applied_revision": None,
                 "host_kernel": "host",
                 "guest_kernel": "guest",
             },
@@ -1311,6 +1554,389 @@ async def test_a_drained_host_can_be_put_back(client):
     assert store.rows["runner-a"]["status"] == HOST_ONLINE
 
 
+async def test_fenced_drain_acquires_and_reports_creator_state(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a", status=HOST_ONLINE)
+    expected_epoch = seeded["drain_fence_epoch"]
+
+    response = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(expected_epoch),
+            "fence_token": str(token),
+        },
+    )
+
+    assert response.status_code == 200
+    row = store.rows["runner-a"]
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] == token
+    assert row["drain_fence_status_before"] == HOST_ONLINE
+    assert row["drain_fence_active"] is True
+    assert row["drain_fence_epoch"] != expected_epoch
+    returned = response.json()["hosts"][0]
+    assert returned["drain_fence_token"] == str(token)
+    assert returned["drain_fence_status_before"] == HOST_ONLINE
+    assert returned["drain_fence_active"] is True
+    assert returned["drain_fence_epoch"] == str(row["drain_fence_epoch"])
+    assert str(UUID(returned["drain_fence_epoch"])) == returned["drain_fence_epoch"]
+
+
+async def test_fenced_drain_requires_an_expected_epoch(client):
+    async_client, store = client
+    seeded = store.seed("runner-a")
+
+    response = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={"expected_fence_token": None, "fence_token": str(uuid4())},
+    )
+
+    assert response.status_code == 422
+    assert store.rows["runner-a"]["status"] == HOST_ONLINE
+    assert store.rows["runner-a"]["drain_fence_epoch"] == seeded["drain_fence_epoch"]
+
+
+async def test_fenced_drain_rejects_a_noncanonical_expected_epoch(client):
+    async_client, store = client
+    seeded = store.seed("runner-a")
+
+    response = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            "fence_token": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 422
+    assert store.rows["runner-a"]["status"] == HOST_ONLINE
+    assert store.rows["runner-a"]["drain_fence_epoch"] == seeded["drain_fence_epoch"]
+
+
+async def test_fenced_drain_rejects_a_stale_epoch_after_token_aba(client):
+    async_client, store = client
+    seeded = store.seed("runner-a")
+    stale_epoch = seeded["drain_fence_epoch"]
+    assert await store.set_host_status(host="runner-a", status=HOST_DRAINING) == "ok"
+    assert await store.set_host_status(host="runner-a", status=HOST_ONLINE) == "ok"
+    current_epoch = store.rows["runner-a"]["drain_fence_epoch"]
+    assert store.rows["runner-a"]["drain_fence_token"] is None
+    assert current_epoch != stale_epoch
+
+    response = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(stale_epoch),
+            "fence_token": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 409
+    assert store.rows["runner-a"]["status"] == HOST_ONLINE
+    assert store.rows["runner-a"]["drain_fence_epoch"] == current_epoch
+
+
+async def test_fenced_drain_response_loss_retry_preserves_first_observation(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    body = {
+        "expected_fence_token": None,
+        "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+        "fence_token": str(token),
+    }
+
+    assert (
+        await async_client.post(
+            "/admin/agent/runner-hosts/runner-a/drain", headers=ADMIN, json=body
+        )
+    ).status_code == 200
+    first_epoch = store.rows["runner-a"]["drain_fence_epoch"]
+    retry = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain", headers=ADMIN, json=body
+    )
+
+    assert retry.status_code == 200
+    assert store.rows["runner-a"]["drain_fence_status_before"] == HOST_ONLINE
+    assert store.rows["runner-a"]["drain_fence_epoch"] == first_epoch
+    assert retry.json()["hosts"][0]["drain_fence_epoch"] == str(first_epoch)
+
+
+async def test_fenced_drain_transfers_only_from_the_expected_owner(client):
+    async_client, store = client
+    first, second = uuid4(), uuid4()
+    seeded = store.seed("runner-a")
+    assert (
+        await async_client.post(
+            "/admin/agent/runner-hosts/runner-a/drain",
+            headers=ADMIN,
+            json={
+                "expected_fence_token": None,
+                "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+                "fence_token": str(first),
+            },
+        )
+    ).status_code == 200
+    active_epoch = store.rows["runner-a"]["drain_fence_epoch"]
+
+    stale_transfer = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": str(uuid4()),
+            "expected_fence_epoch": str(active_epoch),
+            "fence_token": str(second),
+        },
+    )
+    assert stale_transfer.status_code == 409
+    assert store.rows["runner-a"]["drain_fence_token"] == first
+
+    transfer = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": str(first),
+            "expected_fence_epoch": str(active_epoch),
+            "fence_token": str(second),
+        },
+    )
+    stale_release = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain",
+        headers=ADMIN,
+        json={"fence_token": str(first)},
+    )
+
+    assert transfer.status_code == 200
+    assert store.rows["runner-a"]["drain_fence_token"] == second
+    assert store.rows["runner-a"]["drain_fence_status_before"] == HOST_DRAINING
+    assert store.rows["runner-a"]["drain_fence_epoch"] != active_epoch
+    assert stale_release.status_code == 409
+    assert store.rows["runner-a"]["status"] == HOST_DRAINING
+
+
+async def test_fenced_drain_never_claims_a_manual_preexisting_drain(client):
+    async_client, store = client
+    seeded = store.seed("runner-a", status=HOST_DRAINING)
+
+    response = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+            "fence_token": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 409
+    assert store.rows["runner-a"]["drain_fence_token"] is None
+
+
+async def test_fenced_release_is_idempotent_but_late_acquire_is_rejected(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    acquire = {
+        "expected_fence_token": None,
+        "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+        "fence_token": str(token),
+    }
+    release = {"fence_token": str(token)}
+    await async_client.post("/admin/agent/runner-hosts/runner-a/drain", headers=ADMIN, json=acquire)
+
+    first = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain", headers=ADMIN, json=release
+    )
+    released_epoch = store.rows["runner-a"]["drain_fence_epoch"]
+    retry = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain", headers=ADMIN, json=release
+    )
+    late = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain", headers=ADMIN, json=acquire
+    )
+
+    assert first.status_code == retry.status_code == 200
+    assert first.json()["hosts"][0]["drain_fence_epoch"] == str(released_epoch)
+    assert retry.json()["hosts"][0]["drain_fence_epoch"] == str(released_epoch)
+    assert late.status_code == 409
+    row = store.rows["runner-a"]
+    assert row["status"] == HOST_ONLINE
+    assert row["drain_fence_token"] == token
+    assert row["drain_fence_active"] is False
+    assert row["drain_fence_epoch"] == released_epoch
+
+
+async def test_fenced_release_reconciles_after_a_lifecycle_status_change(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+            "fence_token": str(token),
+        },
+    )
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain",
+        headers=ADMIN,
+        json={"fence_token": str(token)},
+    )
+    lifecycle_epoch = uuid4()
+    store.rows["runner-a"]["status"] = HOST_OFFLINE
+    store.rows["runner-a"]["drain_fence_epoch"] = lifecycle_epoch
+
+    retry = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain",
+        headers=ADMIN,
+        json={"fence_token": str(token)},
+    )
+
+    assert retry.status_code == 200
+    returned = retry.json()["hosts"][0]
+    assert returned["status"] == HOST_OFFLINE
+    assert returned["drain_fence_token"] == str(token)
+    assert returned["drain_fence_active"] is False
+    assert returned["drain_fence_epoch"] == str(lifecycle_epoch)
+
+
+async def test_legacy_actions_preserve_active_drain_and_require_force_to_undrain(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+            "fence_token": str(token),
+        },
+    )
+
+    same_drain = await async_client.post("/admin/agent/runner-hosts/runner-a/drain", headers=ADMIN)
+    refused = await async_client.post("/admin/agent/runner-hosts/runner-a/undrain", headers=ADMIN)
+    forced = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain?force=true", headers=ADMIN
+    )
+
+    assert same_drain.status_code == 200
+    assert refused.status_code == 409
+    assert forced.status_code == 200
+    row = store.rows["runner-a"]
+    assert row["status"] == HOST_ONLINE
+    assert row["drain_fence_token"] is None
+    assert row["drain_fence_status_before"] is None
+    assert row["drain_fence_active"] is False
+
+
+async def test_legacy_transition_clears_a_released_receipt(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+            "fence_token": str(token),
+        },
+    )
+    await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain",
+        headers=ADMIN,
+        json={"fence_token": str(token)},
+    )
+
+    response = await async_client.post("/admin/agent/runner-hosts/runner-a/drain", headers=ADMIN)
+
+    assert response.status_code == 200
+    row = store.rows["runner-a"]
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] is None
+    assert row["drain_fence_status_before"] is None
+
+
+async def test_fence_tokens_never_enter_the_admin_audit(client, monkeypatch):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    audit = AsyncMock()
+    monkeypatch.setattr(admin_hosts, "log_admin_action", audit)
+
+    response = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/drain",
+        headers=ADMIN,
+        json={
+            "expected_fence_token": None,
+            "expected_fence_epoch": str(seeded["drain_fence_epoch"]),
+            "fence_token": str(token),
+        },
+    )
+
+    assert response.status_code == 200
+    audit.assert_awaited_once()
+    assert str(token) not in repr(audit.await_args)
+
+    audit.reset_mock()
+    forced = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/undrain?force=true", headers=ADMIN
+    )
+    assert forced.status_code == 200
+    audit.assert_awaited_once()
+    assert audit.await_args.args[4] == {"host": "runner-a", "force": True}
+    assert str(token) not in repr(audit.await_args)
+
+
+async def test_forced_removal_clears_drain_fences(client):
+    async_client, store = client
+    first = uuid4()
+    seeded = store.seed("runner-a")
+    await store.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=seeded["drain_fence_epoch"],
+        fence_token=first,
+    )
+
+    refused = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+    forced = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/remove?force=true", headers=ADMIN
+    )
+    assert refused.status_code == 409
+    assert forced.status_code == 200
+    assert store.rows["runner-a"]["drain_fence_token"] is None
+
+
+async def test_an_active_drain_fence_cannot_be_forgotten(client):
+    async_client, store = client
+    token = uuid4()
+    seeded = store.seed("runner-a")
+    await store.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=seeded["drain_fence_epoch"],
+        fence_token=token,
+    )
+
+    response = await async_client.delete("/admin/agent/runner-hosts/runner-a", headers=ADMIN)
+
+    assert response.status_code == 409
+    assert store.rows["runner-a"]["drain_fence_token"] == token
+    assert store.rows["runner-a"]["drain_fence_active"] is True
+
+
 async def test_an_illegal_transition_is_a_409_naming_the_current_state(client):
     """Draining a disabled host is refused, and the refusal says why."""
     async_client, store = client
@@ -1401,24 +2027,26 @@ async def test_the_pool_listing_carries_the_new_fields(client):
 @pytest.mark.parametrize(
     "row",
     [
-        # Exactly the shape #1158's tests build, and the shape a pre-migration
-        # row deserializes to. It has to render.
+        # The optional phase-G fields may still be absent, but migration 0051
+        # backfills the protocol generation before this API starts.
         {
             "host": "legacy",
             "last_worker_id": "w-1",
             "first_seen_at": datetime.now(UTC),
             "last_seen_at": datetime.now(UTC),
             "is_active": False,
+            "drain_fence_epoch": uuid4(),
         }
     ],
 )
-def test_a_row_without_any_pool_columns_still_renders(row):
+def test_a_row_without_optional_pool_columns_still_renders(row):
     item = admin_hosts._to_item(row)
 
     assert item.status == HOST_ONLINE
     assert item.enrolled is False
     assert item.slots_used == 0
     assert item.slots_total is None
+    assert item.drain_fence_epoch == row["drain_fence_epoch"]
 
 
 @pytest.mark.parametrize(
@@ -1548,6 +2176,40 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
     ]
 
 
+async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):
+    from tests.unit.test_sandbox_resource_protocol import beat, sample
+
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    measured = sample()
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [beat(resource_usage=measured, terminal_count=3)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.status_code == 200, response.text
+    assert store.sandbox_observations[0]["resource_usage"] == measured
+    assert store.sandbox_observations[0]["terminal_count"] == 3
+    assert store.sandbox_observations[0]["host"] == "runner-a"
+
+
+async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(residency_client):
+    from tests.unit.test_sandbox_resource_protocol import beat, sample
+
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [beat(resource_usage=sample(pids=-1), terminal_count=-1)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.status_code == 200, response.text
+    observation = store.sandbox_observations[0]
+    assert observation["running"] is True
+    assert observation.get("resource_usage") is None
+    assert observation.get("terminal_count") is None
+
+
 async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
@@ -1574,7 +2236,10 @@ async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency
     assert store.sandbox_observations == []
 
 
-async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residency_client):
+@pytest.mark.parametrize("member_generations", [None, {"athr_1": 8}])
+async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
+    residency_client, member_generations
+):
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
@@ -1582,6 +2247,7 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residenc
         "generation": 3,
         "activation_generation": 8,
         "reason": "idle",
+        "member_activation_generations": member_generations,
     }
 
     response = await client.post(
@@ -1637,7 +2303,7 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
 
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": True}
+        {**store.sandbox_stop_due, "shared_live": True, "member_activation_generations": None}
     ]
 
 

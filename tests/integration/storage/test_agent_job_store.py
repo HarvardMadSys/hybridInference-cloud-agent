@@ -33,7 +33,12 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.shared_protocol import FORK_HELPER, mid_turn_input_capability
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
+from cloud_agent_shared.shared_protocol import (
+    FORK_HELPER,
+    USER_MESSAGE_EVENT,
+    mid_turn_input_capability,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -322,6 +327,18 @@ async def _reserve_retained_chat(
         execution_profile=job["execution_profile"],
     )
     assert sandbox is not None and sandbox["shared_live"] is True
+    residency = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        runtime_id="claude-code",
+        runtime_version=sandbox["runtime_version"],
+        ttl_seconds=1800,
+    )
+    assert residency is not None
+    sandbox = {**sandbox, "residency_generation": residency["generation"]}
     return job, claim, sandbox
 
 
@@ -329,8 +346,10 @@ async def _reserve_shared_chat(
     store: Storage,
     *,
     metadata: dict | None = None,
+    plugins: list[dict] | None = None,
     task_prompt: str = "fix the flaky test",
     fork_helper_version: str | None = None,
+    disk_limit_mib: int = 0,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -345,7 +364,13 @@ async def _reserve_shared_chat(
         sandbox_image_digest="sha256:shared-image",
     )
     assert online is not None and online["status"] == "online"
-    job = await _create_job(store, base_sha="a" * 40, metadata=metadata, task_prompt=task_prompt)
+    job = await _create_job(
+        store,
+        base_sha="a" * 40,
+        metadata=metadata,
+        plugins=plugins,
+        task_prompt=task_prompt,
+    )
     claim = await _claim(
         store,
         worker_id="shared-worker",
@@ -367,9 +392,184 @@ async def _reserve_shared_chat(
         sandbox_image_digest=claim.get("sandbox_image_digest"),
         execution_profile=job["execution_profile"],
         fork_helper_version=fork_helper_version,
+        disk_limit_mib=disk_limit_mib,
     )
     assert sandbox is not None and sandbox["shared_live"] is True
+    residency = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        runtime_id="claude-code",
+        runtime_version=sandbox["runtime_version"],
+        ttl_seconds=1800,
+    )
+    assert residency is not None
+    sandbox = {**sandbox, "residency_generation": residency["generation"]}
     return job, claim, sandbox
+
+
+async def test_sandbox_reservation_rechecks_expiry_after_waiting_on_membership(
+    pool, store: Storage
+):
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    async with pool.acquire() as setup:
+        await setup.execute(
+            "UPDATE agent_attempts "
+            "SET lease_expires_at = clock_timestamp() + INTERVAL '400 milliseconds' "
+            "WHERE id = $1",
+            claim["attempt_id"],
+        )
+    reserving = None
+    async with pool.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        before_generation = await blocker.fetchval(
+            "SELECT activation_generation FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = $1 FOR UPDATE",
+            job["thread_id"],
+        )
+        reserving = asyncio.create_task(
+            store.sandbox.reserve_thread_sandbox(
+                thread_id=job["thread_id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                host="shared-runner",
+                sandbox_id=sandbox["sandbox_id"],
+                container_name=sandbox["container_name"],
+                runtime_id=sandbox["runtime_id"],
+                runtime_version=sandbox["runtime_version"],
+                sandbox_image_digest=sandbox["sandbox_image_digest"],
+                execution_profile=sandbox["execution_profile"],
+            )
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "reservation did not wait on the membership row lock"
+        await asyncio.sleep(0.55)
+
+    assert reserving is not None
+    assert await asyncio.wait_for(reserving, timeout=2) is None
+    async with pool.acquire() as conn:
+        after_generation = await conn.fetchval(
+            "SELECT activation_generation FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert after_generation == before_generation
+
+
+async def test_fork_residencies_recheck_coordinator_expiry_after_a_plain_row_lock(
+    pool, store: Storage
+):
+    job, claim, sandbox = await _reserve_shared_chat(
+        store,
+        fork_helper_version=SHARED_SANDBOX_HELPER_PINS[FORK_HELPER],
+    )
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-fork-clock",
+        context_status="new",
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-fork-clock",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="fork-clock-wait",
+    )
+    assert operation is not None and operation.get("error") is None
+    token = "fork-clock-coordinator"
+    assert await store.session_fork.claim_session_fork_materialization(
+        operation_id=operation["id"],
+        coordinator_token=token,
+        lease_seconds=60,
+    )
+    async with pool.acquire() as setup:
+        before = await setup.fetch(
+            "SELECT thread_id, residency_generation "
+            "FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = ANY($1::text[]) ORDER BY thread_id",
+            [operation["source_thread_id"], operation["target_thread_id"]],
+        )
+        await setup.execute(
+            "UPDATE agent_session_forks "
+            "SET coordinator_lease_expires_at = "
+            "clock_timestamp() + INTERVAL '400 milliseconds' WHERE id = $1",
+            operation["id"],
+        )
+
+    establishing = None
+    async with pool.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT id FROM agent_session_forks WHERE id = $1 FOR UPDATE",
+            operation["id"],
+        )
+        establishing = asyncio.create_task(
+            store.session_fork.establish_session_fork_residencies(
+                operation_id=operation["id"],
+                coordinator_token=token,
+                ttl_seconds=120,
+            )
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "residency establishment did not wait on the fork row lock"
+        await asyncio.sleep(0.55)
+
+    assert establishing is not None
+    assert await asyncio.wait_for(establishing, timeout=2) is None
+    async with pool.acquire() as conn:
+        after = await conn.fetch(
+            "SELECT thread_id, residency_generation "
+            "FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = ANY($1::text[]) ORDER BY thread_id",
+            [operation["source_thread_id"], operation["target_thread_id"]],
+        )
+    assert [tuple(row.values()) for row in after] == [tuple(row.values()) for row in before]
 
 
 async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
@@ -380,6 +580,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     job, claim, sandbox = await _reserve_shared_chat(
         store,
         metadata={"_agent_base_ref": "release/x"},
+        disk_limit_mib=16384,
     )
     fence = {
         "thread_id": job["thread_id"],
@@ -394,9 +595,12 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         context_status="new",
     )
     assert running is not None and running["shared_live"] is True
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     settled = await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-shared-one",
@@ -418,6 +622,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert capture["sandbox_id"] == sandbox["sandbox_id"]
     assert capture["anchor_job_id"] == job["id"]
     assert capture["base_sha"] == job["base_sha"]
+    assert capture["disk_limit_mib"] == 16384
     patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
     digest = hashlib.sha256(patch.encode()).hexdigest()
     assert (
@@ -441,13 +646,16 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert publication["included_job_ids"] == [job["id"]]
     assert publication["branch_id"] == job["thread_id"]
     assert publication["patch"] == patch
+    assert publication["disk_limit_mib"] == 16384
     assert publication["metadata"] == {"_agent_base_ref": "release/x"}
+    assert publication["session_summaries"] == []
     # Publication is group bookkeeping, not another state of the model turn.
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "succeeded"
 
     commit_sha = "b" * 40
     assert await store.snapshot.record_snapshot_publish(
         snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
         pr_url="https://example.test/pull/1",
         commit_sha=commit_sha,
     )
@@ -460,6 +668,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert pending_import is not None
     assert pending_import["snapshot_id"] == capture["snapshot_id"]
     assert pending_import["published_commit_sha"] == commit_sha
+    assert pending_import["disk_limit_mib"] == 16384
     assert await store.snapshot.complete_snapshot_base_import(
         snapshot_id=capture["snapshot_id"],
         commit_sha=commit_sha,
@@ -476,6 +685,218 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert group["published_base_sha"] == commit_sha
     assert group["snapshot_state"] == "quiescent"
     assert await store.snapshot.pending_snapshot_base_import() is None
+
+
+@pytest.mark.parametrize("publish_parent", [False, True])
+async def test_snapshot_publication_uses_latest_current_attempt_replies_from_included_turns(
+    pool,
+    store: Storage,
+    publish_parent,
+):
+    """Publication summaries follow the captured turns, not the newest chat activity."""
+    from cloud_agent.storage._sql.events import insert_event
+
+    parent, parent_claim, sandbox = await _reserve_shared_chat(store)
+
+    async def settle(job, claim, reservation, replies):
+        fence = {
+            "thread_id": job["thread_id"],
+            "attempt_id": claim["attempt_id"],
+            "lease_generation": claim["lease_generation"],
+            "sandbox_generation": reservation["generation"],
+            "activation_generation": reservation["activation_generation"],
+        }
+        assert await store.sandbox.mark_thread_sandbox_running(
+            **fence,
+            container_id="container-summary-selection",
+            context_status="new" if job["parent_job_id"] is None else "live",
+        )
+        assert await store.sandbox.admit_thread_sandbox_turn(
+            **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+        )
+        for reply in replies:
+            assert await store.attempt_commands.append_event(
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                event_type="message",
+                payload={"text": reply},
+            )
+            if reply == "Investigating retry behavior.":
+                assert await store.attempt_commands.append_event(
+                    attempt_id=claim["attempt_id"],
+                    lease_generation=claim["lease_generation"],
+                    event_type=USER_MESSAGE_EVENT,
+                    payload={"text": "Use exponential backoff."},
+                )
+        assert await store.sandbox.settle_thread_sandbox(
+            **fence,
+            residency_generation=sandbox["residency_generation"],
+            job_id=job["id"],
+            context_status="live",
+            native_session_id="native-summary-selection",
+            idle_timeout_seconds=1800,
+            base_sha=job["base_sha"],
+        )
+        assert await store.attempt_commands.transition(
+            job_id=job["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            from_states=("running",),
+            to_state="succeeded",
+        )
+
+    parent_summary = "Fixed retry handling. " + "Result details. " * 400
+    await settle(parent, parent_claim, sandbox, ["Investigating retry behavior.", parent_summary])
+    if publish_parent:
+        prior_capture = await store.snapshot.claim_due_sandbox_snapshot()
+        assert prior_capture is not None
+        prior_patch = "diff --git a/retry.py b/retry.py\n"
+        assert await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=prior_capture["snapshot_id"],
+            sandbox_id=prior_capture["sandbox_id"],
+            sandbox_generation=prior_capture["generation"],
+            container_id=prior_capture["container_id"],
+            workspace_epoch=prior_capture["workspace_epoch"],
+            base_sha=prior_capture["base_sha"],
+            patch=prior_patch,
+            content_sha256=hashlib.sha256(prior_patch.encode()).hexdigest(),
+        )
+        prior_publication = await store.snapshot.claim_for_publish()
+        assert prior_publication is not None
+        assert await store.snapshot.record_snapshot_publish(
+            snapshot_id=prior_capture["snapshot_id"],
+            expected_publish_attempt_count=prior_publication["publish_attempt_count"],
+            pr_url="https://github.com/o/n/pull/7",
+            commit_sha="b" * 40,
+        )
+        assert await store.snapshot.complete_snapshot_base_import(
+            snapshot_id=prior_capture["snapshot_id"],
+            commit_sha="b" * 40,
+        )
+    child = await store.conversation_commands.create_follow_up(
+        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="also update the docs"
+    )
+    assert child is not None
+    child_claim = await _claim(
+        store,
+        worker_id="summary-child",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert child_claim is not None and child_claim["id"] == child["id"]
+    child_sandbox = await store.sandbox.reserve_thread_sandbox(
+        thread_id=child["thread_id"],
+        attempt_id=child_claim["attempt_id"],
+        lease_generation=child_claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name="freeinference-shared-test",
+        runtime_id="claude-code",
+        runtime_version=child_claim.get("runtime_version"),
+        sandbox_image_digest=child_claim.get("sandbox_image_digest"),
+        execution_profile=child["execution_profile"],
+    )
+    assert child_sandbox is not None
+    child_summary = "Documented the retry behavior."
+    await settle(child, child_claim, child_sandbox, ["Reading the docs.", child_summary])
+
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+
+    # A persisted response from a different attempt must not win just because
+    # its transcript id is newer than the settled attempt's final response.
+    async with pool.acquire() as conn:
+        other_attempt_id = await conn.fetchval(
+            """
+            INSERT INTO agent_attempts (
+                job_id, thread_id, attempt_no, lease_owner, lease_generation,
+                lease_expires_at, status, finished_at
+            )
+            VALUES ($1, $2, 2, 'superseded-summary', 2, NOW(), 'superseded', NOW())
+            RETURNING id
+            """,
+            parent["id"],
+            parent["thread_id"],
+        )
+        await insert_event(
+            conn,
+            job_id=parent["id"],
+            attempt_id=other_attempt_id,
+            event_type="message",
+            payload={"text": "A response from a noncurrent attempt."},
+        )
+
+    later = await store.conversation_commands.create_follow_up(
+        parent_job_id=child["id"], user_id=child["user_id"], prompt="start unrelated later work"
+    )
+    assert later is not None
+    later_claim = await _claim(
+        store,
+        worker_id="summary-later",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert later_claim is not None and later_claim["id"] == later["id"]
+    assert await store.attempt_commands.append_event(
+        attempt_id=later_claim["attempt_id"],
+        lease_generation=later_claim["lease_generation"],
+        event_type="message",
+        payload={"text": "A newer response outside the captured snapshot."},
+    )
+
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None
+    assert publication["included_job_ids"] == (
+        [child["id"]] if publish_parent else [parent["id"], child["id"]]
+    )
+    assert publication["session_summaries"] == (
+        [child_summary] if publish_parent else [parent_summary[:4000], child_summary]
+    )
+    assert [
+        (message["role"], message["content"]) for message in publication["session_messages"]
+    ] == [
+        ("user", parent["task_prompt"]),
+        ("assistant", "Investigating retry behavior."),
+        ("user", "Use exponential backoff."),
+        ("assistant", parent_summary),
+        ("user", "also update the docs"),
+        ("assistant", "Reading the docs."),
+        ("assistant", child_summary),
+    ]
+    assert publication["model"] == child["model"]
+    # A copied turn, or a later snapshot including an already-published turn,
+    # can carry a prior URL. The newest publication must replace that value.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET published_pr_url = $2 WHERE id = $1",
+            child["id"],
+            "https://github.com/o/n/pull/7",
+        )
+    assert await store.snapshot.record_snapshot_publish(
+        snapshot_id=publication["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
+        pr_url="https://github.com/o/n/pull/8",
+        commit_sha="c" * 40,
+    )
+    published_child = await store.conversation_queries.get_job(child["id"])
+    assert published_child["published_pr_url"] == "https://github.com/o/n/pull/8"
+    assert published_child["published_commit_sha"] == "c" * 40
 
 
 async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
@@ -496,9 +917,12 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
         container_id="container-shared-stopped-snapshot",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-shared-stopped-snapshot",
@@ -571,9 +995,12 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         container_id="container-before-replacement",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-before-replacement",
@@ -651,7 +1078,7 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         ("capture_dirty", "dirty"),
         ("capture_stalled", "pending"),
         ("publish_failed", "dirty"),
-        ("publish_stalled", "dirty"),
+        ("publish_stalled", "quiescent"),
     ],
 )
 async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
@@ -674,9 +1101,12 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
         container_id="container-shared-failure",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-shared-failure",
@@ -723,6 +1153,7 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
         if failure_mode == "publish_failed":
             await store.snapshot.fail_snapshot_publish(
                 snapshot_id=capture["snapshot_id"],
+                expected_publish_attempt_count=publication["publish_attempt_count"],
                 detail="publisher rejected the immutable patch",
             )
         else:
@@ -741,8 +1172,11 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
 
 
 @pytest.mark.parametrize("next_action", ["follow_up", "fork", "capture", "publish", "base_import"])
+@pytest.mark.parametrize(
+    "claim_coordinator", [False, True], ids=["unclaimed", "expired-coordinator"]
+)
 async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
-    pool, store: Storage, next_action: str
+    pool, store: Storage, next_action: str, claim_coordinator: bool
 ):
     """A failed hidden child remains history but cannot occupy the host manifest."""
     from cloud_agent_host.runner import _shared_group_manifest
@@ -759,9 +1193,12 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-fork-recovery", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-source",
@@ -779,6 +1216,19 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         source_job_id=job["id"], user_id=job["user_id"], idempotency_key="stalled-fork"
     )
     assert operation is not None and operation.get("error") is None
+    if claim_coordinator:
+        assert await store.session_fork.claim_session_fork_materialization(
+            operation_id=operation["id"],
+            coordinator_token="stopped-coordinator",
+            lease_seconds=990,
+        )
+        assert await store.session_fork.reap_stalled_session_forks(stall_seconds=0) == []
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_session_forks "
+                "SET coordinator_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+                operation["id"],
+            )
     actions = await store.session_fork.reap_stalled_session_forks(stall_seconds=0)
     assert [action["id"] for action in actions] == [operation["id"]]
     async with pool.acquire() as conn:
@@ -844,6 +1294,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         if next_action == "base_import":
             assert await store.snapshot.record_snapshot_publish(
                 snapshot_id=observed["snapshot_id"],
+                expected_publish_attempt_count=observed["publish_attempt_count"],
                 pr_url="https://example.invalid/pull/1",
                 commit_sha="b" * 40,
             )
@@ -923,9 +1374,12 @@ async def test_a_rebuilt_host_image_leaves_fork_and_mid_turn_input_to_the_group(
         container_id="container-shared-one",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-source",
@@ -991,7 +1445,11 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     store: Storage,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
-    job, claim, sandbox = await _reserve_shared_chat(store)
+    saved_plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/repo"}]
+    job, claim, sandbox = await _reserve_shared_chat(
+        store, disk_limit_mib=16384, plugins=saved_plugins
+    )
+    assert job["plugins"] == claim["plugins"] == saved_plugins
     saved_skills = [
         {
             "id": 42,
@@ -1019,9 +1477,12 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         container_id="container-shared-one",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-source",
@@ -1070,6 +1531,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert operation["state"] == "preparing"
     assert operation["sandbox_id"] == sandbox["sandbox_id"]
     assert operation["container_id"] == "container-shared-one"
+    assert operation["disk_limit_mib"] == 16384
     assert operation["target_thread_id"] != job["thread_id"]
     await store.conversation_commands.set_thread_archived(
         job_id=job["id"], user_id=job["user_id"], archived=True
@@ -1150,8 +1612,9 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert await store.session_fork.claim_session_fork_materialization(
         operation_id=operation["id"],
         coordinator_token=coordinator,
-        lease_seconds=210,
+        lease_seconds=990,
     )
+    assert await store.session_fork.reap_stalled_session_forks(stall_seconds=0) == []
     assert not await store.session_fork.claim_session_fork_materialization(
         operation_id=operation["id"],
         coordinator_token="competing-coordinator",
@@ -1257,11 +1720,20 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
+    assert child["plugins"] == saved_plugins
     assert child["skills"] == [
         {key: value for key, value in skill.items() if key != "instructions"}
         for skill in saved_skills
     ]
     async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval(
+                    "SELECT plugins FROM agent_threads WHERE id = $1", child["thread_id"]
+                )
+            )
+            == saved_plugins
+        )
         assert (
             json.loads(
                 await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", child["id"])
@@ -1349,6 +1821,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert source_follow_up is not None and source_follow_up["state"] == "queued"
     assert source_follow_up["skills"] == child_follow_up["skills"] == saved_skills
     assert child_follow_up is not None and child_follow_up["state"] == "queued"
+    assert source_follow_up["plugins"] == child_follow_up["plugins"] == saved_plugins
     first_claim = await _claim(
         store,
         worker_id="shared-worker-a",
@@ -1366,17 +1839,72 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         claim_attestation=_shared_claim_attestation(),
     )
     assert first_claim is not None and second_claim is not None
+    assert first_claim["plugins"] == second_claim["plugins"] == saved_plugins
     assert {first_claim["id"], second_claim["id"]} == {
         source_follow_up["id"],
         child_follow_up["id"],
     }
+    assert first_claim["thread_sandbox"]["disk_limit_mib"] == 16384
+    assert second_claim["thread_sandbox"]["disk_limit_mib"] == 16384
+
+
+async def test_native_fork_mints_no_residency_on_a_disabled_host(store: Storage):
+    """Fork hands two fresh member grants to the group's machine; not a removed one."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-shared-one", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-source",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="native-fork-disabled-host",
+    )
+    assert operation is not None and operation.get("error") is None
+    assert await store.session_fork.claim_session_fork_materialization(
+        operation_id=operation["id"], coordinator_token="coordinator", lease_seconds=60
+    )
+
+    assert await store.host_pool.set_host_status(host="shared-runner", status="disabled") == "ok"
+
+    assert (
+        await store.session_fork.establish_session_fork_residencies(
+            operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+        )
+        is None
+    )
 
 
 async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_failed(
     store: Storage,
 ):
     """Provider history and platform terminal state cannot drift by one turn."""
-    first, first_claim, sandbox = await _reserve_shared_chat(store)
+    first, first_claim, sandbox = await _reserve_shared_chat(store, disk_limit_mib=16384)
     first_fence = {
         "thread_id": first["thread_id"],
         "attempt_id": first_claim["attempt_id"],
@@ -1389,9 +1917,12 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         container_id="container-native-ordinal",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**first_fence, job_id=first["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **first_fence, residency_generation=sandbox["residency_generation"], job_id=first["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **first_fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=first["id"],
         context_status="live",
         native_session_id="native-ordinal-source",
@@ -1417,6 +1948,8 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     assert (await store.conversation_queries.get_job(first["id"]))["native_turn_no"] == 1
     assert (await store.conversation_queries.get_job(second["id"]))["state"] == "queued"
 
+    await store.host_pool.set_host_settings(changes={"sandbox_disk_mib": 32768})
+    assert (await store.host_pool.host_settings())["sandbox_disk_mib"] == 32768
     second_claim = await _claim(
         store,
         worker_id="shared-worker-second",
@@ -1426,6 +1959,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         claim_attestation=_shared_claim_attestation(),
     )
     assert second_claim is not None and second_claim["id"] == second["id"]
+    assert second_claim["thread_sandbox"]["disk_limit_mib"] == 16384
     activated = await store.sandbox.reserve_thread_sandbox(
         thread_id=first["thread_id"],
         attempt_id=second_claim["attempt_id"],
@@ -1437,8 +1971,10 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         runtime_version=sandbox["runtime_version"],
         sandbox_image_digest=sandbox["sandbox_image_digest"],
         execution_profile=sandbox["execution_profile"],
+        disk_limit_mib=second_claim["thread_sandbox"]["disk_limit_mib"],
     )
     assert activated is not None
+    assert activated["disk_limit_mib"] == 16384
     second_fence = {
         "thread_id": first["thread_id"],
         "attempt_id": second_claim["attempt_id"],
@@ -1451,9 +1987,12 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         container_id="container-native-ordinal",
         context_status="restored",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**second_fence, job_id=second["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **second_fence, residency_generation=sandbox["residency_generation"], job_id=second["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **second_fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=second["id"],
         context_status="restored",
         native_session_id="native-ordinal-source",
@@ -1476,6 +2015,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     )
     assert operation is not None and operation.get("error") is None
     assert operation["source_native_turn_no"] == 2
+    assert operation["disk_limit_mib"] == 16384
 
 
 async def test_create_get_list_round_trip(store: Storage):
@@ -1492,6 +2032,34 @@ async def test_create_get_list_round_trip(store: Storage):
     listed = await store.conversation_queries.list_jobs(user_id="user-1")
     assert [item["id"] for item in listed] == [job["id"]]
     assert await store.conversation_queries.get_job("ajob_missing") is None
+
+
+@pytest.mark.parametrize(
+    "plugins",
+    [None, [{"plugin": "reviewer@team-tools", "marketplace": "owner/repo"}]],
+)
+async def test_thread_plugins_persist_in_create_and_job_reads(pool, store: Storage, plugins):
+    """Thread plugin selections survive storage and all ordinary job readers."""
+    job = await _create_job(store, plugins=plugins)
+    expected = plugins or []
+    assert job["plugins"] == expected
+    async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval(
+                    "SELECT plugins FROM agent_threads WHERE id = $1", job["thread_id"]
+                )
+            )
+            == expected
+        )
+
+    fetched = await store.conversation_queries.get_job(job["id"])
+    assert fetched is not None and fetched["plugins"] == expected
+    listed = await store.conversation_queries.list_jobs(user_id=job["user_id"])
+    assert len(listed) == 1 and listed[0]["plugins"] == expected
+    conversations = await store.conversation_queries.list_conversations(user_id=job["user_id"])
+    assert len(conversations["conversations"]) == 1
+    assert conversations["conversations"][0]["job"]["plugins"] == expected
 
 
 async def test_execution_profile_persists_and_is_inherited_by_follow_up(pool, store, monkeypatch):
@@ -2167,7 +2735,9 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Stora
         container_id="container-shared-waiting",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=parent["id"]
+    )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id=parent["user_id"], prompt="already waiting"
     )
@@ -2184,6 +2754,7 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Stora
     )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=parent["id"],
         context_status="live",
         native_session_id="native-shared-waiting",
@@ -2284,6 +2855,109 @@ async def test_concurrent_claims_keep_queued_turns_in_order(store: Storage):
     assert (await store.host_pool.get_host(host="runner-a"))["slots_used"] == 2
 
 
+async def test_enabled_archive_policy_requires_exact_host_and_replica_revision(store: Storage):
+    job = await _create_job(store, task_prompt="archive-fenced work")
+    configured = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings={
+            "enabled": True,
+            "region": "us-east-1",
+            "kms_key_arn": (
+                "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+            ),
+            "expected_bucket_owner": "123456789012",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+        },
+    )
+    assert configured is not None and configured["revision"] == 1
+
+    # A legacy host cannot claim while the deployment requires archiving.
+    assert await _claim(store, worker_id="legacy", lease_ttl_seconds=60) is None
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="runner-a-credential-hash",
+        capabilities=[*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY],
+        sandbox_archive_settings_applied_revision=1,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    # An old process cannot borrow the supporting sibling's mutable host row.
+    assert await _claim(store, worker_id="old-replica", lease_ttl_seconds=60) is None
+    replica = {
+        **_shared_claim_attestation(),
+        "runner_capabilities": [*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY],
+    }
+    for revision in (None, 0, 2):
+        assert (
+            await _claim(
+                store,
+                worker_id=f"wrong-revision-{revision}",
+                lease_ttl_seconds=60,
+                claim_attestation={
+                    **replica,
+                    "sandbox_archive_settings_applied_revision": revision,
+                },
+            )
+            is None
+        )
+    exact = {**replica, "sandbox_archive_settings_applied_revision": 1}
+    claim = await _claim(
+        store,
+        worker_id="current-replica",
+        lease_ttl_seconds=60,
+        claim_attestation=exact,
+    )
+    assert claim is not None and claim["id"] == job["id"]
+
+    next_job = await _create_job(store, task_prompt="archive revision changed")
+    next_policy = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=1,
+        settings={
+            "enabled": True,
+            "region": "us-east-1",
+            "kms_key_arn": (
+                "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+            ),
+            "expected_bucket_owner": "123456789012",
+            "max_archive_bytes": 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+        },
+    )
+    assert next_policy is not None and next_policy["revision"] == 2
+    assert (
+        await _claim(
+            store,
+            worker_id="prior-policy",
+            lease_ttl_seconds=60,
+            claim_attestation=exact,
+        )
+        is None
+    )
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="runner-a-credential-hash",
+        sandbox_archive_settings_applied_revision=2,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    current = await _claim(
+        store,
+        worker_id="next-policy",
+        lease_ttl_seconds=60,
+        claim_attestation={**replica, "sandbox_archive_settings_applied_revision": 2},
+    )
+    assert current is not None and current["id"] == next_job["id"]
+
+
+async def test_disabled_archive_policy_allows_legacy_host_and_replica(store: Storage):
+    job = await _create_job(store, task_prompt="archives disabled")
+
+    claim = await _claim(store, worker_id="legacy", lease_ttl_seconds=60)
+
+    assert claim is not None and claim["id"] == job["id"]
+
+
 @pytest.mark.parametrize("parent_already_running", [False, True])
 async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
     store: Storage,
@@ -2343,7 +3017,9 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(pool, stor
         container_id="container-lock-order",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=parent["id"]
+    )
 
     async with pool.acquire() as conn:
         await conn.execute(
@@ -2372,6 +3048,7 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(pool, stor
         settlement = asyncio.create_task(
             store.sandbox.settle_thread_sandbox(
                 **fence,
+                residency_generation=sandbox["residency_generation"],
                 job_id=parent["id"],
                 context_status="live",
                 native_session_id="native-lock-order",
@@ -2417,7 +3094,9 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(pool, store
         container_id="container-reconcile-lock-order",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=parent["id"]
+    )
 
     async with pool.acquire() as conn:
         await conn.execute(
@@ -2446,6 +3125,7 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(pool, store
         settlement = asyncio.create_task(
             store.sandbox.settle_thread_sandbox(
                 **fence,
+                residency_generation=sandbox["residency_generation"],
                 job_id=parent["id"],
                 context_status="live",
                 native_session_id="native-reconcile-lock-order",
@@ -2468,7 +3148,7 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(pool, store
                         "thread_id": parent["thread_id"],
                         "activation_generation": sandbox["activation_generation"],
                         "process_generation": 1,
-                        "residency_generation": 0,
+                        "residency_generation": sandbox["residency_generation"],
                         "resident_state": "live",
                     }
                 ],
@@ -2607,6 +3287,80 @@ async def test_heartbeat_extends_and_fences(store: Storage):
     assert stale["ok"] is False
 
 
+@pytest.mark.parametrize("operation", ["heartbeat", "transition", "release"])
+async def test_attempt_authority_is_rechecked_after_a_plain_row_lock_wait(
+    pool, store: Storage, operation: str
+):
+    """A transaction snapshot from before expiry cannot revive a blocked attempt."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    attempt_id = int(claim["attempt_id"])
+    generation = int(claim["lease_generation"])
+    async with pool.acquire() as setup:
+        await setup.execute(
+            "UPDATE agent_attempts "
+            "SET lease_expires_at = clock_timestamp() + INTERVAL '400 milliseconds' "
+            "WHERE id = $1",
+            attempt_id,
+        )
+
+    pending = None
+    async with pool.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval("SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE", attempt_id)
+        if operation == "heartbeat":
+            pending = asyncio.create_task(
+                store.attempt_commands.heartbeat(
+                    attempt_id=attempt_id,
+                    lease_generation=generation,
+                    lease_ttl_seconds=60,
+                )
+            )
+        elif operation == "transition":
+            pending = asyncio.create_task(
+                store.attempt_commands.transition(
+                    job_id=job["id"],
+                    attempt_id=attempt_id,
+                    lease_generation=generation,
+                    from_states=("running",),
+                    to_state="failed",
+                )
+            )
+        else:
+            pending = asyncio.create_task(
+                store.attempt_commands.release_claim(
+                    job_id=job["id"],
+                    attempt_id=attempt_id,
+                    lease_generation=generation,
+                )
+            )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, f"{operation} did not wait on the attempt row lock"
+        await asyncio.sleep(0.55)
+
+    assert pending is not None
+    result = await asyncio.wait_for(pending, timeout=2)
+    assert result == ({"ok": False} if operation == "heartbeat" else False)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, lease_expires_at <= clock_timestamp() AS expired "
+            "FROM agent_attempts WHERE id = $1",
+            attempt_id,
+        )
+    assert row["status"] == "running"
+    assert row["expired"] is True
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "running"
+
+
 async def test_event_seq_and_global_cursor(store: Storage):
     """Events get per-attempt seq 1..n and a strictly increasing global id."""
     job = await _create_job(store)
@@ -2651,7 +3405,11 @@ async def test_retained_workspace_readiness_is_a_durable_thread_wide_fence(
         container_id="container-retained-one",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+    )
     assert await store.sandbox.thread_workspace_ready(thread_id=job["thread_id"]) is False
 
     assert await store.attempt_commands.append_event(
@@ -2671,6 +3429,7 @@ async def test_retained_workspace_readiness_is_a_durable_thread_wide_fence(
 
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="new",
         native_session_id="native-session-one",
@@ -2765,9 +3524,12 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
         container_id="container-retained-one",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     request = dict(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="new",
         native_session_id="claude-session-one",
@@ -2793,6 +3555,27 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
             )
 
     before = await snapshot_state()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_attempts "
+            "SET lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE id = $1",
+            claim["attempt_id"],
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT residency_status FROM agent_thread_sandbox_memberships "
+                "WHERE thread_id = $1",
+                job["thread_id"],
+            )
+            == "hot"
+        )
     replay = await store.sandbox.settle_thread_sandbox(**request)
     assert replay is not None
     assert replay["native_session_id"] == original["native_session_id"]
@@ -2808,13 +3591,291 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
     for change in [
         {"activation_generation": fence["activation_generation"] + 1},
         {"lease_generation": fence["lease_generation"] + 1},
+        {"residency_generation": sandbox["residency_generation"] + 1},
         {"native_session_id": "a-different-session"},
         {"context_status": "restored"},
     ]:
         assert await store.sandbox.settle_thread_sandbox(**(request | change)) is None
-    await _expire_attempt(pool, store, claim["attempt_id"])
-    assert await store.sandbox.settle_thread_sandbox(**request) is None
     assert await snapshot_state() == before
+
+
+@pytest.mark.parametrize("operation", ["residency_record", "process", "admission", "settlement"])
+@pytest.mark.parametrize("lost_authority", ["expired", "superseded"])
+async def test_hot_residency_authority_is_checked_inside_every_lifecycle_write(
+    pool,
+    store: Storage,
+    operation: str,
+    lost_authority: str,
+):
+    """The status bit cannot outlive its clock or let an old generation write."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-residency-fence",
+        context_status="new",
+    )
+    generation = sandbox["residency_generation"]
+    if operation == "process":
+        assert await store.sandbox.record_thread_sandbox_process(
+            **fence,
+            residency_generation=generation,
+            process_generation=1,
+        )
+    if operation == "settlement":
+        assert await store.sandbox.admit_thread_sandbox_turn(
+            **fence,
+            residency_generation=generation,
+            job_id=job["id"],
+        )
+
+    if lost_authority == "expired":
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_thread_sandbox_memberships "
+                "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' "
+                "WHERE thread_id = $1",
+                job["thread_id"],
+            )
+    else:
+        replacement = await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host="runner-a",
+            sandbox_id=sandbox["sandbox_id"],
+            runtime_id="claude-code",
+            runtime_version=sandbox["runtime_version"],
+            ttl_seconds=1800,
+        )
+        assert replacement is not None and replacement["generation"] > generation
+
+    if operation == "residency_record":
+        result = await store.sandbox.record_shared_thread_residency(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            sandbox_id=sandbox["sandbox_id"],
+            residency_generation=generation,
+        )
+        assert result is False
+    elif operation == "process":
+        result = await store.sandbox.record_thread_sandbox_process(
+            **fence,
+            residency_generation=generation,
+            process_generation=99,
+        )
+        assert result is False
+    elif operation == "admission":
+        result = await store.sandbox.admit_thread_sandbox_turn(
+            **fence,
+            residency_generation=generation,
+            job_id=job["id"],
+        )
+        assert result is False
+    else:
+        result = await store.sandbox.settle_thread_sandbox(
+            **fence,
+            residency_generation=generation,
+            job_id=job["id"],
+            context_status="new",
+            native_session_id="native-must-not-settle",
+            idle_timeout_seconds=1800,
+        )
+        assert result is None
+
+    async with pool.acquire() as conn:
+        member = await conn.fetchrow(
+            "SELECT residency_status, residency_generation, process_generation, "
+            "admitted_job_id, last_settled_job_id, active_attempt_id "
+            "FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert member["residency_status"] == "hot"
+    if lost_authority == "expired":
+        assert member["residency_generation"] == generation
+    else:
+        assert member["residency_generation"] > generation
+    if operation == "process":
+        assert member["process_generation"] == 1
+    elif operation == "admission":
+        assert member["admitted_job_id"] is None
+    elif operation == "settlement":
+        assert member["last_settled_job_id"] is None
+        assert member["active_attempt_id"] == claim["attempt_id"]
+
+
+async def test_process_generation_cannot_move_backwards_or_release_a_newer_process(
+    pool,
+    store: Storage,
+):
+    """A delayed report from process N cannot revoke already-recorded N+1."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-process-generation",
+        context_status="new",
+    )
+    residency_generation = sandbox["residency_generation"]
+    assert await store.sandbox.record_thread_sandbox_process(
+        **fence,
+        residency_generation=residency_generation,
+        process_generation=3,
+    )
+    assert not await store.sandbox.record_thread_sandbox_process(
+        **fence,
+        residency_generation=residency_generation,
+        process_generation=2,
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence,
+        residency_generation=residency_generation,
+        job_id=job["id"],
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=residency_generation,
+        job_id=job["id"],
+        context_status="new",
+        native_session_id="native-process-generation",
+        idle_timeout_seconds=1800,
+    )
+
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT process_generation FROM agent_thread_sandbox_memberships "
+                "WHERE thread_id = $1",
+                job["thread_id"],
+            )
+            == 3
+        )
+        # Even in the worst case where a stale host observation has already
+        # labelled the member stopped, its old generation cannot release the
+        # newer process's renewable residency.
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships SET resident_state = 'stopped' "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+
+    assert (
+        await store.residency.release_shared_residency_if_quiescent(
+            thread_id=job["thread_id"],
+            generation=residency_generation,
+            process_generation=2,
+            host="runner-a",
+            sandbox_id=sandbox["sandbox_id"],
+        )
+        is None
+    )
+    async with pool.acquire() as conn:
+        member = await conn.fetchrow(
+            "SELECT process_generation, residency_status "
+            "FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert member["process_generation"] == 3
+    assert member["residency_status"] == "hot"
+
+
+@pytest.mark.parametrize("terminal_state", ["stopped", "lost"])
+async def test_equal_process_receipt_cannot_resurrect_a_terminal_process(
+    pool,
+    store: Storage,
+    terminal_state: str,
+):
+    """An equal receipt is idempotent, not authority to undo a later observation."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    container_id = "container-equal-process-receipt"
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id=container_id,
+        context_status="new",
+    )
+    residency_generation = sandbox["residency_generation"]
+
+    async def observe(state: str, process_generation: int) -> None:
+        assert (
+            await store.sandbox.reconcile_thread_sandbox_observation(
+                thread_id=job["thread_id"],
+                host="runner-a",
+                sandbox_id=sandbox["sandbox_id"],
+                container_id=container_id,
+                sandbox_generation=sandbox["generation"],
+                running=True,
+                members=[
+                    {
+                        "thread_id": job["thread_id"],
+                        "activation_generation": sandbox["activation_generation"],
+                        "process_generation": process_generation,
+                        "residency_generation": residency_generation,
+                        "resident_state": state,
+                    }
+                ],
+            )
+            == "running"
+        )
+
+    # A supervisor heartbeat can publish the generation while the worker's
+    # first process receipt is still in flight. The equal receipt legitimately
+    # completes STARTING -> LIVE.
+    await observe("starting", 1)
+    assert await store.sandbox.record_thread_sandbox_process(
+        **fence,
+        residency_generation=residency_generation,
+        process_generation=1,
+    )
+
+    # Once that same generation is observed terminal, a delayed duplicate of
+    # the receipt must not resurrect it. A real replacement has a larger
+    # generation and may still establish LIVE.
+    await observe(terminal_state, 1)
+    assert not await store.sandbox.record_thread_sandbox_process(
+        **fence,
+        residency_generation=residency_generation,
+        process_generation=1,
+    )
+    async with pool.acquire() as conn:
+        terminal = await conn.fetchrow(
+            "SELECT process_generation, resident_state "
+            "FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert dict(terminal) == {"process_generation": 1, "resident_state": terminal_state}
+
+    assert await store.sandbox.record_thread_sandbox_process(
+        **fence,
+        residency_generation=residency_generation,
+        process_generation=2,
+    )
+    async with pool.acquire() as conn:
+        replacement = await conn.fetchrow(
+            "SELECT process_generation, resident_state "
+            "FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert dict(replacement) == {"process_generation": 2, "resident_state": "live"}
 
 
 async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
@@ -2835,9 +3896,12 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
         context_status="new",
     )
     assert running is not None
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     settled = await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="new",
         native_session_id="claude-session-one",
@@ -3017,9 +4081,23 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
         container_id="container-pinned",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    residency = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=original["attempt_id"],
+        lease_generation=original["lease_generation"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        ttl_seconds=1800,
+    )
+    assert residency is not None
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=residency["generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=residency["generation"],
         job_id=job["id"],
         context_status="new",
         native_session_id="session-pinned",
@@ -3235,7 +4313,9 @@ async def test_failed_admitted_turn_fails_queued_follow_up(
         container_id="container-retained-one",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
@@ -3327,6 +4407,8 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
     )
     residency = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="shared-runner",
         sandbox_id=sandbox["sandbox_id"],
         runtime_id="claude-code",
@@ -3346,7 +4428,11 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         generation=residency["generation"],
         grant_id="grant-shared-expired",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence,
+        residency_generation=residency["generation"],
+        job_id=job["id"],
+    )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
@@ -3452,9 +4538,12 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
         container_id="container-shared-one",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-shared-settled",
@@ -3513,10 +4602,13 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
         mode=None,
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert (
         await store.sandbox.settle_thread_sandbox(
             **fence,
+            residency_generation=sandbox["residency_generation"],
             job_id=job["id"],
             context_status="new",
             native_session_id="claude-session-one",
@@ -3571,7 +4663,9 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
         )
         is not None
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
@@ -3582,7 +4676,19 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
 
     actions = await store.attempt_commands.reap_expired(max_attempts=3)
 
-    assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "failed"}]
+    assert actions == [
+        {
+            "job_id": job["id"],
+            "attempt_id": claim["attempt_id"],
+            "action": "failed",
+            "cleanup_residency": {
+                "thread_id": job["thread_id"],
+                "generation": sandbox["residency_generation"],
+                "host": "runner-a",
+                "grant_id": None,
+            },
+        }
+    ]
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "failed"
     durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
@@ -3771,6 +4877,11 @@ async def test_model_credential_uses_only_agent_owned_metadata(
                 "CREATE TEMP VIEW agent_attempts AS SELECT * FROM public.agent_attempts"
             )
             await conn.execute("CREATE TEMP VIEW agent_jobs AS SELECT * FROM public.agent_jobs")
+            # The fence asks whether the attempt's machine is still enrolled;
+            # the host pool is agent-owned too.
+            await conn.execute(
+                "CREATE TEMP VIEW agent_runner_hosts AS SELECT * FROM public.agent_runner_hosts"
+            )
             # The thread carries the tool servers now; still agent-owned.
             await conn.execute(
                 "CREATE TEMP VIEW agent_threads AS SELECT * FROM public.agent_threads"
@@ -3913,6 +5024,69 @@ async def test_a_released_claim_costs_no_retry(pool, store: Storage):
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
 
 
+async def test_delayed_credential_retry_does_not_block_later_jobs(pool, store: Storage):
+    """A single executor can serve another owner while credentials recover."""
+    oldest = await _create_job(store)
+    later = await _create_job(store, user_id="another-owner")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim["id"] == oldest["id"]
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_runner_hosts SET slots_total=1 WHERE host='runner-a'")
+    assert await store.attempt_commands.release_claim(
+        job_id=oldest["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        retry_after_seconds=3600,
+    )
+    other = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert other["id"] == later["id"]
+    assert await store.attempt_commands.transition(
+        job_id=later["id"],
+        attempt_id=other["attempt_id"],
+        lease_generation=other["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+    )
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM agent_attempts WHERE job_id=$1 AND status<>'aborted'",
+                oldest["id"],
+            )
+            == 0
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET claim_retry_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            oldest["id"],
+        )
+    retry = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert retry["id"] == oldest["id"]
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT claim_retry_at FROM agent_jobs WHERE id=$1", oldest["id"])
+            is None
+        )
+
+
+async def test_cancel_during_a_delayed_claim_release_finishes_cancelled(pool, store: Storage):
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    await store.attempt_commands.request_cancel(job_id=job["id"])
+    assert await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        retry_after_seconds=3600,
+    )
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "cancelled"
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT claim_retry_at FROM agent_jobs WHERE id=$1", job["id"])
+            is None
+        )
+
+
 async def test_an_admitted_turn_is_never_handed_back_to_the_queue(store: Storage):
     """The guard that keeps a user's instruction from running twice.
 
@@ -3934,7 +5108,9 @@ async def test_an_admitted_turn_is_never_handed_back_to_the_queue(store: Storage
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="release-guard-container", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
 
     released = await store.attempt_commands.release_claim(
         job_id=job["id"],
@@ -5284,7 +6460,9 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-history-delete", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=source["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=source["id"]
+    )
     assert await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -5293,6 +6471,7 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
     )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=source["id"],
         context_status="live",
         native_session_id="native-source-history",
@@ -5435,9 +6614,12 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Stora
     assert await store.sandbox.mark_thread_sandbox_running(
         **sandbox_fence, container_id="title-container", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**sandbox_fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **sandbox_fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **sandbox_fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="title-session",
@@ -5646,9 +6828,12 @@ async def test_followup_recovers_original_topic_and_legacy_warmup_title(pool, st
     assert await store.sandbox.mark_thread_sandbox_running(
         **sandbox_fence, container_id="title-recovery", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**sandbox_fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **sandbox_fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **sandbox_fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="title-recovery-session",
@@ -5819,13 +7004,16 @@ async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
         container_id="container-lost-member",
         context_status="new",
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=parent["id"]
+    )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
     assert child is not None and child["state"] == "queued"
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=parent["id"],
         context_status="live",
         native_session_id="native-lost-member",
@@ -5994,9 +7182,12 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-side-receipt", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-side-receipt",

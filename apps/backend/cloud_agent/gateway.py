@@ -16,7 +16,6 @@ travels only on this path and never toward a sandbox or a browser.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import quote
 
@@ -25,6 +24,7 @@ from pydantic import ValidationError
 
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 
 logger = get_logger(__name__)
 
@@ -83,6 +83,21 @@ class GatewayError(Exception):
         return 400 <= self.status_code < 500
 
 
+def _catalog_reasoning_efforts(body: dict[str, Any], visible: set[str]) -> dict[str, list[str]]:
+    """Read effort domains only for the models in this catalog response."""
+    raw = body.get("reasoning_efforts")
+    if not isinstance(raw, dict):
+        return {}
+    efforts: dict[str, list[str]] = {}
+    for model, values in raw.items():
+        if str(model) not in visible or not isinstance(values, list):
+            continue
+        levels = [str(value) for value in values]
+        if levels:
+            efforts[str(model)] = levels
+    return efforts
+
+
 class GatewayClient:
     """Calls the gateway's internal contracts on behalf of this service."""
 
@@ -102,9 +117,19 @@ class GatewayClient:
             client: An existing httpx client, for tests and for sharing a
                 connection pool.
         """
-        self._base_url = (base_url or os.environ.get(ENV_BASE_URL) or "").rstrip("/")
-        self._token = dispatch_token or os.environ.get(ENV_DISPATCH_TOKEN) or ""
+        self._base_url_override = base_url
+        self._token_override = dispatch_token
         self._client = client
+
+    @property
+    def _base_url(self) -> str:
+        value = self._base_url_override
+        return (value if value is not None else setting_env(ENV_BASE_URL) or "").rstrip("/")
+
+    @property
+    def _token(self) -> str:
+        value = self._token_override
+        return value if value is not None else setting_env(ENV_DISPATCH_TOKEN) or ""
 
     @property
     def configured(self) -> bool:
@@ -123,7 +148,10 @@ class GatewayClient:
                 error_type="gateway_not_configured",
             )
         headers = {"Authorization": f"Bearer {self._token}"}
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         try:
             if self._client is not None:
                 response = await self._client.get(
@@ -247,17 +275,26 @@ class GatewayClient:
         body = await self._get("/internal/model-catalog", {"user_id": user_id})
         raw_models = body.get("models")
         visible = {str(model) for model in raw_models} if isinstance(raw_models, list) else set()
-        raw = body.get("reasoning_efforts")
-        if not isinstance(raw, dict):
-            return {}
-        efforts: dict[str, list[str]] = {}
-        for model, values in raw.items():
-            if str(model) not in visible or not isinstance(values, list):
-                continue
-            levels = [str(value) for value in values]
-            if levels:
-                efforts[str(model)] = levels
-        return efforts
+        return _catalog_reasoning_efforts(body, visible)
+
+    async def model_catalog_with_reasoning_efforts(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """Read model names and effort domains from one current catalog response.
+
+        A composer needs both fields, which the same Gateway endpoint serves.
+        Reading it once keeps the options together and avoids a second lookup.
+        An older response without effort domains still offers its model names.
+
+        Raises:
+            GatewayError: If the catalog is unavailable or has no model list.
+        """
+        body = await self._get("/internal/model-catalog", {"user_id": user_id})
+        raw_models = body.get("models")
+        if not isinstance(raw_models, list):
+            raise GatewayError("gateway returned no model list")
+        models = [str(model) for model in raw_models]
+        return models, _catalog_reasoning_efforts(body, set(models))
 
     async def agent_access(self, user_id: str) -> AgentAccessDecision:
         """Read the current Agent policy decision without a role-based fallback.
@@ -291,7 +328,7 @@ class GatewayClient:
         away from handing it to somebody else, along with the verifier it was
         redeemed with.
 
-        ``contracts/identity.openapi.yaml`` specifies 400 for an unusable code,
+        ``gateway_contracts/identity.openapi.yaml`` specifies 400 for an unusable code,
         403 for an unavailable account, and 404 when identity is not configured.
         These statuses are preserved in ``GatewayError`` for the session
         callback. A 401 is outside that contract: this PKCE endpoint requires
@@ -325,7 +362,10 @@ class GatewayClient:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
         }
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         path = "/v1/identity/token"
         try:
             if self._client is not None:
@@ -356,6 +396,6 @@ class GatewayClient:
     # The ownership amendment moved the registry, its credentials and its proxy
     # to this service, and the gateway's endpoint went with them — so the
     # method could only ever 404, while its docstring still said a sandbox
-    # reaches MCP through the gateway's proxy. Read `registry_for_user()` from
-    # `cloud_agent.mcp_registry` instead; nothing here asks the gateway about
-    # tools, which is the whole point of the amendment.
+    # reaches MCP through the gateway's proxy. A thread's servers come from
+    # `cloud_agent.mcp.registry.resolve_for_thread()` instead; nothing here asks
+    # the gateway about tools, which is the whole point of the amendment.

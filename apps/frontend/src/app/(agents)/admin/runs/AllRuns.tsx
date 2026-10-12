@@ -166,9 +166,9 @@ function repoName(repo: string): string {
 
 //: The row's frame on the page background. The sticky first cell needs an
 //: opaque copy of it, or scrolled cells would show through.
-const ROW_HOVER = 'hover:bg-gray-100 dark:hover:bg-gray-900';
+const ROW_HOVER = 'transition-colors hover:bg-surface-hover/50';
 const STICKY_CELL =
-  'bg-gray-50 group-hover:bg-gray-100 dark:bg-gray-950 dark:group-hover:bg-gray-900 lg:sticky lg:left-0 lg:z-10 lg:shadow-[inset_-1px_0_0_#f3f4f6] dark:lg:shadow-[inset_-1px_0_0_rgba(255,255,255,0.05)]';
+  'bg-surface-raised group-hover:bg-surface-hover lg:sticky lg:left-0 lg:z-10 lg:shadow-[inset_-1px_0_0_rgb(var(--ui-border))]';
 
 function RunsTable({ runs }: { runs: AdminRunsPage['runs'] }) {
   const now = Date.now();
@@ -180,12 +180,12 @@ function RunsTable({ runs }: { runs: AdminRunsPage['runs'] }) {
             <col key={label} style={{ width }} />
           ))}
         </colgroup>
-        <thead className="text-xs text-gray-400 dark:text-gray-500">
-          <tr className="border-b border-gray-100 dark:border-white/5">
+        <thead className="bg-surface-muted text-xs text-muted">
+          <tr className="border-b border-border">
             {COLUMNS.map(({ label }) => (
               <th
                 key={label}
-                className={`whitespace-nowrap px-3 py-2 font-normal ${
+                className={`whitespace-nowrap px-3 py-3 font-medium ${
                   NUMERIC_COLUMNS.has(label) ? 'text-right' : ''
                 } ${label === 'Turn' ? STICKY_CELL : ''}`}
                 scope="col"
@@ -195,7 +195,7 @@ function RunsTable({ runs }: { runs: AdminRunsPage['runs'] }) {
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+        <tbody className="divide-y divide-border">
           {runs.map((run) => {
             // Derived from this row's own summary, never from a previous
             // row's: a cell cannot survive a filter or page change.
@@ -314,7 +314,7 @@ function LoadingTable() {
   return (
     <div className="mt-4 overflow-hidden" role="status" aria-label="Loading turns">
       <span className="sr-only">Loading turns…</span>
-      <div className="divide-y divide-gray-100 dark:divide-white/5">
+      <div className="divide-y divide-border">
         {Array.from({ length: SKELETON_ROWS }, (_, row) => (
           <div key={row} className="flex items-center gap-5 px-3 py-3">
             <div className="h-3.5 w-1/4 animate-pulse rounded bg-gray-100 dark:bg-white/5" />

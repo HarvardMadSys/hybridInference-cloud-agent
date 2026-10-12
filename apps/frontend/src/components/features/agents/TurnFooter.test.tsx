@@ -293,13 +293,15 @@ describe('TurnFooter', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('opens the per-tool table and labels its timing as approximate', () => {
+  it('reveals a full tool detail and labels its timing as approximate', () => {
+    const fullDetail =
+      'git -C /workspace/repositories/freeinference-cloud-agent status --short --branch';
     const withTools = job({
       events: [
         {
           kind: 'tool_use',
           tool: 'Bash',
-          detail: 'cargo build',
+          detail: fullDetail,
           id: 't1',
           at: '2026-08-19T10:00:00.000Z',
         },
@@ -314,7 +316,14 @@ describe('TurnFooter', () => {
     });
     render(<TurnFooter job={withTools} />);
     fireEvent.click(screen.getByRole('button', { name: '1 tool call' }));
-    expect(screen.getByText('cargo build')).toBeInTheDocument();
+    const detail = screen.getByTitle(fullDetail);
+    fireEvent.click(detail);
+    expect(detail.parentElement).toHaveAttribute('open');
+    expect(detail).toHaveTextContent(fullDetail);
+    expect(screen.getByRole('region', { name: 'Tool call measurements' })).toHaveAttribute(
+      'tabindex',
+      '0',
+    );
     expect(screen.getByText('15s')).toBeInTheDocument();
     expect(screen.getByTitle('Approximate duration')).toHaveTextContent('15s');
   });
@@ -544,22 +553,21 @@ describe('per-call resources, through both real adapters', () => {
     fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
   }
 
-  it('shows what the measured call consumed', () => {
+  it('shows measured and unavailable resources, ranks calls and marks approximate timing', () => {
     openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
 
     expect(screen.getByText('4.4s')).toBeInTheDocument();
     expect(screen.getByText('270MB')).toBeInTheDocument();
-  });
-
-  it('shows a dash for the call too short to measure, never a zero', () => {
-    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
-
     // CPU and memory are unmeasured; process counts are also unknown because
     // this fixture predates the guest observer. None of those is a measured 0.
     expect(screen.getAllByText('—')).toHaveLength(4);
     expect(screen.getAllByTitle('Not available').length).toBeGreaterThan(0);
     expect(screen.queryByText('0s')).toBeNull();
     expect(screen.queryByText('0B')).toBeNull();
+    expect(screen.queryByTitle(/upper bound/)).toBeNull();
+    expect(screen.getByText(/Longest call:/)).toBeInTheDocument();
+    expect(screen.getAllByText('Bash').length).toBeGreaterThan(1);
+    expect(screen.getAllByTitle('Approximate duration')).toHaveLength(2);
   });
 
   it('marks a call that shared its reading as an upper bound', () => {
@@ -575,19 +583,6 @@ describe('per-call resources, through both real adapters', () => {
 
     expect(screen.getByText('4.4s')).toBeInTheDocument();
     expect(screen.getAllByTitle(/upper bound/)[0]).toBeInTheDocument();
-  });
-
-  it('does not claim an upper bound when nothing was shared', () => {
-    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
-
-    expect(screen.queryByTitle(/upper bound/)).toBeNull();
-  });
-
-  it('names the longest call so a 157-row table does not have to be read', () => {
-    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
-
-    expect(screen.getByText(/Longest call:/)).toBeInTheDocument();
-    expect(screen.getAllByText('Bash').length).toBeGreaterThan(1);
   });
 
   it('renders and ranks the recorded duration instead of the wider event window', () => {
@@ -636,12 +631,6 @@ describe('per-call resources, through both real adapters', () => {
     fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
 
     expect(screen.queryByText(/on other work/)).toBeNull();
-  });
-
-  it('marks message-level durations as approximate without timing-source prose', () => {
-    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
-
-    expect(screen.getAllByTitle('Approximate duration')).toHaveLength(2);
   });
 
   it('does not mark directly measured durations as approximate', () => {

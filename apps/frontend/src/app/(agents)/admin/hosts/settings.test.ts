@@ -48,8 +48,20 @@ const SESSIONS: HostSettingDefinition = {
   scope: 'broker',
 };
 
+const CPU: HostSettingDefinition = {
+  ...TIMEOUT,
+  key: 'sandbox_cpu_millicores',
+  env: 'AGENT_SANDBOX_CPU_MILLICORES',
+  label: 'Container CPU',
+  unit: 'millicores',
+  default: 2000,
+  minimum: 100,
+  maximum: 256000,
+};
+
 function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
+    drain_fence_epoch: '00000000-0000-0000-0000-000000000001',
     host: 'runner-a',
     active: false,
     last_worker_id: null,
@@ -79,7 +91,7 @@ function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
 }
 
 describe('settingFact', () => {
-  it('uses the server value over the global one, and the host own with neither', () => {
+  it('uses the server value over the global one, and the deployment default with neither', () => {
     expect(
       settingFact(
         TIMEOUT,
@@ -113,10 +125,33 @@ describe('settingFact', () => {
     expect(factNote(done)).toBe('set for all servers');
   });
 
-  it('treats a cleared value as applying until the server is back on its own', () => {
+  it('treats a cleared value as applying until the server uses the deployment default', () => {
     const fact = settingFact(TIMEOUT, {}, host({ settings_applied: { agent_timeout_s: 7200 } }));
     expect(fact.state).toBe('applying');
-    expect(factNote(fact)).toBe('server default · applying 1 h');
+    expect(factNote(fact)).toBe('deployment default · applying 1 h');
+  });
+
+  it('ignores a different legacy environment value when reporting a reset', () => {
+    const applied = settingFact(
+      TIMEOUT,
+      {},
+      host({
+        settings_local: { agent_timeout_s: 999 },
+        settings_applied: { agent_timeout_s: 3600 },
+      }),
+    );
+    expect(applied).toMatchObject({ admin: null, own: 999, state: 'applied' });
+    expect(factNote(applied)).toBe('deployment default');
+    const waiting = settingFact(
+      TIMEOUT,
+      {},
+      host({
+        settings_local: { agent_timeout_s: 999 },
+        settings_applied: { agent_timeout_s: 999 },
+      }),
+    );
+    expect(waiting.state).toBe('applying');
+    expect(factNote(waiting)).toBe('deployment default · applying 1 h');
   });
 
   it('never claims a value for a server that has not reported, or cannot apply it', () => {
@@ -152,19 +187,19 @@ describe('globalRollout', () => {
     const own = (name: string) => host({ host: name, settings_desired: { agent_timeout_s: 900 } });
     const names: Record<string, string> = { a: 'rtx6000b' };
     expect(rolloutText(TIMEOUT, {}, [own('a')], (h) => names[h.host] ?? h.host)).toBe(
-      'Each server uses its own .env value, or 1 h · rtx6000b sets its own (15 min)',
+      'Deployment default: 1 h · rtx6000b sets its own (15 min)',
     );
     expect(rolloutText(TIMEOUT, {}, [own('a'), own('b'), own('c')])).toBe(
-      'Each server uses its own .env value, or 1 h · 3 servers set their own',
+      'Deployment default: 1 h · 3 servers set their own',
     );
     const old = (name: string) => host({ host: name, capabilities: [] });
     expect(rolloutText(TIMEOUT, {}, [old('a'), old('b'), old('c')])).toBe(
-      'Each server uses its own .env value, or 1 h · 3 servers need a redeploy',
+      'Deployment default: 1 h · 3 servers need a redeploy',
     );
   });
 
   it('says each server uses its own when nothing is set globally', () => {
-    expect(rolloutText(TIMEOUT, {}, [host()])).toBe('Each server uses its own .env value, or 1 h');
+    expect(rolloutText(TIMEOUT, {}, [host()])).toBe('Deployment default: 1 h');
     expect(rolloutText(TIMEOUT, { agent_timeout_s: 3600 }, [host(), host({ host: 'b' })])).toBe(
       'In use on 2 servers',
     );
@@ -181,6 +216,9 @@ describe('formatSettingValue', () => {
     expect(formatSettingValue(IMPORT, 4096)).toBe('4 GiB');
     expect(formatSettingValue(IMPORT, 1500)).toBe('1500 MiB');
     expect(formatSettingValue(SESSIONS, 64)).toBe('64');
+    expect(formatSettingValue(CPU, 2000)).toBe('2 vCPU');
+    expect(formatSettingValue(CPU, 1250)).toBe('1.25 vCPU');
+    expect(formatSettingValue(CPU, 101)).toBe('0.101 vCPU');
   });
 });
 
@@ -214,6 +252,36 @@ describe('parseSettingInput', () => {
 });
 
 describe('input units', () => {
+  it('uses vCPU input while preserving whole millicores and enforcing CPU bounds', () => {
+    expect(inputUnits(CPU)).toEqual(['vCPU']);
+    expect(unitFor(CPU, 1250)).toBe('vCPU');
+    expect(amountIn(1250, 'vCPU')).toBe('1.25');
+    expect(parseSettingInput(CPU, '1.25', 'vCPU')).toEqual({ value: 1250 });
+    expect(parseSettingInput(CPU, '0.101', 'vCPU')).toEqual({ value: 101 });
+    for (const raw of ['0.099', '256.001', '0.1005']) {
+      expect(parseSettingInput(CPU, raw, 'vCPU')).toEqual({
+        error: 'Enter a value from 0.1 vCPU to 256 vCPU.',
+      });
+    }
+  });
+
+  it('reads and formats broker input limits in KiB', () => {
+    const inputLimit: HostSettingDefinition = {
+      ...SESSIONS,
+      key: 'terminal_input_max_kib',
+      unit: 'KiB',
+      default: 64,
+      minimum: 1,
+      maximum: 64,
+    };
+    expect(inputUnits(inputLimit)).toEqual(['KiB']);
+    expect(formatSettingValue(inputLimit, 32)).toBe('32 KiB');
+    expect(parseSettingInput(inputLimit, '32', 'KiB')).toEqual({ value: 32 });
+    expect(parseSettingInput(inputLimit, '65', 'KiB')).toEqual({
+      error: 'Enter a value from 1 KiB to 64 KiB.',
+    });
+  });
+
   it('offers days only where the bound allows more than one', () => {
     expect(inputUnits(TIMEOUT)).toEqual(['s', 'min', 'h']);
     expect(inputUnits({ ...TIMEOUT, maximum: 604800 })).toEqual(['s', 'min', 'h', 'd']);

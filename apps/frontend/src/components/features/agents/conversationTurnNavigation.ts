@@ -327,7 +327,9 @@ function historyTurnDescription(
  * link into turn four does not list turn eight — nothing would be there to
  * scroll to.
  */
-export function describeHistoryTurns(job: AgentJob): ConversationTurnDescription[] {
+export function describeHistoryTurns(
+  job: Pick<AgentJob, 'historyTurns'>,
+): ConversationTurnDescription[] {
   const historyTurns = job.historyTurns;
   if (historyTurns === undefined) return [];
   return historyTurns.map((turn, index) =>
@@ -443,14 +445,6 @@ export function toNavigationEntry(
   };
 }
 
-/** Build the rail's entries for the turns a page currently renders. */
-export function buildConversationTurnNavigation(
-  job: AgentJob,
-  options: ConversationTurnOptions = {},
-): ConversationTurnNavigationEntry[] {
-  return describeConversationTurns(job, options).map((turn) => toNavigationEntry(turn, options));
-}
-
 /**
  * Whether two entry lists would render the same marks.
  *
@@ -508,5 +502,7 @@ export function messageBlockKey(jobId: string, messageId: number): string {
  * had one.
  */
 export function eventBlockKey(jobId: string, event: AgentEvent, index: number): string {
+  if (event.kind === 'tool_use' && event.activityKey)
+    return `${jobId}:activity:${event.activityKey}`;
   return `${jobId}:e${event.sourceEventId ?? `i${index}`}`;
 }

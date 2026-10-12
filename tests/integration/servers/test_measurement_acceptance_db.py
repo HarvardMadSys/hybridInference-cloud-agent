@@ -711,10 +711,12 @@ async def test_the_startup_record_is_stored_while_the_turn_is_still_running(chai
     job = chain.claimed_job()
 
     def _run_turn() -> None:
+        control = ControlPlane(chain.base_url, job.worker_token)
+        control.job_id = job.job_id
         runner_mod._stream_shared_agent_turn(
             supervisor=supervisor,
             job=job,
-            control=ControlPlane(chain.base_url, job.worker_token),
+            control=control,
             heart=_IdleHeart(),
             lease_token="acceptance-lease",
             timeout_s=60.0,
@@ -733,8 +735,10 @@ async def test_the_startup_record_is_stored_while_the_turn_is_still_running(chai
     turn = threading.Thread(target=_run_turn, daemon=True, name="acceptance-turn")
     turn.start()
     try:
-        assert turn_started.wait(timeout=10), "the turn must have started"
-        assert stream.frames_entered.wait(timeout=10), "the model must be mid-turn"
+        assert await asyncio.to_thread(turn_started.wait, timeout=10), "the turn must have started"
+        assert await asyncio.to_thread(stream.frames_entered.wait, timeout=10), (
+            "the model must be mid-turn"
+        )
         row = await _await_row(chain.pool, measurement.measurement_id)
 
         # The ordering under test: the row is already there while the turn
@@ -759,7 +763,7 @@ async def test_the_startup_record_is_stored_while_the_turn_is_still_running(chai
         assert "prompt_dispatch" in [mark["name"] for mark in record["milestones"]]
     finally:
         stream.release.set()
-        turn.join(timeout=5)
+        await asyncio.to_thread(turn.join, timeout=5)
 
 
 # ---------------------------------------------------------------------------

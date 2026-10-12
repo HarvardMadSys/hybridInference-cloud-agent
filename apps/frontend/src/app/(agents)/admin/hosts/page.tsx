@@ -78,6 +78,7 @@ import {
 } from './capacity';
 import { curveSource, curveSourceHosts, formatAge, serverInventory } from './format';
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
 // easily as "gone". Carried over from the gateway's section along with the
@@ -188,7 +189,7 @@ function RowToggle({
       aria-label={`${open ? 'Hide details for' : 'Show details for'} ${name}`}
       aria-controls={panelId}
       onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson disabled:opacity-40 dark:border-white/10 dark:text-gray-400 dark:hover:bg-white/5 dark:focus-visible:ring-crimson-light"
+      className="ui-button ui-button-secondary min-h-9 gap-1.5 px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
     >
       <svg
         viewBox="0 0 12 12"
@@ -628,9 +629,9 @@ function HostsView() {
     // to decide anyway — with the consequence stated, before the request.
     if (slotsUsed > 0) {
       const ok = window.confirm(
-        `${host} is still running ${slotsUsed} attempt(s). Removing it does not stop them — ` +
-          'nothing here can reach them. They are left to their leases, which expire and requeue ' +
-          'the work exactly once. Remove anyway?',
+        `${host} is still running ${slotsUsed} attempt(s). Removing it ends them: their leases ` +
+          'expire now, and the work is requeued once, or a chat whose turn may already have run ' +
+          'is marked lost. Remove anyway?',
       );
       if (!ok) return;
     }
@@ -742,6 +743,14 @@ function HostsView() {
                   const open = expanded === name;
                   const panelId = panelIdFor(name);
                   const concurrency = concurrencyFacts(host);
+                  const allocationId = computeInventory?.hosts.find(
+                    (item) => item.host === host.host,
+                  )?.allocation_id;
+                  const autoscalingManaged =
+                    computeInventory?.allocations
+                      .find((allocation) => allocation.id === allocationId)
+                      ?.blocked_reasons.some((reason) => reason.code === 'autoscaling_managed') ??
+                    false;
                   const sandboxTitle = [
                     facts.sandboxes.explanation,
                     ...facts.sandboxes.reasons.map(reasonLabel),
@@ -811,43 +820,51 @@ function HostsView() {
                                 on hover. Nothing else is written under the
                                 field: the number is the host's number, and an
                                 operator who wants a different one types it. */}
-                          <form
-                            className="mt-1.5 flex items-center gap-1.5"
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              const value = Number(new FormData(event.currentTarget).get('slots'));
-                              if (
-                                !Number.isInteger(value) ||
-                                value < MIN_HOST_SLOTS ||
-                                value > MAX_HOST_SLOTS
-                              ) {
-                                return;
-                              }
-                              void handleSlots(host.host, value);
-                            }}
-                          >
-                            <input
-                              key={`${host.host}:${concurrency.requested ?? 'default'}`}
-                              name="slots"
-                              type="number"
-                              min={MIN_HOST_SLOTS}
-                              max={MAX_HOST_SLOTS}
-                              step={1}
-                              defaultValue={
-                                concurrency.requested ?? host.slots_total ?? MIN_HOST_SLOTS
-                              }
-                              aria-label={`Turns at once for ${name}`}
-                              disabled={busy}
-                              className="w-16 rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] tabular-nums text-gray-700 shadow-sm disabled:opacity-40 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200"
-                            />
-                            <button
-                              type="submit"
-                              disabled={busy}
-                              className="rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 dark:border-white/10 dark:bg-transparent dark:text-gray-200 dark:hover:bg-white/5"
+                          {autoscalingManaged ? (
+                            <p className="mt-2 max-w-[15rem] text-[11px] text-gray-500 dark:text-gray-400">
+                              Slots are managed from fresh capacity by CloudLab auto-scaling.
+                            </p>
+                          ) : (
+                            <form
+                              className="mt-2 flex min-w-0 max-w-full flex-wrap items-center gap-2"
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                const value = Number(
+                                  new FormData(event.currentTarget).get('slots'),
+                                );
+                                if (
+                                  !Number.isInteger(value) ||
+                                  value < MIN_HOST_SLOTS ||
+                                  value > MAX_HOST_SLOTS
+                                ) {
+                                  return;
+                                }
+                                void handleSlots(host.host, value);
+                              }}
                             >
-                              Apply
-                            </button>
-                          </form>
+                              <input
+                                key={`${host.host}:${concurrency.requested ?? 'default'}`}
+                                name="slots"
+                                type="number"
+                                min={MIN_HOST_SLOTS}
+                                max={MAX_HOST_SLOTS}
+                                step={1}
+                                defaultValue={
+                                  concurrency.requested ?? host.slots_total ?? MIN_HOST_SLOTS
+                                }
+                                aria-label={`Turns at once for ${name}`}
+                                disabled={busy}
+                                className="ui-input min-h-9 w-20 min-w-0 max-w-full px-2.5 py-1.5 tabular-nums [@media(pointer:coarse)]:min-h-11"
+                              />
+                              <button
+                                type="submit"
+                                disabled={busy}
+                                className="ui-button ui-button-secondary min-h-9 px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
+                              >
+                                Apply
+                              </button>
+                            </form>
+                          )}
                           {concurrency.launchError !== null && (
                             <span
                               role="alert"
@@ -901,7 +918,7 @@ function HostsView() {
                           )}
                         </td>
                         <td className={`${hostStyles.actions} px-6 py-4`}>
-                          <div className="flex items-center justify-end gap-2">
+                          <div className="flex flex-wrap items-center justify-end gap-2">
                             <button
                               type="button"
                               disabled={busy}
@@ -916,7 +933,7 @@ function HostsView() {
                                     : `${name} stops taking new work; running attempts finish.`,
                                 )
                               }
-                              className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson disabled:opacity-40 dark:border-white/10 dark:bg-transparent dark:text-gray-200 dark:hover:bg-white/5 dark:focus-visible:ring-crimson-light"
+                              className="ui-button ui-button-secondary min-h-9 px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
                             >
                               {host.status === 'draining' ? 'Resume new work' : 'Pause new work'}
                             </button>
@@ -924,7 +941,7 @@ function HostsView() {
                               type="button"
                               disabled={busy}
                               onClick={() => handleRemove(host.host, host.slots_used)}
-                              className="rounded-lg border border-transparent px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-500/10"
+                              className="ui-button min-h-9 border border-status-error/20 px-3 py-1.5 text-xs text-status-error hover:bg-status-error/10 [@media(pointer:coarse)]:min-h-11"
                             >
                               Remove from pool
                             </button>
@@ -1036,11 +1053,12 @@ function HostsView() {
   const staleActive = hosts.find((h) => h.active && h.seconds_since_seen > RECENT_POLL_SECONDS);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-12 lg:px-12 lg:py-16">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Servers"
+          description="Manage compute resources, server capacity, and sandbox placement."
+        />
         <AdminNavigation current="servers" />
 
         {error && (
@@ -1075,12 +1093,9 @@ function HostsView() {
 
         <ComputeResources
           placementControl={
-            <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+            <div className="mb-4 rounded-2xl border border-border bg-surface p-4 shadow-subtle sm:p-5">
               <div className="flex flex-wrap items-center justify-between gap-4">
-                <label
-                  htmlFor="server-placement"
-                  className="text-sm font-semibold text-gray-900 dark:text-gray-100"
-                >
+                <label htmlFor="server-placement" className="text-sm font-semibold text-foreground">
                   New sandbox location
                 </label>
                 <select
@@ -1088,7 +1103,7 @@ function HostsView() {
                   disabled={busy || pool === null}
                   value={activeHost ? (selectionUnavailable ? '__unavailable__' : activeHost) : ''}
                   onChange={(event) => void handlePin(event.target.value || null)}
-                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
+                  className="ui-input min-h-11 w-full sm:w-auto sm:min-w-64"
                 >
                   <option value="">Automatic — available servers</option>
                   {selectionUnavailable && (
@@ -1122,7 +1137,7 @@ function HostsView() {
                   })}
                 </select>
               </div>
-              <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+              <p className="mt-3 text-sm leading-6 text-muted">
                 All new sandboxes use this location. Existing sandboxes stay on their current
                 server.
               </p>

@@ -39,7 +39,10 @@ from cloud_agent.admin_observability import (
 )
 from cloud_agent.api.admin_llm_requests import _refuse
 from cloud_agent.api.admin_runs import _no_store, get_admin_run_queries
-from cloud_agent.api.deps import get_grant_client, verify_admin_access
+from cloud_agent.api.deps import (
+    get_grant_client,
+    verify_admin_access,
+)
 from cloud_agent.domain.execution import ATTEMPT_ABORTED
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
@@ -52,7 +55,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/admin/agent/steps", dependencies=[Depends(_no_store)])
+# The guard is on the router, not each route: a route added to this surface
+# inherits it, so the next steps read cannot ship without one by omission.
+router = APIRouter(
+    prefix="/admin/agent/steps",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+)
 
 #: Turns one page reads. Each costs a reference read and a gateway read per
 #: run, so a page stays small and the list pages on.
@@ -91,7 +99,6 @@ async def list_admin_steps(
     host: str | None = Query(None, max_length=256),
     cursor: str | None = Query(None, max_length=2048),
     limit: int = Query(DEFAULT_STEP_TURNS, ge=1, le=MAX_STEP_TURNS),
-    _admin: str = Depends(verify_admin_access),
     queries: AdminRunQueries = Depends(get_admin_run_queries),
     grants: GrantClient = Depends(get_grant_client),
 ) -> AdminStepsPage:

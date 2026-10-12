@@ -6,9 +6,22 @@ Secrets have their own write-only field and never enter operation requests.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+import base64
+import ipaddress
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+
+from cloud_agent.domain.compute import normalize_user_public_key
+from cloud_agent.ports.external.host_bootstrap import validate_sandbox_storage_path
 
 
 class ComputeRequest(BaseModel):
@@ -17,8 +30,34 @@ class ComputeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class CloudLabDefaults(ComputeRequest):
+    """Non-secret defaults applied to new CloudLab server requests."""
+
+    project: str = Field(default="", max_length=128)
+    duration: int = Field(default=4, ge=1, le=168)
+    profile_project: str = Field(default="", max_length=128)
+    profile_name: str = Field(default="", max_length=128)
+    ssh_username: str = Field(
+        default="", max_length=128, pattern=r"^(?:[a-zA-Z_][a-zA-Z0-9_.-]*)?$"
+    )
+    ssh_public_key: str = Field(default="", max_length=8192)
+
+    @field_validator("ssh_public_key")
+    @classmethod
+    def validate_ssh_public_key(cls, value: str) -> str:
+        """Accept one OpenSSH public key, or blank when the account keys are enough."""
+        if not value:
+            return ""
+        return normalize_user_public_key(value)
+
+
 class RenewalPolicy(ComputeRequest):
-    """Independent resource deadlines, expressed in seconds."""
+    """Independent resource deadlines, expressed in seconds.
+
+    With rotation, ``renew_before_seconds`` is also when a node is replaced:
+    an extension is tried first; a refused one, or a node at its maximum age,
+    starts a move of the whole Host to a newly allocated node instead.
+    """
 
     enabled: bool = False
     renew_before_seconds: int = Field(default=3600, ge=60, le=604800)
@@ -26,6 +65,14 @@ class RenewalPolicy(ComputeRequest):
     stop_new_groups_before_seconds: int = Field(default=1800, ge=0, le=604800)
     stop_claims_before_seconds: int = Field(default=300, ge=0, le=604800)
     reason: str = Field(default="", max_length=2000)
+    rotation_enabled: bool = False
+    max_node_age_seconds: int = Field(default=604800, ge=3600, le=2592000)
+    # Hardware for a replacement node, tried in order (newest first).
+    node_types: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")]] = Field(
+        default_factory=list, max_length=20
+    )
+    # The profile parameter that selects a node's hardware type.
+    node_type_binding: str = Field(default="phystype", pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
     @model_validator(mode="after")
     def ordered_deadlines(self) -> Self:
@@ -39,7 +86,78 @@ class RenewalPolicy(ComputeRequest):
             raise ValueError("require horizon > renew_before > stop_new_groups >= stop_claims")
         if self.enabled and not self.reason:
             raise ValueError("an actual reason is required to enable automatic renewal")
+        if self.rotation_enabled and (not self.enabled or not self.node_types):
+            raise ValueError("node replacement needs automatic renewal and candidate node types")
+        if len(set(self.node_types)) != len(self.node_types):
+            raise ValueError("candidate node types must be distinct")
         return self
+
+
+class CloudLabAutoscalingSlotPolicy(ComputeRequest):
+    """Versioned slot-sizing formula applied to fresh Host capacity telemetry."""
+
+    formula_version: Literal[1] = 1
+    cpu_reservation_fraction: float = Field(default=0.75, ge=0.75, le=0.75)
+    cpu_per_slot: Literal[2] = 2
+    memory_reserve_gib: Literal[8] = 8
+    memory_per_slot_gib: Literal[4] = 4
+    min_slots: Literal[2] = 2
+    max_slots: Literal[128] = 128
+
+
+class CloudLabAutoscalingPolicy(ComputeRequest):
+    """Desired singleton policy; provider secrets remain connection references."""
+
+    enabled: bool = False
+    min_hosts: int = Field(default=0, ge=0, le=8)
+    max_hosts: int = Field(default=0, ge=0, le=8)
+    connection_id: str | None = Field(default=None, min_length=1, max_length=128)
+    ssh_connection_id: str | None = Field(default=None, min_length=1, max_length=128)
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    deployment_profiles: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")]] = Field(
+        default_factory=list, max_length=8
+    )
+    sandbox_storage_path: str | None = Field(default=None, max_length=4096)
+    renewal_policy: RenewalPolicy = Field(default_factory=RenewalPolicy)
+    slot_policy: CloudLabAutoscalingSlotPolicy = Field(
+        default_factory=CloudLabAutoscalingSlotPolicy
+    )
+    scale_up_sustain_seconds: int = Field(default=120, ge=0, le=86400)
+    scale_down_idle_seconds: int = Field(default=3600, ge=60, le=604800)
+    cooldown_seconds: int = Field(default=600, ge=0, le=86400)
+    scale_down_enabled: bool = False
+
+    @field_validator("sandbox_storage_path")
+    @classmethod
+    def validate_storage_path(cls, value: str | None) -> str | None:
+        """Accept only the shared absolute sandbox-storage path grammar."""
+        return None if value is None else validate_sandbox_storage_path(value)
+
+    @model_validator(mode="after")
+    def validate_capacity(self) -> Self:
+        """Keep capacity, profile reservations and v1 renewal features coherent."""
+        if self.min_hosts > self.max_hosts:
+            raise ValueError("minimum hosts cannot exceed maximum hosts")
+        if len(set(self.deployment_profiles)) != len(self.deployment_profiles):
+            raise ValueError("deployment profiles must be distinct")
+        if self.renewal_policy.rotation_enabled:
+            raise ValueError("automatic node rotation is not supported by CloudLab autoscaling v1")
+        if self.max_hosts > len(self.deployment_profiles):
+            raise ValueError("maximum hosts exceeds reserved deployment profiles")
+        if self.enabled and (
+            self.max_hosts < 1 or self.connection_id is None or self.ssh_connection_id is None
+        ):
+            raise ValueError(
+                "enabled autoscaling requires capacity and CloudLab and SSH connections"
+            )
+        return self
+
+
+class UpdateCloudLabAutoscaling(ComputeRequest):
+    """Compare and replace the autoscaling policy observed by an administrator."""
+
+    expected_revision: int = Field(ge=0)
+    policy: CloudLabAutoscalingPolicy
 
 
 class AddComputeConnection(ComputeRequest):
@@ -60,6 +178,110 @@ class UpdateComputeConnection(ComputeRequest):
     secret: SecretStr | None = Field(default=None, min_length=1, max_length=65536)
 
 
+class AddDeploymentProfile(ComputeRequest):
+    """Create a reviewed Host deployment profile from write-only Admin inputs."""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    label: str = Field(min_length=1, max_length=120)
+    deployment_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
+    deploy_root: str = Field(default="/opt/cloud-agent", pattern=r"^/[a-zA-Z0-9/_-]+$")
+    environment: SecretStr = Field(min_length=1, max_length=65536)
+    files: dict[str, Annotated[SecretStr, Field(min_length=1, max_length=65536)]] = Field(
+        min_length=1, max_length=24
+    )
+    source_bundle_base64: SecretStr = Field(min_length=1)
+    install_prerequisites: bool = True
+    timeout_seconds: int = Field(default=3600, ge=60, le=7200)
+    data_mount: str | None = Field(default=None, pattern=r"^/[a-zA-Z0-9/_-]+$")
+
+    def bundle(self) -> bytes:
+        """Decode with a hard ceiling before the value reaches persistence."""
+        try:
+            encoded = self.source_bundle_base64.get_secret_value().encode("ascii")
+            if len(encoded) > 96 * 1024 * 1024:
+                raise ValueError
+            payload = base64.b64decode(encoded, validate=True)
+        except (UnicodeError, ValueError):
+            raise ValueError("invalid deployment bundle") from None
+        if not payload or len(payload) > 64 * 1024 * 1024:
+            raise ValueError("invalid deployment bundle")
+        return payload
+
+
+class SetupMachine(ComputeRequest):
+    """A stable infrastructure machine reached through an existing verified key."""
+
+    connection_id: str = Field(min_length=1, max_length=128)
+    address: str = Field(min_length=1, max_length=253, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9.:-]*$")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+
+
+class AutomaticDeploymentSetup(ComputeRequest):
+    """Generate immutable Host setups from the running release and trusted machines."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    gateway: SetupMachine
+    control: SetupMachine
+    gateway_port: int = Field(default=8080, ge=1, le=65535)
+    chat_network_pool: str
+    dns_server: str
+    protected_cidrs: list[str] = Field(min_length=1, max_length=64)
+    slots: int = Field(default=2, ge=1, le=8)
+
+    @field_validator("chat_network_pool")
+    @classmethod
+    def validate_pool(cls, value: str) -> str:
+        """Require an explicit private IPv4 pool large enough for group bridges."""
+        pool = ipaddress.IPv4Network(value, strict=True)
+        private = [
+            ipaddress.IPv4Network(cidr)
+            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        ]
+        if (
+            pool.version != 4
+            or pool.prefixlen > 29
+            or not any(pool.subnet_of(net) for net in private)
+        ):
+            raise ValueError("Use an RFC1918 IPv4 pool with a prefix at most /29")
+        return str(pool)
+
+    @field_validator("dns_server")
+    @classmethod
+    def validate_resolver(cls, value: str) -> str:
+        """Require a usable explicit IPv4 resolver address."""
+        resolver = ipaddress.ip_address(value)
+        if (
+            resolver.version != 4
+            or resolver.is_unspecified
+            or resolver.is_loopback
+            or resolver.is_multicast
+            or resolver.is_link_local
+        ):
+            raise ValueError("Use a reachable IPv4 DNS resolver")
+        return str(resolver)
+
+    @field_validator("protected_cidrs")
+    @classmethod
+    def validate_protected(cls, values: list[str]) -> list[str]:
+        """Canonicalize protected IPv4 destinations without accepting shell data."""
+        result = []
+        for value in values:
+            network = ipaddress.ip_network(value, strict=False)
+            if network.version != 4:
+                raise ValueError("Protected destinations must be IPv4 networks")
+            result.append(str(network))
+        return sorted(set(result))
+
+    @model_validator(mode="after")
+    def validate_network_destinations(self) -> Self:
+        """Reject configurations the unchanged Host network guard cannot install."""
+        pool = ipaddress.IPv4Network(self.chat_network_pool)
+        if ipaddress.IPv4Address(self.dns_server) in pool:
+            raise ValueError("The DNS resolver must be outside the sandbox network pool")
+        return self
+
+
 class AddServerRequest(ComputeRequest):
     """Acquire or attach a resource and deploy a configured Host profile."""
 
@@ -71,7 +293,14 @@ class AddServerRequest(ComputeRequest):
     ssh_connection_id: str | None = Field(default=None, min_length=1, max_length=128)
     configuration: dict[str, Any] = Field(default_factory=dict)
     deployment_profile: str | None = Field(default=None, min_length=1, max_length=120)
+    sandbox_storage_path: str | None = Field(default=None, max_length=4096)
     policy: RenewalPolicy = Field(default_factory=RenewalPolicy)
+
+    @field_validator("sandbox_storage_path")
+    @classmethod
+    def validate_storage_path(cls, value: str | None) -> str | None:
+        """An omitted value preserves the selected deployment profile's storage."""
+        return None if value is None else validate_sandbox_storage_path(value)
 
 
 class ImportComputeRequest(ComputeRequest):
@@ -98,6 +327,13 @@ class ExtendComputeRequest(ComputeRequest):
     request_id: str = Field(min_length=1, max_length=128)
     target_expires_at: AwareDatetime
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class RotateComputeRequest(ComputeRequest):
+    """Move the Host to a replacement node now, before its lease forces it."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0)
 
 
 class RetireComputeRequest(ComputeRequest):

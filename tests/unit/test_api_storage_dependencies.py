@@ -39,7 +39,7 @@ def port_names() -> set[str]:
     """Every capability port's class name, read from the ports package itself.
 
     Enumerated rather than listed here: each module declares its own assembly
-    protocol (`_RoutesStorage`, `_HostsStorage`, `_AdminRunsStorage`), and a new
+    protocol (`_JobsStorage`, `_HostsStorage`, `_AdminRunsStorage`), and a new
     one must pass without editing this test. What must never appear is one of
     the ports those assemblies hold.
     """

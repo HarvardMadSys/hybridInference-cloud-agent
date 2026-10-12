@@ -9,8 +9,10 @@ actually opens.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -55,6 +57,19 @@ class FakeHostStore(AllCapabilities):
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
         self.global_settings: dict[str, Any] = {}
+        self.autoscaling_managed: set[str] = set()
+        self.archive_settings: dict[str, Any] = {
+            "enabled": False,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+            "region": "",
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+            "revision": 0,
+            "updated_at": datetime.now(timezone.utc),
+        }
         self.audit = _AuditTrail()
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
@@ -64,6 +79,7 @@ class FakeHostStore(AllCapabilities):
             "last_worker_id": f"w-{host}",
             "first_seen_at": seen,
             "last_seen_at": seen,
+            "drain_fence_epoch": uuid4(),
             "runtime_versions": {"claude-code": "2.1.220"},
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.235"]},
         }
@@ -120,6 +136,8 @@ class FakeHostStore(AllCapabilities):
         row = self.rows.get(host)
         if row is None:
             return "unknown"
+        if host in self.autoscaling_managed:
+            return "autoscaling_managed"
         row["slots_desired"] = slots
         return "ok"
 
@@ -130,6 +148,27 @@ class FakeHostStore(AllCapabilities):
         previous = dict(self.global_settings)
         self.global_settings = _changed(previous, changes)
         return previous
+
+    async def sandbox_archive_settings(self) -> dict[str, Any]:
+        return dict(self.archive_settings)
+
+    async def set_sandbox_archive_settings(
+        self, *, expected_revision: int, settings: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if expected_revision > self.archive_settings["revision"]:
+            return None
+        same = all(self.archive_settings.get(key) == value for key, value in settings.items())
+        if same:
+            return {**self.archive_settings, "_changed": False}
+        if expected_revision != self.archive_settings["revision"]:
+            return None
+        self.archive_settings = {
+            **settings,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+            "revision": expected_revision + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        return {**self.archive_settings, "_changed": True}
 
     async def set_runner_host_settings(
         self, *, host: str, changes: dict[str, int | None]
@@ -481,6 +520,23 @@ async def test_sizing_an_unknown_host_is_a_404(admin_client):
 
 
 @pytest.mark.asyncio
+async def test_sizing_an_autoscaling_managed_host_is_refused(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    store.rows["runner-a"]["slots_desired"] = 6
+    store.autoscaling_managed.add("runner-a")
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/slots", json={"slots": 8}, headers=ADMIN
+    )
+
+    assert response.status_code == 409
+    assert "managed by CloudLab autoscaling" in response.json()["detail"]
+    assert store.rows["runner-a"]["slots_desired"] == 6
+    assert len(store.audit) == 0
+
+
+@pytest.mark.asyncio
 async def test_a_size_change_is_audited_with_both_values(admin_client):
     """The trail answers 'who resized this host, from what' without a diff."""
     client, store = admin_client
@@ -510,13 +566,28 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
     assert body["host_settings"] == {}
     definitions = {item["key"]: item for item in body["host_setting_definitions"]}
     assert set(definitions) == {
+        "sandbox_cpu_millicores",
+        "sandbox_memory_mib",
+        "sandbox_disk_mib",
         "agent_timeout_s",
         "chat_idle_timeout_s",
         "source_import_max_mib",
+        "storage_min_available_mib",
         "shared_resident_capacity",
         "terminal_idle_ttl_s",
         "terminal_hard_ttl_s",
         "terminal_max_sessions",
+        "terminal_max_sessions_per_workspace",
+        "workspace_command_timeout_s",
+        "workspace_file_write_max_mib",
+        "workspace_file_preview_max_kib",
+        "workspace_command_output_max_mib",
+        "workspace_directory_max_entries",
+        "terminal_buffer_max_mib",
+        "terminal_buffer_max_events",
+        "terminal_output_max_mib",
+        "terminal_input_max_kib",
+        "terminal_max_streams_per_session",
     }
     assert definitions["source_import_max_mib"] | {"label": None, "description": None} == {
         "key": "source_import_max_mib",
@@ -529,6 +600,77 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "maximum": 65536,
         "scope": "runner",
     }
+    assert definitions["storage_min_available_mib"] | {"label": None, "description": None} == {
+        "key": "storage_min_available_mib",
+        "env": "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+        "label": None,
+        "description": None,
+        "unit": "MiB",
+        "default": 1024,
+        "minimum": 1,
+        "maximum": 1048576,
+        "scope": "runner",
+    }
+
+
+@pytest.mark.asyncio
+async def test_container_sizes_can_be_set_globally_overridden_and_reset(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    sizes = {
+        "sandbox_cpu_millicores": 1250,
+        "sandbox_memory_mib": 8192,
+        "sandbox_disk_mib": 20480,
+    }
+    response = await client.put(
+        "/admin/agent/host-settings", json={"settings": sizes}, headers=ADMIN
+    )
+    assert response.status_code == 200
+    assert response.json()["host_settings"] == sizes
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/settings",
+        json={"settings": {"sandbox_cpu_millicores": 500, "sandbox_disk_mib": 0}},
+        headers=ADMIN,
+    )
+    assert response.status_code == 200
+    assert response.json()["hosts"][0]["settings_desired"] == {
+        "sandbox_cpu_millicores": 500,
+        "sandbox_disk_mib": 0,
+    }
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/settings",
+        json={"settings": {"sandbox_cpu_millicores": None, "sandbox_disk_mib": None}},
+        headers=ADMIN,
+    )
+    assert response.status_code == 200
+    assert response.json()["hosts"][0]["settings_desired"] == {}
+    assert response.json()["host_settings"] == sizes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sandbox_cpu_millicores": 99},
+        {"sandbox_cpu_millicores": 256001},
+        {"sandbox_cpu_millicores": 1250.5},
+        {"sandbox_memory_mib": 127},
+        {"sandbox_memory_mib": 1048577},
+        {"sandbox_disk_mib": -1},
+        {"sandbox_disk_mib": 16777217},
+        {"sandbox_disk_mib": True},
+    ],
+)
+async def test_invalid_container_sizes_are_refused_without_saving(admin_client, change):
+    client, store = admin_client
+    response = await client.put(
+        "/admin/agent/host-settings", json={"settings": change}, headers=ADMIN
+    )
+    assert response.status_code == 422
+    assert store.global_settings == {}
+    assert len(store.audit) == 0
 
 
 @pytest.mark.asyncio
@@ -551,6 +693,226 @@ async def test_a_global_setting_is_saved_changed_and_cleared_one_key_at_a_time(a
     )
     assert response.json()["host_settings"] == {"terminal_max_sessions": 32}
     assert store.global_settings == {"terminal_max_sessions": 32}
+
+
+def _archive_policy(*, revision: int = 0, **changes: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "enabled": True,
+        "region": "us-east-1",
+        "kms_key_arn": (
+            "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+        ),
+        "expected_bucket_owner": "123456789012",
+        "max_archive_bytes": 2 * 1024**3,
+        "multipart_threshold_bytes": 8 * 1024**2,
+        "multipart_part_bytes": 8 * 1024**2,
+        "revision": revision,
+    }
+    values.update(changes)
+    return values
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client):
+    client, store = admin_client
+
+    before = await client.get("/admin/agent/sandbox-archive-settings", headers=ADMIN)
+    assert before.status_code == 200
+    assert before.json()["enabled"] is False
+    assert before.json()["s3_uri"] == "s3://freeinference/cloud-agent/sandbox"
+
+    response = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(),
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 200
+    assert response.json() | {"updated_at": None} == {
+        **_archive_policy(revision=1),
+        "s3_uri": "s3://freeinference/cloud-agent/sandbox",
+        "aws_access_key_id": "",
+        "aws_secret_access_key_configured": False,
+        "updated_at": None,
+    }
+    assert "aws_secret_access_key" not in response.json()
+    assert store.audit[-1]["action"] == "agent.sandbox_archive_settings.set"
+    assert store.audit[-1]["details"] == {
+        "old_revision": 0,
+        "new_revision": 1,
+        "old_settings": {
+            "enabled": False,
+            "region": "",
+            "kms_key_arn": "",
+            "expected_bucket_owner": "",
+            "aws_access_key_id": "",
+            "aws_secret_access_key_configured": False,
+            "max_archive_bytes": 2 * 1024**3,
+            "multipart_threshold_bytes": 8 * 1024**2,
+            "multipart_part_bytes": 8 * 1024**2,
+        },
+        "new_settings": {
+            key: value for key, value in _archive_policy().items() if key != "revision"
+        }
+        | {"aws_access_key_id": "", "aws_secret_access_key_configured": False},
+    }
+
+    no_op = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=1),
+        headers=ADMIN,
+    )
+    retry = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=0),
+        headers=ADMIN,
+    )
+    future = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=99),
+        headers=ADMIN,
+    )
+    assert no_op.status_code == retry.status_code == 200
+    assert no_op.json()["revision"] == retry.json()["revision"] == 1
+    assert future.status_code == 409
+    assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_missing_singleton_timestamp_is_still_readable(admin_client):
+    client, store = admin_client
+    store.archive_settings["updated_at"] = None
+
+    response = await client.get("/admin/agent/sandbox-archive-settings", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert response.json()["updated_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_rejects_stale_or_unsafe_writes(admin_client):
+    client, store = admin_client
+    first = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(),
+        headers=ADMIN,
+    )
+    assert first.status_code == 200
+
+    stale = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(region="us-west-2"),
+        headers=ADMIN,
+    )
+    assert stale.status_code == 422  # KMS region mismatch is rejected before the CAS.
+
+    stale = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(expected_bucket_owner="999999999999"),
+        headers=ADMIN,
+    )
+    assert stale.status_code == 422
+
+    stale = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(enabled=False, region=""),
+        headers=ADMIN,
+    )
+    assert stale.status_code == 409
+    assert store.archive_settings["revision"] == 1
+
+    injected = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=1), "aws_access_key_id": "must-not-be-stored"},
+        headers=ADMIN,
+    )
+    assert injected.status_code == 422
+    redirected = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=1), "s3_uri": "s3://attacker-bucket/elsewhere"},
+        headers=ADMIN,
+    )
+    assert redirected.status_code == 422
+    bool_enabled = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=1), "enabled": 1},
+        headers=ADMIN,
+    )
+    assert bool_enabled.status_code == 422
+    assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_stores_an_access_key_without_returning_the_secret(admin_client):
+    client, store = admin_client
+    secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    access_key = "AKIAIOSFODNN7EXAMPLE"
+    saved = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            kms_key_arn="",
+            expected_bucket_owner="",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret,
+        ),
+        headers=ADMIN,
+    )
+
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["aws_access_key_id"] == access_key
+    assert body["aws_secret_access_key_configured"] is True
+    assert "aws_secret_access_key" not in body
+    assert body["kms_key_arn"] == ""
+    assert body["expected_bucket_owner"] == ""
+    assert store.archive_settings["aws_secret_access_key"] == secret
+    assert secret not in json.dumps(store.audit[-1])
+
+    kept = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            revision=1,
+            kms_key_arn="",
+            expected_bucket_owner="",
+            aws_access_key_id=access_key,
+            aws_secret_access_key="",
+        ),
+        headers=ADMIN,
+    )
+    assert kept.status_code == 200
+    assert kept.json()["revision"] == 1
+    assert store.archive_settings["aws_secret_access_key"] == secret
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_null_optional_limits_restore_safe_defaults(admin_client):
+    client, _ = admin_client
+
+    response = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={
+            **_archive_policy(),
+            "max_archive_bytes": None,
+            "multipart_threshold_bytes": None,
+            "multipart_part_bytes": None,
+        },
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["max_archive_bytes"] == 2 * 1024**3
+    assert response.json()["multipart_threshold_bytes"] == 8 * 1024**2
+    assert response.json()["multipart_part_bytes"] == 8 * 1024**2
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_routes_require_admin_access(admin_client):
+    client, _ = admin_client
+
+    assert (await client.get("/admin/agent/sandbox-archive-settings")).status_code in (401, 403)
+    assert (
+        await client.put("/admin/agent/sandbox-archive-settings", json=_archive_policy())
+    ).status_code in (401, 403)
 
 
 @pytest.mark.asyncio

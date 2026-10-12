@@ -204,6 +204,91 @@ describe('McpConnectionsSection', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('authorized');
   });
 
+  it.each([
+    'javascript:alert(document.domain)',
+    'data:text/html,<script>alert(1)</script>',
+    '/authorize',
+    '//login.example.com/authorize',
+    'https://user@login.example.com/authorize',
+  ])('blocks an unsafe sign-in URL before browser navigation: %s', async (authorizationUrl) => {
+    const currentUrl = window.location.href;
+    mockedAuthorize.mockResolvedValueOnce({
+      authorization_url: authorizationUrl,
+      needs_client_id: false,
+      message: '',
+    });
+
+    render(<McpConnectionsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('unsafe sign-in address');
+    expect(window.location.href).toBe(currentUrl);
+    expect(mockedList).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['slack', 'google-drive'])(
+    'accepts OAuth client credentials and shows the registered callback for %s',
+    async (template) => {
+      const redirectUri = 'https://agent.example.com/agents/v1/agent/mcp/oauth/callback';
+      mockedList.mockResolvedValue({
+        ...api,
+        connections: [{ ...connection, template }],
+      });
+      mockedAuthorize.mockResolvedValueOnce({
+        authorization_url: null,
+        needs_client_id: true,
+        redirect_uri: redirectUri,
+        message: 'Provide a registered client ID and secret.',
+      });
+      mockedAuthorize.mockResolvedValueOnce({
+        authorization_url: null,
+        needs_client_id: false,
+        message: 'authorized',
+      });
+
+      render(<McpConnectionsSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+      const redirect = await screen.findByLabelText('OAuth redirect URI');
+      expect(redirect).toHaveValue(redirectUri);
+      expect(redirect).toHaveAttribute('readonly');
+      const secret = screen.getByLabelText('OAuth client secret');
+      expect(secret).toHaveAttribute('type', 'password');
+      expect(secret).toHaveAttribute('autocomplete', 'off');
+      fireEvent.change(screen.getByLabelText('OAuth client ID'), {
+        target: { value: 'registered-client' },
+      });
+      fireEvent.change(secret, { target: { value: 'private-client-secret' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+      await waitFor(() =>
+        expect(mockedAuthorize).toHaveBeenLastCalledWith(
+          connection.id,
+          'registered-client',
+          'private-client-secret',
+        ),
+      );
+      expect(await screen.findByRole('status')).toHaveTextContent('authorized');
+      expect(screen.queryByLabelText('OAuth client secret')).not.toBeInTheDocument();
+      expect(screen.queryByText('private-client-secret')).not.toBeInTheDocument();
+    },
+  );
+
+  it('starts GitHub browser sign-in without asking for app credentials', async () => {
+    mockedList.mockResolvedValue({
+      ...api,
+      connections: [{ ...connection, template: 'github', label: 'GitHub' }],
+    });
+    mockedAuthorize.mockResolvedValue({
+      authorization_url: 'https://github.com/login/oauth/authorize?client_id=service-app',
+      needs_client_id: false,
+    });
+    render(<McpConnectionsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with GitHub' }));
+    await waitFor(() => expect(mockedAuthorize).toHaveBeenCalledWith(3, undefined));
+    expect(screen.queryByLabelText('OAuth client ID')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('OAuth client secret')).not.toBeInTheDocument();
+  });
+
   it('disconnects a connection after confirming', async () => {
     mockedDisconnect.mockResolvedValue(undefined);
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -160,6 +161,60 @@ def test_an_unfetchable_key_refuses_rather_than_passing(monkeypatch, keypair) ->
     monkeypatch.setattr(identity, "PyJWKClient", _Broken)
     with pytest.raises(IdentityError):
         verify_identity_token(_token(key))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        jwt.PyJWKClientConnectionError("upstream connection failed"),
+        httpx.ConnectError("upstream connection failed"),
+        TimeoutError("upstream request timed out"),
+    ],
+)
+def test_signing_key_network_failures_are_temporary_identity_unavailability(
+    monkeypatch, keypair, failure
+):
+    key, _ = keypair
+    monkeypatch.setenv(ENV_JWKS_URL, "https://gateway.example/v1/identity/jwks")
+
+    class Unreachable:
+        def get_signing_key_from_jwt(self, token):
+            raise failure
+
+    monkeypatch.setattr(identity, "_jwks_client", lambda: Unreachable())
+    with pytest.raises(identity.IdentityUnavailable):
+        verify_identity_token(_token(key))
+
+
+def test_an_unknown_signing_key_remains_an_invalid_credential(monkeypatch, keypair):
+    key, _ = keypair
+
+    class UnknownKey:
+        def get_signing_key_from_jwt(self, token):
+            raise jwt.PyJWKClientError("No matching signing key")
+
+    monkeypatch.setattr(identity, "_jwks_client", lambda: UnknownKey())
+    with pytest.raises(IdentityError) as refusal:
+        verify_identity_token(_token(key, kid="unknown"))
+    assert not isinstance(refusal.value, identity.IdentityUnavailable)
+
+
+def test_a_jwks_fetch_has_a_bounded_network_timeout(monkeypatch, keypair) -> None:
+    """The real JWKS client must bound a slow fetch and fail closed on timeout."""
+    key, _ = keypair
+    monkeypatch.setenv(ENV_JWKS_URL, "https://gateway.example/v1/identity/jwks")
+    requested_timeouts: list[float] = []
+
+    def _unreachable(request, *, timeout, context):
+        requested_timeouts.append(timeout)
+        raise TimeoutError("JWKS request timed out")
+
+    monkeypatch.setattr("jwt.jwks_client.urllib.request.urlopen", _unreachable)
+
+    with pytest.raises(IdentityError, match="cannot resolve the signing key"):
+        verify_identity_token(_token(key))
+
+    assert requested_timeouts == [10.0]
 
 
 def test_a_withdrawn_jwks_key_stops_verifying_after_the_set_refreshes(monkeypatch) -> None:

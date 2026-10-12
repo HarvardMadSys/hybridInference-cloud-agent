@@ -123,10 +123,23 @@ def render_fragment(measure: Selection | None) -> dict[str, Any] | None:
     return AgentOperationProfilingFragment(**block).model_dump(exclude_none=True)
 
 
-def measured_response(model: Any, measure: Selection | None, payload: dict[str, Any]) -> Response:
-    """Serialize a response without changing the profiling-off wire shape."""
+def measured_response(
+    model: Any,
+    measure: Selection | None,
+    payload: dict[str, Any],
+    *,
+    omit_if_none: tuple[str, ...] = (),
+) -> Response:
+    """Serialize a response without changing the profiling-off wire shape.
+
+    ``omit_if_none`` names optional fields to leave out, rather than send as
+    null, when the producer did not supply them.
+    """
     body = model(**payload).model_dump()
     body.pop("profiling", None)
+    for key in omit_if_none:
+        if body.get(key) is None:
+            body.pop(key, None)
     block = render_fragment(measure)
     if block is not None:
         body["profiling"] = block

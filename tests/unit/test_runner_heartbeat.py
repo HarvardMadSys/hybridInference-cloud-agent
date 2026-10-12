@@ -144,6 +144,7 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
     renewal_done = threading.Event()
     stopped = threading.Event()
     requests = []
+    dispatch_events = []
 
     class Stop:
         def set(self):
@@ -161,6 +162,10 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
 
     def endpoint(request):
         operation = request.url.path.rsplit("/", 1)[-1]
+        if operation == "events":
+            assert clock.now == 0
+            dispatch_events.append(json.loads(request.content))
+            return httpx.Response(200, json={})
         requests.append((operation, clock.now))
         if clock.now >= clock.expires_at:
             return httpx.Response(409, json={"detail": "lease expired"})
@@ -225,6 +230,9 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
         assert clock.now == 360
         assert not heart.lease_lost and not heart.cancel_requested
         assert clock.expires_at > clock.now
+        assert dispatch_events == [
+            {"event_type": "lifecycle", "payload": {"phase": "turn_started"}, "event_seq": 1}
+        ]
         control.finish("succeeded")
         assert requests[-1] == ("finish", 360)
         assert all(operation in {"heartbeat", "finish"} for operation, _ in requests)

@@ -14,6 +14,28 @@ import ComputeConnectionForm from './ComputeConnectionForm';
 import { credentialLabel } from './ComputeCredentials';
 import { buttonClass, ErrorNotice, Reasons } from './compute-ui';
 
+function usesCloudLabHostKeyPolicy(
+  allocation: ComputeAllocation,
+  connection: ComputeConnection,
+): boolean {
+  return (
+    allocation.provider_id === 'cloudlab' &&
+    allocation.ssh_connection_id === connection.id &&
+    connection.provider_id === 'existing_ssh' &&
+    ['unchecked', 'registration'].includes(allocation.ssh_host_key_policy ?? '')
+  );
+}
+
+function cloudLabHostKeyPolicyMessage(allocation: ComputeAllocation): string | null {
+  if (allocation.ssh_host_key_policy === 'unchecked') {
+    return 'SSH host-key checking is disabled for this CloudLab server.';
+  }
+  if (allocation.ssh_host_key_policy === 'registration') {
+    return 'This CloudLab server registers its SSH host key at first boot.';
+  }
+  return null;
+}
+
 export default function ServerAccess({
   allocation,
   allocations,
@@ -55,6 +77,7 @@ export default function ServerAccess({
             key={editor.id}
             catalog={catalog}
             connection={editor}
+            preserveConfiguration={usesCloudLabHostKeyPolicy(allocation, editor)}
             onSaved={(connection) => {
               onSaved(connection);
               setEditing(null);
@@ -91,34 +114,47 @@ export default function ServerAccess({
                   >
                     Edit {connection.provider_id === 'existing_ssh' ? 'SSH key' : 'account'}
                   </button>
-                  <button
-                    className={buttonClass}
-                    type="button"
-                    disabled={!catalog.secret_store_configured || busy !== null}
-                    onClick={async () => {
-                      setBusy(connection.id);
-                      setError(null);
-                      setNotice(null);
-                      try {
-                        const result = await validateComputeConnection(connection.id);
-                        onSaved(result.connection);
-                        setNotice(
-                          result.connection.status === 'verified'
-                            ? `${connection.name} verified.`
-                            : 'Check the access details below.',
-                        );
-                      } catch (error) {
-                        setError(getErrorMessage(error));
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                  >
-                    {busy === connection.id ? 'Checking…' : 'Check'}
-                  </button>
+                  {!usesCloudLabHostKeyPolicy(allocation, connection) && (
+                    <button
+                      className={buttonClass}
+                      type="button"
+                      disabled={!catalog.secret_store_configured || busy !== null}
+                      onClick={async () => {
+                        setBusy(connection.id);
+                        setError(null);
+                        setNotice(null);
+                        try {
+                          const result = await validateComputeConnection(connection.id);
+                          onSaved(result.connection);
+                          setNotice(
+                            result.connection.status === 'verified'
+                              ? `${connection.name} verified.`
+                              : 'Check the access details below.',
+                          );
+                        } catch (error) {
+                          setError(getErrorMessage(error));
+                        } finally {
+                          setBusy(null);
+                        }
+                      }}
+                    >
+                      {busy === connection.id ? 'Checking…' : 'Check'}
+                    </button>
+                  )}
                 </div>
               </div>
-              <Reasons reasons={connection.blocked_reasons} />
+              {usesCloudLabHostKeyPolicy(allocation, connection) && (
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  {cloudLabHostKeyPolicyMessage(allocation)}
+                </p>
+              )}
+              <Reasons
+                reasons={connection.blocked_reasons.filter(
+                  (reason) =>
+                    !usesCloudLabHostKeyPolicy(allocation, connection) ||
+                    reason.code !== 'connection_unverified',
+                )}
+              />
             </div>
           ))}
           {saved.length < ids.length && (

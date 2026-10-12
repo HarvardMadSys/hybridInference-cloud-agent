@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -649,9 +650,12 @@ def test_a_failing_sample_does_not_stop_the_sampler() -> None:
     class Exploding:
         def __init__(self) -> None:
             self.calls = 0
+            self.retried = threading.Event()
 
         def read(self, name: str) -> str | None:
             self.calls += 1
+            if self.calls > 1:
+                self.retried.set()
             raise RuntimeError("boom")
 
     exploding = Exploding()
@@ -662,8 +666,10 @@ def test_a_failing_sample_does_not_stop_the_sampler() -> None:
         interval_s=0.01,
     )
     collector.start()
-    time.sleep(0.2)
-    collector.stop()
+    try:
+        assert exploding.retried.wait(timeout=5), "the sampler did not retry after its failure"
+    finally:
+        collector.stop()
     assert exploding.calls > 1
 
 

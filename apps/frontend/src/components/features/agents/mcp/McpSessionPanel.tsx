@@ -13,8 +13,13 @@ import {
   type McpCapabilityKind,
   type McpInvocationApi,
   type McpInvocationStatus,
+  type McpInvocationsApi,
   type McpPolicy,
 } from '@/lib/api/mcp';
+
+import { McpInvocationCard, connectionName, invocationAction } from './McpInvocationCard';
+
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from '../agentPush';
 
 /** The three answers a capability can carry, in escalating order. */
 const POLICIES: Array<{ value: McpPolicy; label: string }> = [
@@ -106,12 +111,6 @@ function uniqueBindingAliases(bindings: McpBindingApi[]): McpBindingApi[] {
   });
 }
 
-/** A short, human phrase for a held call's arguments. */
-function formatArguments(invocation: McpInvocationApi): string {
-  if (!invocation.arguments) return 'The arguments are not readable on this deployment.';
-  return JSON.stringify(invocation.arguments, null, 2);
-}
-
 const INVOCATION_PROGRESS: Record<McpInvocationStatus, number> = {
   pending: 0,
   approved: 1,
@@ -128,6 +127,7 @@ function mergeInvocations(
   current: McpInvocationApi[],
   incoming: McpInvocationApi[],
   snapshot = false,
+  historyLimit = 50,
 ) {
   const calls = new Map(
     current.filter((call) => !snapshot || call.status !== 'pending').map((call) => [call.id, call]),
@@ -141,21 +141,48 @@ function mergeInvocations(
   const sorted = [...calls.values()].sort((a, b) => b.id - a.id);
   return [
     ...sorted.filter((call) => call.status === 'pending'),
-    ...sorted.filter((call) => call.status !== 'pending').slice(0, 50),
+    ...sorted.filter((call) => call.status !== 'pending').slice(0, historyLimit),
   ];
 }
 
-async function readInvocations(jobId: string): Promise<McpInvocationApi[]> {
-  // History is bounded by the API. Fetch pending calls separately so newer
-  // completed calls cannot hide an older approval that still blocks the agent.
+async function readInvocationPages(
+  jobId: string,
+  pendingOnly: boolean,
+  pages = Infinity,
+): Promise<McpInvocationsApi> {
+  const invocations: McpInvocationApi[] = [];
+  let beforeId: number | undefined;
+  let response: McpInvocationsApi = { invocations: [] };
+  for (let page = 0; page < pages; page += 1) {
+    response = await listMcpInvocations({
+      jobId,
+      ...(pendingOnly ? { pendingOnly: true } : {}),
+      ...(beforeId === undefined ? {} : { beforeId }),
+    });
+    invocations.push(...response.invocations);
+    const cursor = response.next_before_id;
+    if (!response.has_more || cursor == null || (beforeId !== undefined && cursor >= beforeId)) {
+      break;
+    }
+    beforeId = cursor;
+  }
+  return { ...response, invocations };
+}
+
+async function readInvocations(jobId: string, historyPages = 1) {
+  // Pending calls have their own complete scan: recent history must never
+  // hide an old request that still blocks the agent.
   const [recent, pending] = await Promise.all([
-    listMcpInvocations({ jobId }),
-    listMcpInvocations({ jobId, pendingOnly: true }),
+    readInvocationPages(jobId, false, historyPages),
+    readInvocationPages(jobId, true),
   ]);
-  return [
-    ...recent.invocations.filter((call) => call.status !== 'pending'),
-    ...pending.invocations,
-  ];
+  return {
+    invocations: [
+      ...recent.invocations.filter((call) => call.status !== 'pending'),
+      ...pending.invocations,
+    ],
+    hasMore: Boolean(recent.has_more && recent.next_before_id != null),
+  };
 }
 
 function PolicyControl({
@@ -261,30 +288,57 @@ function McpSessionPanelContent({
   const [selections, setSelections] = useState<Record<number, Selection>>({});
   const [invocations, setInvocations] = useState<McpInvocationApi[]>([]);
   const reviewedInvocations = useRef(new Set<number>());
+  const historyPages = useRef(1);
+  const historyReadVersion = useRef(0);
+  const historyAppliedVersion = useRef(0);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const historyOperation = useRef(false);
   const pending = invocations.filter((call) => call.status === 'pending');
   const decided = invocations
     .filter(
       (call) =>
         call.status !== 'pending' && (!approvalsOnly || reviewedInvocations.current.has(call.id)),
     )
-    .slice(0, approvalsOnly ? 1 : 50);
+    .slice(0, approvalsOnly ? 1 : historyPages.current * 50);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [decidingId, setDecidingId] = useState<number | null>(null);
+  const [decidingIds, setDecidingIds] = useState(new Set<number>());
+  const decisionOperations = useRef(new Set<number>());
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const selectionOperation = useRef(false);
+  // Calls approved with "Always allow" whose rule is not saved yet. Saving a
+  // server's rules expires every call still waiting on it, the approved one
+  // included, so each rule waits until nothing on its server is in flight.
+  const alwaysAllow = useRef(new Map<number, McpInvocationApi>());
+  // Each save reads the rules and writes them back; one at a time, so two
+  // rules for the same server cannot overwrite each other.
+  const alwaysAllowSaves = useRef(Promise.resolve());
+
+  const applyInvocationSnapshot = useCallback(
+    (response: { invocations: McpInvocationApi[]; hasMore: boolean }, version: number) => {
+      if (version < historyAppliedVersion.current) return;
+      historyAppliedVersion.current = version;
+      setInvocations((current) =>
+        mergeInvocations(current, response.invocations, true, historyPages.current * 50),
+      );
+      setHistoryHasMore(response.hasMore);
+    },
+    [],
+  );
 
   const load = useCallback(async () => {
     if (selectionOperation.current) return;
     selectionOperation.current = true;
     setLoading(true);
     setError(null);
+    const historyVersion = ++historyReadVersion.current;
     try {
       const [bindingResponse, invocationResponse] = await Promise.all([
         approvalsOnly ? Promise.resolve({ bindings: [] }) : getMcpThreadBindings(threadId),
-        readInvocations(jobId),
+        readInvocations(jobId, historyPages.current),
       ]);
       const uniqueBindings = uniqueBindingAliases(bindingResponse.bindings);
       setBindings(uniqueBindings);
@@ -298,7 +352,7 @@ function McpSessionPanelContent({
           'Duplicate connection aliases were adjusted. Save permissions to apply these names.',
         );
       }
-      setInvocations((current) => mergeInvocations(current, invocationResponse, true));
+      applyInvocationSnapshot(invocationResponse, historyVersion);
       setLoaded(true);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not load MCP settings.');
@@ -306,7 +360,7 @@ function McpSessionPanelContent({
       selectionOperation.current = false;
       setLoading(false);
     }
-  }, [jobId, threadId, approvalsOnly]);
+  }, [jobId, threadId, approvalsOnly, applyInvocationSnapshot]);
 
   useEffect(() => {
     if (!active) return;
@@ -316,31 +370,66 @@ function McpSessionPanelContent({
   // A held call has a deadline, and the agent is blocked on the answer: a
   // panel that only refreshes when the user clicks would show a stale queue
   // for exactly as long as the call is waiting.
+  // While the owner's change stream flows, each change to this job's calls is
+  // pushed and read at once, and the clock is only the backstop.
+  const pushLive = useAgentPushLive();
   useEffect(() => {
     if (!active) return;
     let disposed = false;
     let loading = false;
+    let again = false;
     const refresh = async () => {
-      if (loading) return;
+      if (loading) {
+        again = true;
+        return;
+      }
       loading = true;
       try {
         // Follow approved calls through dispatch and completion as well.
-        const response = await readInvocations(jobId);
+        const historyVersion = ++historyReadVersion.current;
+        const response = await readInvocations(jobId, historyPages.current);
         if (!disposed) {
-          setInvocations((current) => mergeInvocations(current, response, true));
+          applyInvocationSnapshot(response, historyVersion);
         }
       } catch {
         // Keep the last known state through transient polling failures.
       } finally {
         loading = false;
+        if (again && !disposed) {
+          again = false;
+          void refresh();
+        }
       }
     };
-    const timer = setInterval(refresh, 3000);
+    const timer = setInterval(refresh, pushLive ? PUSH_FALLBACK_POLL_MS : 3000);
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      if (change.resync || change.mcp.includes(jobId)) void refresh();
+    });
     return () => {
       disposed = true;
       clearInterval(timer);
+      unsubscribe();
     };
-  }, [active, jobId]);
+  }, [active, jobId, pushLive, applyInvocationSnapshot]);
+
+  async function loadOlderRequests() {
+    if (!historyHasMore || historyOperation.current) return;
+    historyOperation.current = true;
+    setLoadingHistory(true);
+    setError(null);
+    const pages = historyPages.current + 1;
+    historyPages.current = pages;
+    const historyVersion = ++historyReadVersion.current;
+    try {
+      const response = await readInvocations(jobId, pages);
+      applyInvocationSnapshot(response, historyVersion);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not load older tool requests.');
+    } finally {
+      historyOperation.current = false;
+      setLoadingHistory(false);
+    }
+  }
 
   function setPolicy(
     connectionId: number,
@@ -421,21 +510,86 @@ function McpSessionPanelContent({
     );
   }
 
-  async function decide(invocation: McpInvocationApi, approve: boolean) {
+  async function decide(invocation: McpInvocationApi, approve: boolean, always = false) {
+    if (decisionOperations.current.has(invocation.id)) return;
+    decisionOperations.current.add(invocation.id);
     reviewedInvocations.current.add(invocation.id);
-    setDecidingId(invocation.id);
+    setDecidingIds(new Set(decisionOperations.current));
     setError(null);
+    setNotice(null);
     try {
       const result = await decideMcpInvocation(invocation.id, approve);
-      setInvocations((current) => mergeInvocations(current, [result]));
+      if (always && result.status === 'approved')
+        alwaysAllow.current.set(invocation.id, invocation);
+      setInvocations((current) =>
+        mergeInvocations(current, [result], false, historyPages.current * 50),
+      );
     } catch (cause: unknown) {
       // A lost race (the call expired or another tab decided it) is reported
       // where the card was, and the next refresh shows what actually happened.
       setError(cause instanceof Error ? cause.message : 'Could not record the decision.');
     } finally {
-      setDecidingId(null);
+      decisionOperations.current.delete(invocation.id);
+      setDecidingIds(new Set(decisionOperations.current));
     }
   }
+
+  /** Stop asking for this capability in this conversation. */
+  const allowFromNowOn = useCallback(
+    async (invocation: McpInvocationApi) => {
+      const key = selectionKey(invocation.capability_kind ?? 'tool');
+      const name = invocation.capability_name;
+      try {
+        // Read the rules fresh: the panel may not have loaded them, and a
+        // stale copy would undo a change made since.
+        const { bindings: current } = await getMcpThreadBindings(threadId);
+        const binding = current.find((item) => item.connection_id === invocation.connection_id);
+        if (!binding) {
+          throw new Error(`${connectionName(invocation)} is no longer in this conversation.`);
+        }
+        const payload: McpBindingRequest = {
+          connection_id: binding.connection_id,
+          alias: binding.alias,
+          enabled: binding.enabled,
+          use_defaults: binding.selection_pending,
+          tools: binding.tools,
+          resources: binding.resources,
+          prompts: binding.prompts,
+        };
+        payload[key] = { ...binding[key], [name]: 'allow' };
+        const response = await updateMcpThreadBinding(threadId, payload);
+        setBindings(response.bindings);
+        // Keep unsaved edits to other capabilities; only this one changed.
+        setSelections((drafts) => {
+          const draft = drafts[invocation.connection_id];
+          if (!draft) return drafts;
+          return {
+            ...drafts,
+            [invocation.connection_id]: { ...draft, [key]: { ...draft[key], [name]: 'allow' } },
+          };
+        });
+        setNotice(
+          `${connectionName(invocation)} can now ${invocationAction(invocation)} without asking in this conversation.`,
+        );
+      } catch (cause: unknown) {
+        setError(cause instanceof Error ? cause.message : 'Could not save the permission.');
+      }
+    },
+    [threadId],
+  );
+
+  useEffect(() => {
+    for (const [id, invocation] of alwaysAllow.current) {
+      const inFlight = invocations.some(
+        (call) =>
+          call.connection_id === invocation.connection_id &&
+          (call.status === 'pending' || call.status === 'approved'),
+      );
+      if (inFlight) continue;
+      alwaysAllow.current.delete(id);
+      alwaysAllowSaves.current = alwaysAllowSaves.current.then(() => allowFromNowOn(invocation));
+    }
+  }, [invocations, allowFromNowOn]);
 
   if (!active && !loaded) {
     if (approvalsOnly) return null;
@@ -451,7 +605,12 @@ function McpSessionPanelContent({
           {error}
         </p>
       ) : null}
-      {pending.length || decided.length ? (
+      {approvalsOnly && notice ? (
+        <p role="status" className="mb-3 text-sm text-emerald-700 dark:text-emerald-400">
+          {notice}
+        </p>
+      ) : null}
+      {pending.length || decided.length || (!approvalsOnly && historyHasMore) ? (
         <section
           aria-labelledby="mcp-approvals"
           className={approvalsOnly ? 'mb-4 max-h-80 overflow-y-auto' : undefined}
@@ -463,41 +622,13 @@ function McpSessionPanelContent({
             Tool approvals
           </h3>
           {pending.map((invocation) => (
-            <div
+            <McpInvocationCard
               key={invocation.id}
-              className="mt-3 rounded-xl border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 p-3"
-            >
-              <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-                {invocation.connection_label ?? `Connection ${invocation.connection_id}`} wants to
-                call {invocation.capability_name}
-              </p>
-              {invocation.expires_at ? (
-                <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
-                  Expires {invocation.expires_at}
-                </p>
-              ) : null}
-              <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-white/70 dark:bg-black/20 p-2 font-mono text-xs text-gray-800 dark:text-gray-200">
-                {formatArguments(invocation)}
-              </pre>
-              <div className="mt-3 flex gap-2">
-                <button
-                  type="button"
-                  disabled={decidingId === invocation.id}
-                  onClick={() => void decide(invocation, true)}
-                  className="rounded-lg bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-sm font-medium text-white dark:text-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Approve
-                </button>
-                <button
-                  type="button"
-                  disabled={decidingId === invocation.id}
-                  onClick={() => void decide(invocation, false)}
-                  className="rounded-lg border border-gray-300 dark:border-white/20 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Deny
-                </button>
-              </div>
-            </div>
+              invocation={invocation}
+              busy={decidingIds.has(invocation.id)}
+              onDecision={(approve) => void decide(invocation, approve)}
+              onAlwaysAllow={() => void decide(invocation, true, true)}
+            />
           ))}
           {decided.map((invocation) => (
             <div
@@ -514,6 +645,16 @@ function McpSessionPanelContent({
               ) : null}
             </div>
           ))}
+          {!approvalsOnly && historyHasMore ? (
+            <button
+              type="button"
+              onClick={() => void loadOlderRequests()}
+              disabled={loadingHistory}
+              className="mt-3 text-sm text-gray-600 hover:underline disabled:opacity-60 dark:text-gray-400"
+            >
+              {loadingHistory ? 'Loading older requests…' : 'Load older requests'}
+            </button>
+          ) : null}
         </section>
       ) : null}
 

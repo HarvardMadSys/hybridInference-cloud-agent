@@ -1,11 +1,12 @@
 'use client';
 
-import { DEFAULT_SKILL_LIMITS } from '@/lib/skillLimits';
+import { formatBytes } from '@/lib/attachmentLimits';
 
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { useId, useState, type FormEvent } from 'react';
 import { createSkill, updateSkill, type SkillApi } from '@/lib/api/skills';
+import { useSkillLimits } from './useSkillLimits';
 import {
   SkillDefault,
   SkillDialog,
@@ -25,6 +26,7 @@ export function SkillEditor({
   onSaved: (skill: SkillApi) => void;
 }) {
   const editing = Boolean(skill);
+  const limits = useSkillLimits();
   const formId = useId();
   const [name, setName] = useState(skill?.name ?? '');
   const [description, setDescription] = useState(skill?.description ?? '');
@@ -37,8 +39,8 @@ export function SkillEditor({
     event.preventDefault();
     if (busy) return;
     setError(null);
-    if (new TextEncoder().encode(instructions).length > DEFAULT_SKILL_LIMITS.max_skill_bytes) {
-      setError('Skill instructions must be no larger than 64 KB.');
+    if (new TextEncoder().encode(instructions).length > limits.max_skill_bytes) {
+      setError(`Skill instructions must be no larger than ${formatBytes(limits.max_skill_bytes)}.`);
       return;
     }
     setBusy(true);
@@ -83,7 +85,7 @@ export function SkillEditor({
           Name
           <input
             required
-            maxLength={DEFAULT_SKILL_LIMITS.max_name_length}
+            maxLength={limits.max_name_length}
             value={name}
             disabled={busy}
             onChange={(event) => setName(event.target.value)}
@@ -95,7 +97,7 @@ export function SkillEditor({
           Description
           <textarea
             required
-            maxLength={DEFAULT_SKILL_LIMITS.max_description_length}
+            maxLength={limits.max_description_length}
             rows={2}
             value={description}
             disabled={busy}
@@ -119,7 +121,7 @@ export function SkillEditor({
             className={`${SKILL_FIELD} font-mono leading-relaxed`}
           />
           <span className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400">
-            Markdown supported · up to 64 KB.
+            Markdown supported · up to {formatBytes(limits.max_skill_bytes)}.
           </span>
         </label>
         <SkillDefault checked={defaultEnabled} onChange={setDefaultEnabled} disabled={busy} />

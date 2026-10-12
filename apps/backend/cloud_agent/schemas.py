@@ -10,9 +10,24 @@ import binascii
 # model, so hiding this one behind TYPE_CHECKING leaves `AgentRunnerHost`
 # silently unbuilt and raises at the first request instead of at import.
 from datetime import datetime  # noqa: TC003
-from typing import Annotated, Any, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+if TYPE_CHECKING:
+    from pydantic import GetJsonSchemaHandler
+    from pydantic.json_schema import JsonSchemaValue
+    from pydantic_core import CoreSchema
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from cloud_agent.agent_access import AgentAccess  # noqa: TC001 — Pydantic resolves this at runtime.
 from cloud_agent.attachments.models import AttachmentLimits, AttachmentRef, AttachmentView
@@ -54,6 +69,23 @@ from cloud_agent_shared.host_settings import (
     SettingUnit,
     validate_admin_change,
 )
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
+from cloud_agent_shared.sandbox_archive_settings import (
+    DEFAULT_MAX_ARCHIVE_BYTES,
+    DEFAULT_MULTIPART_PART_BYTES,
+    DEFAULT_MULTIPART_THRESHOLD_BYTES,
+    MAX_ARCHIVE_BYTES,
+    MAX_MULTIPART_PART_BYTES,
+    MAX_SINGLE_UPLOAD_BYTES,
+    MIN_MULTIPART_PART_BYTES,
+    SANDBOX_ARCHIVE_S3_URI,
+    SandboxArchivePolicy,
+    SandboxArchivePolicyError,
+)
+from cloud_agent_shared.sandbox_resources import (
+    SandboxResourceSample,
+    parse_sandbox_resource_sample,
+)
 from cloud_agent_shared.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
     HOST_CONCURRENCY_MIN_SLOTS,
@@ -76,6 +108,33 @@ MAX_LEASE_TTL_SECONDS = 900.0
 # the charset to lowercase/digits/underscore makes that structurally impossible
 # while still letting runtime adapters introduce new kinds.
 EVENT_TYPE_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
+
+# What a host may say about itself, bounded. A host is trusted to run turns,
+# not to size rows: these values are stored as JSONB that the admin pool view
+# and the owner's job view read back on every load. Each cap sits far above
+# anything a real runner sends — runtime and helper ids and their versions come
+# from image labels, capabilities from the shared protocol's own constants, the
+# worker id from a hostname — so only a machine that is misbehaving meets one.
+HOST_REPORT_KEY_MAX_CHARS = 64
+HOST_REPORT_VERSION_MAX_CHARS = 128
+HOST_CAPABILITY_MAX_CHARS = 256
+HOST_VERSION_MENU_MAX_ITEMS = 64
+HOST_LABELS_MAX_ITEMS = 32
+HOST_LABEL_VALUE_MAX_CHARS = 255
+WORKER_ID_MAX_CHARS = 512
+#: A worker's terminal explanation is trimmed to this rather than refused.
+#: Refusing it would refuse the finish, and a turn whose finish cannot land
+#: sits on its lease until the reaper takes it — a worse outcome for the owner
+#: than a long message cut short.
+WORKER_FINISH_DETAIL_MAX_CHARS = 4000
+
+_HostReportKey = Annotated[str, Field(max_length=HOST_REPORT_KEY_MAX_CHARS)]
+_HostReportVersion = Annotated[str, Field(max_length=HOST_REPORT_VERSION_MAX_CHARS)]
+_HostVersionMenu = Annotated[
+    list[_HostReportVersion], Field(max_length=HOST_VERSION_MENU_MAX_ITEMS)
+]
+_HostCapability = Annotated[str, Field(max_length=HOST_CAPABILITY_MAX_CHARS)]
+_HostLabelValue = Annotated[str, Field(max_length=HOST_LABEL_VALUE_MAX_CHARS)]
 
 # Where a job's `base_ref` lives once it is persisted. The column stores the
 # resolved `base_sha` — a branch moves — so the branch the owner actually
@@ -164,6 +223,11 @@ class AgentJobCreate(BaseModel):
         None,
         max_length=16,
         description="Owned skills for this chat. Omitted uses library defaults; [] selects none.",
+    )
+    plugins: list[SandboxPlugin] | None = Field(
+        None,
+        max_length=MAX_SANDBOX_PLUGINS,
+        description="Plugins installed for this chat during sandbox initialization.",
     )
     mcp_bindings: list[McpBindingInput] | None = Field(
         None,
@@ -635,6 +699,11 @@ class AgentJobResponse(BaseModel):
     published_pr_url: str | None = None
     published_commit_sha: str | None = None
     detail: str | None = None
+    # Raised by one each time the row changes. A tab that also receives this
+    # row from the owner's change stream keeps whichever revision is higher;
+    # the conversation's fields (title, pin) follow ``thread_revision``.
+    revision: int = 0
+    thread_revision: int = 0
     # Set on turns created by a fork: the original turn this row copies.
     forked_from_job_id: str | None = None
     metadata: dict[str, Any] | None = None
@@ -665,6 +734,7 @@ class AgentJobResponse(BaseModel):
     #: are the single copy of the content, so a fork references the same
     #: immutable uploads rather than duplicating them.
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    plugins: list[SandboxPlugin] = Field(default_factory=list)
     mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -1035,6 +1105,31 @@ class AgentThreadMessageCreate(BaseModel):
             f"previous turn's; the literal {RESET_REASONING_EFFORT!r} resets to Auto."
         ),
     )
+    require_idle: bool = Field(
+        False,
+        strict=True,
+        description=(
+            "Accept only when every chat sharing the published workspace is idle "
+            "with an empty queue."
+        ),
+    )
+    expected_latest_job_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="The newest turn read by an idle-only action; checked atomically on submit.",
+    )
+
+    @model_validator(mode="after")
+    def validate_idle_guard(self) -> AgentThreadMessageCreate:
+        """Bind an idle-only action to the newest turn its caller actually read."""
+        if self.require_idle and (
+            not self.expected_latest_job_id or not self.expected_latest_job_id.strip()
+        ):
+            raise ValueError("require_idle needs expected_latest_job_id")
+        if self.expected_latest_job_id is not None and not self.require_idle:
+            raise ValueError("expected_latest_job_id needs require_idle")
+        return self
 
     @field_validator("prompt")
     @classmethod
@@ -1133,6 +1228,66 @@ class AgentPendingMessageSendNow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(..., ge=1)
+
+
+class AgentQuestionOption(BaseModel):
+    """One choice in a native agent question."""
+
+    label: str
+    description: str = ""
+
+
+class AgentQuestion(BaseModel):
+    """A native question rendered without exposing its transport dialect."""
+
+    id: str
+    header: str = ""
+    question: str
+    multiple: bool = False
+    options: list[AgentQuestionOption] = Field(default_factory=list)
+    allow_custom: bool = True
+    #: ``plan_approval`` renders the question as the plan's Markdown and offers
+    #: feedback; plain questions carry no kind.
+    kind: Literal["plan_approval"] | None = None
+
+
+class AgentQuestionRequest(BaseModel):
+    """The correlated questions one native tool is waiting to have answered."""
+
+    request_id: str
+    questions: list[AgentQuestion]
+
+
+class AgentThreadQuestionsResponse(BaseModel):
+    """Pending native questions and the exact attempt that asked them."""
+
+    job_id: str
+    attempt_id: int | None = None
+    questions: list[AgentQuestionRequest] = Field(default_factory=list)
+
+
+class AgentQuestionAnswer(BaseModel):
+    """Answer a native request only on the job and attempt the owner read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(..., min_length=1, max_length=128)
+    attempt_id: int = Field(..., ge=1)
+    request_id: str = Field(..., min_length=1, max_length=128)
+    answers: dict[
+        Annotated[str, Field(min_length=1, max_length=128)],
+        Annotated[
+            list[Annotated[str, Field(min_length=1, max_length=10_000)]], Field(max_length=20)
+        ],
+    ] = Field(default_factory=dict, max_length=10)
+    reject: bool = False
+
+
+class AgentQuestionAnswerResponse(BaseModel):
+    """Whether the live native request accepted the answer."""
+
+    accepted: bool
+    reason: str | None = None
 
 
 class AgentThreadMessageResult(BaseModel):
@@ -1249,12 +1404,17 @@ class AgentOperationProfilingFragment(BaseModel):
 
 
 class AgentWorkspaceResponse(BaseModel):
-    """A directory listing or bounded text-file preview from a job workspace."""
+    """A directory listing or bounded file payload from a job workspace."""
 
     path: str
     kind: Literal["file", "directory", "symlink"]
     entries: list[AgentWorkspaceEntry] | None = None
     content: str | None = None
+    # Preserve directory/text response shapes when there are no binary bytes.
+    content_base64: str | None = Field(None, exclude_if=lambda value: value is None)
+    media_type: Literal["image/png", "image/jpeg", "image/gif", "image/webp"] | None = Field(
+        None, exclude_if=lambda value: value is None
+    )
     size: int | None = None
     binary: bool = False
     truncated: bool = False
@@ -1346,6 +1506,11 @@ class AgentTerminalSessionListResponse(BaseModel):
     """Interactive terminal sessions retained by one live workspace."""
 
     terminals: list[AgentTerminalSessionResponse] = Field(default_factory=list)
+    #: The owning broker's per-workspace terminal limit. Absent when the broker
+    #: predates advertising it; the browser then assumes its own default.
+    max_sessions: int | None = None
+    #: The most input bytes the owning broker accepts in one request.
+    max_input_bytes: int | None = None
     #: Present only on a measured list request; the instrumented handler adds
     #: it after serializing, so an unmeasured reply has no key at all.
     profiling: AgentOperationProfilingFragment | None = None
@@ -1386,7 +1551,9 @@ class WorkerClaimAttestation(BaseModel):
 
     sandbox_runtime: str | None = Field(None, max_length=128)
     sandbox_image_digest: str | None = Field(None, max_length=512)
-    runtime_versions: dict[str, str] = Field(default_factory=dict, max_length=64)
+    runtime_versions: dict[_HostReportKey, _HostReportVersion] = Field(
+        default_factory=dict, max_length=64
+    )
     #: Every version this replica's image holds, keyed by runtime id — the menu
     #: a stored selection is checked against before the claim honours it.
     #:
@@ -1395,12 +1562,17 @@ class WorkerClaimAttestation(BaseModel):
     #: not name: the field went over the wire, Pydantic discarded it, the claim
     #: saw an empty menu and fell back to the image default. Every selection an
     #: admin made was a no-op, and the only sign was one log line.
-    runtime_versions_available: dict[str, list[str]] = Field(default_factory=dict, max_length=64)
+    runtime_versions_available: dict[_HostReportKey, _HostVersionMenu] = Field(
+        default_factory=dict, max_length=64
+    )
     #: Versions of in-image protocol helpers that are not Agent CLIs (for
     #: example the Claude SDK fork bridge). They ride the same attestation so
     #: the API cannot silently discard evidence used by capability gating.
-    helper_versions: dict[str, str] = Field(default_factory=dict, max_length=64)
-    runner_capabilities: list[str] = Field(default_factory=list, max_length=64)
+    helper_versions: dict[_HostReportKey, _HostReportVersion] = Field(
+        default_factory=dict, max_length=64
+    )
+    runner_capabilities: list[_HostCapability] = Field(default_factory=list, max_length=64)
+    sandbox_archive_settings_applied_revision: StrictInt | None = Field(None, ge=0)
     host_kernel: str | None = Field(None, max_length=256)
     guest_kernel: str | None = Field(None, max_length=256)
 
@@ -1414,7 +1586,11 @@ class WorkerClaimRequest(BaseModel):
     # healthy while the server ignored what the client thought it requested.
     model_config = ConfigDict(extra="forbid")
 
-    worker_id: str = Field(..., description="Stable identifier of the claiming worker.")
+    worker_id: str = Field(
+        ...,
+        max_length=WORKER_ID_MAX_CHARS,
+        description="Stable identifier of the claiming worker.",
+    )
     lease_ttl_seconds: float = Field(
         120.0,
         gt=0,
@@ -1494,6 +1670,7 @@ class WorkerThreadSandbox(BaseModel):
     execution_profile: str
     memory_limit: str = "4g"
     cpu_limit: str = "2"
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     stop_timeout_seconds: int = 10
     state: Literal[
         "provisioning",
@@ -1563,6 +1740,7 @@ class WorkerClaimResponse(BaseModel):
     base_sha: str | None = None
     task_prompt: str
     setup_script: str | None = None
+    plugins: list[SandboxPlugin] = Field(default_factory=list)
     runtime: str
     model: str
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
@@ -1602,16 +1780,9 @@ class WorkerClaimResponse(BaseModel):
         description=(
             "The sandbox's *second* credential, for this service's MCP relay. "
             "Scoped `mcp`, so it opens the relay and nothing else — not the "
-            "worker surface, and not the gateway. Empty when this deployment "
-            "serves no MCP."
-        ),
-    )
-    mcp_base_url: str = Field(
-        "",
-        description=(
-            "The relay as the sandbox reaches it. Empty means no MCP for this "
-            "run, which a runtime treats as a refusal rather than resolving "
-            "servers against the inference address."
+            "worker surface, and not the gateway. The relay's address is the "
+            "claiming host's own, the one its network rules admit; the claim "
+            "names none."
         ),
     )
     clone_token: str | None = Field(
@@ -1620,6 +1791,16 @@ class WorkerClaimResponse(BaseModel):
             "Short-lived read-only credential for this one repository, for the runner to "
             "check it out with. Stays in the runner; never enters the sandbox. Null when "
             "no GitHub App is configured, which is enough for a public repository."
+        ),
+    )
+    github_token: str | None = Field(
+        None,
+        repr=False,
+        description=(
+            "Short-lived GitHub App token scoped to this repository with contents and "
+            "pull_requests write permissions. Injected as GH_TOKEN in the owning sandbox "
+            "member for pushing branches and creating pull requests. Null when no GitHub "
+            "App installation covers the repository."
         ),
     )
     mcp_bindings: list[str] = Field(
@@ -1717,6 +1898,7 @@ class WorkerSandboxReserveRequest(BaseModel):
     resident_slot_capacity: int = Field(8, ge=2, le=128)
     memory_limit: str = Field("4g", min_length=1, max_length=32)
     cpu_limit: str = Field("2", min_length=1, max_length=32)
+    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     stop_timeout_seconds: int = Field(10, ge=1, le=300)
     #: The image's claude-session-fork helper version, sent by the runner that
     #: is about to create the container from it. Native Fork asks it of the
@@ -1746,6 +1928,7 @@ class WorkerSandboxProcessRequest(BaseModel):
 
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
+    residency_generation: int = Field(..., ge=1)
     process_generation: int = Field(..., ge=1)
 
 
@@ -1754,6 +1937,7 @@ class WorkerSandboxAdmissionRequest(BaseModel):
 
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
+    residency_generation: int = Field(..., ge=1)
 
 
 class WorkerSandboxSettleRequest(BaseModel):
@@ -1761,6 +1945,7 @@ class WorkerSandboxSettleRequest(BaseModel):
 
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
+    residency_generation: int = Field(..., ge=1)
     context_status: Literal["new", "live", "restored"]
     native_session_id: str | None = Field(None, max_length=512)
     base_sha: str | None = Field(None, min_length=7, max_length=64)
@@ -2025,7 +2210,14 @@ class WorkerFinishRequest(BaseModel):
     """Terminal transition reported by a worker."""
 
     state: str = Field(..., description="succeeded|failed|cancelled")
-    detail: str | None = None
+    detail: str | None = Field(
+        None,
+        description=(
+            "Why the turn ended as it did. Kept to the first "
+            f"{WORKER_FINISH_DETAIL_MAX_CHARS} characters; a longer one is trimmed, "
+            "not refused."
+        ),
+    )
     setup_script: str | None = Field(
         None,
         max_length=8000,
@@ -2054,6 +2246,14 @@ class WorkerFinishRequest(BaseModel):
             "knowing its base, and a job may be submitted without naming a commit."
         ),
     )
+
+    @field_validator("detail")
+    @classmethod
+    def _trim_detail(cls, value: str | None) -> str | None:
+        """Keep the stored explanation bounded without refusing the finish."""
+        if value is None or len(value) <= WORKER_FINISH_DETAIL_MAX_CHARS:
+            return value
+        return value[: WORKER_FINISH_DETAIL_MAX_CHARS - 1] + "\u2026"
 
 
 class WorkerAckResponse(BaseModel):
@@ -2162,6 +2362,10 @@ class AgentConfigResponse(BaseModel):
         description="Repositories this deployment is entitled to work on. Empty means none.",
     )
     runtimes: list[str] = Field(default_factory=list, description="Runtime ids that can run here.")
+    plugin_runtimes: list[str] = Field(
+        default_factory=list,
+        description="Runtime ids that support plugins installed at sandbox initialization.",
+    )
     models: list[str] = Field(
         default_factory=list,
         description=(
@@ -2230,6 +2434,25 @@ class GitHubConnectionResponse(BaseModel):
     install_url: str | None = None
 
 
+class CreateGitHubRepositoryRequest(BaseModel):
+    """Create a personal GitHub repository without starting a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    description: str = Field("", max_length=350, pattern=r"^[^\x00]*$")
+    private: bool = Field(True, strict=True)
+
+
+class CreateGitHubRepositoryResponse(BaseModel):
+    """The created repository and its separately checked Agent access."""
+
+    repo: str = Field(..., pattern=REPO_PATTERN, max_length=140)
+    web_url: str = Field(..., pattern=r"^https?://[^/]+/", max_length=2048)
+    default_branch: str = Field(..., min_length=1, max_length=1024)
+    accessible: bool
+
+
 class SourceControlAccount(BaseModel):
     """Public identity metadata for a connected provider account."""
 
@@ -2270,7 +2493,7 @@ class McpIntegrationResponse(BaseModel):
     """One catalogue MCP server, and whether this user has connected it.
 
     Carries no credential and no upstream URL — the same rule as
-    :class:`McpServerSummary`, for the same reason, and enforced the same way:
+    :class:`McpConnectionSummary`, for the same reason, and enforced the same way:
     there is no field either could occupy. ``account_label`` is what the
     provider calls the connected account, which is the user's own name for it
     and the only way to tell two connections apart in the UI.
@@ -2327,10 +2550,11 @@ class RepoBranchesResponse(BaseModel):
 class AgentRunnerHost(BaseModel):
     """One machine in the agent runner pool.
 
-    Everything below ``seconds_since_seen`` arrived with the dynamic pool
-    (phase G) and every one of those fields has a default. A host that joined
-    by polling — the only way in before enrollment existed — has none of them
-    set, and it must still render on the admin page rather than 500 it.
+    Most fields below ``seconds_since_seen`` arrived with the dynamic pool
+    (phase G) and retain defaults for hosts that joined by polling. The drain
+    fence epoch is different: its migration backfills every host and the API
+    requires it so an automation client never mistakes a partial fence
+    contract for a safe compare-and-swap base.
     """
 
     host: str
@@ -2394,6 +2618,32 @@ class AgentRunnerHost(BaseModel):
         description="Where this host's workspace broker listens, as the control plane reaches it.",
     )
     last_heartbeat_at: datetime | None = None
+    drain_fence_token: UUID | None = Field(
+        None,
+        repr=False,
+        description=(
+            "Opaque owner of an automated deployment drain, retained after release "
+            "as an idempotency receipt."
+        ),
+    )
+    drain_fence_status_before: Literal["online", "draining"] | None = Field(
+        None,
+        description="Host status immediately before the current drain-fence token was acquired.",
+    )
+    drain_fence_active: bool = Field(
+        False,
+        description=(
+            "True only while the recorded deployment fence owns a draining host; "
+            "false for an absent fence or released receipt."
+        ),
+    )
+    drain_fence_epoch: UUID = Field(
+        ...,
+        description=(
+            "Opaque compare-and-swap generation for deployment drain state. It rotates "
+            "whenever host lifecycle, credential, placement, or drain ownership changes."
+        ),
+    )
     sandbox_runtime: str | None = Field(
         None,
         description=(
@@ -2442,7 +2692,7 @@ class AgentRunnerHost(BaseModel):
         description=(
             "Runtime settings set for this server on the admin page, by key "
             "(see host_setting_definitions). They win over the global values; "
-            "a setting absent here uses the global value, or the host's own."
+            "a setting absent here uses the global value, or the deployment default."
         ),
     )
     settings_applied: dict[str, int | float] | None = Field(
@@ -2457,22 +2707,67 @@ class AgentRunnerHost(BaseModel):
     settings_local: dict[str, int | float] | None = Field(
         None,
         description=(
-            "What this host's own environment gives each setting with no admin "
-            "value: its .env, or the built-in default. Clearing an admin value "
-            "returns the host to this."
+            "The host's original bootstrap environment values, for diagnostics "
+            "and one-time migration. Clearing an admin value restores the global "
+            "value or built-in default."
         ),
     )
+    sandbox_archive_settings_applied_revision: StrictInt | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Archive-policy revision this host's broker confirmed applying. Null means "
+            "the host predates database-backed archive settings or has not synchronized yet."
+        ),
+    )
+
+
+class AcquireHostDrainFenceRequest(BaseModel):
+    """Atomically replace the expected drain owner with a new opaque owner."""
+
+    expected_fence_token: UUID | None = Field(..., repr=False)
+    expected_fence_epoch: UUID = Field(
+        ...,
+        repr=False,
+        description=(
+            "Canonical UUID copied from the latest host snapshot; the acquire is stale if "
+            "drain-relevant host state changed afterward."
+        ),
+    )
+    fence_token: UUID = Field(..., repr=False)
+
+    @field_validator("expected_fence_epoch", mode="before")
+    @classmethod
+    def expected_epoch_is_canonical(cls, value: object) -> object:
+        """Reject alternate UUID spellings so persisted CAS intent is byte-stable."""
+        if isinstance(value, UUID) or not isinstance(value, str):
+            return value
+        try:
+            parsed = UUID(value)
+        except ValueError:
+            return value  # Let Pydantic produce its ordinary UUID error.
+        if str(parsed) != value:
+            raise ValueError("expected_fence_epoch must be a canonical UUID")
+        return parsed
+
+
+class ReleaseHostDrainFenceRequest(BaseModel):
+    """Release only the automated drain owned by this opaque token."""
+
+    fence_token: UUID = Field(..., repr=False)
 
 
 class HostSettingDefinition(BaseModel):
     """One runtime setting an admin may set, with its unit and bounds."""
 
     key: str
-    env: str = Field(..., description="The host environment variable it overrides.")
+    env: str = Field(
+        ..., description="The legacy host environment variable imported at enrollment."
+    )
     label: str
     description: str
     unit: SettingUnit
-    default: int = Field(..., description="Built-in value when neither an admin nor .env sets it.")
+    default: int = Field(..., description="Built-in value when no admin override is set.")
     minimum: int
     maximum: int
     scope: SettingScope = Field(
@@ -2528,7 +2823,7 @@ class ListAgentRunnerHostsResponse(BaseModel):
         default_factory=dict,
         description=(
             "Runtime settings set for every server. A value set for one server "
-            "wins over these; a setting set nowhere uses each host's own."
+            "wins over these; a setting set nowhere uses the deployment default."
         ),
     )
     host_setting_definitions: list[HostSettingDefinition] = Field(
@@ -2550,7 +2845,7 @@ class AdminAuditLogEntry(BaseModel):
 
     id: int
     action: str = Field(description="Dotted action name, e.g. ``agent.runner_host.drain``.")
-    category: Literal["settings", "servers", "measurements", "content"] | None = Field(
+    category: Literal["settings", "servers", "measurements", "content", "database"] | None = Field(
         None,
         description="The Audit log filter this action falls under, or null for none.",
     )
@@ -2636,7 +2931,7 @@ class SetHostSettingsRequest(BaseModel):
             "The settings to change, by key (see host_setting_definitions), each "
             "a whole number inside that setting's bounds, or null to clear it so "
             "the next level applies: a server's value falls back to the global "
-            "one, and a global value to each host's own .env or default. "
+            "one, and a global value to the deployment's built-in default. "
             "Settings not named keep their values. Hosts apply the result from "
             "their next heartbeat answer."
         ),
@@ -2646,6 +2941,130 @@ class SetHostSettingsRequest(BaseModel):
     @classmethod
     def _known_and_in_bounds(cls, value: dict[str, int | None]) -> dict[str, int | None]:
         return validate_admin_change(value)
+
+
+class SandboxArchiveSettingsResponse(BaseModel):
+    """The revisioned archive policy stored for every sandbox host.
+
+    The secret access key is write-only. ``aws_secret_access_key_configured``
+    tells the editor whether a blank secret keeps the stored one.
+    """
+
+    enabled: bool = False
+    s3_uri: Literal["s3://freeinference/cloud-agent/sandbox"] = SANDBOX_ARCHIVE_S3_URI
+    region: str = ""
+    kms_key_arn: str = ""
+    expected_bucket_owner: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key_configured: bool = False
+    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
+    multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
+    multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
+    revision: int = Field(0, ge=0)
+    updated_at: datetime | None = None
+
+
+class HostSandboxArchiveSettings(SandboxArchiveSettingsResponse):
+    """Heartbeat copy. Includes the secret and omits empty credential fields.
+
+    Older brokers reject unknown policy keys. An unset access key must not
+    appear on the wire; a set key is delivered only to a broker that can
+    apply it. The admin configured flag is not part of this payload.
+    """
+
+    aws_secret_access_key: str = ""
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_credentials(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if not data.get("aws_access_key_id"):
+            data.pop("aws_access_key_id", None)
+        if not data.get("aws_secret_access_key"):
+            data.pop("aws_secret_access_key", None)
+        data.pop("aws_secret_access_key_configured", None)
+        return data
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        del core_schema, handler
+        schema = SandboxArchiveSettingsResponse.model_json_schema()
+        properties = dict(schema["properties"])
+        properties.pop("aws_secret_access_key_configured", None)
+        properties["aws_secret_access_key"] = {
+            "default": "",
+            "description": "Included only when an access key is configured.",
+            "title": "Aws Secret Access Key",
+            "type": "string",
+        }
+        return {
+            **schema,
+            "title": "HostSandboxArchiveSettings",
+            "description": "Archive policy delivered to a broker. Empty access-key fields are omitted.",
+            "properties": properties,
+        }
+
+
+class SetSandboxArchiveSettingsRequest(BaseModel):
+    """Replace the whole archive policy if the displayed revision is current."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+    region: str = Field("", max_length=128)
+    kms_key_arn: str = Field("", max_length=2048)
+    expected_bucket_owner: str = Field("", max_length=12)
+    aws_access_key_id: str = Field("", max_length=128)
+    aws_secret_access_key: str = Field("", max_length=256)
+    max_archive_bytes: StrictInt = Field(DEFAULT_MAX_ARCHIVE_BYTES, ge=1, le=MAX_ARCHIVE_BYTES)
+    multipart_threshold_bytes: StrictInt = Field(
+        DEFAULT_MULTIPART_THRESHOLD_BYTES, ge=1, le=MAX_SINGLE_UPLOAD_BYTES
+    )
+    multipart_part_bytes: StrictInt = Field(
+        DEFAULT_MULTIPART_PART_BYTES,
+        ge=MIN_MULTIPART_PART_BYTES,
+        le=MAX_MULTIPART_PART_BYTES,
+    )
+    revision: StrictInt = Field(..., ge=0, description="Revision returned by the last GET.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_optional_limits(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        for key, default in (
+            ("max_archive_bytes", DEFAULT_MAX_ARCHIVE_BYTES),
+            ("multipart_threshold_bytes", DEFAULT_MULTIPART_THRESHOLD_BYTES),
+            ("multipart_part_bytes", DEFAULT_MULTIPART_PART_BYTES),
+        ):
+            if values.get(key) is None:
+                values[key] = default
+        return values
+
+    @model_validator(mode="after")
+    def _safe_archive_policy(self) -> SetSandboxArchiveSettingsRequest:
+        # A blank secret can mean "keep the stored secret" when the access key
+        # id is unchanged. The route merges that secret and validates again.
+        if self.aws_access_key_id and not self.aws_secret_access_key:
+            return self
+        try:
+            SandboxArchivePolicy(
+                enabled=self.enabled,
+                region=self.region,
+                kms_key_arn=self.kms_key_arn,
+                expected_bucket_owner=self.expected_bucket_owner,
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                max_archive_bytes=self.max_archive_bytes,
+                multipart_threshold_bytes=self.multipart_threshold_bytes,
+                multipart_part_bytes=self.multipart_part_bytes,
+                revision=self.revision,
+            )
+        except SandboxArchivePolicyError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 # ── Host pool: enrollment and heartbeat ────────────────────────────────
@@ -2720,7 +3139,7 @@ class HostRegisterRequest(BaseModel):
             "register under a name an admin did not choose for it."
         ),
     )
-    capabilities: list[str] = Field(
+    capabilities: list[_HostCapability] = Field(
         default_factory=list,
         max_length=64,
         description=(
@@ -2746,7 +3165,9 @@ class HostRegisterRequest(BaseModel):
         ),
     )
     runner_version: str | None = Field(None, max_length=128)
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[_HostReportKey, _HostLabelValue] = Field(
+        default_factory=dict, max_length=HOST_LABELS_MAX_ITEMS
+    )
 
 
 class HostRegisterResponse(BaseModel):
@@ -2808,6 +3229,24 @@ class RetainedSandboxBeat(BaseModel):
     )
     shared_live: Literal[True] = True
     members: list[WorkerSandboxMember] = Field(default_factory=list, max_length=128)
+    resource_usage: SandboxResourceSample | None = None
+    terminal_count: StrictInt | None = Field(None, ge=0, le=4096)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unusable_resources(cls, data: Any) -> Any:
+        """Optional diagnostics must never refuse a valid lifecycle heartbeat."""
+        if not isinstance(data, dict):
+            return data
+        result = dict(data)
+        if result.get("resource_usage") is not None:
+            result["resource_usage"] = parse_sandbox_resource_sample(result["resource_usage"])
+        count = result.get("terminal_count")
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096
+        ):
+            result["terminal_count"] = None
+        return result
 
 
 class RetainedSandboxStop(BaseModel):
@@ -2822,6 +3261,10 @@ class RetainedSandboxStop(BaseModel):
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
     shared_live: Literal[True] = True
+    member_activation_generations: (
+        dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
+        | None
+    ) = Field(None, max_length=128)
 
 
 class HostHeartbeatRequest(BaseModel):
@@ -2852,7 +3295,7 @@ class HostHeartbeatRequest(BaseModel):
     )
     runner_version: str | None = Field(None, max_length=128)
     broker_url: str | None = Field(None, max_length=2048)
-    capabilities: list[str] | None = Field(None, max_length=64)
+    capabilities: list[_HostCapability] | None = Field(None, max_length=64)
     sandbox_runtime: str | None = Field(
         None,
         max_length=128,
@@ -2875,7 +3318,7 @@ class HostHeartbeatRequest(BaseModel):
             "can know exactly what executed the original."
         ),
     )
-    runtime_versions: dict[str, str] | None = Field(
+    runtime_versions: dict[_HostReportKey, _HostReportVersion] | None = Field(
         None,
         max_length=64,
         description=(
@@ -2884,7 +3327,7 @@ class HostHeartbeatRequest(BaseModel):
             "means 'inspected, image carries no version labels'."
         ),
     )
-    runtime_versions_available: dict[str, list[str]] | None = Field(
+    runtime_versions_available: dict[_HostReportKey, _HostVersionMenu] | None = Field(
         None,
         max_length=64,
         description=(
@@ -2935,8 +3378,17 @@ class HostHeartbeatRequest(BaseModel):
         None,
         max_length=MAX_SETTINGS_KEYS,
         description=(
-            "What this host's own environment gives each setting with no admin "
-            "value. Null means not reported and keeps what is stored."
+            "The host's original bootstrap environment values, for diagnostics "
+            "and one-time migration. Null means not reported and keeps what is stored."
+        ),
+    )
+    sandbox_archive_settings_applied_revision: StrictInt | None = Field(
+        None,
+        ge=0,
+        description=(
+            "The archive-policy revision the authenticated workspace broker confirmed. "
+            "Explicit null clears a stale confirmation after restart; omitting the field "
+            "keeps the last observation for compatibility with older runners."
         ),
     )
 
@@ -2990,12 +3442,12 @@ class HostHeartbeatResponse(BaseModel):
     settings: dict[str, int] = Field(
         default_factory=dict,
         description=(
-            "The runtime settings an admin set for this host — its own values "
-            "over the global ones. A setting absent here is the host's own: "
-            "its .env, or the built-in default. Always the whole set, so a "
-            "value cleared on the admin page is absent rather than unchanged."
+            "The complete runtime settings for this host: per-host overrides, "
+            "then global admin values, then built-in defaults. Clearing an "
+            "override returns the next level's value, never a legacy environment value."
         ),
     )
+    sandbox_archive_settings: HostSandboxArchiveSettings
     residencies_lost: list[ResidencyBeat] = Field(
         default_factory=list,
         description=(
@@ -3028,51 +3480,6 @@ class HostHeartbeatResponse(BaseModel):
             "what moves a host to offline."
         ),
     )
-
-
-class ProfilingPolicyRun(BaseModel):
-    """The immutable experiment a policy names, as a host receives it."""
-
-    run_id: str
-    operations: list[str]
-    target: dict[str, str] = Field(default_factory=dict)
-    expires_at: datetime
-    config_version: int = 1
-    max_operations: int
-    admission_instances: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class ProfilingPolicy(BaseModel):
-    """What a host agent should collect for, and until when.
-
-    Two orders, and they answer two different questions:
-
-    * ``revision`` -- which configuration this is. A host refuses an answer
-      older than the one it already applied, which is the whole anti-rollback
-      rule; there is no lease and no renewal to confuse it with.
-    * ``run.config_version`` -- which immutable experiment this is. It never
-      changes for a given run.
-    """
-
-    mode: str = Field(
-        ...,
-        description=(
-            "``admin`` means the persisted configuration decides, so this answer "
-            "is authoritative. ``environment`` and ``disabled`` mean the host "
-            "keeps its own deployment configuration and must ignore the run "
-            "below, which is empty in both cases."
-        ),
-    )
-    revision: int = Field(..., description="Configuration version this answer states.")
-    run: ProfilingPolicyRun | None = Field(
-        None,
-        description=(
-            "The experiment in force, or null when the deployment is not "
-            "collecting. Null is a statement, not an absence: a host holding an "
-            "older revision adopts it and stops selecting."
-        ),
-    )
-    server_time: datetime = Field(..., description="The control plane's instant for this answer.")
 
 
 # ── Session ────────────────────────────────────────────────────────────

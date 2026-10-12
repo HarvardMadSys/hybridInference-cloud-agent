@@ -40,43 +40,65 @@ async def ensure_gateway_namespace(
     Concurrent initializers serialize on the singleton table.
     """
     async with pool.acquire() as conn, conn.transaction():
-        await conn.execute("LOCK TABLE agent_identity_namespace IN EXCLUSIVE MODE")
-        stored = await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
-        if stored is not None:
-            if issuer != stored:
-                raise IdentityNamespaceError(
-                    "GATEWAY_ISSUER does not match this Agent database's identity issuer. "
-                    "Restore the original configuration or use a separate database."
-                )
-            return stored
-        if issuer is None:
-            return None
-        if not adopt_existing and await _has_owner_data(conn):
+        return await check_gateway_namespace(conn, issuer, adopt_existing=adopt_existing)
+
+
+async def check_gateway_namespace(
+    conn: asyncpg.Connection, issuer: str | None, *, adopt_existing: bool = False
+) -> str | None:
+    """Bind or check the issuer in the same transaction as its settings update."""
+    await conn.execute("LOCK TABLE agent_identity_namespace IN EXCLUSIVE MODE")
+    stored = await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
+    if stored is not None:
+        if issuer != stored:
             raise IdentityNamespaceError(
-                "This Agent database has existing owner data but no identity issuer. "
-                "Verify its original Gateway issuer and explicitly initialize that binding with "
-                "python -m cloud_agent.identity_namespace --adopt-existing --issuer <original-issuer>."
+                "GATEWAY_ISSUER does not match this Agent database's identity issuer. "
+                "Restore the original configuration or use a separate database."
             )
-        await conn.execute(
-            "INSERT INTO agent_identity_namespace (singleton, gateway_issuer) VALUES (TRUE, $1)",
-            issuer,
+        return stored
+    if issuer is None:
+        return None
+    if not adopt_existing and await _has_owner_data(conn):
+        raise IdentityNamespaceError(
+            "This Agent database has existing owner data but no identity issuer. "
+            "Verify its original Gateway issuer and explicitly initialize that binding with "
+            "python -m cloud_agent.identity_namespace --adopt-existing --issuer <original-issuer>."
         )
-        return issuer
+    await conn.execute(
+        "INSERT INTO agent_identity_namespace (singleton, gateway_issuer) VALUES (TRUE, $1)", issuer
+    )
+    return issuer
 
 
 async def _check_or_adopt(issuer: str | None, *, adopt_existing: bool) -> None:
     import asyncpg
 
-    from cloud_agent.identity import gateway_issuer
+    from cloud_agent.settings import setting_env
 
-    configured_issuer = gateway_issuer()
-    if adopt_existing and issuer != configured_issuer:
-        raise IdentityNamespaceError("The adoption issuer must exactly match GATEWAY_ISSUER.")
     dsn = os.environ.get("AGENT_DATABASE_URL")
     if not dsn:
         raise IdentityNamespaceError("AGENT_DATABASE_URL must be set.")
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
     try:
+        from cloud_agent.settings import apply_settings
+        from cloud_agent.storage.assembly import Storage
+
+        revision, encoded = await Storage(pool).settings.read_settings()
+        if revision >= 0 and "gateway_issuer" in encoded:
+            apply_settings(revision, encoded)
+        configured_issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
+        if configured_issuer is None and "gateway_issuer" not in encoded:
+            # Before the main listener imports new fields, an existing database's
+            # recorded namespace is already the authoritative identity source.
+            configured_issuer = await pool.fetchval(
+                "SELECT gateway_issuer FROM agent_identity_namespace"
+            )
+        if configured_issuer is None:
+            raise IdentityNamespaceError(
+                "Gateway identity issuer is missing. Configure it in Admin Settings before checking this deployment."
+            )
+        if adopt_existing and issuer != configured_issuer:
+            raise IdentityNamespaceError("The adoption issuer must exactly match GATEWAY_ISSUER.")
         await ensure_gateway_namespace(pool, configured_issuer, adopt_existing=adopt_existing)
     finally:
         await pool.close()

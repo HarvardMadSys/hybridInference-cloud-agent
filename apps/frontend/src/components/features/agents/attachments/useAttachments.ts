@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type ClipboardEvent } from 'react';
 import {
   DEFAULT_ATTACHMENT_LIMITS,
   formatBytes,
   type AttachmentLimits,
 } from '@/lib/attachmentLimits';
 import { isSafeUploadPath, uploadPathFor } from '@/lib/attachmentPath';
+import { imagesFromClipboard } from '@/lib/clipboardImages';
 import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
 import { getErrorMessage } from '@/lib/utils/errors';
 import type { Translator } from '@/lib/i18n/translate';
@@ -44,6 +45,18 @@ export function useAttachments(
   // in state — reading state per file would admit every file in one selection
   // and only then notice the total was blown.
   const tally = useRef({ count: 0, bytes: 0 });
+  // Own reservations outside React state so remove/reset and a late upload
+  // completion cannot release the same slot twice. State updaters stay pure,
+  // even when React replays them in StrictMode.
+  const reservations = useRef(new Map<string, { size: number; id?: number }>());
+  const release = useCallback((key: string) => {
+    const reservation = reservations.current.get(key);
+    if (!reservation) return;
+    reservations.current.delete(key);
+    tally.current.count -= 1;
+    tally.current.bytes -= reservation.size;
+    return reservation;
+  }, []);
 
   const add = useCallback(
     (files: File[]) => {
@@ -83,9 +96,17 @@ export function useAttachments(
         }
         tally.current.count += 1;
         tally.current.bytes += file.size;
+        reservations.current.set(key, { size: file.size });
         queued.push(entry);
         void uploadAttachment(file, path)
           .then((saved) => {
+            const reservation = reservations.current.get(key);
+            if (!reservation) {
+              // Removed/reset uploads can finish after their slot is gone.
+              void deleteAttachment(saved.id).catch(() => {});
+              return;
+            }
+            reservation.id = saved.id;
             setEntries((old) =>
               old.map((row) => (row.key === key ? { ...row, status: 'ready', id: saved.id } : row)),
             );
@@ -94,8 +115,7 @@ export function useAttachments(
             // The server refused it after all, so give the slot back — the
             // tally has to describe what is actually attached, or the next
             // pick is admitted against bytes nobody is holding.
-            tally.current.count -= 1;
-            tally.current.bytes -= file.size;
+            if (!release(key)) return;
             setEntries((old) =>
               old.map((row) =>
                 row.key === key
@@ -107,24 +127,32 @@ export function useAttachments(
       }
       setEntries((old) => [...old, ...queued]);
     },
-    [limits, t],
+    [limits, release, t],
   );
 
-  const remove = useCallback((key: string) => {
-    setEntries((old) => {
-      const going = old.find((entry) => entry.key === key);
-      if (going && going.status !== 'rejected') {
-        tally.current.count -= 1;
-        tally.current.bytes -= going.size;
-      }
+  const onPaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const images = imagesFromClipboard(event.clipboardData);
+      if (images.length === 0) return;
+      event.preventDefault();
+      add(images);
+    },
+    [add],
+  );
+
+  const remove = useCallback(
+    (key: string) => {
+      const going = release(key);
       // Best effort: a staged upload nobody claims is collected by the control
       // plane anyway, so a failed delete costs nothing the user can see.
       if (going?.id !== undefined) void deleteAttachment(going.id).catch(() => {});
-      return old.filter((entry) => entry.key !== key);
-    });
-  }, []);
+      setEntries((old) => old.filter((entry) => entry.key !== key));
+    },
+    [release],
+  );
 
   const reset = useCallback(() => {
+    reservations.current.clear();
     tally.current = { count: 0, bytes: 0 };
     setEntries([]);
   }, []);
@@ -133,6 +161,7 @@ export function useAttachments(
   return {
     entries,
     add,
+    onPaste,
     remove,
     reset,
     /** What the create request sends. Empty until every upload has landed. */

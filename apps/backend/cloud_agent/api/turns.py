@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-import time
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import ValidationError
 
 from cloud_agent.api._job_views import (
     _job_response,
@@ -36,11 +36,14 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
+    get_job_event_signal,
     get_storage,
     require_store,
 )
+from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.application.follow_ups import (
     prepare_follow_up,
+    sandbox_context_lost_error,
     session_archived_error,
 )
 from cloud_agent.application.job_admission import _idempotency_conflict
@@ -55,16 +58,17 @@ from cloud_agent.schemas import (
     AgentJobResponse,
     AgentPendingMessageSendNow,
     AgentPendingMessageUpdate,
+    AgentQuestionAnswer,
+    AgentQuestionAnswerResponse,
     AgentThreadMessageCreate,
     AgentThreadMessageResult,
+    AgentThreadQuestionsResponse,
     AgentThreadQueueResponse,
 )
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
-from cloud_agent_shared.shared_protocol import (
-    INPUT_REFUSALS,
-    INPUT_REFUSED,
-    INPUT_UNREACHABLE,
+from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
+    JobEventSignal,
 )
+from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -141,8 +145,24 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
         return _no_such_message_error()
     if error == "session_archived":
         return session_archived_error()
+    if error == "sandbox_context_lost":
+        return sandbox_context_lost_error()
     if error == "client_request_conflict":
         return _idempotency_conflict()
+    if error == "conversation_changed":
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "conversation_changed",
+                    "message": (
+                        "A chat sharing this workspace changed or is still busy. Wait for "
+                        "all chats' messages and workspace publication to finish, then "
+                        "refresh and try again."
+                    ),
+                }
+            },
+        )
     if error == "attachments_unavailable":
         return HTTPException(
             status_code=400,
@@ -187,6 +207,99 @@ async def _owned_latest_turn(
     if latest is None or latest["user_id"] != user["user_id"] or latest.get("deleted_at"):
         raise _no_such_thread_error(thread_id)
     return latest
+
+
+def _question_unreachable() -> HTTPException:
+    """Keep a transport failure distinct from an agent with no questions."""
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "type": "question_unreachable",
+                "message": "Could not reach the agent's questions. Try again.",
+            }
+        },
+    )
+
+
+@router.get("/threads/{thread_id}/questions", response_model=AgentThreadQuestionsResponse)
+async def get_thread_questions(
+    thread_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _TurnsStorage | None = Depends(get_storage),
+) -> AgentThreadQuestionsResponse:
+    """Read the live attempt's native questions, including after a page reload."""
+    job_store = _require_store(store)
+    latest = await _owned_latest_turn(job_store, thread_id, user)
+    attempt_id = latest.get("current_attempt_id")
+    result = AgentThreadQuestionsResponse(job_id=str(latest["id"]), attempt_id=attempt_id)
+    if latest.get("state") != RUNNING or latest.get("cancel_requested") or attempt_id is None:
+        return result
+    broker = await broker_for_attempt(job_store.host_pool, int(attempt_id))
+    if broker is None:
+        raise _question_unreachable()
+    try:
+        pending = await broker.pending_shared_questions(thread_id, owner=f"attempt:{attempt_id}")
+    except WorkspaceBrokerError as exc:
+        raise _question_unreachable() from exc
+    try:
+        return AgentThreadQuestionsResponse.model_validate(
+            {"job_id": result.job_id, "attempt_id": attempt_id, "questions": pending["questions"]}
+        )
+    except (KeyError, TypeError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "type": "invalid_question_response",
+                    "message": "The agent returned an invalid question. Try again.",
+                }
+            },
+        ) from exc
+
+
+@router.post("/threads/{thread_id}/questions", response_model=AgentQuestionAnswerResponse)
+async def answer_thread_question(
+    thread_id: str,
+    body: AgentQuestionAnswer,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _TurnsStorage | None = Depends(get_storage),
+) -> AgentQuestionAnswerResponse:
+    """Answer only the native request belonging to the attempt the owner saw."""
+    job_store = _require_store(store)
+    latest = await _owned_latest_turn(job_store, thread_id, user)
+    if (
+        latest.get("state") != RUNNING
+        or latest.get("cancel_requested")
+        or str(latest["id"]) != body.job_id
+        or latest.get("current_attempt_id") != body.attempt_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "question_expired",
+                    "message": "This question's turn has ended or changed. Refresh the questions.",
+                }
+            },
+        )
+    broker = await broker_for_attempt(job_store.host_pool, body.attempt_id)
+    if broker is None:
+        raise _question_unreachable()
+    try:
+        answer = await broker.answer_shared_question(
+            thread_id,
+            owner=f"attempt:{body.attempt_id}",
+            request_id=body.request_id,
+            answers=body.answers,
+            reject=body.reject,
+        )
+    except WorkspaceBrokerError as exc:
+        raise _question_unreachable() from exc
+    return AgentQuestionAnswerResponse(
+        accepted=answer.get("accepted") is True,
+        reason=answer.get("reason") if answer.get("accepted") is not True else None,
+    )
 
 
 async def _queue_result(
@@ -290,6 +403,12 @@ async def submit_thread_message(
     the first send made — the turn if it has become one, the waiting message if
     not — and the same key under different content is a 409
     ``idempotency_conflict``.
+
+    ``require_idle`` binds a fresh action to ``expected_latest_job_id`` and
+    refuses it with ``conversation_changed`` if any chat sharing the workspace
+    has a live turn or waiting message, a Fork is active, or the workspace is
+    unpublished at the locked write. An accepted idle-only action creates its
+    turn in that same transaction without entering the pending queue.
     """
     job_store = _require_store(store)
     latest = await _owned_latest_turn(job_store, thread_id, user)
@@ -344,16 +463,22 @@ async def submit_thread_message(
         # The canonical id the check resolved, never the alias typed: it is
         # checked again against whatever turn is newest when this is sent.
         model=prepared.model,
-        reasoning_effort=body.reasoning_effort,
+        reasoning_effort=prepared.reasoning_effort if body.require_idle else body.reasoning_effort,
         client_request_id=idempotency_key,
         client_request_fingerprint=fingerprint,
+        require_idle=body.require_idle,
+        expected_latest_job_id=body.expected_latest_job_id,
+        reset_reasoning_effort=prepared.reset_reasoning_effort,
+        skills=prepared.skills,
+        attachments=prepared.attachments,
     )
     if submitted.get("error") is not None:
         if submitted["error"] == "not_found":
             raise _no_such_thread_error(thread_id)
         raise _message_refused(submitted)
     if submitted.get("job_id") is not None:
-        # The same key, sent twice at once: the other send got there first.
+        # A guarded action created its turn atomically, or a concurrent send
+        # with this key got there first.
         return AgentThreadMessageResult(
             job=_job_response(
                 await _owned_job(job_store.conversation_queries, str(submitted["job_id"]), user)
@@ -562,46 +687,24 @@ def _mid_turn_input_unsupported() -> HTTPException:
     )
 
 
-#: How long a message chosen to go into a turn that no host has taken yet waits
-#: for one, and how often it looks. A turn that is still waiting after that
-#: keeps the message in line, and it goes as the next turn.
-HAND_OVER_WAIT_S = 600.0
-HAND_OVER_POLL_S = 0.5
-
 #: Hand-overs waiting for a host, kept so they are not collected mid-wait.
 _hand_overs: set[asyncio.Task[None]] = set()
 
 
-async def _hand_over(
-    job_store: _TurnsStorage, *, thread_id: str, attempt_id: int, message: dict[str, Any]
-) -> str | None:
-    """Give the attempt's host the message; ``None`` when its turn has it.
-
-    Otherwise the shared word for why not. The host puts it in front of the
-    model before the model's next tool call, and the turn's own stream says
-    when it did.
-    """
-    broker = await broker_for_attempt(job_store.host_pool, attempt_id)
-    if broker is None:
-        return INPUT_UNREACHABLE
-    try:
-        answer = await broker.inject_shared_input(
-            thread_id,
-            owner=f"attempt:{attempt_id}",
-            message_id=str(message["id"]),
-            text=str(message["prompt"]),
-        )
-    except WorkspaceBrokerError:
-        logger.warning(
-            "agent_send_now_unreachable",
-            extra={"event": "agent_send_now_unreachable", "thread_id": thread_id},
-            exc_info=True,
-        )
-        return INPUT_UNREACHABLE
-    if answer.get("accepted") is True:
-        return None
-    refused = answer.get("reason")
-    return refused if refused in INPUT_REFUSALS else INPUT_REFUSED
+async def close_send_now_handovers() -> None:
+    """Cancel and join request-spawned handoffs before app resources close."""
+    tasks = tuple(_hand_overs)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        joined = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            # The owner still has to wait for task cleanup before closing the
+            # store and broker clients; propagate its cancellation afterwards.
+            await joined
+            raise
 
 
 async def _hand_over_once_claimed(
@@ -612,46 +715,23 @@ async def _hand_over_once_claimed(
     message: dict[str, Any],
     gateway: Any,
     app_credentials: Any | None,
+    signal: JobEventSignal | None = None,
 ) -> None:
-    """Wait for a host to take the turn, then give it the message.
-
-    The message stays ``sending`` meanwhile, tied to the turn. A turn that ends
-    first puts it back in line with the rest of its ending, and one that is
-    still waiting at the deadline leaves it there too: either way it goes as
-    the next turn.
-    """
-    deadline = time.monotonic() + HAND_OVER_WAIT_S
+    """Eagerly wait for a host; the durable worker remains the crash backstop."""
     try:
-        while time.monotonic() < deadline:
-            job = await job_store.conversation_queries.get_job(job_id)
-            if job is None or job.get("state") in TERMINAL_STATES:
-                return
-            queue = await job_store.pending_messages.queue_state(
-                thread_id=thread_id, user_id=str(message["user_id"])
+        outcome = await send_now_delivery.wait_for_handoff(
+            job_store,
+            job_id=job_id,
+            message=message,
+            signal=signal,
+        )
+        if outcome.requeued:
+            await _settle(
+                job_store,
+                thread_id=thread_id,
+                gateway=gateway,
+                app_credentials=app_credentials,
             )
-            current = next(
-                (row for row in (queue or {}).get("messages", []) if row["id"] == message["id"]),
-                None,
-            )
-            if current is None or current["state"] != "sending":
-                return
-            attempt_id = job.get("current_attempt_id")
-            if job.get("state") == RUNNING and attempt_id is not None:
-                reason = await _hand_over(
-                    job_store, thread_id=thread_id, attempt_id=int(attempt_id), message=message
-                )
-                if reason is not None:
-                    await job_store.pending_messages.return_to_queue(
-                        message_id=str(message["id"]), revision=int(message["revision"])
-                    )
-                    await _settle(
-                        job_store,
-                        thread_id=thread_id,
-                        gateway=gateway,
-                        app_credentials=app_credentials,
-                    )
-                return
-            await asyncio.sleep(HAND_OVER_POLL_S)
     except Exception:
         logger.warning(
             "agent_send_now_hand_over_failed",
@@ -672,6 +752,7 @@ async def send_pending_message_now(
     store: _TurnsStorage | None = Depends(get_storage),
     gateway: Any = Depends(get_gateway_client),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    signal: JobEventSignal | None = Depends(get_job_event_signal),
 ) -> AgentThreadMessageResult:
     """Send one waiting message into the live turn.
 
@@ -714,6 +795,7 @@ async def send_pending_message_now(
                 message=message,
                 gateway=gateway,
                 app_credentials=app_credentials,
+                signal=signal,
             )
         )
         _hand_overs.add(task)
@@ -725,10 +807,22 @@ async def send_pending_message_now(
             outcome=SettleOutcome(),
             message_id=message_id,
         )
-    reason = await _hand_over(
-        job_store, thread_id=thread_id, attempt_id=int(began["attempt_id"]), message=message
-    )
-    if reason is None:
+    try:
+        handoff = await send_now_delivery.deliver_handoff(
+            job_store,
+            message_id=message_id,
+            revision=int(message["revision"]),
+        )
+    except Exception:
+        # The durable row has committed.  A transient database or broker error
+        # must not make the owner retry the request; the recovery worker owns it.
+        logger.warning(
+            "agent_send_now_hand_over_failed",
+            extra={"event": "agent_send_now_hand_over_failed", "thread_id": thread_id},
+            exc_info=True,
+        )
+        handoff = send_now_delivery.HandoffOutcome()
+    if handoff.reason is None:
         return await _queue_result(
             job_store,
             thread_id=thread_id,
@@ -736,18 +830,22 @@ async def send_pending_message_now(
             outcome=SettleOutcome(),
             message_id=message_id,
         )
-    await job_store.pending_messages.return_to_queue(
-        message_id=message_id, revision=int(message["revision"])
-    )
-    # The turn may have ended meanwhile, with this message out of line; now it
-    # is back, it goes next.
-    outcome = await _settle(
-        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+    # The turn may have ended meanwhile. If this owner put the message back,
+    # settle it now; otherwise that concurrent ending already did so.
+    outcome = (
+        await _settle(
+            job_store,
+            thread_id=thread_id,
+            gateway=gateway,
+            app_credentials=app_credentials,
+        )
+        if handoff.requeued
+        else SettleOutcome()
     )
     result = await _queue_result(
         job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
     )
-    result.not_delivered_reason = reason
+    result.not_delivered_reason = handoff.reason
     return result
 
 

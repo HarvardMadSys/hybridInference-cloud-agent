@@ -32,7 +32,14 @@ import type {
   ProcessObservation,
   TurnResources,
 } from './types';
-import { replyPreviewPiece } from './trajectoryProtocol';
+import {
+  notificationHasError,
+  projectProtocolEvents,
+  rawNotification,
+  record,
+  replyPreviewPiece,
+} from './trajectoryProtocol';
+import { agentLiveStatus } from './agentLiveStatus';
 
 /**
  * Preserve a server result as a per-turn display state.
@@ -57,6 +64,24 @@ function asText(payload: Record<string, unknown> | null, ...keys: string[]): str
     if (typeof value === 'string' && value) return value;
   }
   return '';
+}
+
+function modelRetryMessage(payload: Record<string, unknown>): string {
+  const delay = payload.retry_delay_ms;
+  let message = 'Retrying model request';
+  if (typeof delay === 'number' && Number.isFinite(delay) && delay >= 0) {
+    message = delay === 0 ? 'Retrying now' : `Retrying in ${Math.ceil(delay / 1000)}s`;
+  }
+  const attempt = payload.attempt;
+  if (typeof attempt === 'number' && Number.isInteger(attempt) && attempt > 0) {
+    const maximum = payload.max_retries;
+    message +=
+      typeof maximum === 'number' && Number.isInteger(maximum) && maximum >= attempt
+        ? ` (retry ${attempt} of ${maximum})`
+        : ` (retry ${attempt})`;
+  }
+  const prefix = payload.error_status === 503 ? 'Provider temporarily unavailable. ' : '';
+  return `${prefix}${message}.`;
 }
 
 function readableValue(value: unknown): string {
@@ -118,10 +143,15 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   // and the Chat reading anchor is restored by row.
   const sourceEventId = event.id;
 
-  // Never carry chain-of-thought into the display model. The UI represents
-  // this as a compact reasoning status, not as model-authored hidden text.
-  if (type === 'thinking') return { kind: 'thinking', text: '', sourceEventId };
+  // Recorded reasoning has its own row, separate from the assistant's output.
+  if (type === 'thinking')
+    return asText(payload, 'parent_tool_use_id')
+      ? null
+      : { kind: 'thinking', text: asText(payload, 'text'), sourceEventId };
   if (type === 'message') {
+    // A delegated agent's answer belongs to its Task/Agent result, and is
+    // separately inspectable in Trajectory. It is not the main reply.
+    if (asText(payload, 'parent_tool_use_id')) return null;
     const previewId = asText(payload, 'preview_id');
     return {
       kind: 'message',
@@ -142,14 +172,26 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     const exitCode = payload.exit_code;
     const output = toolOutput(payload);
     const outputIsError =
-      (typeof exitCode === 'number' && exitCode !== 0) || payload.status === 'failed';
+      (typeof exitCode === 'number' && exitCode !== 0) ||
+      payload.status === 'failed' ||
+      payload.is_error === true ||
+      payload.native_tool_status === 'failed';
     return {
       kind: 'tool_use',
       tool: name,
       id: asText(payload, 'id') || undefined,
+      ...(Object.hasOwn(payload, 'input') ? { input: payload.input } : {}),
+      ...(asText(payload, 'parent_tool_use_id')
+        ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
+        : {}),
+      ...(payload.native_tool_status === 'completed' ? { resultState: 'received' as const } : {}),
+      ...(payload.native_tool_status === 'cancelled' ? { resultState: 'cancelled' as const } : {}),
       ...(event.created_at ? { at: event.created_at } : {}),
       detail: asText(payload, 'detail', 'text') || commandText(payload.input) || 'Running tool',
       ...(output ? { output } : {}),
+      ...(Object.hasOwn(payload, 'structured_output')
+        ? { structuredOutput: payload.structured_output }
+        : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
       sourceEventId,
     };
@@ -164,6 +206,13 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         readableValue(payload.aggregated_output) ||
         asText(payload, 'text', 'detail'),
       toolUseId: asText(payload, 'tool_use_id') || undefined,
+      ...(Object.hasOwn(payload, 'structured_output')
+        ? { structuredOutput: payload.structured_output }
+        : {}),
+      ...(asText(payload, 'parent_tool_use_id')
+        ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
+        : {}),
+      ...(payload.native_tool_status === 'cancelled' ? { cancelled: true } : {}),
       isError: payload.is_error === true,
       ...(event.created_at ? { at: event.created_at } : {}),
       sourceEventId,
@@ -190,6 +239,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   }
   if (type === 'lifecycle') {
     const phase = asText(payload, 'phase', 'text') || 'lifecycle';
+    if (phase === 'api_retry') {
+      return { kind: 'lifecycle', text: modelRetryMessage(payload), sourceEventId };
+    }
     // The runner reports whether it reused the tree; the milestone reads
     // differently depending on the answer, and only the runner can know it.
     if (phase === 'checked_out' && payload.reused === true) {
@@ -410,8 +462,28 @@ const INFRASTRUCTURE_FAILURE_PATTERNS = [
 const REPOSITORY_TOO_LARGE =
   /source (?:checkout|archive)(?: \((\S+ \S+) including its Git objects\))? exceeds (?:this host's (\S+ \S+)|the) retained import size limit/i;
 
-function isRepositoryTooLarge(detail: string | null | undefined): boolean {
+export function isRepositoryTooLarge(detail: string | null | undefined): boolean {
   return Boolean(detail && REPOSITORY_TOO_LARGE.test(detail));
+}
+
+/** The runner refused a turn its site's own setup made impossible, such as
+ * connected tools on a server with no MCP relay. Its message always starts
+ * this way and ends by asking for an admin, the only person who can clear
+ * the cause, so a follow-up fails the same way until one does.
+ */
+const SITE_MISCONFIGURED = /^Site misconfigured:\s*/;
+
+function failureCauseOf(detail: string | null | undefined): AgentJob['failureCause'] {
+  if (isRepositoryTooLarge(detail)) return 'repository_too_large';
+  if (detail && SITE_MISCONFIGURED.test(detail)) return 'site_misconfigured';
+  return undefined;
+}
+
+/** A site-misconfigured failure's reason, for a surface whose title already
+ * says the site is misconfigured. */
+export function siteMisconfiguredReason(detail: string): string {
+  const reason = detail.replace(SITE_MISCONFIGURED, '');
+  return reason.charAt(0).toUpperCase() + reason.slice(1);
 }
 
 /** Translate infrastructure failures only; keep task errors and transcripts intact.
@@ -425,6 +497,9 @@ export function ownerFailureMessage(detail: string): string {
   if (/^sandbox failed: /.test(detail)) {
     return 'The sandbox failed while running this response.';
   }
+  // Written for the owner already, and naming what only an admin can fix; it
+  // must never fold into the generic connection message below.
+  if (SITE_MISCONFIGURED.test(detail)) return detail;
   const tooLarge = REPOSITORY_TOO_LARGE.exec(detail);
   if (tooLarge) {
     const [, size, limit] = tooLarge;
@@ -446,21 +521,114 @@ export function ownerFailureMessage(detail: string): string {
   return detail;
 }
 
-/** Preserve attempt boundaries and attach each result to its tool activity. */
-function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
+function nativeItemKey(event: AgentJobEventApi, id: string): string {
+  return `${'job_id' in event ? event.job_id : ''}:${event.attempt_id}:${id}`;
+}
+
+/** A native item snapshot carries complete channels rather than text deltas. */
+function reasoningSnapshot(
+  stored: AgentJobEventApi,
+  projected: AgentJobEventApi,
+  identified: Set<string>,
+): AgentJobEventApi {
+  const notification = rawNotification(stored);
+  if (!notification || notificationHasError(notification)) return projected;
+  const item = record(record(notification.params).item);
+  const id = typeof item.id === 'string' ? item.id : '';
+  const method = notification.method;
+  if (
+    item.type !== 'reasoning' ||
+    !id ||
+    !['item/started', 'item/updated', 'item/completed'].includes(String(method)) ||
+    (stored.payload?.protocol !== 'codex-app-server' && !identified.has(nativeItemKey(stored, id)))
+  ) {
+    return projected;
+  }
+  const blocks = [
+    { channel: 'summary', content: item.summary },
+    { channel: 'reasoning', content: item.content },
+  ].flatMap(({ channel, content }) => {
+    if (!Array.isArray(content)) return [];
+    const parts = content.map((value) => (typeof value === 'string' ? value : ''));
+    const text = parts.join('\n');
+    return text ? [{ channel, text, parts }] : [];
+  });
+  return {
+    ...projected,
+    event_type: 'thinking',
+    payload: {
+      ...projected.payload,
+      text: typeof item.text === 'string' ? item.text : '',
+      native_item_id: id,
+      stream_state: method === 'item/started' ? 'started' : 'snapshot',
+      ...(blocks.length ? { reasoning_blocks: blocks } : {}),
+    },
+  };
+}
+
+/** Preserve attempt boundaries and fold updates into their recorded activity. */
+function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEvent[] {
   const attemptIds = [...new Set(events.map((event) => event.attempt_id))].sort((a, b) => a - b);
   const attemptNoById = new Map(attemptIds.map((id, index) => [id, index + 1]));
   const rows: AgentEvent[] = [];
   const toolsById = new Map<string, number>();
   const lastToolByAttempt = new Map<number, number>();
+  const reasoningByItem = new Map<string, number>();
+  const reasoningChannelsByItem = new Map<string, Map<string, Map<number, string>>>();
+  const identifiedReasoning = new Set(
+    events.flatMap((event) => {
+      const id = event.event_type === 'thinking' ? asText(event.payload, 'native_item_id') : '';
+      return id ? [nativeItemKey(event, id)] : [];
+    }),
+  );
 
-  for (const event of events) {
+  const activityEvents = new Map(
+    projectProtocolEvents(events)
+      .map((event, index) => reasoningSnapshot(events[index], event, identifiedReasoning))
+      .filter((event) => ['tool_use', 'tool_result', 'thinking'].includes(event.event_type))
+      .map((event) => [event.id, event]),
+  );
+  const callCounts = new Map<string, number>();
+  const resultCounts = new Map<string, number>();
+  for (const event of activityEvents.values()) {
+    const id = asText(event.payload, event.event_type === 'tool_use' ? 'id' : 'tool_use_id');
+    if (!id) continue;
+    const key = `${attemptNoById.get(event.attempt_id)}:${id}`;
+    const counts = event.event_type === 'tool_use' ? callCounts : resultCounts;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const storedEvent of events) {
+    // Chat has its own answer-preview folding. Project native reasoning and
+    // tools without projecting message fragments a second time.
+    const event = activityEvents.get(storedEvent.id) ?? storedEvent;
     const mapped = toDisplayEvent(event);
     if (!mapped) continue;
     const attemptNo = attemptNoById.get(event.attempt_id);
     const row = { ...mapped, attemptNo } as AgentEvent;
 
     if (row.kind === 'tool_use') {
+      if (
+        event.payload?.native_tool_request === true &&
+        row.id &&
+        callCounts.get(`${attemptNo}:${row.id}`) === 1
+      ) {
+        row.activityKey = `${event.attempt_id}:${row.id}`;
+      }
+      if (
+        row.id &&
+        ((callCounts.get(`${attemptNo}:${row.id}`) ?? 0) > 1 ||
+          (resultCounts.get(`${attemptNo}:${row.id}`) ?? 0) > 1)
+      )
+        row.resultState = 'unknown';
+      row.resultState ??= row.outputIsError
+        ? 'failed'
+        : row.output !== undefined
+          ? 'received'
+          : job &&
+              (job.state === 'running' || job.state === 'publishing') &&
+              job.current_attempt_id === event.attempt_id
+            ? 'waiting'
+            : 'not_recorded';
       const rowIndex = rows.push(row) - 1;
       if (row.id) toolsById.set(`${attemptNo}:${row.id}`, rowIndex);
       if (attemptNo !== undefined) lastToolByAttempt.set(attemptNo, rowIndex);
@@ -469,14 +637,25 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
 
     if (row.kind === 'tool_result') {
       const explicit = row.toolUseId ? toolsById.get(`${attemptNo}:${row.toolUseId}`) : undefined;
-      const targetIndex =
-        explicit ?? (attemptNo === undefined ? undefined : lastToolByAttempt.get(attemptNo));
+      const targetIndex = row.toolUseId
+        ? explicit
+        : attemptNo === undefined
+          ? undefined
+          : lastToolByAttempt.get(attemptNo);
       const target = targetIndex === undefined ? undefined : rows[targetIndex];
-      if (targetIndex !== undefined && target?.kind === 'tool_use' && !target.output) {
+      if (
+        targetIndex !== undefined &&
+        target?.kind === 'tool_use' &&
+        !target.output &&
+        target.resultState !== 'unknown' &&
+        (!row.parentToolUseId || row.parentToolUseId === target.parentToolUseId)
+      ) {
         rows[targetIndex] = {
           ...target,
           output: row.text ? row.text.split('\n') : ['Command completed with no output.'],
           outputIsError: row.isError,
+          ...(row.structuredOutput !== undefined ? { structuredOutput: row.structuredOutput } : {}),
+          resultState: row.cancelled ? 'cancelled' : row.isError ? 'failed' : 'received',
           // Folding is where the pair still exists. Downstream only sees the
           // surviving tool_use row, so a consumer that wanted to time the
           // call — the turn footer does — would find nothing left to pair
@@ -516,11 +695,81 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
       }
     }
 
-    // Reasoning is a state, not a sequence of steps. A run emits one of these
-    // per thinking block, and rendering each as its own row turns "the agent
-    // thought about it" into a wall of identical lines. Consecutive ones
-    // collapse into the single status row that was always intended.
-    if (row.kind === 'thinking' && rows[rows.length - 1]?.kind === 'thinking') continue;
+    if (row.kind === 'thinking') {
+      const nativeId = asText(event.payload, 'native_item_id');
+      if (nativeId) {
+        const key = nativeItemKey(event, nativeId);
+        const index = reasoningByItem.get(key);
+        const previous = index === undefined ? undefined : rows[index];
+        const target = previous?.kind === 'thinking' ? previous : row;
+        const channels = reasoningChannelsByItem.get(key) ?? new Map<string, Map<number, string>>();
+        reasoningChannelsByItem.set(key, channels);
+        const snapshotBlocks = event.payload?.reasoning_blocks;
+        let updates: { text: string; channel: string; parts?: unknown[] }[] = [
+          { text: row.text, channel: asText(event.payload, 'stream_channel') || 'summary' },
+        ];
+        if (Array.isArray(snapshotBlocks)) {
+          updates = snapshotBlocks.map((value) => {
+            const block = record(value);
+            return {
+              text: typeof block.text === 'string' ? block.text : '',
+              channel: typeof block.channel === 'string' ? block.channel : 'summary',
+              parts: Array.isArray(block.parts) ? block.parts : undefined,
+            };
+          });
+        }
+        const params = record(rawNotification(storedEvent)?.params);
+        for (const update of updates) {
+          if (!update.text) continue;
+          if (event.payload?.stream_state === 'delta') {
+            const parts = channels.get(update.channel) ?? new Map<number, string>();
+            const nativeIndex =
+              update.channel === 'reasoning' ? params.contentIndex : params.summaryIndex;
+            const partIndex =
+              typeof nativeIndex === 'number' && Number.isInteger(nativeIndex) && nativeIndex >= 0
+                ? nativeIndex
+                : 0;
+            parts.set(partIndex, (parts.get(partIndex) ?? '') + update.text);
+            channels.set(update.channel, parts);
+          } else {
+            channels.set(
+              update.channel,
+              new Map(
+                (update.parts ?? [update.text]).map((text, partIndex) => [
+                  partIndex,
+                  typeof text === 'string' ? text : '',
+                ]),
+              ),
+            );
+          }
+        }
+        const blocks = [...channels].map(([channel, parts]) => ({
+          channel,
+          text: [...parts]
+            .sort(([left], [right]) => left - right)
+            .map(([, text]) => text)
+            .join('\n'),
+        }));
+        const folded = {
+          ...target,
+          text: blocks.map((block) => block.text).join('\n\n'),
+          ...(blocks.length ? { reasoningBlocks: blocks } : {}),
+        };
+        if (index === undefined) reasoningByItem.set(key, rows.push(folded) - 1);
+        else rows[index] = folded;
+        continue;
+      }
+      // Empty runtime statuses may repeat; recorded text blocks stay distinct.
+      const previous = rows[rows.length - 1];
+      if (
+        !row.text.trim() &&
+        previous?.kind === 'thinking' &&
+        !previous.text.trim() &&
+        previous.attemptNo === row.attemptNo
+      ) {
+        continue;
+      }
+    }
 
     // Same for a milestone repeated back to back: the platform's "started" and
     // the CLI's "init" both mean "setting up environment", so they rendered as
@@ -701,10 +950,123 @@ function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
   };
 }
 
+function mapThreadMessage(message: AgentThreadMessageApi) {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    jobId: message.job_id,
+    createdAt: message.created_at,
+    ...(message.mid_turn ? { midTurn: true } : {}),
+  };
+}
+
+/** Index a conversation once, rather than scanning its full log for each turn. */
+function groupByJob<T extends { job_id: string }>(rows: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const group = groups.get(row.job_id);
+    if (group) group.push(row);
+    else groups.set(row.job_id, [row]);
+  }
+  return groups;
+}
+
+function sameRecords<T>(previous: T[], next: T[]): boolean {
+  return previous.length === next.length && previous.every((row, index) => row === next[index]);
+}
+
+function displayHistoryTurn(
+  job: AgentJobApi,
+  messages: AgentThreadMessageApi[],
+  events: AgentThreadEventApi[],
+): AgentHistoryTurn {
+  const goalTurn = storedGoalTurn(job);
+  return {
+    jobId: job.id,
+    turnNo: job.turn_no ?? 1,
+    state: toDisplayState(job),
+    // Only the server can prove the native session and host are forkable.
+    forkable: job.native_fork_available === true,
+    ...(goalTurn ? { goalTurn } : {}),
+    messages: messages.map(mapThreadMessage),
+    events: displayEvents(events, job),
+  };
+}
+
+type HistoryProjector = (
+  jobs: AgentJobApi[],
+  messages: Map<string, AgentThreadMessageApi[]>,
+  events: Map<string, AgentThreadEventApi[]>,
+) => AgentHistoryTurn[];
+
+/**
+ * A projection cache owned by one mounted conversation. Stored rows are
+ * immutable: live appends keep their references, while reloads replace them.
+ * A changed row, message or event rebuilds that turn, including late results.
+ * Only the visible history is retained; there is no cross-owner or TTL cache.
+ */
+export function createDisplayJobAdapter(): typeof toDisplayJob {
+  type CachedTurn = {
+    job: AgentJobApi;
+    messages: AgentThreadMessageApi[];
+    events: AgentThreadEventApi[];
+    turn: AgentHistoryTurn;
+  };
+  let scope: string | undefined;
+  let cached = new Map<string, CachedTurn>();
+  let history: AgentHistoryTurn[] = [];
+  const projectHistory: HistoryProjector = (jobs, messages, events) => {
+    const nextCache = new Map<string, CachedTurn>();
+    const nextHistory = jobs.map((job) => {
+      const jobMessages = messages.get(job.id) ?? [];
+      const jobEvents = events.get(job.id) ?? [];
+      let entry = cached.get(job.id);
+      if (
+        !entry ||
+        entry.job !== job ||
+        !sameRecords(entry.messages, jobMessages) ||
+        !sameRecords(entry.events, jobEvents)
+      ) {
+        entry = {
+          job,
+          messages: jobMessages,
+          events: jobEvents,
+          turn: displayHistoryTurn(job, jobMessages, jobEvents),
+        };
+      }
+      nextCache.set(job.id, entry);
+      return entry.turn;
+    });
+    cached = nextCache;
+    if (!sameRecords(history, nextHistory)) history = nextHistory;
+    return history;
+  };
+  return (job, options = {}) => {
+    const nextScope = options.thread?.thread_id ?? job.thread_id ?? job.id;
+    if (scope !== nextScope || options.threadEvents === undefined) {
+      cached.clear();
+      history = [];
+      scope = nextScope;
+    }
+    return adaptJob(job, options, projectHistory);
+  };
+}
+
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
+  return adaptJob(job, options);
+}
+
+function adaptJob(
+  job: AgentJobApi,
+  options: AdaptOptions,
+  projectHistory?: HistoryProjector,
+): AgentJob {
+  const failureCause = failureCauseOf(job.detail);
   const events = options.events ?? [];
   const patch = options.patch ?? '';
-  const renderedEvents = displayEvents(events);
+  const renderedEvents = displayEvents(events, job);
+  const liveStatus = agentLiveStatus(job, events);
 
   // Attempts are inferred from the event log rather than fetched: an attempt
   // is visible once it writes events. Supersession alone does not prove a
@@ -768,19 +1130,12 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
         .map((threadJob) => threadJob.id),
     );
   }
-  const mapMessage = (message: AgentThreadMessageApi) => ({
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    jobId: message.job_id,
-    createdAt: message.created_at,
-    ...(message.mid_turn ? { midTurn: true } : {}),
-  });
+  const messagesByJob = groupByJob(options.thread?.messages ?? []);
   const priorMessages = (options.thread?.messages ?? [])
     .filter((message) =>
       priorJobIds ? priorJobIds.has(message.job_id) : message.job_id !== job.id,
     )
-    .map(mapMessage);
+    .map(mapThreadMessage);
   const historicalJobs = (options.thread?.jobs ?? []).filter(
     (threadJob) =>
       threadJob.id !== job.id &&
@@ -789,42 +1144,35 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   const threadEvents = options.threadEvents;
   let historyTurns: AgentHistoryTurn[] | undefined;
   if (threadEvents !== undefined) {
-    historyTurns = historicalJobs.map((threadJob) => ({
-      jobId: threadJob.id,
-      turnNo: threadJob.turn_no ?? 1,
-      // The stored turn's own outcome, so the rail can say a turn failed
-      // without re-deriving it from the events it happens to carry.
-      state: toDisplayState(threadJob),
-      // This is stronger than platform success: the API has also proved a
-      // settled native ordinal, compatible online host/image, and idle source
-      // membership. Showing a button from state alone creates a predictable
-      // 409 for failed rollout generations.
-      forkable: threadJob.native_fork_available === true,
-      // Each stored turn carries its own relationship to the goal: whether the
-      // platform queued it, and what it reported. Absent for a conversation
-      // without a goal, which is what keeps this from touching every turn.
-      ...(storedGoalTurn(threadJob) ? { goalTurn: storedGoalTurn(threadJob) } : {}),
-      messages: (options.thread?.messages ?? [])
-        .filter((message) => message.job_id === threadJob.id)
-        .map(mapMessage),
-      events: displayEvents(threadEvents.filter((event) => event.job_id === threadJob.id)),
-    }));
+    const eventsByJob = groupByJob(threadEvents);
+    if (projectHistory) {
+      historyTurns = projectHistory(historicalJobs, messagesByJob, eventsByJob);
+    } else {
+      historyTurns = historicalJobs.map((threadJob) =>
+        displayHistoryTurn(
+          threadJob,
+          messagesByJob.get(threadJob.id) ?? [],
+          eventsByJob.get(threadJob.id) ?? [],
+        ),
+      );
+    }
   }
   // A turn copied by fork has no events; its durable messages are the only
   // record of what it said. For a settled job whose event log carries no
   // message rows, render the thread's copy of the turn — prompt included, so
   // the turn keeps its chronology and the prompt card knows to stand down.
   const settled = job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled';
-  let ownMessages: ReturnType<typeof mapMessage>[] = [];
+  let ownMessages: ReturnType<typeof mapThreadMessage>[] = [];
   if (settled && !events.some((event) => event.event_type === 'message')) {
-    ownMessages = (options.thread?.messages ?? [])
-      .filter((message) => message.job_id === job.id)
-      .map(mapMessage);
+    ownMessages = (messagesByJob.get(job.id) ?? []).map(mapThreadMessage);
   }
-  const threadPrUrl = [...(options.thread?.jobs ?? [])]
+  const threadPrJob = [...(options.thread?.jobs ?? [])]
     .reverse()
-    .find((threadJob) => threadJob.published_pr_url)?.published_pr_url;
-  const publishedPrUrl = job.published_pr_url ?? threadPrUrl ?? null;
+    .find((threadJob) => threadJob.published_pr_url);
+  const publishedPrUrl =
+    threadPrJob && (threadPrJob.turn_no ?? 1) > (job.turn_no ?? 1)
+      ? threadPrJob.published_pr_url
+      : (job.published_pr_url ?? threadPrJob?.published_pr_url ?? null);
 
   return {
     id: job.id,
@@ -837,9 +1185,10 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     title: job.title ?? options.thread?.title ?? job.task_prompt.split('\n')[0].slice(0, 80),
     prompt: job.task_prompt,
     state: toDisplayState(job),
+    cancelRequested: job.cancel_requested,
     conversationState: job.conversation_state ?? undefined,
     stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
-    ...(isRepositoryTooLarge(job.detail) ? { failureCause: 'repository_too_large' as const } : {}),
+    ...(failureCause ? { failureCause } : {}),
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),
@@ -885,6 +1234,8 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     currentAttemptNo: currentAttemptIndex >= 0 ? currentAttemptIndex + 1 : undefined,
     telemetryAttemptNo: telemetryAttemptIndex >= 0 ? telemetryAttemptIndex + 1 : undefined,
     events: renderedEvents,
+    liveNote: liveStatus?.note,
+    liveNoteStartedAt: liveStatus?.startedAt,
     diffFiles: toDiffFiles(patch),
     workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: toDiffFileDetails(patch),

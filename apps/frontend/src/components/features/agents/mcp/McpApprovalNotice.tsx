@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { listMcpInvocations } from '@/lib/api/mcp';
 
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from '../agentPush';
+
 /** Keep pending decisions visible while the conversation's tool pane is closed. */
 export function McpApprovalNotice({
   jobId,
@@ -14,13 +16,20 @@ export function McpApprovalNotice({
   onReview: () => void;
 }) {
   const [count, setCount] = useState(0);
+  // A call held for approval is pushed the moment it is created or decided;
+  // the clock is the backstop for when the owner's change stream is not up.
+  const pushLive = useAgentPushLive();
   useEffect(() => {
     setCount(0);
     if (!active) return;
     let disposed = false;
     let loading = false;
+    let again = false;
     const refresh = async () => {
-      if (loading) return;
+      if (loading) {
+        again = true;
+        return;
+      }
       loading = true;
       try {
         const result = await listMcpInvocations({ jobId, pendingOnly: true });
@@ -30,15 +39,23 @@ export function McpApprovalNotice({
         // Keep an already visible decision available during a transient poll failure.
       } finally {
         loading = false;
+        if (again && !disposed) {
+          again = false;
+          void refresh();
+        }
       }
     };
     void refresh();
-    const timer = setInterval(refresh, 3000);
+    const timer = setInterval(refresh, pushLive ? PUSH_FALLBACK_POLL_MS : 3000);
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      if (change.resync || change.mcp.includes(jobId)) void refresh();
+    });
     return () => {
       disposed = true;
       clearInterval(timer);
+      unsubscribe();
     };
-  }, [active, jobId]);
+  }, [active, jobId, pushLive]);
 
   if (!count) return null;
   return (

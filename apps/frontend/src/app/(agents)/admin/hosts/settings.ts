@@ -2,7 +2,7 @@
 //
 // Precedence is the control plane's (`cloud_agent_shared/host_settings.py`): a
 // value set for one server, then the value set for all servers, then the
-// server's own `.env` or built-in default. The page only reads what the server
+// deployment default. The page only reads what the server
 // reports applying and compares — it never assumes a saved value is in force,
 // for the same reason the execution-slots cell says "applying" until the host
 // confirms.
@@ -23,7 +23,7 @@ export interface SettingFact {
   source: SettingSource;
   /** What the server reports using now, or null when it has not said. */
   inUse: number | null;
-  /** The server's own value — its `.env` or the built-in default — or null when unreported. */
+  /** Legacy local value reported by the server, retained for diagnostics only. */
   own: number | null;
   state: SettingState;
 }
@@ -56,10 +56,10 @@ export function settingFact(
   } else if (inUse === null) {
     state = 'unreported';
   } else {
-    // With no admin value the server should be back on its own; until it says
-    // so, a cleared value is still being undone.
-    const target = admin ?? own;
-    state = target === null || inUse === target ? 'applied' : 'applying';
+    // Reset restores the deployment default; a pre-migration local value is
+    // diagnostic information and must never become the desired value again.
+    const target = admin ?? definition.default;
+    state = inUse === target ? 'applied' : 'applying';
   }
   return { definition, admin, source, inUse, own, state };
 }
@@ -111,11 +111,13 @@ export function formatSettingValue(definition: HostSettingDefinition, value: num
       ? `${value / 1024} GiB`
       : `${value} MiB`;
   }
+  if (definition.unit === 'KiB') return `${value} KiB`;
+  if (definition.unit === 'millicores') return `${value / 1000} vCPU`;
   return String(value);
 }
 
-/** A unit a value can be typed in. The API always takes seconds or MiB. */
-export type InputUnit = 's' | 'min' | 'h' | 'd' | 'MiB' | 'GiB';
+/** A unit a value can be typed in; the API takes the definition's own unit. */
+export type InputUnit = 's' | 'min' | 'h' | 'd' | 'MiB' | 'GiB' | 'KiB' | 'vCPU';
 
 const UNIT_SIZE: Record<InputUnit, number> = {
   s: 1,
@@ -124,6 +126,8 @@ const UNIT_SIZE: Record<InputUnit, number> = {
   d: 86_400,
   MiB: 1,
   GiB: 1024,
+  KiB: 1,
+  vCPU: 1000,
 };
 
 /**
@@ -138,6 +142,8 @@ export function inputUnits(definition: HostSettingDefinition): InputUnit[] {
     return definition.maximum >= 2 * 86_400 ? ['s', 'min', 'h', 'd'] : ['s', 'min', 'h'];
   }
   if (definition.unit === 'MiB') return ['MiB', 'GiB'];
+  if (definition.unit === 'KiB') return ['KiB'];
+  if (definition.unit === 'millicores') return ['vCPU'];
   return [];
 }
 
@@ -157,7 +163,8 @@ export function amountIn(value: number, unit: InputUnit | null): string {
 /**
  * Read a typed amount in a unit: a whole number of the setting's own unit
  * inside its bounds, or why not. A decimal amount is fine when it lands on a
- * whole second or MiB, so 1.5 h is 5400 s.
+ * whole second, MiB or millicore, so 1.5 h is 5400 s and 1.25 vCPU is 1250
+ * millicores.
  */
 export function parseSettingInput(
   definition: HostSettingDefinition,
@@ -168,7 +175,7 @@ export function parseSettingInput(
   const amount = Number(text);
   const value = unit === null ? amount : amount * UNIT_SIZE[unit];
   // Multiplying a decimal amount can leave float noise (1.1 h); a real
-  // fraction of a second or MiB is still refused.
+  // fraction of the setting's own unit is still refused.
   const whole = Math.round(value);
   if (
     text === '' ||
@@ -225,9 +232,7 @@ export function rolloutText(
   const rollout = globalRollout(definition, globalValues, hosts);
   const parts: string[] = [];
   if (valueOf(globalValues, definition.key) === null) {
-    parts.push(
-      `Each server uses its own .env value, or ${formatSettingValue(definition, definition.default)}`,
-    );
+    parts.push(`Deployment default: ${formatSettingValue(definition, definition.default)}`);
   } else {
     const following = rollout.applied + rollout.waiting;
     parts.push(
@@ -264,13 +269,11 @@ export function factNote(fact: SettingFact): string {
       ? 'set for this server'
       : fact.source === 'global'
         ? 'set for all servers'
-        : 'server default';
+        : 'deployment default';
   if (fact.state === 'unreported') return `${from} · not reported yet`;
   if (fact.state === 'applying') {
-    const target = fact.admin ?? fact.own;
-    return target === null
-      ? `${from} · applying`
-      : `${from} · applying ${formatSettingValue(fact.definition, target)}`;
+    const target = fact.admin ?? fact.definition.default;
+    return `${from} · applying ${formatSettingValue(fact.definition, target)}`;
   }
   return from;
 }

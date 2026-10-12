@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createAgentJob,
   getAgentJobUsage,
   refreshAgentJobUsage,
   type AgentJobApi,
@@ -13,9 +14,17 @@ import {
 } from '@/lib/api/agents';
 
 import { RunDetails } from './RunDetails';
+import { PUSH_BATCH_MS, receiveHint, resetAgentPush } from './agentPush';
 import type { AgentJob } from './types';
 
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => navigation,
+}));
+
 vi.mock('@/lib/api/agents', () => ({
+  createAgentJob: vi.fn(),
   getAgentJobUsage: vi.fn(),
   refreshAgentJobUsage: vi.fn(),
 }));
@@ -23,6 +32,8 @@ vi.mock('@/lib/api/agents', () => ({
 beforeEach(() => {
   vi.mocked(getAgentJobUsage).mockReset();
   vi.mocked(refreshAgentJobUsage).mockReset();
+  vi.mocked(createAgentJob).mockReset();
+  navigation.push.mockReset();
 });
 
 afterEach(() => {
@@ -47,6 +58,8 @@ const HISTORY_JOB = {
   id: 'ajob_0',
   turn_no: 2,
   state: 'succeeded',
+  repo: 'acme/widgets',
+  task_prompt: '  Add checkout to the catalog page  ',
   runtime: 'codex',
   model: 'gpt-observed',
   reasoning_effort: 'high',
@@ -163,6 +176,190 @@ describe('RunDetails', () => {
     expect(screen.getByText('qwen-test')).toBeInTheDocument();
   });
 
+  it('uses a matching loaded turn for its status summary when the thread row is unavailable', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_1"
+        turnNo={7}
+        tab="overview"
+        fallback={{
+          ...CURRENT_JOB,
+          state: 'done',
+          startedAt: '2026-08-19T09:00:00.000Z',
+          finishedAt: '2026-08-19T09:02:00.000Z',
+        }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByRole('region', { name: 'Turn 7 summary' });
+    expect(within(summary).getByRole('heading', { name: 'Completed' })).toBeInTheDocument();
+    expect(within(summary).getByText('2m')).toBeInTheDocument();
+  });
+
+  it('never borrows status, failure, or metadata from another turn when a historical row is missing', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_missing"
+        turnNo={2}
+        tab="overview"
+        fallback={{
+          ...CURRENT_JOB,
+          state: 'failed',
+          stateNote: 'The latest turn failed.',
+          startedAt: '2026-08-19T09:00:00.000Z',
+          finishedAt: '2026-08-19T09:02:00.000Z',
+          prUrl: 'https://github.test/current-pr',
+        }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Status not recorded' })).toBeInTheDocument();
+    expect(screen.queryByText('qwen-test')).not.toBeInTheDocument();
+    expect(screen.queryByText('The latest turn failed.')).not.toBeInTheDocument();
+    expect(screen.queryByText('2m')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open draft pull request' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/follow-up/)).not.toBeInTheDocument();
+  });
+
+  it('shows the selected turn’s owner-facing failure reason and retry guidance', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{
+          ...HISTORY_JOB,
+          state: 'failed',
+          detail: 'shared Agent CLI turn exceeded its execution timeout',
+        }}
+        fallback={{ ...CURRENT_JOB, state: 'failed', stateNote: 'Unrelated current failure' }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByRole('region', { name: 'Turn 2 summary' });
+    expect(within(summary).getByRole('heading', { name: 'Failed' })).toBeInTheDocument();
+    expect(summary).toHaveTextContent('This response took too long and was stopped.');
+    expect(summary).toHaveTextContent(
+      'Review these details before sending a follow-up to try again.',
+    );
+    expect(screen.queryByText('Unrelated current failure')).not.toBeInTheDocument();
+  });
+
+  it('reports missing failure details without inventing a reason', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', detail: null }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/No failure details were recorded/)).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      detail: 'source checkout exceeds the retained import size limit',
+      guidance: /Ask an admin to raise the repository import limit/,
+    },
+    {
+      detail: 'Site misconfigured: no MCP relay is configured. Ask an administrator.',
+      guidance: /An admin needs to finish setting up the site/,
+    },
+  ])('gives an actionable prerequisite instead of a retry for $detail', ({ detail, guidance }) => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', detail }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(guidance)).toBeInTheDocument();
+    expect(screen.queryByText(/sending a follow-up to try again/)).not.toBeInTheDocument();
+  });
+
+  it('explains lost context without offering to continue the same chat', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', context_status: 'lost', detail: null }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Start a new chat to continue/)).toBeInTheDocument();
+    expect(screen.queryByText(/sending a follow-up to try again/)).not.toBeInTheDocument();
+  });
+
+  it('offers to restart a failed run in a new session, then navigates to it', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_new' } as AgentJobApi);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', detail: 'Build step timed out.' }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    const restart = screen.getByRole('button', { name: 'Restart in a new session' });
+    expect(restart).toBeInTheDocument();
+    fireEvent.click(restart);
+
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith({
+        repo: 'acme/widgets',
+        task_prompt: 'Add checkout to the catalog page',
+        model: 'gpt-observed',
+        reasoning_effort: 'high',
+      }),
+    );
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_new');
+  });
+
+  it('does not offer to restart in a new session for a run that is not failed', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={HISTORY_JOB}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole('button', { name: 'Restart in a new session' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('offers the workspace diff while saying it is the current workspace', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
     const onOpenGitDiff = vi.fn();
@@ -210,6 +407,108 @@ describe('RunDetails', () => {
     await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
     expect(screen.queryByText('$0')).toBeNull();
     expect(screen.getAllByText('Not recorded').length).toBeGreaterThan(0);
+  });
+
+  it('shows usage the change stream sent without reading it again', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_pushed"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('1,000')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+
+    const pushed = usage();
+    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 4321 };
+    act(() => receiveHint('usage', 'ajob_pushed', pushed));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+
+    expect(screen.getByText('4,321')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    resetAgentPush();
+  });
+
+  it('keeps the newer of the usage it read and the usage it was pushed', async () => {
+    vi.useFakeTimers();
+    const read = usage();
+    read.version = '0005';
+    read.ledger.totals = { ...read.ledger.totals!, tokens_in: 5555 };
+    vi.mocked(getAgentJobUsage).mockResolvedValue(read);
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_versions"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('5,555')).toBeInTheDocument();
+
+    // Computed before that read, delivered after it.
+    const older = usage();
+    older.version = '0004';
+    older.ledger.totals = { ...older.ledger.totals!, tokens_in: 4444 };
+    act(() => receiveHint('usage', 'ajob_versions', older));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+    expect(screen.getByText('5,555')).toBeInTheDocument();
+    expect(screen.queryByText('4,444')).toBeNull();
+    resetAgentPush();
+  });
+
+  it("keeps a newer pushed usage over the answer to the reader's refresh", async () => {
+    vi.useFakeTimers();
+    const before = usage();
+    before.version = '0002';
+    before.ledger.totals = { ...before.ledger.totals!, tokens_in: 2000 };
+    vi.mocked(getAgentJobUsage)
+      .mockResolvedValueOnce(before)
+      // Later reads are slow: only the refresh's answer can change what is shown.
+      .mockImplementation(() => new Promise(() => undefined));
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_refreshed"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('2,000')).toBeInTheDocument();
+
+    const pushed = usage();
+    pushed.version = '0003';
+    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 3000 };
+    act(() => receiveHint('usage', 'ajob_refreshed', pushed));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+
+    // The refresh answers with the cached usage as it was before that push.
+    let answer!: (value: AgentJobUsageApi) => void;
+    vi.mocked(refreshAgentJobUsage).mockImplementation(
+      () => new Promise((resolve) => (answer = resolve)),
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[0]);
+    await act(async () => answer(before));
+
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+    expect(screen.queryByText('2,000')).toBeNull();
+    resetAgentPush();
   });
 
   it('says the deployment has no ledger instead of showing nothing', async () => {

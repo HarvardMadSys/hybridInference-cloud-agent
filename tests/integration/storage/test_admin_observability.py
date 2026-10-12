@@ -25,7 +25,7 @@ from cloud_agent.api.deps import get_storage
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.assembly import Storage
-from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
+from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 
 @pytest_asyncio.fixture

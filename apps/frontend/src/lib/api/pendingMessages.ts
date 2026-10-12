@@ -73,6 +73,10 @@ export interface ThreadMessageResultApi {
 
 export interface ThreadMessageRequest {
   prompt: string;
+  /** Require idle chats, empty queues and a published shared workspace. */
+  require_idle?: boolean;
+  /** The newest turn verified by the caller; required with require_idle. */
+  expected_latest_job_id?: string;
   /** Omitted inherits the previous turn's skills; `[]` clears them. */
   skill_ids?: number[];
   attachment_ids?: number[];
@@ -185,16 +189,21 @@ function clearPendingKey(scope: string): void {
 export async function submitThreadMessage(
   threadId: string,
   body: ThreadMessageRequest,
+  options: {
+    /** A durable coordinator owns this ID and its receipt; this API never rotates it. */
+    requestId?: string;
+  } = {},
 ): Promise<ThreadMessageResultApi> {
   const scope = `thread:${threadId}`;
+  const request = { ...body, prompt: body.prompt.trim() };
   const send = (key: string) =>
     fetchWithAuth(API_BASE, `${threadPath(threadId)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
-      body: JSON.stringify(body),
+      body: JSON.stringify(request),
     });
-  let resp = await send(pendingKey(scope));
-  if (resp.status === 409) {
+  let resp = await send(options.requestId ?? pendingKey(scope));
+  if (resp.status === 409 && options.requestId === undefined) {
     const type = await errorType(resp);
     if (type === 'idempotency_conflict') {
       clearPendingKey(scope);
@@ -207,7 +216,7 @@ export async function submitThreadMessage(
     return queueJson<ThreadMessageResultApi>(resp);
   }
   const result = await queueJson<ThreadMessageResultApi>(resp);
-  clearPendingKey(scope);
+  if (options.requestId === undefined) clearPendingKey(scope);
   return result;
 }
 

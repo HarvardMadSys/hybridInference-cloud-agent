@@ -31,13 +31,64 @@ function entry(action: string, details: Record<string, unknown> | null = null): 
 }
 
 describe('describeAuditEntry', () => {
+  it('describes archive policy changes from snapshot and legacy audit details', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_settings: { enabled: false, region: 'us-east-1' },
+          new_settings: { enabled: true, region: 'us-east-1' },
+        }),
+      ),
+    ).toBe('Enabled sandbox archives');
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_settings: { enabled: true },
+          new_settings: { enabled: false },
+        }),
+      ),
+    ).toBe('Disabled sandbox archives');
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_settings: { enabled: true, region: 'us-east-1' },
+          new_settings: { enabled: true, region: 'us-west-2' },
+        }),
+      ),
+    ).toBe('Changed sandbox archive settings');
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox_archive_settings.set', {
+          old_enabled: false,
+          new_enabled: true,
+        }),
+      ),
+    ).toBe('Enabled sandbox archives');
+  });
+
+  it('describes a sandbox stop as a request, before the host confirms the result', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.sandbox.stop', { sandbox_id: 'sandbox-one', host: 'host-one' }),
+      ),
+    ).toBe('Requested stopping sandbox sandbox-one on host-one');
+  });
+
+  it('describes database reads using their table without exposing filter values', () => {
+    expect(describeAuditEntry(entry('agent.database.query', { table: 'agent_jobs' }))).toBe(
+      'Queried database table agent_jobs',
+    );
+    expect(describeAuditEntry(entry('agent.database.query'))).toBe('Queried the database');
+    expect(describeAuditEntry(entry('agent.database.pgadmin.open'))).toBe('Opened pgAdmin');
+  });
+
   it('says what a settings change was, in units, and what it replaced', () => {
     const global = entry('agent.host_settings.set', {
       changes: { agent_timeout_s: 7200 },
       old_values: { agent_timeout_s: null },
     });
     expect(describeAuditEntry(global, [TIMEOUT])).toBe(
-      "Set Turn time limit to 2 h for all servers (was each server's default)",
+      'Set Turn time limit to 2 h for all servers (was the deployment default)',
     );
     const cleared = entry('agent.runner_host.set_settings', {
       host: 'rtx6000b',
@@ -46,6 +97,13 @@ describe('describeAuditEntry', () => {
     });
     expect(describeAuditEntry(cleared, [TIMEOUT])).toBe(
       'Reset Turn time limit on rtx6000b to the Settings value (was 30 min)',
+    );
+    const reset = entry('agent.host_settings.set', {
+      changes: { agent_timeout_s: null },
+      old_values: { agent_timeout_s: 7200 },
+    });
+    expect(describeAuditEntry(reset, [TIMEOUT])).toBe(
+      'Reset Turn time limit for all servers to the deployment default (was 2 h)',
     );
   });
 
@@ -102,6 +160,9 @@ describe('describeAuditEntry', () => {
     ).toBe('Sent new sandboxes to gpu-2');
     expect(describeAuditEntry(entry('agent.compute.allocation.policy'))).toBe(
       "Changed a server's lease policy",
+    );
+    expect(describeAuditEntry(entry('agent.compute.cloudlab_defaults.set'))).toBe(
+      'Changed CloudLab defaults',
     );
   });
 

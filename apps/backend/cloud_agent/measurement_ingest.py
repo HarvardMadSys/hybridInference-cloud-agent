@@ -339,16 +339,6 @@ def _require_measurement_id(record: Mapping[str, Any]) -> str:
     return measurement_id
 
 
-def _bounded_count(record: Mapping[str, Any], key: str, limit: int) -> int:
-    """Return a required non-negative count field, refusing one over its cap."""
-    value = record.get(key)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise MeasurementRejected(f"{key} must be a non-negative integer")
-    if value > limit:
-        raise MeasurementRejected(f"{key} exceeds {limit}")
-    return value
-
-
 def _from_either(record: Mapping[str, Any], key: str) -> Any:
     """Return a field from the top level, or from facts when it is only there.
 

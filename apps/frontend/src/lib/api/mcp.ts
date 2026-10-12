@@ -74,6 +74,8 @@ export interface McpTemplateApi {
   transport: McpTransport;
   auth_kind: McpAuthKind;
   notes: string[];
+  documentation_url?: string;
+  browser_sign_in_available?: boolean;
 }
 
 /** Public metadata from the official MCP Registry, never an installed connection. */
@@ -213,6 +215,39 @@ export interface McpAuthorizeApi {
   authorization_url: string | null;
   needs_client_id: boolean;
   message: string;
+  /** The configured callback to register with a provider that requires an OAuth app. */
+  redirect_uri?: string | null;
+}
+
+/** Check an untrusted sign-in destination immediately before browser navigation. */
+export function validateMcpAuthorizationUrl(value: string): string {
+  const error = new Error('This server returned an unsafe sign-in address.');
+  if (
+    typeof value !== 'string' ||
+    !/^https:\/\//i.test(value) ||
+    /\s|\\/.test(value) ||
+    Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+  ) {
+    throw error;
+  }
+  let url: URL;
+  try {
+    // No base URL: relative and protocol-relative addresses are not accepted.
+    url = new URL(value);
+  } catch {
+    throw error;
+  }
+  const authority = value.slice(value.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  if (
+    url.protocol !== 'https:' ||
+    !url.hostname ||
+    !authority ||
+    authority.includes('@') ||
+    value.includes('#')
+  ) {
+    throw error;
+  }
+  return value;
 }
 
 /** One session's selection for one connection. */
@@ -258,10 +293,19 @@ export interface McpBindingRequest {
 export interface McpInvocationApi {
   id: number;
   job_id: string;
+  /** The attempt that raised the call; absent on older control planes. */
+  attempt_id?: number | null;
   thread_id: string;
+  /** Conversation title, absent on older control planes. */
+  thread_title?: string | null;
   connection_id: number;
   connection_label: string | null;
   capability_name: string;
+  capability_kind: McpCapabilityKind;
+  /** Null once a newer discovery replaced the catalogue the call was held under. */
+  capability_description: string | null;
+  /** Server-supplied hints (title, readOnlyHint, ...): untrusted, display only. */
+  capability_annotations: Record<string, unknown>;
   status: McpInvocationStatus;
   arguments_digest: string;
   /** Null when the platform could not decode the stored body. */
@@ -276,6 +320,9 @@ export interface McpInvocationApi {
 
 export interface McpInvocationsApi {
   invocations: McpInvocationApi[];
+  /** Optional during rolling upgrades from the unpaginated response. */
+  has_more?: boolean;
+  next_before_id?: number | null;
 }
 
 /** Add one connection by hand. A secret here is written, never echoed back. */
@@ -306,16 +353,13 @@ export interface McpInvocationQuery {
   threadId?: string;
   /** Only calls still waiting on the owner. */
   pendingOnly?: boolean;
+  limit?: number;
+  beforeId?: number;
 }
 
 /** Every MCP connection this user has added, with the offered templates. */
 export async function listMcpConnections(): Promise<McpConnectionsApi> {
   return jsonOrThrow(await fetchWithAuth(API_BASE, '/v1/agent/mcp/connections'));
-}
-
-/** Templates alone, for a caller that needs presets before it needs a list. */
-export async function listMcpTemplates(): Promise<McpTemplateApi[]> {
-  return jsonOrThrow(await fetchWithAuth(API_BASE, '/v1/agent/mcp/templates'));
 }
 
 /** Search our durable directory cache; this does not contact a listed server. */
@@ -446,13 +490,14 @@ export async function disconnectMcpConnection(connectionId: number): Promise<voi
 /**
  * Start a browser authorization for an OAuth connection.
  *
- * `clientId` is sent when the user supplies one after the platform reported
+ * Client credentials are sent when supplied after the platform reported
  * `needs_client_id`; the platform still owns discovery, registration and PKCE,
  * so the browser only ever travels to a URL this service built.
  */
 export async function authorizeMcpConnection(
   connectionId: number,
   clientId?: string,
+  clientSecret?: string,
 ): Promise<McpAuthorizeApi> {
   const resp = await fetchWithAuth(
     API_BASE,
@@ -460,7 +505,11 @@ export async function authorizeMcpConnection(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(clientId ? { client_id: clientId } : {}),
+      body: JSON.stringify(
+        clientId
+          ? { client_id: clientId, ...(clientSecret ? { client_secret: clientSecret } : {}) }
+          : {},
+      ),
     },
   );
   return jsonOrThrow(resp);
@@ -529,12 +578,14 @@ export async function updateMcpThreadBinding(
   );
 }
 
-/** Calls that needed a decision, for one job or one conversation. */
+/** Calls for one conversation, or pending approvals across the owner's conversations. */
 export async function listMcpInvocations(query: McpInvocationQuery): Promise<McpInvocationsApi> {
   const params = new URLSearchParams();
   if (query.jobId) params.set('job_id', query.jobId);
   if (query.threadId) params.set('thread_id', query.threadId);
   if (query.pendingOnly) params.set('pending_only', 'true');
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.beforeId !== undefined) params.set('before_id', String(query.beforeId));
   return jsonOrThrow(
     await fetchWithAuth(API_BASE, `/v1/agent/mcp/invocations?${params.toString()}`),
   );

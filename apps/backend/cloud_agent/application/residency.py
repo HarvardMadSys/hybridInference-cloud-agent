@@ -12,10 +12,10 @@ and none of them is a route. The lease length travels with it.
 from __future__ import annotations
 
 import contextlib
-import os
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 
 if TYPE_CHECKING:
     from cloud_agent.ports import GrantRepository
@@ -29,7 +29,13 @@ logger = get_logger("cloud_agent.api.hosts")
 #: the lease and the thread-attributed grant are renewed by the same beat and
 #: revoked together (retained-session design §§3 and 6), the cap on how long an idle resident
 #: process keeps a live credential after its host goes quiet.
-RESIDENCY_TTL_S = float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0)
+RESIDENCY_TTL_S = 1800.0
+
+
+def residency_ttl_s() -> float:
+    """Read the current lease duration for newly established or renewed residents."""
+    fallback = float(setting_env("AGENT_RESIDENCY_TTL_S") or RESIDENCY_TTL_S)
+    return number_setting("residency_ttl_s", fallback)
 
 
 async def _mint_residency_grant(
@@ -38,13 +44,19 @@ async def _mint_residency_grant(
     """Mint the worker-fenced grant for one supervisor-owned member process."""
     if grants is None:
         return None
+    # The gateway's mint is idempotent on (job, attempt), even after revoke.
+    # A Fork retry or another establishment within the same worker attempt
+    # rotates the residency and revokes its predecessor. Include that durable
+    # generation so its replacement cannot receive the revoked grant again,
+    # while retries of this particular mint still recover the same capability.
+    mint_attempt_id = f"residency:{row['establishing_attempt_id']}:{int(row['generation'])}"
     try:
         grant = await grants.mint(
             user_id=row["user_id"],
             job_id=f"thread:{row['thread_id']}",
-            attempt_id=str(row["establishing_attempt_id"]),
+            attempt_id=mint_attempt_id,
             models=[row["model"]],
-            ttl_seconds=int(RESIDENCY_TTL_S),
+            ttl_seconds=int(residency_ttl_s()),
         )
     except Exception:
         logger.warning(
@@ -75,6 +87,9 @@ async def _mint_residency_grant(
         thread_id=row["thread_id"], generation=row["generation"], grant_id=grant_id, **binding
     )
     if not linked:
-        await grants.revoke(grant_id)
+        # Generation takeover or clock expiry won the race with minting. The
+        # token must never escape, even when best-effort cleanup is unavailable.
+        with contextlib.suppress(Exception):
+            await grants.revoke(grant_id)
         return None
     return token

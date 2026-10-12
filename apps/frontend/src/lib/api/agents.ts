@@ -6,7 +6,7 @@ import type { SelectedSkillApi } from './skills';
 //
 // 1. **The event stream is read with fetch + ReadableStream, not EventSource.**
 //    EventSource cannot set an Authorization header, and these endpoints are
-//    authenticated. This mirrors the streaming-chat client in `chat.ts`.
+//    authenticated.
 // 2. **Every frame carries a global event id, and reconnects resume from it.**
 //    The gateway applies a finite cap to long-lived SSE, so a job that outlives
 //    one connection is normal, not exceptional — resuming by cursor is how the
@@ -342,6 +342,11 @@ export interface AgentJobUsageApi {
     /** Cache-inclusive input, null when the harness counters cannot establish it. */
     normalized_input_tokens?: number | null;
   };
+  /**
+   * Orders two reads of this job's usage, asked for or pushed: the one whose
+   * version compares greater saw everything the other did. Opaque.
+   */
+  version?: string | null;
   conversation?: {
     totals: AgentLedgerTotalsApi | null;
     unknown_rows: AgentLedgerUnknownRowsApi | null;
@@ -399,6 +404,10 @@ export interface AgentJobApi {
   published_pr_url: string | null;
   published_commit_sha?: string | null;
   detail: string | null;
+  /** Raised by one on every change to this turn's row (absent on older servers). */
+  revision?: number;
+  /** The same counter for the conversation's row: title, pin, archive. */
+  thread_revision?: number;
   metadata: Record<string, unknown> | null;
   /** Names only; optional so a pre-MCP deployment stays readable. */
   mcp_servers?: string[];
@@ -537,6 +546,9 @@ export interface AgentJobFileApi {
   path: string;
   kind: 'file';
   content: string | null;
+  /** Complete bounded bytes for binary downloads and passive raster previews. */
+  content_base64?: string | null;
+  media_type?: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | null;
   size: number | null;
   binary: boolean;
   truncated: boolean;
@@ -637,6 +649,8 @@ export interface AgentConfigApi {
   mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
+  /** Runtimes that install task-selected plugins when a sandbox is initialized. */
+  plugin_runtimes?: string[];
   /**
    * Effort levels each runtime can express, in its own vocabulary. A runtime
    * absent here cannot express one at all.
@@ -682,6 +696,38 @@ export interface AgentMcpServerApi {
 export async function getAgentConfig(options: { fresh?: boolean } = {}): Promise<AgentConfigApi> {
   const query = options.fresh ? '?fresh=true' : '';
   return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/config${query}`));
+}
+
+export interface CreateGitHubRepositoryRequest {
+  name: string;
+  description?: string;
+  private: boolean;
+}
+
+export interface CreatedGitHubRepository {
+  repo: string;
+  web_url: string;
+  default_branch: string;
+  /** Whether the connected GitHub App can already use the repository. */
+  accessible: boolean;
+}
+
+/**
+ * Create a personal GitHub repository initialized with a README.
+ *
+ * A failed response can follow a successful creation on GitHub, so this
+ * operation is never retried automatically. The caller must check GitHub
+ * before repeating an ambiguous request.
+ */
+export async function createGitHubRepository(
+  request: CreateGitHubRepositoryRequest,
+): Promise<CreatedGitHubRepository> {
+  const resp = await fetchWithAuth(API_BASE, '/v1/agent/repositories', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return jsonOrThrow(resp);
 }
 
 export type AgentIntegrationProvider = 'github' | 'gitlab';
@@ -784,18 +830,6 @@ export async function disconnectAgentIntegration(
   if (!resp.ok) await jsonOrThrow(resp);
 }
 
-/**
- * Model ids this gateway serves — the model picker's options.
- *
- * Sourced from the agent config, not /v1/models: that list answers for the
- * browsing user, and on staging it offered 15 models of which 13 failed the
- * job's first call. The config's list is the create endpoint's own predicate.
- */
-export async function listAgentModels(): Promise<string[]> {
-  const cfg = await getAgentConfig();
-  return cfg.models ?? [];
-}
-
 export interface RepoBranchesApi {
   default: string | null;
   branches: string[];
@@ -823,7 +857,16 @@ export interface McpBindingInputApi {
   prompts?: Record<string, 'deny' | 'confirm' | 'allow'>;
 }
 
+export interface AgentPluginInputApi {
+  /** Native name@marketplace (Claude/Codex), or an npm package (pi/OpenCode/Kilo). */
+  plugin: string;
+  /** GitHub owner/repo or a credential-free HTTPS Git URL for native plugins. */
+  marketplace?: string;
+}
+
 export interface CreateAgentJobRequest {
+  /** Installed before the first agent turn in this conversation's sandbox. */
+  plugins?: AgentPluginInputApi[];
   /** Omitted uses personal defaults; an empty list selects none. */
   skill_ids?: number[];
   /** Staged uploads to place under /uploads. Omitted attaches nothing. */
@@ -841,19 +884,6 @@ export interface CreateAgentJobRequest {
   /** A branch. The platform pins it to a commit at creation. */
   base_ref?: string;
   base_sha?: string;
-}
-
-export async function listAgentJobs(
-  limit = 50,
-  archived = false,
-  repo?: string,
-): Promise<AgentJobApi[]> {
-  const query = new URLSearchParams({ limit: String(limit) });
-  if (archived) query.set('archived', 'true');
-  if (repo) query.set('repo', repo);
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs?${query.toString()}`);
-  const body = await jsonOrThrow<{ jobs: AgentJobApi[] }>(resp);
-  return body.jobs;
 }
 
 export interface AgentConversationApi {
@@ -1179,11 +1209,12 @@ export async function getAgentThreadStats(jobId: string): Promise<AgentThreadSta
 }
 
 export async function createAgentJob(body: CreateAgentJobRequest): Promise<AgentJobApi> {
+  const request = { ...body, task_prompt: body.task_prompt.trim() };
   return submitOnce('create', (requestId) =>
     fetchWithAuth(API_BASE, '/v1/agent/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestId },
-      body: JSON.stringify(body),
+      body: JSON.stringify(request),
     }),
   );
 }
@@ -1443,19 +1474,6 @@ export async function forkAgentJob(
   }
 }
 
-/** Page through the event log. Used to backfill before the stream attaches. */
-export async function listAgentJobEvents(
-  jobId: string,
-  after = 0,
-  limit = 500,
-): Promise<{ events: AgentJobEventApi[]; next_cursor: number }> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/events?after=${after}&limit=${limit}`,
-  );
-  return jsonOrThrow(resp);
-}
-
 /** One stored event labelled with the conversation turn it belongs to. */
 export interface AgentThreadEventApi extends AgentJobEventApi {
   job_id: string;
@@ -1525,13 +1543,30 @@ export interface AgentTerminalApi {
   last_seq: number;
 }
 
+export interface AgentTerminalListApi {
+  terminals: AgentTerminalApi[];
+  /** Per-workspace creation limit advertised by the owning broker. */
+  max_sessions?: number | null;
+  /** Maximum input bytes in one request, advertised by the owning broker. */
+  max_input_bytes?: number | null;
+}
+
 /** List the PTY sessions that still belong to this workspace. */
-export async function listAgentTerminals(jobId: string): Promise<AgentTerminalApi[]> {
+export function listAgentTerminals(jobId: string): Promise<AgentTerminalApi[]>;
+export function listAgentTerminals(
+  jobId: string,
+  options: { includeLimits: true },
+): Promise<AgentTerminalApi[] | AgentTerminalListApi>;
+export async function listAgentTerminals(
+  jobId: string,
+  options?: { includeLimits: true },
+): Promise<AgentTerminalApi[] | AgentTerminalListApi> {
   const resp = await fetchWithAuth(
     API_BASE,
     `/v1/agent/jobs/${encodeURIComponent(jobId)}/terminals`,
   );
-  const body = await jsonOrThrow<AgentTerminalApi[] | { terminals: AgentTerminalApi[] }>(resp);
+  const body = await jsonOrThrow<AgentTerminalApi[] | AgentTerminalListApi>(resp);
+  if (options?.includeLimits) return body;
   return Array.isArray(body) ? body : body.terminals;
 }
 
@@ -1564,15 +1599,20 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function utf8Chunks(value: string): Uint8Array[] {
-  const encoded = new TextEncoder().encode(value);
+function byteChunks(encoded: Uint8Array, maximum: number): Uint8Array[] {
   if (encoded.byteLength === 0) return [];
   const chunks: Uint8Array[] = [];
   let offset = 0;
   while (offset < encoded.byteLength) {
-    let end = Math.min(offset + MAX_TERMINAL_INPUT_BYTES, encoded.byteLength);
+    let end = Math.min(offset + maximum, encoded.byteLength);
     if (end < encoded.byteLength) {
-      while (end > offset && (encoded[end] & 0xc0) === 0x80) end -= 1;
+      // Prefer not to split a UTF-8 character. A character has at most three
+      // continuation bytes, so anything longer is not text and is cut as is.
+      let boundary = end;
+      while (boundary > end - 4 && boundary > offset && (encoded[boundary] & 0xc0) === 0x80) {
+        boundary -= 1;
+      }
+      if (boundary > offset && (encoded[boundary] & 0xc0) !== 0x80) end = boundary;
     }
     chunks.push(encoded.subarray(offset, end));
     offset = end;
@@ -1580,13 +1620,26 @@ function utf8Chunks(value: string): Uint8Array[] {
   return chunks;
 }
 
-/** Send keystrokes, including control sequences, to a running PTY. */
+/**
+ * Send keystrokes, including control sequences, to a running PTY.
+ *
+ * Text is sent as UTF-8. Bytes are sent as they are: xterm reports some mouse
+ * events as binary that is not valid UTF-8.
+ */
 export async function writeAgentTerminalInput(
   jobId: string,
   terminalId: string,
-  data: string,
+  data: string | Uint8Array,
+  maxInputBytes = MAX_TERMINAL_INPUT_BYTES,
 ): Promise<void> {
-  for (const chunk of utf8Chunks(data)) {
+  // Four bytes can hold any UTF-8 character; smaller or malformed limits
+  // cannot safely delimit a chunk and use the compatibility fallback.
+  const maximum =
+    Number.isInteger(maxInputBytes) && maxInputBytes >= 4
+      ? Math.min(maxInputBytes, MAX_TERMINAL_INPUT_BYTES)
+      : MAX_TERMINAL_INPUT_BYTES;
+  const encoded = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+  for (const chunk of byteChunks(encoded, maximum)) {
     const resp = await fetchWithAuth(API_BASE, `${terminalPath(jobId, terminalId)}/input`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1634,12 +1687,19 @@ export interface AgentTerminalResetEvent {
   reason: 'output_truncated';
 }
 
+/** Sent first on every connection: events up to `seq` predate this viewer. */
+export interface AgentTerminalAttachedEvent {
+  seq: number;
+}
+
 export interface StreamAgentTerminalOptions {
   after?: number;
   signal?: AbortSignal;
   onOutput: (event: AgentTerminalOutputEvent) => void;
   onReset: (event: AgentTerminalResetEvent) => void;
   onExit: (event: AgentTerminalExitEvent) => void;
+  /** Where the terminal's history ends; brokers that predate it never call this. */
+  onAttached?: (event: AgentTerminalAttachedEvent) => void;
 }
 
 /**
@@ -1668,6 +1728,14 @@ export async function streamAgentTerminal(
     try {
       const payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
       const seq = payload.seq;
+      if (eventName === 'attached') {
+        // Not a terminal event: it names where history ends and must not move
+        // the resume cursor.
+        if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0) {
+          options.onAttached?.({ seq });
+        }
+        return false;
+      }
       if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= cursor) return false;
       if (eventName === 'output' && typeof payload.data === 'string') {
         cursor = seq;
@@ -1725,7 +1793,9 @@ export async function streamAgentTerminal(
         { headers: { Accept: 'text/event-stream' }, signal: options.signal },
       );
       if (!resp.ok) {
-        reconnectable = false;
+        // A temporarily unavailable host or rate limit must not disable a
+        // retained terminal. Resume from the same cursor after the backoff.
+        reconnectable = resp.status === 429 || (resp.status >= 500 && resp.status < 600);
         await jsonOrThrow(resp);
         return;
       }
@@ -1805,13 +1875,14 @@ export interface StreamAgentJobOptions {
   signal?: AbortSignal;
 }
 
-interface ParsedFrame {
+export interface ParsedFrame {
   event: string;
   data: string;
   id?: number;
 }
 
-function parseFrame(raw: string): ParsedFrame | null {
+/** One SSE frame's fields; `null` for a comment-only frame such as a keepalive. */
+export function parseFrame(raw: string): ParsedFrame | null {
   let event = 'message';
   let id: number | undefined;
   const dataLines: string[] = [];
@@ -1839,6 +1910,26 @@ function parseFrame(raw: string): ParsedFrame | null {
 export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions): Promise<void> {
   let cursor = opts.lastEventId ?? 0;
   let finished = false;
+  let reconnectAttempts = 0;
+
+  // Empty or repeatedly failing streams must not create a reconnect storm.
+  // New event progress restores the short delay for the next dropped stream.
+  const waitToReconnect = () =>
+    new Promise<void>((resolve) => {
+      if (opts.signal?.aborted) {
+        resolve();
+        return;
+      }
+      const delayMs = Math.min(100 * 2 ** reconnectAttempts, 5_000);
+      reconnectAttempts = Math.min(reconnectAttempts + 1, 6);
+      const finish = () => {
+        clearTimeout(timer);
+        opts.signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      opts.signal?.addEventListener('abort', finish, { once: true });
+    });
 
   while (!finished) {
     if (opts.signal?.aborted) return;
@@ -1893,7 +1984,9 @@ export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions)
             const parsed = JSON.parse(frame.data) as AgentJobEventApi;
             // Track the cursor from the frame id so a reconnect resumes
             // exactly here, with no gap and no duplicate.
-            cursor = frame.id ?? parsed.id ?? cursor;
+            const nextCursor = frame.id ?? parsed.id ?? cursor;
+            if (nextCursor > cursor) reconnectAttempts = 0;
+            cursor = nextCursor;
             opts.onEvent(parsed);
           } catch {
             // A frame we cannot parse is dropped rather than aborting the
@@ -1907,7 +2000,14 @@ export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions)
       // fires. Reconnect from the cursor instead of surfacing an error.
       opts.onError?.(err);
     } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        // Abort and network failures may already have errored the body.
+      }
       reader.releaseLock();
     }
+
+    if (!finished) await waitToReconnect();
   }
 }

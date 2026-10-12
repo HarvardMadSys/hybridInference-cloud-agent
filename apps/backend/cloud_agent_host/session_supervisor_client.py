@@ -9,6 +9,11 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent_host.bounded_output import (
+    MAX_PROTOCOL_LINE_BYTES,
+    protocol_lines,
+)
+
 if TYPE_CHECKING:
     import builtins
     from collections.abc import Iterator
@@ -25,8 +30,13 @@ class SharedTurnStream:
 
     def frames(self) -> Iterator[dict[str, Any]]:
         """Yield validated object frames until result/error."""
-        for line in self._response.iter_lines():
-            if not line:
+        # Frames include both normalized content and the raw CLI record, plus
+        # JSON escaping. Keep HTTP framing bounded before JSON parsing too.
+        for line in protocol_lines(
+            self._response.iter_text(),
+            max_bytes=MAX_PROTOCOL_LINE_BYTES * 4,
+        ):
+            if not line.strip():
                 continue
             try:
                 value = json.loads(line)
@@ -50,6 +60,55 @@ class SessionSupervisorError(RuntimeError):
 
     def __str__(self) -> str:
         return self.message
+
+
+#: Where a FastAPI validation error says a field came from. Dropped from the
+#: field path: every lifecycle field is in the body, so it only adds noise.
+_REQUEST_PARTS = frozenset({"body", "query", "path", "header", "cookie"})
+
+
+def _validation_problems(detail: Any) -> str:
+    """Name the fields a FastAPI validation error rejected, never their values.
+
+    The values stay out: the field most likely to exceed its bound is a
+    credential, and this text becomes an event the chat's owner reads.
+    """
+    if not isinstance(detail, list):
+        return ""
+    problems: list[str] = []
+    for item in detail[:3]:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("loc")
+        parts = location if isinstance(location, list) else []
+        if parts and parts[0] in _REQUEST_PARTS:
+            parts = parts[1:]
+        field_path = ".".join(str(part) for part in parts)
+        message = str(item.get("msg") or "is invalid")[:200]
+        problems.append(f"{field_path}: {message}" if field_path else message)
+    return "; ".join(problems)
+
+
+def _error_detail(response: httpx.Response, refused: str) -> str:
+    """The broker's own reason for an error response, or the most a caller can say.
+
+    A refusal the broker anticipated carries its reason as a string
+    ``detail``. Anything else used to collapse into ``refused`` alone, which
+    named neither the call nor the cause: a request the broker's models
+    rejected, whose ``detail`` is a list, or a crash an older broker answered
+    as plain text. The status, and the fields a validation error names, are
+    what make that line findable in the broker's log.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail:
+        return detail
+    reason = f"{refused}: HTTP {response.status_code} {response.reason_phrase}".rstrip()
+    problems = _validation_problems(detail)
+    return f"{reason} ({problems})" if problems else reason
 
 
 class SessionSupervisorClient:
@@ -86,14 +145,14 @@ class SessionSupervisorClient:
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
         if response.is_error:
-            detail = "shared Session Supervisor rejected the lifecycle transition"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
-            raise SessionSupervisorError(response.status_code, detail)
+            operation = suffix or "status"
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(
+                    response,
+                    f"shared Session Supervisor rejected the lifecycle transition ({operation})",
+                ),
+            )
         body = response.json()
         if not isinstance(body, dict):
             raise SessionSupervisorError(502, "shared Session Supervisor returned invalid data")
@@ -117,14 +176,10 @@ class SessionSupervisorClient:
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
         if response.is_error:
-            detail = "workspace broker rejected the profiling policy"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
-            raise SessionSupervisorError(response.status_code, detail)
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(response, "workspace broker rejected the profiling policy"),
+            )
         body = response.json()
         if not isinstance(body, dict):
             raise SessionSupervisorError(502, "workspace broker returned invalid data")
@@ -156,6 +211,34 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(502, "workspace broker returned invalid data")
         return body
 
+    def apply_sandbox_archive_settings(
+        self, settings: dict[str, Any], *, timeout: float = 5.0
+    ) -> dict[str, Any]:
+        """Relay one complete DB archive policy and read its applied revision.
+
+        AWS credentials are intentionally absent: only the non-secret storage
+        policy crosses this channel, and the broker uses its own workload
+        identity. Re-sending an equal revision is idempotent and repairs a
+        broker that restarted since the previous heartbeat.
+        """
+        try:
+            response = self._client.post(
+                f"{self._base_url}/sandbox-archive-settings",
+                json={"settings": settings},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
+        if response.is_error:
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(response, "workspace broker rejected sandbox archive settings"),
+            )
+        body = response.json()
+        if not isinstance(body, dict):
+            raise SessionSupervisorError(502, "workspace broker returned invalid data")
+        return body
+
     def list(self) -> builtins.list[dict[str, Any]]:
         """Observe every retained container owned by this host's broker."""
         try:
@@ -163,14 +246,12 @@ class SessionSupervisorClient:
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "chat Session Supervisor is unavailable") from exc
         if response.is_error:
-            detail = "chat Session Supervisor rejected the lifecycle observation"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
-            raise SessionSupervisorError(response.status_code, detail)
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(
+                    response, "chat Session Supervisor rejected the lifecycle observation"
+                ),
+            )
         body = response.json()
         rows = body.get("sandboxes") if isinstance(body, dict) else None
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
@@ -205,6 +286,7 @@ class SessionSupervisorClient:
                 "resident_slot_capacity": spec.resident_slot_capacity,
                 "memory_limit": spec.memory_limit,
                 "cpu_limit": spec.cpu_limit,
+                "disk_limit_mib": spec.disk_limit_mib,
                 "stop_timeout_s": spec.stop_timeout_s,
                 "members": members,
                 "owner": owner,
@@ -228,6 +310,80 @@ class SessionSupervisorClient:
             thread_id,
             "resident",
             payload={"token": token, "launch": asdict(launch), "profiling": profiling},
+            # Native package installation runs before the resident is ready.
+            timeout=960.0 if launch.plugins else None,
+        )
+
+    def capture_initial_archive(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        token: str,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str,
+        preparation_id: str,
+        base_sha: str,
+    ) -> dict[str, Any]:
+        """Persist the prepared pre-prompt workspace exactly once."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "archive-initial",
+            timeout=900.0,
+            payload={
+                "sandbox_id": spec.sandbox_id,
+                "generation": spec.generation,
+                "origin_thread_id": spec.thread_id,
+                "runtime_id": spec.runtime_id,
+                "runtime_version": spec.runtime_version,
+                "sandbox_image_digest": spec.sandbox_image_digest,
+                "expected_container_id": expected_container_id,
+                "resident_slot_capacity": spec.resident_slot_capacity,
+                "memory_limit": spec.memory_limit,
+                "cpu_limit": spec.cpu_limit,
+                "disk_limit_mib": spec.disk_limit_mib,
+                "stop_timeout_s": spec.stop_timeout_s,
+                "members": members,
+                "token": token,
+                "preparation_id": preparation_id,
+                "base_sha": base_sha,
+            },
+        )
+
+    def initial_archive_status(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        token: str,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str,
+        preparation_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a crash-committed baseline before any workspace reset."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "archive-initial/status",
+            timeout=900.0,
+            payload={
+                "sandbox_id": spec.sandbox_id,
+                "generation": spec.generation,
+                "origin_thread_id": spec.thread_id,
+                "runtime_id": spec.runtime_id,
+                "runtime_version": spec.runtime_version,
+                "sandbox_image_digest": spec.sandbox_image_digest,
+                "expected_container_id": expected_container_id,
+                "resident_slot_capacity": spec.resident_slot_capacity,
+                "memory_limit": spec.memory_limit,
+                "cpu_limit": spec.cpu_limit,
+                "disk_limit_mib": spec.disk_limit_mib,
+                "stop_timeout_s": spec.stop_timeout_s,
+                "members": members,
+                "token": token,
+                "preparation_id": preparation_id,
+            },
         )
 
     def start_shared_turn(
@@ -264,13 +420,7 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
         if response.is_error:
             response.read()
-            detail = "shared Session Supervisor rejected the turn"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
+            detail = _error_detail(response, "shared Session Supervisor rejected the turn")
             status_code = response.status_code
             response.close()
             raise SessionSupervisorError(status_code, detail)
@@ -328,17 +478,30 @@ class SessionSupervisorClient:
         thread_id: str,
         *,
         generation: int,
+        activation_generation: int,
         reason: str = "idle",
+        member_activation_generations: dict[str, int] | None = None,
     ) -> dict[str, Any]:
-        """Apply a group-fenced shared idle stop."""
+        """Apply a group- and activation-fenced shared idle stop."""
         return self._shared_request(
             "POST",
             thread_id,
             "stop-idle",
+            # A configured archive makes the clean stop synchronous: Docker
+            # exports bounded final roots and completes bounded S3 retries
+            # before this call can report success.
+            timeout=1800.0,
             payload={
                 "generation": generation,
-                "activation_generation": 0,
+                "activation_generation": activation_generation,
                 "reason": reason,
+                **(
+                    {}
+                    if member_activation_generations is None
+                    else {
+                        "member_activation_generations": member_activation_generations,
+                    }
+                ),
             },
         )
 

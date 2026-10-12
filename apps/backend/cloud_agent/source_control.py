@@ -8,9 +8,10 @@ request publishing lifecycle supports GitLab end to end.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
-import os
+import math
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,12 +21,23 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from cloud_agent.settings import number_setting, settings_environment
+
 if TYPE_CHECKING:
     from cloud_agent.ports import SourceControlRepository
 
 GITLAB_ORIGIN = "https://gitlab.com"
 OAUTH_STATE_TTL = timedelta(minutes=10)
 _TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
+_REFRESH_LEASE_DB_MARGIN_SECONDS = 30
+_GITLAB_REFRESH_WAIT_ATTEMPTS = 10
+_GITLAB_REFRESH_WAIT_INTERVAL_S = 0.3
+
+
+def _refresh_lease_seconds(request_timeout_s: float) -> int:
+    """Keep a refresh lease live through provider I/O and its fenced write."""
+    return max(1, math.ceil(request_timeout_s + _REFRESH_LEASE_DB_MARGIN_SECONDS))
+
 
 #: Wraps stored provider credentials. Its own secret, not the gateway's — the
 #: source derived this key from ``API_KEY_SECRET``, which meant the gateway
@@ -57,7 +69,9 @@ class SourceControlCipher:
     """Encrypt provider secrets with a domain-separated server key."""
 
     def __init__(self, secret: str | None = None, *, domain: bytes = SOURCE_CONTROL_DOMAIN) -> None:
-        material = secret if secret is not None else os.getenv(ENV_ENCRYPTION_KEY, "")
+        from cloud_agent.settings import setting_env
+
+        material = secret if secret is not None else setting_env(ENV_ENCRYPTION_KEY, "")
         if not material:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"
@@ -138,7 +152,7 @@ def github_connect_configured(app_credentials: Any, env: dict[str, str] | None =
     of all three there is nothing for a user to press, and the deployment's
     allowlist is the only way a repository becomes available.
     """
-    source = env if env is not None else os.environ
+    source = env if env is not None else settings_environment()
     return (
         app_credentials is not None
         and bool((source.get("AGENT_GITHUB_APP_INSTALL_URL") or "").strip())
@@ -178,7 +192,7 @@ class GitLabOAuthConfig:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> GitLabOAuthConfig | None:
         """Load a complete, safe GitLab.com OAuth configuration or return None."""
-        source = env if env is not None else dict(os.environ)
+        source = env if env is not None else settings_environment()
         client_id = (source.get("AGENT_GITLAB_OAUTH_CLIENT_ID") or "").strip()
         client_secret = (source.get("AGENT_GITLAB_OAUTH_CLIENT_SECRET") or "").strip()
         redirect_uri = (source.get("AGENT_GITLAB_OAUTH_REDIRECT_URI") or "").strip()
@@ -211,12 +225,12 @@ class GitLabOAuthClient:
         config: GitLabOAuthConfig,
         *,
         cipher: SourceControlCipher,
-        timeout_s: float = 20.0,
+        timeout_s: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.config = config
         self.cipher = cipher
-        self._timeout_s = timeout_s
+        self._timeout_override = timeout_s
         self._transport = transport
 
     async def authorization_url(self, store: SourceControlRepository, *, user_id: str) -> str:
@@ -234,12 +248,24 @@ class GitLabOAuthClient:
         )
         return f"{GITLAB_ORIGIN}/oauth/authorize?{urlencode({'client_id': self.config.client_id, 'redirect_uri': self.config.redirect_uri, 'response_type': 'code', 'state': state, 'scope': 'read_user read_api', 'code_challenge': challenge.decode('ascii'), 'code_challenge_method': 'S256'})}"
 
-    def _client(self) -> httpx.AsyncClient:
+    def _client(self, *, timeout_s: float | None = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            timeout=self._timeout_s,
+            timeout=self.request_timeout_s if timeout_s is None else timeout_s,
             transport=self._transport,
             follow_redirects=False,
         )
+
+    @property
+    def request_timeout_s(self) -> float:
+        """Effective deadline used for the next provider request."""
+        if self._timeout_override is not None:
+            return self._timeout_override
+        return number_setting("gitlab_request_timeout_s", 20.0)
+
+    @property
+    def refresh_lease_seconds(self) -> int:
+        """Lease long enough for provider I/O plus the fenced database write."""
+        return _refresh_lease_seconds(self.request_timeout_s)
 
     @staticmethod
     def _require_success(response: httpx.Response, operation: str) -> dict[str, Any]:
@@ -277,9 +303,11 @@ class GitLabOAuthClient:
             raise SourceControlError("GitLab code exchange returned no usable token")
         return body
 
-    async def _refresh(self, refresh_token: str) -> dict[str, Any]:
+    async def _refresh(
+        self, refresh_token: str, *, timeout_s: float | None = None
+    ) -> dict[str, Any]:
         try:
-            async with self._client() as client:
+            async with self._client(timeout_s=timeout_s) as client:
                 response = await client.post(
                     f"{GITLAB_ORIGIN}/oauth/token",
                     data={
@@ -379,6 +407,28 @@ class GitLabOAuthClient:
                 break
         return projects
 
+    async def _await_gitlab_refresh(
+        self,
+        store: SourceControlRepository,
+        *,
+        user_id: str,
+    ) -> str:
+        """Return only a winning refresh/reconnect token, or fail retryably."""
+        for attempt in range(_GITLAB_REFRESH_WAIT_ATTEMPTS):
+            current = await store.get_gitlab_connection(user_id=user_id)
+            if current is None:
+                raise SourceControlError("The GitLab connection changed while its token refreshed.")
+            # A missing lease means either the winner stored its result or a
+            # reconnect installed the current credential. This also handles a
+            # loser whose initial snapshot already observed the winner's
+            # generation. An abandoned lease retains its (possibly expired)
+            # timestamp, so it fails retryably instead of exposing an old token.
+            if current.get("refresh_lease_expires_at") is None:
+                return self.cipher.decrypt(current["access_token_ciphertext"])
+            if attempt + 1 < _GITLAB_REFRESH_WAIT_ATTEMPTS:
+                await asyncio.sleep(_GITLAB_REFRESH_WAIT_INTERVAL_S)
+        raise SourceControlError("The GitLab token is being refreshed. Try again shortly.")
+
     async def access_token_for_connection(
         self, store: SourceControlRepository, connection: dict[str, Any]
     ) -> str:
@@ -388,16 +438,39 @@ class GitLabOAuthClient:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at > datetime.now(timezone.utc) + _TOKEN_REFRESH_MARGIN:
             return self.cipher.decrypt(connection["access_token_ciphertext"])
-        refresh_token = self.cipher.decrypt(connection["refresh_token_ciphertext"])
-        refreshed = await self._refresh(refresh_token)
-        await store.update_gitlab_tokens(
-            connection_id=connection["id"],
-            user_id=connection["user_id"],
-            access_token_ciphertext=self.cipher.encrypt(refreshed["access_token"]),
-            refresh_token_ciphertext=self.cipher.encrypt(refreshed["refresh_token"]),
-            expires_at=self.token_expiry(refreshed),
-        )
-        return refreshed["access_token"]
+        connection_id = int(connection["id"])
+        user_id = str(connection["user_id"])
+        renewed = None
+        async with store.serialize_gitlab_account(user_id=user_id) as account_store:
+            # Pin the request timeout to the value that sized this claim. A
+            # settings update between these awaits must affect the next
+            # request, not lengthen this single-use refresh past its lease.
+            refresh_timeout_s = self.request_timeout_s
+            claim = await account_store.claim_gitlab_token_refresh(
+                connection_id=connection_id,
+                user_id=user_id,
+                lease_seconds=_refresh_lease_seconds(refresh_timeout_s),
+                margin_seconds=int(_TOKEN_REFRESH_MARGIN.total_seconds()),
+            )
+            if claim is not None:
+                refresh_generation = int(claim["refresh_generation"])
+                refresh_token = self.cipher.decrypt(claim["refresh_token_ciphertext"])
+                # The claim committed before provider I/O. A transient failure
+                # leaves its recoverable lease and releases this outer lock.
+                refreshed = await self._refresh(refresh_token, timeout_s=refresh_timeout_s)
+                if await account_store.update_gitlab_tokens(
+                    connection_id=connection_id,
+                    user_id=user_id,
+                    refresh_generation=refresh_generation,
+                    access_token_ciphertext=self.cipher.encrypt(refreshed["access_token"]),
+                    refresh_token_ciphertext=self.cipher.encrypt(refreshed["refresh_token"]),
+                    expires_at=self.token_expiry(refreshed),
+                ):
+                    renewed = str(refreshed["access_token"])
+        if renewed is not None:
+            return renewed
+        # Poll only after releasing serialization, so the winner can store.
+        return await self._await_gitlab_refresh(store, user_id=user_id)
 
     async def projects_for_connection(
         self, store: SourceControlRepository, connection: dict[str, Any]

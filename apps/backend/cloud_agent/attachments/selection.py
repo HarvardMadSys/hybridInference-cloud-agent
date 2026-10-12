@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.attachments.models import (
-    MAX_ATTACHMENT_FILES,
-    MAX_ATTACHMENT_TOTAL_BYTES,
     SANDBOX_UPLOAD_DIR,
     AttachmentError,
     AttachmentRef,
+    attachment_max_files,
+    attachment_max_total_bytes,
+    attachment_size_label,
 )
 
 if TYPE_CHECKING:
@@ -18,11 +19,15 @@ if TYPE_CHECKING:
 
 def check_selection(rows: list[dict[str, Any]]) -> None:
     """Bound what one turn can carry, on the server as well as in the browser."""
-    if len(rows) > MAX_ATTACHMENT_FILES:
-        raise AttachmentError(f"Attach at most {MAX_ATTACHMENT_FILES} files.")
+    max_files = attachment_max_files()
+    max_total_bytes = attachment_max_total_bytes()
+    if len(rows) > max_files:
+        raise AttachmentError(f"Attach at most {max_files} files.")
     total = sum(int(row["size_bytes"]) for row in rows)
-    if total > MAX_ATTACHMENT_TOTAL_BYTES:
-        raise AttachmentError("Attached files must total no more than 20 MB.")
+    if total > max_total_bytes:
+        raise AttachmentError(
+            f"Attached files must total no more than {attachment_size_label(max_total_bytes)}."
+        )
 
 
 async def resolve_attachments(

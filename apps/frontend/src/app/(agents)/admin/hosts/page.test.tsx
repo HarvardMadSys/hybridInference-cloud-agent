@@ -1,6 +1,18 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
+// Setup notices have their own tests; this page uses a configured deployment.
+vi.mock('@/lib/api/adminSettings', () => ({
+  getAgentAdminSettings: async () => ({
+    revision: 1,
+    definitions: [],
+    values: {},
+    secret_configured: {},
+    bootstrap: [],
+    setup: { required: false, groups: [], bootstrap_missing: [] },
+  }),
+}));
+
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,8 +23,12 @@ import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
 const auth = vi.hoisted(() => ({ role: 'admin', access: undefined as AgentAccessApi | undefined }));
+const computeServerInventory = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
 beforeEach(() => {
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
+  computeServerInventory.current = null;
 });
 
 vi.mock('@/components/providers', () => ({
@@ -62,24 +78,36 @@ import AdminHostsPage from './page';
 
 // Exercise the parent's Host commands and polling through its scoped render contract.
 // ComputeResources.test verifies the real drawer selection and navigation.
-vi.mock('./ComputeResources', () => ({
-  default: ({
+vi.mock('./ComputeResources', async () => {
+  const { useEffect } = await vi.importActual<typeof import('react')>('react');
+
+  function MockComputeResources({
     renderHostControls,
     serverGroups,
     placementControl,
+    onInventory,
   }: {
     placementControl?: ReactNode;
     renderHostControls: (hosts: string[]) => ReactNode;
     serverGroups?: { members: { host: string }[] }[];
-  }) => (
-    <section aria-label="Servers">
-      {placementControl}
-      {renderHostControls(
-        (serverGroups ?? []).flatMap((server) => server.members.map((host) => host.host)),
-      )}
-    </section>
-  ),
-}));
+    onInventory?: (snapshot: Record<string, unknown>) => void;
+  }) {
+    const inventorySnapshot = computeServerInventory.current;
+    useEffect(() => {
+      if (inventorySnapshot !== null) onInventory?.(inventorySnapshot);
+    }, [inventorySnapshot, onInventory]);
+    return (
+      <section aria-label="Servers">
+        {placementControl}
+        {renderHostControls(
+          (serverGroups ?? []).flatMap((server) => server.members.map((host) => host.host)),
+        )}
+      </section>
+    );
+  }
+
+  return { default: MockComputeResources };
+});
 
 const mocked = {
   list: getAgentRunnerHosts as unknown as ReturnType<typeof vi.fn>,
@@ -510,9 +538,9 @@ describe('AdminHostsPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
 
     expect(confirm).toHaveBeenCalledTimes(1);
-    // The consequence has to be in the prompt: force does not stop the
-    // attempts, it leaves them to their leases.
-    expect(confirm.mock.calls[0][0]).toMatch(/does not stop them/);
+    // The consequence has to be in the prompt: force ends the host's running
+    // attempts now, requeueing them or marking a chat lost.
+    expect(confirm.mock.calls[0][0]).toMatch(/Removing it ends them/);
     expect(mocked.remove).not.toHaveBeenCalled();
 
     confirm.mockReturnValue(true);
@@ -681,6 +709,39 @@ describe('capacity columns', () => {
       'title',
       expect.stringContaining('next heartbeat'),
     );
+  });
+
+  it('keeps autoscaler-managed slot capacity visible without a manual editor', async () => {
+    computeServerInventory.current = {
+      allocations: [
+        {
+          id: 'resource-a',
+          name: 'Autoscaled CloudLab',
+          nodes: [{ hosts: ['runner-a'] }],
+          blocked_reasons: [
+            {
+              code: 'autoscaling_managed',
+              message: 'Lifecycle is managed by CloudLab autoscaling.',
+            },
+          ],
+        },
+      ],
+      hosts: [{ host: 'runner-a', allocation_id: 'resource-a' }],
+      active_host: null,
+      observed_at: '2026-10-11T12:34:31Z',
+    };
+    mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_used: 1 })]));
+    renderPage();
+
+    const explanation = await screen.findByText(
+      'Slots are managed from fresh capacity by CloudLab auto-scaling.',
+    );
+    const row = screen.getByRole('rowheader', { name: 'runner-a' }).closest('tr')!;
+    expect(within(row).getByText('1 / 4 in use')).toBeInTheDocument();
+    expect(explanation).toBeInTheDocument();
+    expect(within(row).queryByLabelText('Turns at once for runner-a')).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
+    expect(mocked.slots).not.toHaveBeenCalled();
   });
 
   it('offers no reset: the saved number is simply the number the host has', async () => {
@@ -1602,10 +1663,11 @@ describe('runtime settings', () => {
       .closest('tr')!;
     expect(within(timeout).getByText('2 h')).toBeInTheDocument();
     expect(within(timeout).getByText('set for all servers')).toBeInTheDocument();
+    fireEvent.click(within(panel).getByText('Advanced'));
     const sessions = within(panel)
       .getByRole('rowheader', { name: 'Terminals per server' })
       .closest('tr')!;
-    expect(within(sessions).getByText('server default')).toBeInTheDocument();
+    expect(within(sessions).getByText('deployment default')).toBeInTheDocument();
 
     const input = within(panel).getByLabelText('Terminals per server for runner-a');
     fireEvent.change(input, { target: { value: '8' } });
@@ -1619,6 +1681,82 @@ describe('runtime settings', () => {
     expect(
       await within(sessions).findByText('set for this server · applying 8'),
     ).toBeInTheDocument();
+  });
+
+  it('sets fractional container CPU for one server and resets it to the global value', async () => {
+    const cpuDefinition = {
+      key: 'sandbox_cpu_millicores',
+      env: 'AGENT_SANDBOX_CPU_MILLICORES',
+      label: 'Container CPU',
+      description: 'CPU limit for new sandboxes. Existing sandboxes keep their limit.',
+      unit: 'millicores',
+      default: 2000,
+      minimum: 100,
+      maximum: 256000,
+      scope: 'runner',
+    } as const;
+    const resourcePool = (settings: Record<string, number>) => ({
+      ...settingsPool([
+        settingsHost({
+          settings_desired: settings,
+          settings_applied: { sandbox_cpu_millicores: 2000 },
+        }),
+      ]),
+      host_settings: { sandbox_cpu_millicores: 4000 },
+      host_setting_definitions: [cpuDefinition],
+    });
+    mocked.list.mockResolvedValue(resourcePool({}));
+    mocked.serverSettings.mockResolvedValueOnce(resourcePool({ sandbox_cpu_millicores: 1250 }));
+    mocked.serverSettings.mockResolvedValueOnce(resourcePool({}));
+    renderPage();
+    await openPanel();
+
+    const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
+    const input = within(panel).getByLabelText('Container CPU for runner-a');
+    expect(input).toHaveAttribute('placeholder', '4');
+    expect(within(panel).getByLabelText('Container CPU for runner-a unit')).toHaveValue('vCPU');
+    expect(within(panel).getByText('2 vCPU')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '1.25' } });
+    fireEvent.submit(input.closest('form')!);
+
+    await waitFor(() =>
+      expect(mocked.serverSettings).toHaveBeenCalledWith('runner-a', {
+        sandbox_cpu_millicores: 1250,
+      }),
+    );
+    expect(
+      await within(panel).findByText('set for this server · applying 1.25 vCPU'),
+    ).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Use default' }));
+    await waitFor(() =>
+      expect(mocked.serverSettings).toHaveBeenCalledWith('runner-a', {
+        sandbox_cpu_millicores: null,
+      }),
+    );
+    expect(
+      await within(panel).findByText('set for all servers · applying 4 vCPU'),
+    ).toBeInTheDocument();
+    expect(within(panel).getByLabelText('Container CPU for runner-a')).toHaveAttribute(
+      'placeholder',
+      '4',
+    );
+  });
+
+  it('offers the deployment default after reset even when the host reports an old environment value', async () => {
+    mocked.list.mockResolvedValue(
+      settingsPool([settingsHost({ settings_local: { agent_timeout_s: 999 } })]),
+    );
+    renderPage();
+    await openPanel();
+    const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
+    const input = within(panel).getByLabelText('Turn time limit for runner-a');
+    expect(input).toHaveAttribute('placeholder', '1');
+    expect(within(panel).getByLabelText('Turn time limit for runner-a unit')).toHaveValue('h');
+    const timeout = within(panel)
+      .getByRole('rowheader', { name: 'Turn time limit' })
+      .closest('tr')!;
+    expect(within(timeout).getByText('deployment default')).toBeInTheDocument();
+    expect(within(timeout).queryByText(/applying/)).not.toBeInTheDocument();
   });
 
   it('says a server that predates settings needs a redeploy, and offers it no input', async () => {

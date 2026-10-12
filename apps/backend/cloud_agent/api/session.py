@@ -49,7 +49,7 @@ require operator action; temporary failures offer retry without signing in again
 
 from __future__ import annotations
 
-import os
+import asyncio
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -66,6 +66,7 @@ from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import SessionUserResponse
+from cloud_agent.settings import setting_env
 
 logger = get_logger(__name__)
 
@@ -100,13 +101,13 @@ OAUTH_CLIENT_ID = "cloud-agent"
 
 def _cookie_is_secure() -> bool:
     """Whether the session cookie carries ``Secure``."""
-    raw = (os.environ.get(ENV_COOKIE_SECURE) or "").strip().lower()
+    raw = (setting_env(ENV_COOKIE_SECURE) or "").strip().lower()
     return raw not in ("0", "false", "no")
 
 
 def _env(name: str) -> str:
-    """Return a trimmed environment value."""
-    return (os.environ.get(name) or "").strip()
+    """Return a trimmed deployment setting."""
+    return (setting_env(name) or "").strip()
 
 
 def safe_return_to(candidate: str | None) -> str:
@@ -430,9 +431,16 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
             cannot verify identity or could not reach the gateway.
     """
     try:
-        claims = identity.verify_identity_token(identity_token)
+        # PyJWKClient performs a synchronous HTTP fetch on a cold cache or an
+        # unknown kid. Keep that fetch off the API worker's event loop.
+        claims = await asyncio.to_thread(identity.verify_identity_token, identity_token)
     except identity.IdentityNotConfigured:
         raise AgentConfigurationError() from None
+    except identity.IdentityUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot verify identity with the gateway; try again shortly.",
+        ) from None
     except identity.IdentityError:
         # Deliberately not echoing the reason. "Signed by an unknown key" and
         # "expired" are the same answer to a browser, and the difference is

@@ -252,7 +252,7 @@ def test_the_menu_survives_validation() -> None:
         }
     )
 
-    # `model_dump()` is what `routes.py` hands to `claim_job`, so it is the
+    # `model_dump()` is what `api/worker.py` hands to `claim_job`, so it is the
     # value under test rather than the parsed object.
     assert attestation.model_dump()["runtime_versions_available"] == {
         "claude-code": ["2.1.220", "2.1.235"]

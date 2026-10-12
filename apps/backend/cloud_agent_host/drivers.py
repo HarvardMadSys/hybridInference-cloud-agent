@@ -25,15 +25,18 @@ provide the same lifecycle guarantees to the threaded host runner.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import queue
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
+from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -183,6 +186,75 @@ class PendingInput:
 
     message_id: str
     text: str
+
+
+@dataclass(frozen=True)
+class _PendingQuestion:
+    """One private native responder and its public question snapshot."""
+
+    snapshot: dict[str, Any]
+    respond: Callable[[dict[str, list[str]], bool], None]
+
+
+def _question_choices(value: Any, *, dialect: str) -> list[dict[str, Any]]:
+    """Read native questions without giving their identifiers transport authority."""
+    if not isinstance(value, list) or not value or len(value) > 10:
+        return []
+    questions: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for index, native in enumerate(value):
+        if not isinstance(native, dict):
+            return []
+        question_id = native.get("id") if dialect == "codex" else str(index)
+        text, header = native.get("question"), native.get("header")
+        if (
+            not isinstance(question_id, str)
+            or not question_id
+            or len(question_id) > 128
+            or question_id in ids
+            or not isinstance(text, str)
+            or not text.strip()
+            or len(text) > 10_000
+            or not isinstance(header, str)
+            or len(header) > 1_000
+        ):
+            return []
+        ids.add(question_id)
+        choices = native.get("options")
+        if choices is None and dialect == "codex":
+            choices = []
+        if not isinstance(choices, list) or len(choices) > 20:
+            return []
+        options: list[dict[str, str]] = []
+        for option in choices:
+            if not isinstance(option, dict):
+                return []
+            label, description = option.get("label"), option.get("description", "")
+            if (
+                not isinstance(label, str)
+                or not label.strip()
+                or len(label) > 1_000
+                or not isinstance(description, str)
+                or len(description) > 10_000
+            ):
+                return []
+            options.append({"label": label, "description": description})
+        questions.append(
+            {
+                "id": question_id,
+                "header": header,
+                "question": text,
+                "multiple": native.get("multiSelect") is True
+                if dialect == "claude"
+                else native.get("multiple") is True,
+                "options": options,
+                "allow_custom": dialect == "claude"
+                or native.get("isOther") is True
+                or (dialect == "codex" and not options)
+                or (dialect == "http" and native.get("custom", True) is not False),
+            }
+        )
+    return questions
 
 
 def _json_object(line: str) -> dict[str, Any] | None:
@@ -344,6 +416,9 @@ class LaunchContext:
     #: path. They provide this trusted writer so Claude's passive hooks are
     #: installed in the filesystem the CLI will actually read.
     install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
+    #: Claude launch settings and its process registry are member-private;
+    #: only native project history is linked to the group's shared store.
+    claude_config_dir: str | None = None
 
 
 class HarnessTurn(Generic[_RuntimeT]):
@@ -356,6 +431,101 @@ class HarnessTurn(Generic[_RuntimeT]):
         self._cancelled = False
         self._final_messages: list[str] = []
         self._result: TurnResult | None = None
+        self._questions_lock = threading.Lock()
+        self._questions: dict[str, _PendingQuestion] = {}
+        self._question_records: dict[str, _PendingQuestion] = {}
+        self._question_keys: dict[str, str] = {}
+        self._questions_closed = False
+
+    def _remember_question(
+        self,
+        native_key: str,
+        questions: list[dict[str, Any]],
+        respond: Callable[[dict[str, list[str]], bool], None],
+    ) -> None:
+        """Register a request while the stream keeps reading the active turn."""
+        with self._questions_lock:
+            if self._questions_closed or self._cancelled or native_key in self._question_keys:
+                return
+            request_id = uuid.uuid4().hex
+            self._question_keys[native_key] = request_id
+            pending = _PendingQuestion({"request_id": request_id, "questions": questions}, respond)
+            self._questions[request_id] = pending
+            self._question_records[native_key] = pending
+
+    def _clear_questions(self) -> None:
+        with self._questions_lock:
+            self._questions_closed = True
+            self._questions.clear()
+            self._question_records.clear()
+
+    def _forget_question(self, native_key: str) -> None:
+        with self._questions_lock:
+            request_id = self._question_keys.get(native_key)
+            if request_id is not None:
+                self._questions.pop(request_id, None)
+            self._question_records.pop(native_key, None)
+
+    def _restore_question(self, native_key: str) -> None:
+        """A bridge POST failed: offer a fresh token unless the CLI resolved it meanwhile."""
+        with self._questions_lock:
+            pending = self._question_records.get(native_key)
+            if self._questions_closed or pending is None:
+                return
+            request_id = uuid.uuid4().hex
+            restored = _PendingQuestion(
+                {**pending.snapshot, "request_id": request_id}, pending.respond
+            )
+            self._question_keys[native_key] = request_id
+            self._question_records[native_key] = restored
+            self._questions[request_id] = restored
+
+    def pending_questions(self) -> list[dict[str, Any]]:
+        """Read this turn's unanswered requests; snapshots cannot mutate the CLI input."""
+        with self._questions_lock:
+            return [copy.deepcopy(question.snapshot) for question in self._questions.values()]
+
+    def answer_question(
+        self, request_id: str, answers: dict[str, list[str]], *, reject: bool = False
+    ) -> InputOutcome:
+        """Reply once to an exact active request, even when two tabs submit together."""
+        with self._questions_lock:
+            if self._questions_closed or self._cancelled or self._result is not None:
+                return InputOutcome(False, INPUT_TURN_ENDED)
+            pending = self._questions.get(request_id)
+            if pending is None:
+                return InputOutcome(False, INPUT_REFUSED)
+            questions = pending.snapshot["questions"]
+            if not reject:
+                if not isinstance(answers, dict) or set(answers) != {q["id"] for q in questions}:
+                    return InputOutcome(False, INPUT_REFUSED)
+                for question in questions:
+                    selected = answers[question["id"]]
+                    if (
+                        not isinstance(selected, list)
+                        or not selected
+                        or len(selected) > 20
+                        or (not question["multiple"] and len(selected) != 1)
+                        or any(
+                            not isinstance(value, str) or not value.strip() or len(value) > 10_000
+                            for value in selected
+                        )
+                        or len(set(selected)) != len(selected)
+                        or (
+                            not question["allow_custom"]
+                            and any(
+                                value not in {option["label"] for option in question["options"]}
+                                for value in selected
+                            )
+                        )
+                    ):
+                        return InputOutcome(False, INPUT_REFUSED)
+            try:
+                pending.respond(answers, reject)
+            except (DriverError, OSError):
+                return InputOutcome(False, INPUT_PROCESS_GONE)
+            self._questions.pop(request_id)
+            return InputOutcome(True)
 
     def iter_events(self) -> Iterator[HarnessEvent]:
         """Yield floor and dialect events as the harness produces them.
@@ -378,7 +548,10 @@ class HarnessTurn(Generic[_RuntimeT]):
         event = self._runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
-        if event.event_type == MESSAGE:
+        parent_tool_use_id = (event.payload or {}).get("parent_tool_use_id")
+        if event.event_type == MESSAGE and not (
+            isinstance(parent_tool_use_id, str) and parent_tool_use_id
+        ):
             text = str((event.payload or {}).get("text", ""))
             if text.strip():
                 self._final_messages.append(text)
@@ -401,6 +574,7 @@ class HarnessTurn(Generic[_RuntimeT]):
     def cancel(self) -> None:
         """Stop this turn now. The kill is the platform's backstop, kept here."""
         self._cancelled = True
+        self._clear_questions()
         self._process.kill()
 
     def inject(self, text: str, *, message_id: str) -> InputOutcome:
@@ -416,6 +590,7 @@ class HarnessTurn(Generic[_RuntimeT]):
         if self._result is None:
             exit_code = self._process.wait()
             self._result = self._build_result(exit_code)
+            self._clear_questions()
             self._session.turn_finished()
         return self._result
 
@@ -619,6 +794,33 @@ class _ProtocolReply:
         return self._value if self._settled.wait(timeout) else None
 
 
+class _InputReceipt:
+    """One turn-local message-ID receipt shared by concurrent broker retries."""
+
+    def __init__(self) -> None:
+        self._settled = threading.Event()
+        self._outcome: InputOutcome | None = None
+        self._error: BaseException | None = None
+
+    def settle(self, outcome: InputOutcome) -> None:
+        self._outcome = outcome
+        self._settled.set()
+
+    def fail(self, error: BaseException) -> None:
+        """Replay an uncertain native failure to every concurrent waiter."""
+        self._error = error
+        self._settled.set()
+
+    def wait(self) -> InputOutcome:
+        """Wait for the one native write attempt and replay its answer."""
+        self._settled.wait()
+        if self._error is not None:
+            raise self._error
+        if self._outcome is None:  # pragma: no cover - settle writes before set
+            raise DriverError("input receipt settled without an outcome")
+        return self._outcome
+
+
 class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
     """One framed activation on a process whose stdout survives the turn."""
 
@@ -643,11 +845,36 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         # the stream reports the message taken whenever its answer arrives.
         self._steers: dict[str, PendingInput] = {}
         self._replies_lock = threading.Lock()
+        # The control plane may lose the broker's accepted response and replay
+        # the same durable handoff after its lease expires.  One message ID is
+        # one native steer for this exact turn, including concurrent retries.
+        self._input_receipts: dict[str, _InputReceipt] = {}
+        self._input_receipts_lock = threading.Lock()
+        self._question_commands: dict[str, str] = {}
+
+    def track_question_reply(self, command_id: str, native_key: str) -> None:
+        """Remember a bridge command whose failure makes its question retryable."""
+        with self._replies_lock:
+            self._question_commands[command_id] = native_key
+
+    def settle_question_reply(self, value: dict[str, Any]) -> None:
+        """Resolve bridge acknowledgements without waiting inside either turn lock."""
+        if value.get("bridge") not in {"question_answered", "command_error"}:
+            return
+        with self._replies_lock:
+            native_key = self._question_commands.pop(str(value.get("id") or ""), None)
+        if native_key is not None:
+            if value.get("bridge") == "command_error":
+                self._restore_question(native_key)
+            else:
+                self._forget_question(native_key)
 
     def raw_lines(self) -> Iterator[str]:
         for line in self._session.turn_lines(self):
-            yield line
             settled, failed, native = self._session.line_settles_turn(line, self)
+            if settled:
+                self._clear_questions()
+            yield line
             if settled:
                 self._saw_result = True
                 self._saw_native_result = native
@@ -667,7 +894,10 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             return [reply]
         events = self._session.events_for_protocol_line(line, self)
         for event in events:
-            if event.event_type == MESSAGE:
+            parent_tool_use_id = event.payload.get("parent_tool_use_id")
+            if event.event_type == MESSAGE and not (
+                isinstance(parent_tool_use_id, str) and parent_tool_use_id
+            ):
                 text = str(event.payload.get("text", ""))
                 if text.strip():
                     self._final_messages.append(text)
@@ -725,15 +955,40 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
 
     def inject(self, text: str, *, message_id: str) -> InputOutcome:
         """Hand ``text`` to the running turn through the session's native seam."""
-        if self._cancelled or self._saw_result or self._result is not None:
-            return InputOutcome(False, INPUT_TURN_ENDED)
-        return self._session.inject_input(self, PendingInput(message_id, text))
+        with self._input_receipts_lock:
+            receipt = self._input_receipts.get(message_id)
+            if receipt is None:
+                if self._cancelled or self._saw_result or self._result is not None:
+                    return InputOutcome(False, INPUT_TURN_ENDED)
+                receipt = _InputReceipt()
+                self._input_receipts[message_id] = receipt
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            return receipt.wait()
+        try:
+            outcome = self._session.inject_input(self, PendingInput(message_id, text))
+        except BaseException as exc:
+            # The native call may have taken the message before failing. Every
+            # concurrent duplicate must preserve that uncertainty rather than
+            # turn it into an explicit refusal that the control plane requeues.
+            receipt.fail(exc)
+            with self._input_receipts_lock:
+                self._input_receipts.pop(message_id, None)
+            raise
+        receipt.settle(outcome)
+        if not outcome.accepted:
+            with self._input_receipts_lock:
+                self._input_receipts.pop(message_id, None)
+        return outcome
 
     def cancel(self) -> None:
         """Use the exact native interrupt; preserve the resident transport."""
         if self._cancelled:
             return
         self._cancelled = True
+        self._clear_questions()
         self._session.interrupt_turn(self)
 
     def wait(self) -> TurnResult:
@@ -748,6 +1003,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             self._result = replace(
                 self._build_result(exit_code), native_turn_settled=self._saw_native_result
             )
+            self._clear_questions()
             self._session.turn_finished()
         return self._result
 
@@ -811,7 +1067,10 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
             # from an ordinary EOF.  The sandbox process already retains only
             # a bounded stderr tail; cap it again here because this exception
             # crosses the broker boundary.  Agent credentials are supplied in
-            # environment variables, never stderr/argv, but avoid reflecting
+            # environment variables, never in the CLI's argv; the host's
+            # ``docker exec`` names them without their values, which reach
+            # the Docker client through its environment, not its argv (see
+            # ``ChatSandboxManager.build_exec_command``). Avoid reflecting
             # arbitrary multiline CLI output to an API caller all the same.
             diagnostic = ""
             if self._process is not None:
@@ -1106,6 +1365,48 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     {"text": _codex_error_text(str(message)), "error": error},
                     raw_line=line,
                 )
+        if method == "item/tool/requestUserInput":
+            native_id = value.get("id")
+            questions = _question_choices(params.get("questions"), dialect="codex")
+            if (
+                isinstance(native_id, (str, int))
+                and not isinstance(native_id, bool)
+                and params.get("threadId") == self.runtime.session_id
+                and params.get("turnId") == turn.protocol_turn_id
+                and questions
+            ):
+
+                def respond(answers: dict[str, list[str]], reject: bool) -> None:
+                    # Codex's pinned protocol has no reject discriminator:
+                    # an empty answers map is its skipped-question response.
+                    self._write_json(
+                        {
+                            "id": native_id,
+                            "result": {
+                                "answers": {}
+                                if reject
+                                else {key: {"answers": values} for key, values in answers.items()}
+                            },
+                        }
+                    )
+
+                turn._remember_question(json.dumps(native_id), questions, respond)
+            elif isinstance(native_id, (str, int)) and not isinstance(native_id, bool):
+                self._write_json(
+                    {
+                        "id": native_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid or stale user question request.",
+                        },
+                    }
+                )
+            return raw_notification
+        if method == "serverRequest/resolved" and params.get("threadId") == self.runtime.session_id:
+            native_id = params.get("requestId")
+            if isinstance(native_id, (str, int)) and not isinstance(native_id, bool):
+                turn._forget_question(json.dumps(native_id))
+            return raw_notification
         if method == "item/agentMessage/delta" and params.get("itemId"):
             # Batched rather than one stored notification per token.
             piece = turn.preview.add(str(params["itemId"]), str(params.get("delta") or ""))
@@ -1541,6 +1842,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         if value is None:
             return HarnessEvent(LINE, raw_line=line)
         bridge = value.get("bridge")
+        turn.settle_question_reply(value)
         if bridge in {"event", "settled"} and value.get("turn_id") != turn.protocol_turn_id:
             return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
         if bridge == "event":
@@ -1549,6 +1851,55 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             event_type = event.get("type")
             properties = event.get("properties")
             properties = properties if isinstance(properties, dict) else {}
+            if event_type == "question.asked":
+                native_id = properties.get("id")
+                questions = _question_choices(properties.get("questions"), dialect="http")
+                if (
+                    isinstance(native_id, str)
+                    and native_id
+                    and properties.get("sessionID") == self.runtime.session_id
+                    and questions
+                ):
+                    question_request_id: str = native_id
+
+                    def respond(answers: dict[str, list[str]], reject: bool) -> None:
+                        command_id = self._request_id("question")
+                        turn.track_question_reply(command_id, question_request_id)
+                        self._write_json(
+                            {
+                                "id": command_id,
+                                "type": "question",
+                                "turn_id": turn.protocol_turn_id,
+                                "request_id": question_request_id,
+                                "reject": reject,
+                                "answers": []
+                                if reject
+                                else [answers[question["id"]] for question in questions],
+                            }
+                        )
+
+                    turn._remember_question(question_request_id, questions, respond)
+                elif (
+                    isinstance(native_id, str)
+                    and native_id
+                    and properties.get("sessionID") == self.runtime.session_id
+                ):
+                    # A malformed native question must not leave a tool
+                    # blocked behind an interaction the UI cannot present.
+                    self._write_json(
+                        {
+                            "id": self._request_id("question"),
+                            "type": "question",
+                            "turn_id": turn.protocol_turn_id,
+                            "request_id": native_id,
+                            "reject": True,
+                            "answers": [],
+                        }
+                    )
+            elif event_type in {"question.replied", "question.rejected"}:
+                native_id = properties.get("requestID")
+                if isinstance(native_id, str):
+                    turn._forget_question(native_id)
             part = properties.get("part")
             part = part if isinstance(part, dict) else {}
             part_type = part.get("type")
@@ -1794,6 +2145,11 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         # calls a tool, then written, then taken once the CLI echoes them.
         self._held: list[PendingInput] = []
         self._written: list[PendingInput] = []
+        # An accepted broker response can be lost after the CLI takes the
+        # message and removes it from ``_written``. Keep its ID for this turn
+        # so a later durable replay returns the same receipt without writing it
+        # to the native process a second time.
+        self._input_receipts: set[str] = set()
         # Set when the stream reaches the result: nothing is taken after it.
         self._input_closed = False
         self._input_lock = threading.Lock()
@@ -1818,6 +2174,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             # the owner sent into the turn. Never an event of its own.
             return HarnessEvent(LINE, raw_line=line)
         if isinstance(record, dict):
+            self._track_questions(record)
             self._track_tool_calls(record)
         event = super().event_for_line(line)
         if isinstance(record, dict) and (
@@ -1833,6 +2190,8 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
     def raw_lines(self) -> Iterator[str]:
         """This turn's slice of the shared stream, up to its result line."""
         for line in self._session.shared_lines():
+            if self._runtime.turn_settled(line):
+                self._clear_questions()
             yield line
             if self._runtime.turn_settled(line):
                 self._saw_result = True
@@ -1889,6 +2248,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             self._result = replace(
                 self._build_result(exit_code), native_turn_settled=self._saw_result
             )
+            self._clear_questions()
             self._session.turn_finished()
         return self._result
 
@@ -1897,7 +2257,142 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         if self._cancelled:
             return
         self._cancelled = True
+        self._clear_questions()
         self._session.interrupt_turn()
+
+    def _track_questions(self, record: dict[str, Any]) -> None:
+        """Hold native questions and plan approval until the turn's owner answers."""
+        kind = record.get("type")
+        native_id = record.get("request_id")
+        if kind == "control_cancel_request" and isinstance(native_id, str):
+            self._forget_question(native_id)
+            return
+        if kind == "result":
+            self._clear_questions()
+            return
+        request = record.get("request")
+        if (
+            kind != "control_request"
+            or not isinstance(native_id, str)
+            or not native_id
+            or not isinstance(request, dict)
+            or request.get("subtype") != "can_use_tool"
+        ):
+            return
+        original = request.get("input")
+        tool_name = request.get("tool_name")
+        if tool_name == "ExitPlanMode":
+            self._track_plan_approval(native_id, original)
+            return
+        if tool_name != "AskUserQuestion":
+            self._reply_permission(
+                native_id,
+                {
+                    "behavior": "deny",
+                    "message": "This interaction is unavailable. Ask the user in chat instead.",
+                },
+            )
+            return
+        questions = _question_choices(
+            original.get("questions") if isinstance(original, dict) else None,
+            dialect="claude",
+        )
+        if not questions:
+            self._reply_permission(
+                native_id,
+                {
+                    "behavior": "deny",
+                    "message": "The question request is invalid. Ask the user in chat instead.",
+                },
+            )
+            return
+        assert isinstance(original, dict)
+        original_input: dict[str, Any] = copy.deepcopy(original)
+
+        def respond(answers: dict[str, list[str]], reject: bool) -> None:
+            response: dict[str, Any] = {
+                "behavior": "deny",
+                "message": "The user skipped this question.",
+            }
+            if not reject:
+                response = {
+                    "behavior": "allow",
+                    "updatedInput": {
+                        **original_input,
+                        "answers": {
+                            question["question"]: ", ".join(answers[question["id"]])
+                            for question in questions
+                        },
+                    },
+                }
+            self._reply_permission(native_id, response)
+
+        self._remember_question(native_id, questions, respond)
+
+    def _track_plan_approval(self, native_id: str, original: Any) -> None:
+        """Approve the native mode transition through the existing question channel."""
+        if not isinstance(original, dict) or (
+            "plan" in original and not isinstance(original["plan"], str)
+        ):
+            self._reply_permission(
+                native_id,
+                {
+                    "behavior": "deny",
+                    "message": "The plan approval request is invalid. Ask the user in chat instead.",
+                },
+            )
+            return
+        original_input = copy.deepcopy(original)
+        text = "Approve this plan and continue implementation?"
+        plan = original_input.get("plan")
+        if isinstance(plan, str) and plan.strip():
+            text += "\n\n" + plan
+        if len(text) > 10_000:
+            suffix = "\n\n[Plan preview truncated.]"
+            text = text[: 10_000 - len(suffix)] + suffix
+        questions = [
+            {
+                "id": "0",
+                "header": "Plan approval",
+                "question": text,
+                "multiple": False,
+                "options": [
+                    {"label": "Approve plan", "description": "Continue with implementation."}
+                ],
+                "allow_custom": True,
+                "kind": "plan_approval",
+            }
+        ]
+
+        def respond(answers: dict[str, list[str]], reject: bool) -> None:
+            feedback = ", ".join(answers.get("0", [])).strip()
+            approved = not reject and feedback == "Approve plan"
+            if approved:
+                response: dict[str, Any] = {"behavior": "allow", "updatedInput": original_input}
+            else:
+                declined = (
+                    "The user declined this plan. Keep planning."
+                    if not feedback
+                    else f"The user declined this plan: {feedback}"
+                )
+                response = {"behavior": "deny", "message": declined}
+            self._reply_permission(native_id, response)
+
+        self._remember_question(native_id, questions, respond)
+
+    def _reply_permission(self, native_id: str, response: dict[str, Any]) -> None:
+        self._session._write_line(
+            json.dumps(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": native_id,
+                        "response": response,
+                    },
+                }
+            )
+        )
 
     def _track_tool_calls(self, record: dict[str, Any]) -> None:
         """Keep the set of this turn's tool calls that are still running.
@@ -1944,6 +2439,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             with self._input_lock:
                 if pending in self._written:
                     self._written.remove(pending)
+                self._input_receipts.discard(pending.message_id)
             return False
         return True
 
@@ -1963,8 +2459,9 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         with self._input_lock:
             if self._cancelled or self._input_closed or self._result is not None:
                 return InputOutcome(False, INPUT_TURN_ENDED)
-            if any(held.message_id == message_id for held in (*self._held, *self._written)):
+            if message_id in self._input_receipts:
                 return InputOutcome(True)
+            self._input_receipts.add(message_id)
             if not self._open_tool_uses:
                 self._held.append(pending)
                 return InputOutcome(True)
@@ -2018,7 +2515,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             credential=context.credential,
             provides_isolation=context.provides_isolation,
             mcp_config=context.mcp_config,
-            config_dir=CLAUDE_STATE_CONFIG_DIR,
+            config_dir=context.claude_config_dir or CLAUDE_STATE_CONFIG_DIR,
             resume_session_id=self._resume_session_id,
         )
         self._argv_template = argv
@@ -2028,7 +2525,8 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         # Reading with a deadline takes a thread that reads stdout into this
         # queue from then on; ``None`` in it is the end of the stream. Started
         # only when a turn needs one, which is rare.
-        self._stdout: queue.Queue[str | None] | None = None
+        self._stdout: OutputPump[str] | None = None
+        self._stdout_ended = False
         self._pushed_back: deque[str] = deque()
         self._model: str | None = None
         #: Pinned by the first turn alongside the model, and compared against
@@ -2051,30 +2549,20 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             raise DriverError("Claude resident process is not alive")
         self._write_line(self.runtime.user_message_line(text))
 
-    @staticmethod
-    def _pump(lines: Iterator[str], into: queue.Queue[str | None]) -> None:
-        try:
-            for line in lines:
-                into.put(line)
-        finally:
-            into.put(None)
-
     def next_line(self, timeout: float | None) -> str | None:
         """The next stdout line, ``None`` at its end; ``queue.Empty`` on timeout."""
         if self._pushed_back:
             return self._pushed_back.popleft()
         assert self._lines is not None
+        if self._stdout_ended:
+            return None
         if self._stdout is None:
             if timeout is None:
                 return next(self._lines, None)
-            self._stdout = queue.Queue()
-            threading.Thread(
-                target=self._pump, args=(self._lines, self._stdout), daemon=True
-            ).start()
+            self._stdout = OutputPump(self._lines, name="claude-resident-output")
         line = self._stdout.get(timeout=timeout)
         if line is None:
-            # Stay at the end for whoever reads next.
-            self._stdout.put(None)
+            self._stdout_ended = True
         return line
 
     def shared_lines(self) -> Iterator[str]:
@@ -2257,6 +2745,11 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         if self._closed:
             return
         self._closed = True
+        if self._stdout is not None:
+            # A graceful EOF can still produce native JSONL while it flushes
+            # history. Discard that output under the same memory limits so
+            # a full pipe does not turn the grace period into a forced kill.
+            self._stdout.close(drain=True)
         if self._process is not None:
             self._process.close_stdin()
             # A result event can precede Claude's asynchronous JSONL flush.

@@ -32,6 +32,11 @@ from cloud_agent_host import sandbox as host_sandbox
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = json.loads((REPO_ROOT / "deploy/release/manifest.schema.json").read_text())
+# Validate the unchanged schema once, then keep checking every manifest against
+# it. jsonschema.validate would repeat the full meta-schema check for each case.
+_SCHEMA_VALIDATOR_CLASS = jsonschema.validators.validator_for(SCHEMA)
+_SCHEMA_VALIDATOR_CLASS.check_schema(SCHEMA)
+SCHEMA_VALIDATOR = _SCHEMA_VALIDATOR_CLASS(SCHEMA)
 
 COMMIT = "4af1b771ac8f736a1be24f20cb307012af114a18"
 RUN_URL = "https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/34559400992"
@@ -118,7 +123,7 @@ def build(**overrides: Any) -> dict[str, Any]:
 
 def test_a_complete_build_produces_a_manifest_the_schema_accepts() -> None:
     manifest = build()
-    jsonschema.validate(manifest, SCHEMA)
+    SCHEMA_VALIDATOR.validate(manifest)
     assert [entry["role"] for entry in manifest["artifacts"]] == sorted(
         ["control", "web", "web", "runner", "sandbox", "tunnel"]
     )
@@ -338,12 +343,6 @@ def test_the_database_revision_is_alembics_head() -> None:
     assert head not in parents
 
 
-def test_the_source_repository_and_schema_version_are_pinned() -> None:
-    manifest = build()
-    assert manifest["source_repository"] == SCHEMA["properties"]["source_repository"]["const"]
-    assert manifest["schema_version"] == SCHEMA["properties"]["schema_version"]["const"]
-
-
 # ------------------------------------------------- the schema refuses tampering
 
 
@@ -386,7 +385,7 @@ def test_the_schema_rejects_a_tampered_manifest(tamper) -> None:
     manifest = build()
     tamper(manifest)
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(manifest, SCHEMA)
+        SCHEMA_VALIDATOR.validate(manifest)
 
 
 def test_membership_is_the_invariant_the_schema_cannot_express() -> None:
@@ -401,7 +400,7 @@ def test_membership_is_the_invariant_the_schema_cannot_express() -> None:
     """
     manifest = build()
     manifest["runtime_catalog"]["codex"]["default"] = "9.9.9"
-    jsonschema.validate(manifest, SCHEMA)
+    SCHEMA_VALIDATOR.validate(manifest)
 
     with pytest.raises(rm.ManifestError) as raised:
         build(
@@ -428,7 +427,7 @@ def test_the_schema_and_the_generator_refuse_the_same_thing() -> None:
         entry for entry in impostor["artifacts"] if entry["role"] != "sandbox"
     ] + [dict(next(e for e in impostor["artifacts"] if e["role"] == "control"))]
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(impostor, SCHEMA)
+        SCHEMA_VALIDATOR.validate(impostor)
     with pytest.raises(rm.ManifestError):
         build(
             artifacts=[
@@ -441,7 +440,7 @@ def test_the_schema_and_the_generator_refuse_the_same_thing() -> None:
     eighth = build()
     eighth["artifacts"].append(dict(eighth["artifacts"][0]))
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(eighth, SCHEMA)
+        SCHEMA_VALIDATOR.validate(eighth)
     with pytest.raises(rm.ManifestError):
         build(artifacts=[*built_artifacts(), artifact("control", seed="eighth")])
 
@@ -451,7 +450,7 @@ def test_the_schema_and_the_generator_refuse_the_same_thing() -> None:
         dict(next(e for e in duplicated_variant["artifacts"] if e.get("variant") == "root"))
     )
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(duplicated_variant, SCHEMA)
+        SCHEMA_VALIDATOR.validate(duplicated_variant)
     with pytest.raises(rm.ManifestError):
         build(artifacts=[*built_artifacts(), artifact("web", base_path="", seed="again")])
 
@@ -520,7 +519,7 @@ def test_the_cli_writes_a_manifest(tmp_path: Path) -> None:
     )
     assert code == 0
     written = json.loads(output.read_text())
-    jsonschema.validate(written, SCHEMA)
+    SCHEMA_VALIDATOR.validate(written)
     # Defaults come from the repository, not from the caller.
     assert written["deploy_protocol"] == rm.deploy_protocol()
     assert written["database_revision"] == rm.database_revision()

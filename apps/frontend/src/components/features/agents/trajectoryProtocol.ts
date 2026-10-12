@@ -75,13 +75,30 @@ const PROGRESS_METHODS = new Set([
   'item/mcpToolCall/progress',
 ]);
 
+const COLLAB_TOOL_NAMES: Record<string, string> = {
+  spawnAgent: 'spawn_agent',
+  sendInput: 'send_input',
+  resumeAgent: 'resume_agent',
+  wait: 'wait',
+  closeAgent: 'close_agent',
+  sendMessage: 'send_message',
+  followupTask: 'followup_task',
+  interruptAgent: 'interrupt_agent',
+  listAgents: 'list_agents',
+};
+
 export function isRuntimeNotification(notification: Record<string, unknown>): boolean {
   if (notificationHasError(notification)) return false;
   const item = record(record(notification.params).item);
   if (PROGRESS_METHODS.has(String(notification.method))) return true;
   return (
     (notification.method === 'item/started' || notification.method === 'item/updated') &&
-    ['agentMessage', 'reasoning', 'commandExecution', 'mcpToolCall'].includes(String(item.type))
+    (['agentMessage', 'reasoning', 'commandExecution', 'mcpToolCall'].includes(String(item.type)) ||
+      (item.type === 'collabAgentToolCall' &&
+        typeof item.id === 'string' &&
+        !!item.id &&
+        typeof item.tool === 'string' &&
+        Object.prototype.hasOwnProperty.call(COLLAB_TOOL_NAMES, item.tool)))
   );
 }
 
@@ -115,6 +132,14 @@ function scope(event: StoredEvent, id: string): string {
   return `${'job_id' in event ? event.job_id : ''}:${event.attempt_id}:${id}`;
 }
 
+function collabResult(item: Record<string, unknown>): string {
+  return JSON.stringify({
+    status: item.status,
+    receiverThreadIds: item.receiverThreadIds,
+    agentsStates: item.agentsStates,
+  });
+}
+
 /** Old normalized replies omitted item IDs. Do not guess their stream owner. */
 export function projectProtocolEvents(events: StoredEvent[]): StoredEvent[] {
   const identified = new Set(
@@ -123,6 +148,25 @@ export function projectProtocolEvents(events: StoredEvent[]): StoredEvent[] {
       return typeof id === 'string' ? [scope(event, id)] : [];
     }),
   );
+  const collabSnapshots = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    const notification = rawNotification(event);
+    const item = record(record(notification?.params).item);
+    if (
+      item.type === 'collabAgentToolCall' &&
+      typeof item.id === 'string' &&
+      item.id &&
+      ['item/started', 'item/updated', 'item/completed'].includes(String(notification?.method))
+    ) {
+      const key = scope(event, item.id);
+      collabSnapshots.set(key, { ...collabSnapshots.get(key), ...item });
+    }
+  }
+  // Native update snapshots repeat a call identity. Only its first recorded
+  // start becomes a call; later snapshots remain inspectable runtime records.
+  // A retry may reuse that identity, so deduplication has the same job/attempt
+  // scope as tool-result pairing.
+  const collabCalls = new Set<string>();
   return events.map((event) => {
     const piece = replyPreviewPiece(event);
     if (piece) {
@@ -137,11 +181,111 @@ export function projectProtocolEvents(events: StoredEvent[]): StoredEvent[] {
       };
     }
     const notification = rawNotification(event);
-    if (!notification || notificationHasError(notification)) return event;
+    if (!notification) return event;
     const payload = record(event.payload);
     const params = record(notification.params);
     const item = record(params.item);
     const method = notification.method;
+    if (
+      method === 'turn/plan/updated' &&
+      !notificationHasError(notification) &&
+      typeof params.turnId === 'string' &&
+      params.turnId &&
+      Array.isArray(params.plan) &&
+      params.plan.every((entry) => {
+        const step = record(entry);
+        return (
+          typeof step.step === 'string' &&
+          ['pending', 'inProgress', 'completed'].includes(String(step.status))
+        );
+      })
+    ) {
+      return {
+        ...event,
+        event_type: 'tool_use',
+        payload: {
+          ...payload,
+          id: `codex-plan:${params.turnId}:${event.id}`,
+          name: 'update_plan',
+          input: {
+            explanation: params.explanation,
+            plan: params.plan.map((entry) => {
+              const step = record(entry);
+              return {
+                step: step.step,
+                status: step.status === 'inProgress' ? 'in_progress' : step.status,
+              };
+            }),
+          },
+          native_tool_request: true,
+          // The notification records a committed plan update; it is not an
+          // invocation awaiting a later result or a completed work plan.
+          native_tool_status: 'completed',
+        },
+      };
+    }
+    if (
+      item.type === 'collabAgentToolCall' &&
+      typeof item.id === 'string' &&
+      item.id &&
+      typeof item.tool === 'string' &&
+      Object.prototype.hasOwnProperty.call(COLLAB_TOOL_NAMES, item.tool)
+    ) {
+      const id = item.id;
+      if (method === 'item/started' || method === 'item/updated') {
+        if (notificationHasError(notification) || collabCalls.has(scope(event, id))) return event;
+        collabCalls.add(scope(event, id));
+        return {
+          ...event,
+          event_type: 'tool_use',
+          payload: {
+            ...payload,
+            id,
+            name: COLLAB_TOOL_NAMES[item.tool],
+            input: collabSnapshots.get(scope(event, id)) ?? item,
+            native_tool_request: true,
+          },
+        };
+      }
+      if (method === 'item/completed') {
+        if (!collabCalls.has(scope(event, id))) {
+          // Backfilled history can begin with a completion. That snapshot
+          // records the call's arguments and outcome; show those without
+          // inventing a start event or an execution interval.
+          return {
+            ...event,
+            event_type: 'tool_use',
+            payload: {
+              ...payload,
+              id,
+              name: COLLAB_TOOL_NAMES[item.tool],
+              input: item,
+              output: collabResult(item),
+              is_error: notificationHasError(notification),
+              native_tool_request: true,
+              native_tool_completion_only: true,
+              native_tool_status: notificationHasError(notification)
+                ? 'failed'
+                : item.status === 'interrupted'
+                  ? 'cancelled'
+                  : 'completed',
+            },
+          };
+        }
+        return {
+          ...event,
+          event_type: 'tool_result',
+          payload: {
+            ...payload,
+            tool_use_id: id,
+            is_error: notificationHasError(notification),
+            content: collabResult(item),
+            ...(item.status === 'interrupted' ? { native_tool_status: 'cancelled' } : {}),
+          },
+        };
+      }
+    }
+    if (notificationHasError(notification)) return event;
     const id =
       typeof item.id === 'string'
         ? item.id

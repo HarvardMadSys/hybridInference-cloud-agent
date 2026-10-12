@@ -1,21 +1,36 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import Link from 'next/link';
+import { useState } from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { listMcpInvocations, type McpInvocationsApi } from '@/lib/api/mcp';
 import type { AgentAccessApi } from '@/lib/api/session';
+import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
+import { LocaleProvider } from '@/components/providers/LocaleProvider';
+import { ThemeProvider } from '@/components/providers/ThemeProvider';
+import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
+let userId: string | undefined;
 
 beforeEach(() => {
   access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   role = 'internal';
+  userId = undefined;
+  vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
 });
 
 let pathname = '/';
 let statusUrl = '/status';
+
+vi.mock('@/lib/api/mcp', async (original) => ({
+  ...(await original<typeof import('@/lib/api/mcp')>()),
+  listMcpInvocations: vi.fn(),
+}));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -26,11 +41,27 @@ vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+vi.mock('@/components/features/agents/firstRun', () => ({
+  FirstRunProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+vi.mock('@/components/features/agents/agentPush', async (original) => ({
+  ...(await original<typeof import('@/components/features/agents/agentPush')>()),
+  useAgentChangeStream: vi.fn(),
+}));
+
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
   return {
     useAuth: () => ({
-      state: { user: { user_name: 'Ada', email: 'ada@example.com', role, agent_access: access } },
+      state: {
+        user: {
+          id: userId,
+          user_name: 'Ada',
+          email: 'ada@example.com',
+          role,
+          agent_access: access,
+        },
+      },
       logout: vi.fn(),
     }),
     useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
@@ -53,8 +84,31 @@ vi.mock('@/components/providers/SiteConfigProvider', () => ({
 }));
 
 vi.mock('@/components/features/agents/AgentsSidebar', () => ({
-  AgentsSidebar: ({ collapsed }: { collapsed?: boolean }) =>
-    collapsed ? null : <aside data-testid="sidebar-stub">tasks</aside>,
+  AgentsSidebar: ({
+    collapsed,
+    headerAction,
+  }: {
+    collapsed?: boolean;
+    headerAction?: React.ReactNode;
+  }) =>
+    collapsed ? null : (
+      <aside id="agents-sidebar" data-testid="sidebar-stub">
+        tasks
+        {headerAction}
+        <Link href="/" onClick={(event) => event.preventDefault()}>
+          New task
+        </Link>
+        <Link href="/job-1" onClick={(event) => event.preventDefault()}>
+          Existing task
+        </Link>
+        <input
+          aria-label="Task search"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') event.preventDefault();
+          }}
+        />
+      </aside>
+    ),
 }));
 
 import AgentsLayout from './layout';
@@ -68,7 +122,7 @@ describe('AgentsLayout sidebar collapse', () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => cleanup());
 
-  it('collapses and restores the task list from the header toggle', () => {
+  it('keeps the collapse control in the task list and the expand control in the header', () => {
     render(
       <AgentsLayout>
         <p>job</p>
@@ -80,17 +134,20 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(toggle()).toHaveAttribute('aria-expanded', 'true');
     expect(toggle()).toHaveAttribute('aria-controls', 'agents-sidebar');
     expect(toggle()).toHaveAttribute('aria-keyshortcuts', 'Meta+B Control+B');
+    expect(screen.getByTestId('sidebar-stub')).toContainElement(toggle());
 
     fireEvent.click(toggle());
 
     expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     expect(toggle()).toHaveAccessibleName('Expand task list');
     expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('banner')).toContainElement(toggle());
     expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('1');
 
     fireEvent.click(toggle());
 
     expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+    expect(screen.getByTestId('sidebar-stub')).toContainElement(toggle());
     expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('0');
   });
 
@@ -140,6 +197,283 @@ describe('AgentsLayout sidebar collapse', () => {
   });
 });
 
+describe('AgentsLayout mobile task list', () => {
+  let query: { matches: boolean };
+  let changeListeners: Set<() => void>;
+
+  beforeEach(() => {
+    localStorage.clear();
+    pathname = '/';
+    query = { matches: true };
+    changeListeners = new Set();
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((media: string) => ({
+        get matches() {
+          return query.matches;
+        },
+        media,
+        addEventListener: (_event: string, listener: () => void) => changeListeners.add(listener),
+        removeEventListener: (_event: string, listener: () => void) =>
+          changeListeners.delete(listener),
+      })),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function renderLayout() {
+    return render(
+      <AgentsLayout>
+        <p>Task composer</p>
+      </AgentsLayout>,
+    );
+  }
+
+  function resizeToMobile(mobile: boolean) {
+    act(() => {
+      query.matches = mobile;
+      changeListeners.forEach((listener) => listener());
+    });
+  }
+
+  it('keeps website preferences in the header while the mobile task list is open', () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand task list' }));
+
+    const header = screen.getByRole('banner');
+    expect(header).toContainElement(screen.getByRole('combobox', { name: 'Theme' }));
+    expect(header).toContainElement(screen.getByRole('combobox', { name: 'Display language' }));
+  });
+
+  it('skips the task list and focuses the workspace when the mobile list is open', async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand task list' }));
+    const workspace = document.getElementById('agents-workspace')!;
+    expect(workspace).toHaveAttribute('hidden');
+
+    fireEvent.click(screen.getByRole('link', { name: 'Skip to workspace' }));
+
+    expect(workspace).not.toHaveAttribute('hidden');
+    await waitFor(() => expect(workspace).toHaveFocus());
+  });
+
+  it('starts with the composer visible and the task list closed on a narrow screen', () => {
+    renderLayout();
+
+    expect(window.matchMedia).toHaveBeenCalledWith('(max-width: 767px)');
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(screen.getByText('Task composer')).toBeVisible();
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(toggle()).toHaveAccessibleName('Expand task list');
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each(['0', '1'])(
+    'opens and closes a task-list view while preserving desktop preference %s',
+    (preference) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, preference);
+      renderLayout();
+      const workspace = screen.getByRole('main');
+
+      fireEvent.click(toggle());
+
+      expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+      expect(workspace).not.toBeVisible();
+      expect(workspace).toHaveAttribute('hidden');
+      expect(screen.queryByRole('main')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAccessibleName('Collapse task list');
+      expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+
+      fireEvent.click(toggle());
+
+      expect(workspace).toBeVisible();
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+    },
+  );
+
+  it('closes the task list with Escape and returns focus to its toggle', () => {
+    renderLayout();
+    fireEvent.click(toggle());
+    screen.getByRole('link', { name: 'Existing task' }).focus();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(toggle()).toHaveFocus();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('moves focus into the task list when opened with Control+B and back when closed', async () => {
+    renderLayout();
+    const workspace = screen.getByRole('main');
+    workspace.focus();
+    expect(workspace).toHaveFocus();
+
+    fireEvent.keyDown(workspace, { key: 'b', ctrlKey: true });
+
+    const firstTaskLink = screen.getByRole('link', { name: 'New task' });
+    expect(firstTaskLink).toHaveFocus();
+    expect(workspace).not.toBeVisible();
+
+    fireEvent.keyDown(firstTaskLink, { key: 'b', ctrlKey: true });
+
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(workspace).toBeVisible();
+    await waitFor(() => expect(workspace).toHaveFocus());
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each([{ ctrlKey: true }, { metaKey: true }])(
+    'keeps focus in a portaled Skills modal when the sidebar shortcut uses %j',
+    (modifier) => {
+      function Workspace() {
+        const [open, setOpen] = useState(true);
+        return (
+          <>
+            <p>Task composer</p>
+            {open && (
+              <SkillDialog title="Skills" onClose={() => setOpen(false)}>
+                <input aria-label="Find skills" />
+              </SkillDialog>
+            )}
+          </>
+        );
+      }
+      render(
+        <AgentsLayout>
+          <Workspace />
+        </AgentsLayout>,
+      );
+      const workspace = screen.getByRole('main');
+      const input = screen.getByRole('textbox', { name: 'Find skills' });
+      expect(input).toHaveFocus();
+
+      fireEvent.keyDown(input, { key: 'b', ...modifier });
+
+      expect(input).toHaveFocus();
+      expect(screen.getByRole('dialog', { name: 'Skills' })).toBeVisible();
+      expect(workspace).toBeVisible();
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+
+      fireEvent.keyDown(input, { key: 'Tab' });
+      expect(screen.getByRole('button', { name: 'Close skill dialog' })).toHaveFocus();
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      workspace.focus();
+      fireEvent.keyDown(workspace, { key: 'b', ...modifier });
+      expect(screen.getByRole('link', { name: 'New task' })).toHaveFocus();
+      expect(workspace).not.toBeVisible();
+    },
+  );
+
+  it('keeps an open native dialog in control until it closes', () => {
+    render(
+      <AgentsLayout>
+        <dialog open aria-label="Task details">
+          <input aria-label="Task title" />
+        </dialog>
+      </AgentsLayout>,
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Task details' });
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    input.focus();
+
+    fireEvent.keyDown(input, { key: 'b', ctrlKey: true });
+    fireEvent.click(toggle());
+
+    expect(input).toHaveFocus();
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+
+    dialog.removeAttribute('open');
+    fireEvent.click(toggle());
+    expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('allows the sidebar shortcut when a modal is hidden', () => {
+    render(
+      <AgentsLayout>
+        <div hidden>
+          <div role="dialog" aria-modal="true" aria-label="Inactive dialog" />
+        </div>
+        <p>Task composer</p>
+      </AgentsLayout>,
+    );
+
+    fireEvent.keyDown(screen.getByRole('main'), { key: 'b', ctrlKey: true });
+
+    expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps the task list open when a descendant has handled Escape', () => {
+    renderLayout();
+    fireEvent.click(toggle());
+    const search = screen.getByRole('textbox', { name: 'Task search' });
+    search.focus();
+
+    expect(fireEvent.keyDown(search, { key: 'Escape' })).toBe(false);
+
+    expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+    expect(screen.queryByRole('main')).not.toBeInTheDocument();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+    expect(search).toHaveFocus();
+  });
+
+  it.each(['New task', 'Existing task'])(
+    'returns to the workspace when selecting %s, including the current route',
+    async (linkName) => {
+      renderLayout();
+      const workspace = screen.getByRole('main');
+      fireEvent.click(toggle());
+
+      fireEvent.click(screen.getByRole('link', { name: linkName }));
+
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(screen.getByRole('main')).toBeVisible();
+      expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+      await waitFor(() => expect(workspace).toHaveFocus());
+    },
+  );
+
+  it.each(['0', '1'])(
+    'restores desktop preference %s when resizing out of an open mobile task list',
+    (preference) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, preference);
+      renderLayout();
+      fireEvent.click(toggle());
+
+      resizeToMobile(false);
+
+      expect(screen.getByRole('main')).toBeVisible();
+      expect(toggle()).toHaveAttribute('aria-expanded', String(preference === '0'));
+      if (preference === '0') expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+      else expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+
+      resizeToMobile(true);
+
+      expect(screen.getByRole('main')).toBeVisible();
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+    },
+  );
+});
+
 describe('AgentsLayout product navigation', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -159,6 +493,28 @@ describe('AgentsLayout product navigation', () => {
       </AgentsLayout>,
     );
   }
+
+  it('changes website preferences in the header when the task list is collapsed', () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, '1');
+    render(
+      <ThemeProvider>
+        <LocaleProvider>
+          <AgentsLayout>
+            <p>job</p>
+          </AgentsLayout>
+        </LocaleProvider>
+      </ThemeProvider>,
+    );
+
+    const theme = screen.getByRole('combobox', { name: 'Theme' });
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('banner')).toContainElement(theme);
+    expect(nav()).not.toContainElement(theme);
+
+    fireEvent.change(theme, { target: { value: 'dark' } });
+    expect(document.documentElement).toHaveClass(DARK_CLASS);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+  });
 
   it('links Status at the configured status page', () => {
     statusUrl = 'https://status.example.test/';
@@ -254,4 +610,70 @@ describe('AgentsLayout permissions', () => {
       expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     },
   );
+});
+
+describe('AgentsLayout owner approval navigation', () => {
+  afterEach(cleanup);
+  it('keeps the global pending badge in the header when the sidebar is collapsed', async () => {
+    localStorage.clear();
+    pathname = '/approvals';
+    userId = 'ada';
+    vi.mocked(listMcpInvocations).mockResolvedValue({
+      invocations: Array.from({ length: 50 }, (_, id) => ({ id, status: 'pending' })),
+      has_more: true,
+      next_before_id: 1,
+    } as McpInvocationsApi);
+    render(
+      <AgentsLayout>
+        <p>approvals</p>
+      </AgentsLayout>,
+    );
+    const link = await screen.findByRole('link', { name: 'Approvals (50+ pending)' });
+    expect(link).toHaveAttribute('href', '/approvals');
+    expect(link).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Agents' })).not.toHaveAttribute('aria-current');
+    fireEvent.click(toggle());
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('banner')).toContainElement(link);
+    expect(listMcpInvocations).toHaveBeenCalledWith({ pendingOnly: true, limit: 50 });
+  });
+
+  it('resets counts when the owner changes and removes approvals when admission is revoked', async () => {
+    localStorage.clear();
+    pathname = '/';
+    userId = 'ada';
+    vi.mocked(listMcpInvocations).mockResolvedValueOnce({
+      invocations: [{ id: 1, status: 'pending' }],
+    } as McpInvocationsApi);
+    const { rerender } = render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    await screen.findByRole('link', { name: 'Approvals (1 pending)' });
+    let finish!: (response: McpInvocationsApi) => void;
+    vi.mocked(listMcpInvocations).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    userId = 'bob';
+    rerender(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    expect(screen.queryByRole('link', { name: 'Approvals (1 pending)' })).not.toBeInTheDocument();
+    await act(async () => finish({ invocations: [] }));
+    expect(screen.getByRole('link', { name: 'Approvals' })).toBeInTheDocument();
+    access = { allowed: true, permissions: [] };
+    vi.mocked(listMcpInvocations).mockClear();
+    rerender(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
+    expect(listMcpInvocations).not.toHaveBeenCalled();
+  });
 });

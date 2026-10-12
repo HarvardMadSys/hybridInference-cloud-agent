@@ -339,87 +339,117 @@ function ToolTimingTable({
           <span className="tabular-nums">{formatDuration(longest.ms)}</span>
         </p>
       ) : null}
-      <table className="w-full text-[12px]">
-        <thead>
-          <tr className="text-left text-gray-500 dark:text-gray-400">
-            <th className="py-1 font-medium">Tool</th>
-            <th className="py-1 font-medium">Detail</th>
-            <th className="py-1 text-right font-medium">Duration</th>
-            <th className="py-1 text-right font-medium">Processes</th>
-            <th className="py-1 text-right font-medium">CPU</th>
-            <th className="py-1 text-right font-medium">Peak memory</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => {
-            const {
-              measurement: call,
-              processCount,
-              timing,
-              timingSource,
-              accountedCpuUsec,
-              accountedMemPeakBytes,
-              accountedPartial,
-            } = row;
-            return (
-              <tr
-                key={`${timing.tool}-${index}`}
-                className="border-t border-gray-100 dark:border-white/5"
-              >
-                <td className="py-1 pr-3 align-top text-gray-800 dark:text-gray-200">
-                  {timing.tool}
-                  {timing.isError ? (
-                    <span className="ml-1 text-rose-600 dark:text-rose-400">failed</span>
-                  ) : null}
-                </td>
-                <td className="max-w-0 truncate py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
-                  {timing.detail}
-                </td>
-                <td
-                  className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300"
-                  title={
-                    timing.ms !== null && timingSource !== 'exact'
-                      ? 'Approximate duration'
-                      : undefined
-                  }
+      <div
+        role="region"
+        aria-label="Tool call measurements"
+        tabIndex={0}
+        className="min-w-0 overflow-x-auto rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      >
+        <table className="w-full min-w-[720px] table-fixed text-[12px]">
+          <colgroup>
+            <col className="w-24" />
+            <col />
+            <col className="w-24" />
+            <col className="w-24" />
+            <col className="w-20" />
+            <col className="w-28" />
+          </colgroup>
+          <thead>
+            <tr className="text-left text-gray-500 dark:text-gray-400">
+              <th className="py-1 font-medium">Tool</th>
+              <th className="py-1 font-medium">Detail</th>
+              <th className="py-1 text-right font-medium">Duration</th>
+              <th className="py-1 text-right font-medium">Processes</th>
+              <th className="py-1 text-right font-medium">CPU</th>
+              <th className="py-1 text-right font-medium">Peak memory</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => {
+              const {
+                measurement: call,
+                processCount,
+                timing,
+                timingSource,
+                accountedCpuUsec,
+                accountedMemPeakBytes,
+                accountedPartial,
+              } = row;
+              return (
+                <tr
+                  key={`${timing.tool}-${index}`}
+                  className="border-t border-gray-100 dark:border-white/5"
                 >
-                  {formatDuration(timing.ms) ?? 'unfinished'}
-                </td>
-                <td
-                  className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300"
-                  title={
-                    !processObservationComplete && processCount > 0
-                      ? 'At least this many processes; some data is missing.'
-                      : undefined
-                  }
-                >
-                  {processObservationComplete
-                    ? processCount
-                    : processCount > 0
-                      ? `≥${processCount}`
-                      : '—'}
-                </td>
-                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-                  <ConsumptionCell
-                    sampled={call ? formatCpu(call.cpuUsec) : null}
-                    shared={call ? !call.exclusive : false}
-                    accounted={formatCpu(accountedCpuUsec)}
-                    partial={accountedPartial}
-                  />
-                </td>
-                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-                  <ConsumptionCell
-                    sampled={call ? formatBytes(call.memPeakBytes) : null}
-                    shared={call ? !call.exclusive : false}
-                    accounted={formatBytes(accountedMemPeakBytes)}
-                    partial={accountedPartial}
-                  />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                  <td className="break-words py-1 pr-3 align-top text-gray-800 dark:text-gray-200">
+                    {timing.tool}
+                    {timing.isError ? (
+                      <span className="ml-1 text-rose-600 dark:text-rose-400">failed</span>
+                    ) : null}
+                  </td>
+                  <td className="max-w-0 py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
+                    <details className="group">
+                      <summary
+                        className="flex cursor-pointer list-none items-start gap-1 marker:content-none"
+                        title={timing.detail}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="shrink-0 text-gray-400 transition-transform group-open:rotate-90 dark:text-gray-500"
+                        >
+                          ›
+                        </span>
+                        <span className="min-w-0 truncate group-open:whitespace-pre-wrap group-open:break-words">
+                          {timing.detail}
+                        </span>
+                      </summary>
+                    </details>
+                  </td>
+                  <td
+                    className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300"
+                    title={
+                      timing.ms !== null && timingSource !== 'exact'
+                        ? 'Approximate duration'
+                        : undefined
+                    }
+                  >
+                    {formatDuration(timing.ms) ?? 'unfinished'}
+                  </td>
+                  <td
+                    className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300"
+                    title={
+                      !processObservationComplete && processCount > 0
+                        ? 'At least this many processes; some data is missing.'
+                        : undefined
+                    }
+                  >
+                    {processObservationComplete
+                      ? processCount
+                      : processCount > 0
+                        ? `≥${processCount}`
+                        : '—'}
+                  </td>
+                  <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                    <ConsumptionCell
+                      sampled={call ? formatCpu(call.cpuUsec) : null}
+                      shared={call ? !call.exclusive : false}
+                      accounted={formatCpu(accountedCpuUsec)}
+                      partial={accountedPartial}
+                    />
+                  </td>
+                  <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                    <ConsumptionCell
+                      sampled={call ? formatBytes(call.memPeakBytes) : null}
+                      shared={call ? !call.exclusive : false}
+                      accounted={formatBytes(accountedMemPeakBytes)}
+                      partial={accountedPartial}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
       {truncated ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
           This turn made more calls than are listed here.

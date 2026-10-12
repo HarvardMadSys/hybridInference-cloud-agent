@@ -20,22 +20,29 @@ export function Picker({
   value,
   options,
   onChange,
+  compact = false,
 }: {
   label: string;
   value: string;
   options: string[];
   onChange: (next: string) => void;
+  compact?: boolean;
 }) {
   if (options.length === 0) {
     return null;
   }
   return (
-    <label className="relative inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10">
-      <span className="sr-only">{label}</span>
-      {/* The width of the control. Truncated rather than unbounded so one
-          pathological model id cannot push the run button off the row. */}
-      <span aria-hidden className="max-w-[13rem] truncate text-gray-700 dark:text-gray-300">
-        {value}
+    <label
+      title={`${label}: ${value}`}
+      className="relative inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-xs text-foreground transition-colors hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15 [@media(pointer:coarse)]:min-h-11"
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        {!compact ? <span className="shrink-0 text-muted">{label}</span> : null}
+        {/* The width of the control follows the selection. Long identifiers
+            truncate so the setting and its label stay inside narrow panes. */}
+        <span aria-hidden className="min-w-0 max-w-[11rem] truncate font-medium">
+          {value}
+        </span>
       </span>
       <svg
         aria-hidden
@@ -43,7 +50,7 @@ export function Picker({
         fill="none"
         stroke="currentColor"
         strokeWidth={1.6}
-        className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+        className="h-3 w-3 shrink-0 text-muted"
       >
         <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
       </svg>
@@ -51,7 +58,7 @@ export function Picker({
         aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        className="absolute inset-0 h-full w-full cursor-pointer text-base opacity-0 focus:outline-none"
       >
         {options.map((option) => (
           <option key={option} value={option}>

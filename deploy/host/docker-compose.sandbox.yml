@@ -50,7 +50,8 @@ services:
       # Read-only, and its own key: this one may open a single forwarded port
       # and nothing else. Restrict it on the gateway host's authorized_keys
       # with command="" plus permitopen — a shell on the gateway is not part of
-      # what a runner host needs.
+      # what a runner host needs — and give its account the Match block in
+      # deploy/host/sshd-tunnels.conf.example, which refuses remote forwards.
       - ${AGENT_TUNNEL_SSH_KEY:?path to the tunnel's ssh private key}:/etc/agent-tunnel/id:ro
       - ${AGENT_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the gateway host}:/etc/agent-tunnel/known_hosts:ro
     networks:
@@ -157,7 +158,9 @@ services:
       TUNNEL_REVERSE_TARGET_PORT: ${AGENT_BROKER_REVERSE_TARGET_PORT:-8092}
     volumes:
       # Its own key again. One key that opens both this and the MCP tunnel
-      # would let anything holding it reach 8000 from the sandbox's side.
+      # would let anything holding it reach 8000 from the sandbox's side. It
+      # is the only key whose authorized_keys line carries permitlisten, for
+      # exactly the reverse bind address and port above.
       - ${AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY:?path to the control-plane tunnel's ssh private key}:/etc/agent-tunnel/id:ro
       - ${AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the control-plane host}:/etc/agent-tunnel/known_hosts:ro
     networks:
@@ -170,10 +173,11 @@ services:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
     restart: unless-stopped
-    # sandbox_host.sh drains runner replicas before replacing this service, so
-    # no admitted agent stream should remain. Keep a bounded window for
-    # terminal/SSE cleanup and lifespan finalizers instead of Docker's short
-    # default, which can SIGKILL the supervisor mid-cleanup.
+    # sandbox_host.sh drains runner replicas and then stops this exact container
+    # without a forced deadline, so archive finalizers normally finish before
+    # Compose replaces or removes it. Keep a longer fallback than Docker's
+    # default for direct Compose operations, but do not use it as the archive
+    # lifecycle bound: multiple retained groups are finalized serially.
     stop_grace_period: ${AGENT_BROKER_STOP_GRACE:-30s}
     environment:
       # Both host processes read these, and neither was reachable from this
@@ -195,9 +199,12 @@ services:
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
       AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       # Daemon-side path, observed through `docker info`; it is deliberately
-      # not mounted into this container. Production points Docker itself at a
-      # durable block volume and sets this to that exact data-root.
+      # not mounted into this container. Leave the default. A durable disk is
+      # bind-mounted onto /var/lib/docker, not selected as a custom data-root.
       AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
+      # Broker-only archival receipts and temporary exports survive service
+      # replacement. No sandbox or runner mounts this directory.
+      AGENT_SANDBOX_ARCHIVE_STATE_DIR: /var/lib/hybridinference/broker-archives
       # Product inactivity timeout: after the latest settled turn (and after
       # all terminals close), docker stop retains the chat writable layer.
       # This is distinct from the per-turn AGENT_TIMEOUT_S watchdog.
@@ -227,20 +234,16 @@ services:
       - cloud_agent_host.workspace_broker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives:/var/lib/hybridinference/broker-archives
     networks:
       - internal
 
   runner:
-    # How long docker waits after SIGTERM before SIGKILL, and therefore how
-    # long a job gets to finish when this container is replaced. The host
-    # service stops claiming on SIGTERM, each turn already running finishes in
-    # its own process, and the service exits after the last of them.
-    #
-    # Bounded on purpose. A job may run up to AGENT_TIMEOUT_S (an hour by
-    # default) and a deploy cannot wait that long, so past this the container
-    # is killed, the lease expires and the control plane supersedes the
-    # attempt — the behaviour every job through a deploy used to get, now
-    # narrowed to the jobs that genuinely outlast the window.
+    # Fallback grace period for direct, out-of-band Compose operations. The
+    # supported host activation path calls Engine `stop --time=-1` for this
+    # service's exact container IDs: the service stops claiming on SIGTERM,
+    # lets every child turn finish, and a deployment never converts that drain
+    # into SIGKILL.
     stop_grace_period: ${AGENT_RUNNER_STOP_GRACE:-5m}
     # One container per host, on purpose. It runs one service that enrolls,
     # heartbeats and claims, and starts a process per turn as it claims one —
@@ -327,6 +330,10 @@ services:
       # Largest first-turn checkout, in MiB, counting its Git objects as well
       # as its files. Spooled through this container's disk, not its memory.
       AGENT_SOURCE_IMPORT_MAX_MIB: ${AGENT_SOURCE_IMPORT_MAX_MIB:-1024}
+      # Container sizes are bootstrap values; admin settings take over on heartbeat.
+      AGENT_SANDBOX_CPU_MILLICORES: ${AGENT_SANDBOX_CPU_MILLICORES:-2000}
+      AGENT_SANDBOX_MEMORY_MIB: ${AGENT_SANDBOX_MEMORY_MIB:-4096}
+      AGENT_SANDBOX_DISK_MIB: ${AGENT_SANDBOX_DISK_MIB:-0}
 
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}

@@ -1,7 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useId, useMemo, useRef, useState, type RefObject } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import { useT } from '@/components/providers';
 import { COMPOSER_MENU_ROW, COMPOSER_MENU_SURFACE } from './composerMenuStyles';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
@@ -45,6 +53,8 @@ export function RepositoryPicker({
   onRefresh,
   refreshing = false,
   onConfigure,
+  onCreate,
+  createDisabled = false,
   returnFocusTo,
 }: {
   repos: string[];
@@ -57,6 +67,10 @@ export function RepositoryPicker({
   refreshing?: boolean;
   /** Go straight to GitHub to add repositories; without it, the Integrations page. */
   onConfigure?: () => void;
+  /** Create a personal GitHub repository before starting a conversation. */
+  onCreate?: () => void;
+  /** Keep asynchronous composer work from moving focus behind the creation dialog. */
+  createDisabled?: boolean;
   /** Where focus goes after a choice. The trigger, unless the composer asked. */
   returnFocusTo?: RefObject<HTMLElement>;
 }) {
@@ -83,9 +97,14 @@ export function RepositoryPicker({
     ? sorted.filter((repo) => repo.toLocaleLowerCase().includes(needle))
     : sorted;
 
+  // The open menu must own the caret as soon as it appears, including when a
+  // restored draft opens it during an asynchronous config update.
+  useLayoutEffect(() => {
+    if (open) search.current?.focus();
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
-    search.current?.focus();
     function onPointerDown(event: PointerEvent) {
       const target = event.target as Node;
       if (panel.current?.contains(target) || trigger.current?.contains(target)) return;
@@ -158,15 +177,15 @@ export function RepositoryPicker({
         aria-label={`${t('composer.repository')}: ${value || t('composer.repositoryPlaceholder')}`}
         title={value || t('composer.repositoryPlaceholder')}
         onClick={() => onOpenChange(!open)}
-        className={`inline-flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:hover:bg-white/10 ${
-          open ? 'bg-gray-100 dark:bg-white/10' : ''
-        } ${value ? 'text-gray-700 dark:text-gray-300' : 'text-crimson-dark dark:text-crimson-light'}`}
+        className={`ui-focus-ring inline-flex min-h-10 min-w-0 max-w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${
+          open ? 'bg-surface-hover' : ''
+        } ${value ? 'text-foreground' : 'text-accent'}`}
       >
         <GitHubMark className="h-3.5 w-3.5 shrink-0" />
-        <span className="max-w-[13rem] truncate">
+        <span className="max-w-[10rem] truncate sm:max-w-[13rem]">
           {value ? (
             <>
-              <span className="text-gray-400 dark:text-gray-500">{owner}</span>
+              <span className="text-muted">{owner}</span>
               {name}
             </>
           ) : (
@@ -179,7 +198,7 @@ export function RepositoryPicker({
           fill="none"
           stroke="currentColor"
           strokeWidth={1.6}
-          className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+          className="h-3 w-3 shrink-0 text-muted"
         >
           <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
         </svg>
@@ -272,7 +291,33 @@ export function RepositoryPicker({
               </p>
             ) : null}
           </div>
+          {onCreate ? (
+            <button
+              type="button"
+              disabled={createDisabled}
+              onClick={() => {
+                if (createDisabled) return;
+                close();
+                onCreate();
+              }}
+              className={`${COMPOSER_MENU_ROW} mt-1 shrink-0 border-t border-gray-100 pt-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/5`}
+            >
+              <span aria-hidden="true" className="w-4 text-center">
+                +
+              </span>
+              {t('repositoryCreate.title')}
+            </button>
+          ) : null}
           <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
+            <a
+              href="https://github.com/new"
+              target="_blank"
+              rel="noreferrer"
+              className={CONFIGURE_CLASS}
+            >
+              <GitHubMark className="h-4 w-4 shrink-0" />
+              <span className="truncate">{t('composer.repositoryCreate')}</span>
+            </a>
             {onConfigure ? (
               <button
                 type="button"

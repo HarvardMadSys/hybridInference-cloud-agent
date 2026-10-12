@@ -11,6 +11,7 @@
 // loop.
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useAuth } from '@/components/providers';
 import { basePath } from '@/config/env';
 import { safeReturnTo } from '@/lib/auth/signin';
@@ -63,6 +64,11 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
               ? 'Agent returned an unexpected response. Contact the service administrator.'
               : 'We cannot confirm your access right now. Please try again shortly.'}
         </p>
+        {state.error === 'configuration' && (
+          <Link href="/setup" className="text-sm underline">
+            Administrator setup
+          </Link>
+        )}
         {state.error === 'unavailable' && (
           <button
             type="button"
@@ -85,6 +91,9 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
         <p className="text-sm text-gray-500 dark:text-gray-400" role="alert">
           {error}
         </p>
+        <Link href="/setup" className="text-sm underline">
+          Administrator setup
+        </Link>
       </div>
     );
   }

@@ -133,12 +133,12 @@ require_tools() {
     command -v "$tool" >/dev/null || missing+=("$tool")
   done
   sha256_command >/dev/null || missing+=("sha256sum")
-  # The release moved from .tar.xz to .tar.zst, so unpacking needs zstd — either
-  # standalone or compiled into tar. Ubuntu 24.04 has tar --zstd once the zstd
-  # package is present, which is why both spellings count.
-  if ! command -v zstd >/dev/null && ! tar --help 2>/dev/null | grep -q -- '--zstd'; then
-    missing+=("zstd")
-  fi
+  # The release moved from .tar.xz to .tar.zst, so unpacking needs the zstd
+  # program. A tar that lists --zstd is no substitute: GNU tar's --zstd runs
+  # that same program, and Ubuntu 24.04's tar lists the flag with or without
+  # the zstd package. Counting the flag would let a host without zstd download
+  # 1.5 GB and mark its runtime as updating, only for tar to fail.
+  command -v zstd >/dev/null || missing+=("zstd")
   if [[ ${#missing[@]} -gt 0 ]]; then
     die "missing on this host: ${missing[*]} (apt-get install -y ${missing[*]})"
   fi
@@ -240,11 +240,7 @@ extract() {
   # `mkdir -p ""` is an error where `mkdir -p /` is a no-op.
   mkdir -p "${KATA_EXTRACT_ROOT%/}/"
   # Members are `./opt/kata/...`, so the root is the extraction target.
-  if command -v zstd >/dev/null; then
-    zstd -dc "$archive" | tar -C "${KATA_EXTRACT_ROOT%/}/" -xf -
-  else
-    tar --zstd -C "${KATA_EXTRACT_ROOT%/}/" -xf "$archive"
-  fi
+  zstd -dc "$archive" | tar -C "${KATA_EXTRACT_ROOT%/}/" -xf -
   [[ -x "$SHIM_BINARY" ]] || die \
     "unpacked, but ${SHIM_BINARY} is missing or not executable — the archive layout is not what this script expects."
 }

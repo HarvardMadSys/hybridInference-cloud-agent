@@ -14,7 +14,7 @@
 # Usage:  deploy.sh [--phase prepare|prepare-database|activate] <sha>
 #
 # With no `--phase` this runs all three in order, which is what every caller
-# before the split invoked and what the repository's own workflows still do.
+# before the split invoked.
 #
 # The phases exist because the release design sequences them across two
 # machines (#270): both sides prepare, *then* this side prepares the database
@@ -42,6 +42,8 @@
 #   DEPLOY_ROOT   where the deployed checkout lives (default /srv/freeinference-cloud-agent)
 #   COMPOSE_PROJECT  compose project name (default cloudagent)
 #   ALLOW_DIRTY=1 deploy over local modifications instead of refusing
+#   AGENT_DEPLOY_DRAINING_HOST  optional exact host that must stay idle and
+#                              draining through the compatibility fence
 #   AGENT_DEPLOY_MODE=artifacts uses AGENT_RELEASE_MANIFEST and the packaged
 #   recipe; DEPLOY_ROOT remains the persistent deployment/configuration root.
 set -euo pipefail
@@ -75,6 +77,9 @@ COMPOSE_FILE="deploy/control-plane/docker-compose.yml"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 SHARED_READY_TIMEOUT="${SHARED_READY_TIMEOUT:-900}"
 DEPLOY_PROTOCOL="shared-live-exact-sha-v4"
+# Candidate recipe capability consumed by downstream deployment orchestration.
+# AGENT_DEPLOY_DRAIN_FENCE_V1
+# AGENT_DEPLOY_DRAIN_FENCE_V2
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -90,9 +95,51 @@ esac
   || die "SHARED_READY_TIMEOUT must be a positive integer (got '${SHARED_READY_TIMEOUT}')"
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
+[ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
+
+# Compute credentials are write-only in Admin and encrypted before they reach
+# Postgres. Make that surface usable without asking an operator to invent one
+# more secret, while keeping the key outside the database it protects. The
+# persistent .env is deliberately untracked and survives both source and
+# artifact upgrades. Never replace a non-empty value: doing so would orphan
+# every saved SSH key and provider token.
+ensure_compute_secret_key() {
+  local configured="" generated="" temporary=""
+  configured="$(grep -E '^AGENT_COMPUTE_SECRET_KEY=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  configured="${configured%\"}"; configured="${configured#\"}"
+  configured="${configured%\'}"; configured="${configured#\'}"
+  if [ -n "${configured}" ]; then
+    return 0
+  fi
+
+  generated="${AGENT_COMPUTE_SECRET_KEY:-}"
+  if [ -n "${generated}" ]; then
+    [[ "${generated}" =~ ^[A-Za-z0-9_+=./-]{32,}$ ]] \
+      || die "AGENT_COMPUTE_SECRET_KEY must be at least 32 dotenv-safe bytes"
+  else
+    command -v openssl >/dev/null 2>&1 \
+      || die "openssl is required to generate AGENT_COMPUTE_SECRET_KEY"
+    generated="$(openssl rand -hex 32)"
+  fi
+
+  temporary="$(mktemp "${DEPLOY_ROOT}/.env.compute-key.XXXXXX")"
+  chmod 600 "${temporary}"
+  awk -v replacement="AGENT_COMPUTE_SECRET_KEY=${generated}" '
+    BEGIN { written = 0 }
+    /^AGENT_COMPUTE_SECRET_KEY=/ {
+      if (!written) { print replacement; written = 1 }
+      next
+    }
+    { print }
+    END { if (!written) print replacement }
+  ' .env > "${temporary}"
+  mv "${temporary}" .env
+  log "generated and persisted the compute credential encryption key"
+}
+
+ensure_compute_secret_key
 
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
-  [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT}"
   source "$SCRIPT_DIR/../release/artifact_env.sh"
   prepare_artifact_deployment control-plane
   COMPOSE_PROJECT="$(artifact_env_value COMPOSE_PROJECT)"
@@ -120,8 +167,6 @@ else
     fi
     log "ALLOW_DIRTY=1 — discarding the above"
   fi
-
-  [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
 
   PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
   log "previous: ${PREVIOUS}"
@@ -176,6 +221,12 @@ from_env() {
 # for every Compose invocation, including a bounded cold-start bootstrap.
 AGENT_DEPLOYMENT_SHA="${SHA}"
 export AGENT_DEPLOYMENT_SHA
+
+# Server setup needs the physical node's address, not the API container's
+# hostname or the public reverse proxy. Respect a deployment-specific SSH alias.
+AGENT_CONTROL_PLANE_SSH_HOST="${AGENT_CONTROL_PLANE_SSH_HOST:-$(from_env AGENT_CONTROL_PLANE_SSH_HOST)}"
+AGENT_CONTROL_PLANE_SSH_HOST="${AGENT_CONTROL_PLANE_SSH_HOST:-$(hostname -f 2>/dev/null || hostname)}"
+export AGENT_CONTROL_PLANE_SSH_HOST
 
 compose() {
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
@@ -433,10 +484,15 @@ READINESS_ARGS=()
 if [[ -n "${DEPLOY_PEER_JOB:-}" ]]; then
   READINESS_ARGS=(--name "$READINESS_CONTAINER")
 fi
+READINESS_MODE_ARGS=()
+if [[ -n "${AGENT_DEPLOY_DRAINING_HOST:-}" ]]; then
+  READINESS_MODE_ARGS=(--draining-host "${AGENT_DEPLOY_DRAINING_HOST}")
+fi
 WATCH_READINESS=1 compose run --rm --no-deps ${READINESS_ARGS[@]+"${READINESS_ARGS[@]}"} control-plane \
   python -m cloud_agent.deploy_readiness \
     --timeout-seconds "${SHARED_READY_TIMEOUT}" \
-    --expected-deployment-sha "${SHA}"
+    --expected-deployment-sha "${SHA}" \
+    ${READINESS_MODE_ARGS[@]+"${READINESS_MODE_ARGS[@]}"}
 
 # The compatibility gate passed, so any bootstrap peers are now part of the
 # desired target stack rather than temporary readiness aids. A later full-stack

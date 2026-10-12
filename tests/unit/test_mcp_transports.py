@@ -99,6 +99,28 @@ def _reply(request: httpx.Request, result: Any, **headers: str) -> httpx.Respons
     )
 
 
+async def test_existing_transport_uses_updated_default_timeouts_and_keeps_overrides(monkeypatch):
+    values = {"mcp_request_timeout_s": 120.0, "mcp_connect_timeout_s": 10.0}
+    monkeypatch.setattr(
+        transports, "number_setting", lambda name, default=None: values.get(name, default)
+    )
+    timeouts = []
+
+    def handle(request):
+        timeouts.append(request.extensions["timeout"])
+        return _reply(request, {"tools": []})
+
+    async with _client(handle) as http:
+        implicit = StreamableHttpTransport(_config(), http)
+        explicit = StreamableHttpTransport(_config(request_timeout=17, connect_timeout=3), http)
+        await implicit.request("tools/list")
+        values.update(mcp_request_timeout_s=31.0, mcp_connect_timeout_s=2.0)
+        await implicit.request("tools/list")
+        await explicit.request("tools/list")
+    assert [timeout["read"] for timeout in timeouts] == [120, 31, 17]
+    assert [timeout["connect"] for timeout in timeouts] == [10, 2, 3]
+
+
 def _sse(payloads: list[Any], **headers: str) -> httpx.Response:
     """Answer with a request-scoped SSE stream carrying ``payloads``."""
     frames = b"".join(b"data: " + json.dumps(payload).encode() + b"\n\n" for payload in payloads)
@@ -157,6 +179,43 @@ class TestHeaders:
         headers = build_headers(config, body=False)
         assert headers["mcp-protocol-version"] == "2025-11-25"
         assert headers["mcp-session-id"] == "sess-1"
+
+    async def test_a_stateless_tool_call_sends_annotated_argument_headers(self) -> None:
+        """GitHub's remote server answers 400 when these headers are missing."""
+        seen: list[httpx.Headers] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers)
+            return _reply(request, {"content": [{"type": "text", "text": "ok"}]})
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-mcp-header": "owner"},
+                "repo": {"type": "string", "x-mcp-header": "repo"},
+            },
+        }
+        async with _client(handle) as http:
+            transport = StreamableHttpTransport(
+                _config(protocol_version="2026-07-28"), http, owns_client=False
+            )
+            await transport.request(
+                "tools/call",
+                {"name": "get_file_contents", "arguments": {"owner": "acme", "repo": "demo"}},
+                input_schema=schema,
+            )
+            transport.set_era("handshake")
+            await transport.request(
+                "tools/call",
+                {"name": "get_file_contents", "arguments": {"owner": "acme", "repo": "demo"}},
+                input_schema=schema,
+            )
+        assert seen[0]["mcp-method"] == "tools/call"
+        assert seen[0]["mcp-name"] == "get_file_contents"
+        assert seen[0]["mcp-param-owner"] == "acme"
+        assert seen[0]["mcp-param-repo"] == "demo"
+        assert "mcp-method" not in seen[1]
+        assert "mcp-param-owner" not in seen[1]
 
 
 class TestStatuses:

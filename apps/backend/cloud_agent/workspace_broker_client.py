@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
 
+SHARED_SESSION_FORK_TIMEOUT_S = 180.0
+# A new member can install its selected plugins before opening the native CLI.
+SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
+
+
 @dataclass
 class WorkspaceBrokerError(RuntimeError):
     """A bounded, owner-safe failure returned by the internal broker."""
@@ -148,6 +153,7 @@ class WorkspaceBrokerClient:
         thread_id: str,
         suffix: str = "",
         *,
+        params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         timeout: float = 60,
     ) -> dict[str, Any]:
@@ -162,6 +168,7 @@ class WorkspaceBrokerClient:
                     method,
                     f"{self._base_url}{path}",
                     headers=self._headers,
+                    params=params,
                     json=json,
                     timeout=timeout,
                 )
@@ -200,14 +207,20 @@ class WorkspaceBrokerClient:
         if response.is_error:
             raise self._response_error(response)
 
-    async def list_sandboxes(self, *, timeout: float = 10) -> list[dict[str, Any]]:
-        """Read the complete retained-container inventory, including stopped groups."""
+    async def list_sandboxes(
+        self, *, timeout: float = 10, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read retained-container inventory, optionally scoped to one shared group."""
+        selection: dict[str, Any] = (
+            {"params": {"thread_id": thread_id}} if thread_id is not None else {}
+        )
         try:
             async with self._http(timeout) as client:
                 response = await client.get(
                     f"{self._base_url}/sandboxes",
                     headers=self._headers,
                     timeout=timeout,
+                    **selection,
                 )
         except httpx.HTTPError:
             raise WorkspaceBrokerError(
@@ -402,9 +415,51 @@ class WorkspaceBrokerClient:
         params = {"base_sha": base_sha} if base_sha else None
         return await self._request("GET", workspace_id, "git", params=params, timeout=70)
 
-    async def shared_chat_sandbox_status(self, thread_id: str) -> dict[str, Any]:
+    async def shared_chat_sandbox_status(
+        self, thread_id: str, *, timeout: float = 60
+    ) -> dict[str, Any]:
         """Inspect one membership in its shared retained container."""
-        return await self._shared_sandbox_request("GET", thread_id)
+        return await self._shared_sandbox_request("GET", thread_id, timeout=timeout)
+
+    async def prepare_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Export the exact stopped container behind a durable host barrier."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/prepare", json=payload, timeout=1800
+        )
+
+    async def upload_sandbox_deletion_archive(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Send a prepared archive using only a checksum-bound S3 upload URL."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/upload", json=payload, timeout=1800
+        )
+
+    async def commit_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Remove a stopped container after its verified receipt is durable."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/commit", json=payload, timeout=120
+        )
+
+    async def abort_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Release an uncommitted host archive barrier after a failed upload."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/abort", json=payload, timeout=120
+        )
+
+    async def discard_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Remove a stopped container without exporting or uploading an archive."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/discard", json=payload, timeout=120
+        )
 
     async def register_shared_sandbox(self, sandbox: dict[str, Any]) -> dict[str, Any]:
         """Rehydrate durable member aliases after a broker process restart.
@@ -449,6 +504,7 @@ class WorkspaceBrokerClient:
                 "resident_slot_capacity": sandbox["resident_slot_capacity"],
                 "memory_limit": sandbox["memory_limit"],
                 "cpu_limit": sandbox["cpu_limit"],
+                "disk_limit_mib": sandbox.get("disk_limit_mib", 0),
                 "stop_timeout_s": sandbox["stop_timeout_seconds"],
                 "members": members,
             },
@@ -471,6 +527,35 @@ class WorkspaceBrokerClient:
             thread_id,
             "input",
             json={"owner": owner, "message_id": message_id, "text": text},
+            timeout=30,
+        )
+
+    async def pending_shared_questions(self, thread_id: str, *, owner: str) -> dict[str, Any]:
+        """Read native requests waiting on one exact activation owner."""
+        return await self._shared_sandbox_request(
+            "GET", thread_id, "questions", params={"owner": owner}, timeout=30
+        )
+
+    async def answer_shared_question(
+        self,
+        thread_id: str,
+        *,
+        owner: str,
+        request_id: str,
+        answers: dict[str, list[str]],
+        reject: bool = False,
+    ) -> dict[str, Any]:
+        """Answer a native request without retaining a reply for later turns."""
+        return await self._shared_sandbox_request(
+            "POST",
+            thread_id,
+            "questions",
+            json={
+                "owner": owner,
+                "request_id": request_id,
+                "answers": answers,
+                "reject": reject,
+            },
             timeout=30,
         )
 
@@ -497,6 +582,7 @@ class WorkspaceBrokerClient:
         resident_slot_capacity: int,
         memory_limit: str,
         cpu_limit: str,
+        disk_limit_mib: int,
         stop_timeout_s: int,
         members: list[dict[str, Any]],
         operation_id: str,
@@ -523,6 +609,7 @@ class WorkspaceBrokerClient:
                 "resident_slot_capacity": resident_slot_capacity,
                 "memory_limit": memory_limit,
                 "cpu_limit": cpu_limit,
+                "disk_limit_mib": disk_limit_mib,
                 "stop_timeout_s": stop_timeout_s,
                 "members": members,
                 "operation_id": operation_id,
@@ -533,7 +620,11 @@ class WorkspaceBrokerClient:
                 "source_launch": source_launch,
                 "target_launch": target_launch,
             },
-            timeout=180,
+            timeout=(
+                SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S
+                if source_launch.get("plugins") or target_launch.get("plugins")
+                else SHARED_SESSION_FORK_TIMEOUT_S
+            ),
         )
 
     @staticmethod
@@ -550,6 +641,7 @@ class WorkspaceBrokerClient:
             "resident_slot_capacity": snapshot["resident_slot_capacity"],
             "memory_limit": snapshot["memory_limit"],
             "cpu_limit": snapshot["cpu_limit"],
+            "disk_limit_mib": snapshot.get("disk_limit_mib", 0),
             "stop_timeout_s": snapshot["stop_timeout_seconds"],
             "members": snapshot["members"],
         }

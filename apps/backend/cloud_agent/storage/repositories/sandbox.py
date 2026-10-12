@@ -7,16 +7,26 @@ they were, and only the class holding them changed.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
+
+logger = get_logger(__name__)
 
 
 class PostgresSandboxRepository:
@@ -25,6 +35,934 @@ class PostgresSandboxRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+
+    @staticmethod
+    async def _lock_running_attempt(conn: Any, attempt_id: int, lease_generation: int) -> bool:
+        """Lock attempt identity before evaluating its wall-clock lease."""
+        return bool(
+            await conn.fetchval(
+                "SELECT id FROM agent_attempts "
+                "WHERE id = $1 AND lease_generation = $2 AND status = 'running' FOR SHARE",
+                attempt_id,
+                lease_generation,
+            )
+        )
+
+    @staticmethod
+    async def _attempt_is_live(conn: Any, attempt_id: int) -> bool:
+        """Evaluate expiry only after the caller has locked the attempt row."""
+        return bool(
+            await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
+                attempt_id,
+            )
+        )
+
+    async def set_admin_archived(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str | None,
+        last_activity_at: datetime,
+        archived: bool,
+        actor_id: str,
+        admin_ip: str,
+        allow_stale_host: bool = False,
+    ) -> str:
+        """Audit a reviewed inventory removal or restore without deleting state.
+
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            # Admission, Fork and reconciliation lock memberships before the
+            # group. Keep that order so hiding cannot race an admitted turn.
+            await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                "SELECT id, user_id, host, generation, container_id, last_activity_at, "
+                "state, archived_at, deletion_state, active_operation_count, snapshot_state "
+                "FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                sandbox_id,
+            )
+            if group is None:
+                return "not_found"
+            if (
+                group["generation"] != generation
+                or group["container_id"] != container_id
+                or group["last_activity_at"] != last_activity_at
+            ):
+                return "stale"
+            if (group["archived_at"] is not None) == archived:
+                return "accepted"
+            if group["deletion_state"] in {"pending", "archived"}:
+                return "busy"
+            stale_host_removal = archived and allow_stale_host
+            if archived:
+                if stale_host_removal:
+                    # This is a reversible visibility change, so do not add
+                    # host row locks to the lifecycle lock order. A matching
+                    # running observation restores visibility if the host
+                    # returns while or just after this transaction commits.
+                    host_online = await conn.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM agent_runner_hosts
+                            WHERE host = $1
+                              AND last_heartbeat_at >= clock_timestamp()
+                                  - make_interval(secs => $2)
+                        )
+                        """,
+                        group["host"],
+                        FRESH_AFTER_SECONDS,
+                    )
+                    if host_online:
+                        return "host_online"
+                elif group["state"] != "stopped" and group["deletion_state"] != "deleted":
+                    return "not_stopped"
+                busy = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships m
+                        WHERE m.sandbox_id = $1 AND (
+                            m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
+                            OR EXISTS (
+                                SELECT 1 FROM agent_jobs j
+                                WHERE j.thread_id = m.thread_id AND j.state = 'running'
+                            )
+                        )
+                    ) OR EXISTS (
+                        SELECT 1 FROM agent_sandbox_snapshots s
+                        WHERE s.sandbox_id = $1
+                          AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
+                    )
+                    """,
+                    sandbox_id,
+                )
+                if (
+                    busy
+                    or group["active_operation_count"]
+                    or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
+                ):
+                    return "busy"
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="admin_inventory_archived" if archived else "admin_inventory_restored",
+                source="admin",
+                actor_id=actor_id,
+                from_state="visible" if archived else "archived",
+                to_state="archived" if archived else "visible",
+                details={"container_present": container_id is not None}
+                | ({"stale_host_removal": True} if stale_host_removal else {}),
+            )
+            await conn.execute(
+                "UPDATE agent_sandboxes "
+                "SET archived_at = CASE WHEN $2 THEN NOW() ELSE NULL END, updated_at = NOW() "
+                "WHERE id = $1",
+                sandbox_id,
+                archived,
+            )
+            # Visibility and its audit receipt commit together. Never delete
+            # the container, native membership or immutable execution ledger.
+            await conn.execute(
+                "INSERT INTO agent_admin_audit_log "
+                "(action, actor_id, admin_ip, target_user_id, details, success) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb, TRUE)",
+                "agent.sandbox.archive" if archived else "agent.sandbox.restore",
+                actor_id,
+                admin_ip,
+                group["user_id"],
+                json.dumps(
+                    {
+                        "sandbox_id": sandbox_id,
+                        "host": group["host"],
+                        "generation": generation,
+                        "container_id": container_id,
+                    }
+                    | ({"stale_host_removal": True} if stale_host_removal else {})
+                ),
+            )
+        return "accepted"
+
+    async def request_admin_delete(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+        broker_confirmed_stopped: bool = False,
+        discard: bool = False,
+    ) -> str:
+        """Fence an idle stopped sandbox for deletion.
+
+        A durable request closes admission before the host removes Docker. The
+        default path exports and verifies an S3 archive first. ``discard``
+        removes the exact stopped container without uploading it. No native
+        state or ledger row is removed until the host confirms that removal.
+        A stale RUNNING row may be repaired only after the API proves the exact
+        host container is stopped and idle.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                "SELECT * FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id
+            )
+            if group is None:
+                return "not_found"
+            if (
+                group["generation"] != generation
+                or group["container_id"] != container_id
+                or group["last_activity_at"] != last_activity_at
+            ):
+                return "stale"
+            if group["deletion_state"] in {"pending", "archived", "deleted"}:
+                return "accepted"
+            forced_stopped_recovery = group["state"] == "running" and broker_confirmed_stopped
+            if group["state"] != "stopped" and not forced_stopped_recovery:
+                return "not_stopped"
+            busy = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM agent_thread_sandbox_memberships m
+                    WHERE m.sandbox_id = $1 AND (
+                        m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
+                        OR EXISTS (
+                            SELECT 1 FROM agent_jobs j
+                            WHERE j.thread_id = m.thread_id AND j.state = 'running'
+                        )
+                    )
+                ) OR EXISTS (
+                    SELECT 1 FROM agent_sandbox_snapshots s
+                    WHERE s.sandbox_id = $1
+                      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
+                )
+                """,
+                sandbox_id,
+            )
+            if (
+                busy
+                or group["active_operation_count"]
+                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
+            ):
+                return "busy"
+            if forced_stopped_recovery:
+                await conn.execute(
+                    """
+                    UPDATE agent_thread_sandbox_memberships
+                    SET resident_state = CASE
+                            WHEN native_state = 'lost' THEN 'lost' ELSE 'stopped' END,
+                        updated_at = NOW()
+                    WHERE sandbox_id = $1
+                    """,
+                    sandbox_id,
+                )
+            request_id = str(uuid4())
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="admin_delete_requested",
+                source="admin",
+                actor_id=actor_id,
+                from_state=str(group["deletion_state"]),
+                to_state="pending",
+                details={"request_id": request_id, "discard": discard},
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET state = CASE WHEN $3 THEN 'stopped' ELSE state END,
+                    idle_deadline = CASE WHEN $3 THEN NULL ELSE idle_deadline END,
+                    stop_requested_at = CASE WHEN $3 THEN NULL ELSE stop_requested_at END,
+                    resource_snapshot = CASE WHEN $3 THEN NULL ELSE resource_snapshot END,
+                    resource_sampled_at = CASE WHEN $3 THEN NULL ELSE resource_sampled_at END,
+                    resource_received_at = CASE WHEN $3 THEN NULL ELSE resource_received_at END,
+                    terminal_count = CASE WHEN $3 THEN NULL ELSE terminal_count END,
+                    terminal_count_observed_at = CASE WHEN $3 THEN NULL ELSE terminal_count_observed_at END,
+                    deletion_state = 'pending', deletion_request_id = $2,
+                    deletion_requested_at = NOW(), deletion_retry_at = NOW(),
+                    deletion_generation = generation, deletion_container_id = container_id,
+                    deletion_last_activity_at = last_activity_at,
+                    deletion_claim_token = NULL, deletion_claim_expires_at = NULL,
+                    deletion_cleanup_required = FALSE, deletion_cleanup_archive_key = NULL,
+                    deletion_discard = $4,
+                    deletion_archive_key = NULL, deletion_archive_version_id = NULL,
+                    deletion_sha256 = NULL, deletion_size_bytes = NULL, deletion_error = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+                request_id,
+                forced_stopped_recovery,
+                discard,
+            )
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.requested",
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                broker_confirmed_stopped=forced_stopped_recovery,
+            )
+        return "accepted"
+
+    async def claim_due_admin_sandbox_deletion(
+        self, *, ttl_seconds: float
+    ) -> dict[str, Any] | None:
+        """Lease one pending or archive-verified deletion without duplicate workers."""
+        if ttl_seconds <= 0:
+            raise ValueError("deletion claim TTL must be positive")
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                WITH due AS (
+                    SELECT id FROM agent_sandboxes
+                    WHERE deletion_state IN ('pending', 'archived')
+                      AND generation = deletion_generation
+                      AND container_id = deletion_container_id
+                      AND last_activity_at = deletion_last_activity_at
+                      AND (deletion_retry_at IS NULL OR deletion_retry_at <= NOW())
+                      AND (deletion_claim_expires_at IS NULL OR deletion_claim_expires_at <= clock_timestamp())
+                    ORDER BY deletion_requested_at, id
+                    FOR UPDATE SKIP LOCKED LIMIT 1
+                )
+                UPDATE agent_sandboxes g
+                SET deletion_claim_token = $1,
+                    deletion_claim_expires_at = clock_timestamp() + make_interval(secs => $2),
+                    updated_at = NOW()
+                FROM due WHERE g.id = due.id
+                RETURNING g.id, g.user_id, g.origin_thread_id, g.host, g.generation,
+                          g.container_id, g.last_activity_at, g.deletion_request_id,
+                          g.deletion_state, g.deletion_discard, g.deletion_claim_token,
+                          g.deletion_cleanup_required, g.deletion_cleanup_archive_key,
+                          g.deletion_archive_key, g.deletion_archive_version_id,
+                          g.deletion_sha256, g.deletion_size_bytes
+                """,
+                str(uuid4()),
+                ttl_seconds,
+            )
+        return None if row is None else dict(row)
+
+    async def record_admin_sandbox_archive(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+        archive_key: str,
+        sha256: str,
+        size_bytes: int,
+        archive_version_id: str | None = None,
+    ) -> bool:
+        """Checkpoint an independently verified S3 receipt under the live worker lease."""
+        if not archive_key.startswith("s3://") or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValueError("verified archive requires an S3 location and SHA256 digest")
+        if size_bytes <= 0:
+            raise ValueError("verified archive must contain data")
+        async with self._pool.acquire() as conn, conn.transaction():
+            group = await self._locked_admin_deletion(
+                conn, sandbox_id, request_id, claim_token, generation, container_id
+            )
+            if group is None:
+                return False
+            if group["deletion_cleanup_required"]:
+                return False
+            if group["deletion_state"] == "archived":
+                return (
+                    group["deletion_archive_key"] == archive_key
+                    and group["deletion_sha256"] == sha256
+                    and group["deletion_size_bytes"] == size_bytes
+                    and group["deletion_archive_version_id"] == archive_version_id
+                )
+            if group["deletion_state"] != "pending":
+                return False
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="deletion_archive_verified",
+                source="system",
+                actor_id="sandbox-deletion-worker",
+                from_state="pending",
+                to_state="archived",
+                details={
+                    "request_id": request_id,
+                    "archive_key": archive_key,
+                    "archive_version_id": archive_version_id,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                },
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET deletion_state = 'archived', deletion_archive_key = $2,
+                    deletion_sha256 = $3, deletion_size_bytes = $4,
+                    deletion_archive_version_id = $5, deletion_error = NULL, updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+                archive_key,
+                sha256,
+                size_bytes,
+                archive_version_id,
+            )
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.archived",
+                archive_key=archive_key,
+                sha256=sha256,
+                size_bytes=size_bytes,
+                archive_version_id=archive_version_id,
+            )
+        return True
+
+    async def renew_admin_sandbox_deletion_claim(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+        ttl_seconds: float = 300,
+        for_cleanup: bool = False,
+        cleanup_archive_key: str | None = None,
+    ) -> bool:
+        """Extend an unexpired exact worker claim before bounded host cleanup."""
+        if ttl_seconds <= 0:
+            raise ValueError("deletion claim TTL must be positive")
+        if for_cleanup and not cleanup_archive_key:
+            raise ValueError("archive cleanup requires the original object key")
+        async with self._pool.acquire() as conn, conn.transaction():
+            group = await self._locked_admin_deletion(
+                conn, sandbox_id, request_id, claim_token, generation, container_id
+            )
+            if group is None or group["deletion_state"] not in {"pending", "archived"}:
+                return False
+            if for_cleanup and (
+                group["deletion_state"] != "pending"
+                or (
+                    group["deletion_cleanup_required"]
+                    and group["deletion_cleanup_archive_key"] != cleanup_archive_key
+                )
+            ):
+                return False
+            await conn.execute(
+                "UPDATE agent_sandboxes "
+                "SET deletion_claim_expires_at=clock_timestamp()+make_interval(secs => $2), "
+                "deletion_cleanup_required=deletion_cleanup_required OR $3, "
+                "deletion_cleanup_archive_key=CASE WHEN $3 "
+                "THEN COALESCE(deletion_cleanup_archive_key,$4) "
+                "ELSE deletion_cleanup_archive_key END WHERE id=$1",
+                sandbox_id,
+                ttl_seconds,
+                for_cleanup,
+                cleanup_archive_key,
+            )
+        return True
+
+    async def complete_admin_sandbox_deletion(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> bool:
+        """Retain the archive and ledger after an exact host deletion acknowledgement."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Follow-up creation takes thread -> latest job -> membership.
+            # Take the thread fence first before failing queued member jobs,
+            # so a submitter cannot hold a job while waiting for our members.
+            await conn.fetch(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await self._locked_admin_deletion(
+                conn, sandbox_id, request_id, claim_token, generation, container_id
+            )
+            if group is None:
+                return False
+            if group["deletion_state"] == "deleted":
+                return True
+            if group["deletion_state"] != "archived":
+                return False
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="deletion_completed",
+                source="system",
+                actor_id="sandbox-deletion-worker",
+                from_state="archived",
+                to_state="deleted",
+                details={
+                    "request_id": request_id,
+                    "archive_key": group["deletion_archive_key"],
+                    "archive_version_id": group["deletion_archive_version_id"],
+                    "sha256": group["deletion_sha256"],
+                    "size_bytes": group["deletion_size_bytes"],
+                },
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET state = 'lost', deletion_state = 'deleted', deleted_at = NOW(),
+                    archived_at = COALESCE(archived_at, NOW()), deletion_error = NULL,
+                    idle_deadline = NULL, stop_requested_at = NULL,
+                    deletion_retry_at = NULL, deletion_claim_expires_at = NULL,
+                    resource_snapshot = NULL, resource_sampled_at = NULL,
+                    resource_received_at = NULL, terminal_count = NULL,
+                    terminal_count_observed_at = NULL, updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET native_state = 'lost', context_status = 'lost', resident_state = 'lost',
+                    updated_at = NOW()
+                WHERE sandbox_id = $1
+                """,
+                sandbox_id,
+            )
+            for member in members:
+                await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.completed",
+                archive_key=group["deletion_archive_key"],
+                sha256=group["deletion_sha256"],
+                size_bytes=group["deletion_size_bytes"],
+                archive_version_id=group["deletion_archive_version_id"],
+            )
+        return True
+
+    async def complete_admin_sandbox_discard(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> bool:
+        """Mark native context lost after the host removes a container with no archive."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetch(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await self._locked_admin_deletion(
+                conn, sandbox_id, request_id, claim_token, generation, container_id
+            )
+            if group is None:
+                return False
+            if group["deletion_state"] == "deleted":
+                return bool(group["deletion_discard"])
+            if group["deletion_state"] != "pending" or not group["deletion_discard"]:
+                return False
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="deletion_completed",
+                source="system",
+                actor_id="sandbox-deletion-worker",
+                from_state="pending",
+                to_state="deleted",
+                details={"request_id": request_id, "discard": True},
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET state = 'lost', deletion_state = 'deleted', deleted_at = NOW(),
+                    deletion_error = NULL, idle_deadline = NULL, stop_requested_at = NULL,
+                    deletion_retry_at = NULL, deletion_claim_expires_at = NULL,
+                    resource_snapshot = NULL, resource_sampled_at = NULL,
+                    resource_received_at = NULL, terminal_count = NULL,
+                    terminal_count_observed_at = NULL, updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET native_state = 'lost', context_status = 'lost', resident_state = 'lost',
+                    updated_at = NOW()
+                WHERE sandbox_id = $1
+                """,
+                sandbox_id,
+            )
+            for member in members:
+                await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.discarded",
+            )
+        return True
+
+    async def fail_admin_sandbox_deletion(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+        error: str,
+        retain_pending: bool = False,
+    ) -> bool:
+        """Release safe pre-archive failures but keep ambiguous deletion fenced."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            group = await self._locked_admin_deletion(
+                conn, sandbox_id, request_id, claim_token, generation, container_id
+            )
+            if group is None or group["deletion_state"] not in {"pending", "archived"}:
+                return False
+            verified = group["deletion_state"] == "archived"
+            retry = verified or retain_pending
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="deletion_failed",
+                source="system",
+                actor_id="sandbox-deletion-worker",
+                from_state=str(group["deletion_state"]),
+                to_state=str(group["deletion_state"]) if retry else "failed",
+                details={
+                    "request_id": request_id,
+                    "retry_scheduled": retry,
+                    "error": error[:500],
+                },
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET deletion_state = CASE WHEN $2 THEN deletion_state ELSE 'failed' END,
+                    deletion_error = $3, deletion_claim_token = NULL,
+                    deletion_claim_expires_at = NULL,
+                    deletion_retry_at = CASE
+                        WHEN $2 THEN clock_timestamp() + INTERVAL '60 seconds' END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+                retry,
+                error[:500],
+            )
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.failed",
+                archive_key=group["deletion_archive_key"],
+            )
+        return True
+
+    @staticmethod
+    async def _locked_admin_deletion(
+        conn: asyncpg.Connection,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> Any:
+        """Reject stale workers, changed reviewed identity and expired claims."""
+        group = await conn.fetchrow(
+            """
+            SELECT * FROM agent_sandboxes
+            WHERE id = $1 AND deletion_request_id = $2 AND deletion_claim_token = $3
+              AND generation = $4 AND container_id = $5
+              AND generation = deletion_generation AND container_id = deletion_container_id
+              AND last_activity_at = deletion_last_activity_at
+              AND (state = 'stopped' OR deletion_state = 'deleted')
+            FOR UPDATE
+            """,
+            sandbox_id,
+            request_id,
+            claim_token,
+            generation,
+            container_id,
+        )
+        if group is None or group["deletion_state"] == "deleted":
+            return group
+        return (
+            group
+            if await conn.fetchval(
+                "SELECT deletion_claim_expires_at > clock_timestamp() "
+                "FROM agent_sandboxes WHERE id = $1",
+                sandbox_id,
+            )
+            else None
+        )
+
+    @staticmethod
+    async def _audit_admin_deletion(
+        conn: asyncpg.Connection,
+        *,
+        group: Any,
+        request_id: str,
+        action: str,
+        actor_id: str = "sandbox-deletion-worker",
+        admin_ip: str = "internal",
+        archive_key: str | None = None,
+        sha256: str | None = None,
+        size_bytes: int | None = None,
+        archive_version_id: str | None = None,
+        broker_confirmed_stopped: bool = False,
+    ) -> None:
+        """Keep each deletion transition and content-free audit atomic."""
+        await conn.execute(
+            "INSERT INTO agent_admin_audit_log "
+            "(action, actor_id, admin_ip, target_user_id, details, success) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6)",
+            action,
+            actor_id,
+            admin_ip,
+            group["user_id"],
+            json.dumps(
+                {
+                    "sandbox_id": group["id"],
+                    "request_id": request_id,
+                    "host": group["host"],
+                    "generation": group["generation"],
+                    "container_id": group["container_id"],
+                    "archive_key": archive_key,
+                    "archive_version_id": archive_version_id,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                }
+                | (
+                    {
+                        "force": True,
+                        "broker_confirmed_stopped": True,
+                        "docker_status": "stopped",
+                    }
+                    if broker_confirmed_stopped
+                    else {}
+                )
+            ),
+            action != "agent.sandbox.delete.failed",
+        )
+
+    @staticmethod
+    async def _record_trajectory_event(
+        conn: asyncpg.Connection,
+        *,
+        group: Any,
+        event_type: str,
+        source: str,
+        actor_id: str | None = None,
+        from_state: str | None = None,
+        to_state: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Commit content-free lifecycle context beside the mutation it explains."""
+        await conn.execute(
+            """
+            INSERT INTO agent_sandbox_events (
+                sandbox_id, generation, event_type, from_state, to_state,
+                source, actor_id, details
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            """,
+            group["id"],
+            group["generation"],
+            event_type,
+            from_state,
+            to_state,
+            source,
+            actor_id,
+            json.dumps(details or {}),
+        )
+
+    async def record_terminal_observation(
+        self,
+        *,
+        sandbox_id: str,
+        host: str,
+        generation: int,
+        container_id: str,
+        terminal_count: int,
+    ) -> bool:
+        """Refresh terminal activity only for the exact running container."""
+        if (
+            isinstance(terminal_count, bool)
+            or not isinstance(terminal_count, int)
+            or not 0 <= terminal_count <= 4096
+        ):
+            raise ValueError("Invalid terminal count")
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_sandboxes
+                    SET terminal_count = $5, terminal_count_observed_at = NOW()
+                    WHERE id = $1 AND host = $2 AND generation = $3
+                      AND container_id = $4 AND state = 'running'
+                    RETURNING TRUE
+                    """,
+                    sandbox_id,
+                    host,
+                    generation,
+                    container_id,
+                    terminal_count,
+                )
+            )
+
+    async def request_admin_stop(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+    ) -> str:
+        """Queue a reviewed, quiescent container stop under its admission fence.
+
+        The host still checks its local terminals and operations before acting.
+        The database marker survives observations and excludes new admission
+        until Docker confirms the stop. No container or workspace is deleted.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            # The same membership -> group order as reservation, Fork and
+            # reconciliation. Claims hold a shared group lock until committed.
+            await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                "SELECT id, user_id, host, generation, container_id, last_activity_at, state, "
+                "stop_requested_at, active_operation_count, snapshot_state, "
+                "terminal_count, terminal_count_observed_at, NOW() AS observed_at "
+                "FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                sandbox_id,
+            )
+            if group is None:
+                return "not_found"
+            if (
+                group["generation"] != generation
+                or group["container_id"] != container_id
+                or group["last_activity_at"] != last_activity_at
+            ):
+                return "stale"
+            if group["state"] == "stopping" and group["stop_requested_at"] is not None:
+                return "accepted"
+            if group["state"] != "running":
+                return "not_running"
+            busy = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM agent_thread_sandbox_memberships m
+                    WHERE m.sandbox_id = $1 AND (
+                        m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
+                        OR EXISTS (
+                            SELECT 1 FROM agent_jobs j
+                            WHERE j.thread_id = m.thread_id AND j.state = 'running'
+                        )
+                    )
+                ) OR EXISTS (
+                    SELECT 1 FROM agent_sandbox_snapshots s
+                    WHERE s.sandbox_id = $1
+                      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
+                )
+                """,
+                sandbox_id,
+            )
+            if (
+                busy
+                or group["active_operation_count"]
+                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
+            ):
+                return "busy"
+            if group["terminal_count"]:
+                return "terminals_open"
+            terminal_observed = group["terminal_count_observed_at"]
+            if (
+                group["terminal_count"] is None
+                or terminal_observed is None
+                or (group["observed_at"] - terminal_observed).total_seconds() > 90
+            ):
+                return "activity_unknown"
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="admin_stop_requested",
+                source="admin",
+                actor_id=actor_id,
+                from_state="running",
+                to_state="stopping",
+                details={"container_present": True},
+            )
+            await conn.execute(
+                "UPDATE agent_sandboxes SET state = 'stopping', "
+                "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
+                sandbox_id,
+            )
+            # Stop and its audit receipt commit together. An unavailable audit
+            # table must never leave an unrecorded cross-owner mutation.
+            await conn.execute(
+                "INSERT INTO agent_admin_audit_log "
+                "(action, actor_id, admin_ip, target_user_id, details, success) "
+                "VALUES ('agent.sandbox.stop', $1, $2, $3, $4::jsonb, TRUE)",
+                actor_id,
+                admin_ip,
+                group["user_id"],
+                json.dumps(
+                    {
+                        "sandbox_id": sandbox_id,
+                        "host": group["host"],
+                        "generation": generation,
+                        "container_id": container_id,
+                    }
+                ),
+            )
+        return "accepted"
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
@@ -42,6 +980,8 @@ class PostgresSandboxRepository:
                     AND g.state NOT IN (
                         'provisioning', 'stopping', 'stopped_dirty', 'lost'
                     )
+                    AND g.stop_requested_at IS NULL
+                    AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                     AND m.fork_operation_id IS NULL
                     AND (
                         m.active_attempt_id IS NULL
@@ -49,7 +989,7 @@ class PostgresSandboxRepository:
                             SELECT 1 FROM agent_attempts a
                             WHERE a.id = m.active_attempt_id
                               AND a.status = 'running'
-                              AND a.lease_expires_at > NOW()
+                              AND a.lease_expires_at > clock_timestamp()
                               AND a.terminal_ready = TRUE
                         )
                     )
@@ -68,7 +1008,18 @@ class PostgresSandboxRepository:
         lease_generation: int,
     ) -> bool:
         """Revoke readiness only for the still-live fenced attempt."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT id FROM agent_attempts "
+                "WHERE id = $1 AND lease_generation = $2 AND status = 'running' FOR UPDATE",
+                attempt_id,
+                lease_generation,
+            )
+            if locked is None or not await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
+                attempt_id,
+            ):
+                return False
             result = await conn.execute(
                 """
                 UPDATE agent_attempts
@@ -76,7 +1027,7 @@ class PostgresSandboxRepository:
                 WHERE id = $1
                   AND lease_generation = $2
                   AND status = 'running'
-                  AND lease_expires_at > NOW()
+                  AND lease_expires_at > clock_timestamp()
                 """,
                 attempt_id,
                 lease_generation,
@@ -132,6 +1083,7 @@ class PostgresSandboxRepository:
         resident_slot_capacity: int = 8,
         memory_limit: str = "4g",
         cpu_limit: str = "2",
+        disk_limit_mib: int = 0,
         stop_timeout_seconds: int = 10,
         fork_helper_version: str | None = None,
     ) -> dict[str, Any] | None:
@@ -153,7 +1105,7 @@ class PostgresSandboxRepository:
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 WHERE a.id = $1 AND a.lease_generation = $2
-                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                  AND a.status = 'running'
                   AND a.host_id = $3 AND j.thread_id = $4
                   AND j.current_attempt_id = a.id
                 FOR SHARE OF a, j
@@ -163,7 +1115,10 @@ class PostgresSandboxRepository:
                 host,
                 thread_id,
             )
-            if earns is None:
+            if earns is None or not await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
+                attempt_id,
+            ):
                 return None
             # Claiming is fenced by the worker's shared-sandbox-v1
             # attestation. Every reservation therefore creates or reuses a
@@ -182,6 +1137,7 @@ class PostgresSandboxRepository:
                 resident_slot_capacity=resident_slot_capacity,
                 memory_limit=memory_limit,
                 cpu_limit=cpu_limit,
+                disk_limit_mib=disk_limit_mib,
                 stop_timeout_seconds=stop_timeout_seconds,
                 fork_helper_version=fork_helper_version,
                 user_id=str(earns["user_id"]),
@@ -201,6 +1157,8 @@ class PostgresSandboxRepository:
     ) -> dict[str, Any] | None:
         """Confirm Docker start under both attempt and sandbox generations."""
         async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+                return None
             locked_membership = await conn.fetchval(
                 """
                 SELECT thread_id
@@ -212,22 +1170,40 @@ class PostgresSandboxRepository:
             )
             if locked_membership is None:
                 return None
+            locked_group = await conn.fetchval(
+                """
+                SELECT g.id
+                FROM agent_sandboxes g
+                JOIN agent_thread_sandbox_memberships m ON m.sandbox_id = g.id
+                WHERE m.thread_id = $1 AND g.generation = $2
+                  AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+                  AND (g.container_id IS NULL OR g.container_id = $3)
+                FOR UPDATE OF g
+                """,
+                thread_id,
+                sandbox_generation,
+                container_id,
+            )
+            if locked_group is None or not await self._attempt_is_live(conn, attempt_id):
+                return None
             shared = await conn.fetchrow(
                 """
                 WITH updated_group AS (
                     UPDATE agent_sandboxes g
-                    SET state = 'running', container_id = $6,
+                    SET state = 'running', container_id = $6, archived_at = NULL,
                         last_activity_at = NOW(), updated_at = NOW()
                     FROM agent_thread_sandbox_memberships m
                     JOIN agent_attempts a ON a.id = m.active_attempt_id
                     JOIN agent_jobs j ON j.id = a.job_id
                     WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                      AND g.generation = $4
+                      AND g.generation = $4 AND g.stop_requested_at IS NULL
+                      AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                       AND m.activation_generation = $5
                       AND m.active_attempt_id = $2
                       AND (g.container_id IS NULL OR g.container_id = $6)
                       AND a.id = $2 AND a.lease_generation = $3
-                      AND a.status = 'running' AND a.lease_expires_at > NOW()
+                      AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
                       AND j.current_attempt_id = a.id AND j.thread_id = m.thread_id
                     RETURNING g.id
                 )
@@ -264,21 +1240,64 @@ class PostgresSandboxRepository:
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         process_generation: int,
     ) -> bool:
-        """Record the supervisor's diagnostic CLI process generation."""
-        async with self._pool.acquire() as conn:
+        """Record a nondecreasing supervisor CLI process generation.
+
+        Equal reports are idempotent while the process is starting or live,
+        but cannot undo a later STOPPED/LOST observation. A delayed report
+        older than the durable generation is rejected so it cannot authorize
+        a stale stopped-process observation to release the newer process's
+        residency.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+                return False
+            locked_membership = await conn.fetchval(
+                """
+                SELECT thread_id FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1 AND activation_generation = $2
+                  AND residency_generation = $3 AND residency_status = 'hot'
+                  AND active_attempt_id = $4
+                FOR UPDATE
+                """,
+                thread_id,
+                activation_generation,
+                residency_generation,
+                attempt_id,
+            )
+            if locked_membership is None or not await conn.fetchval(
+                """
+                SELECT a.lease_expires_at > clock_timestamp()
+                   AND m.residency_lease_expires_at > clock_timestamp()
+                FROM agent_attempts a, agent_thread_sandbox_memberships m
+                WHERE a.id = $1 AND m.thread_id = $2
+                """,
+                attempt_id,
+                thread_id,
+            ):
+                return False
             shared = await conn.fetchval(
                 """
                 UPDATE agent_thread_sandbox_memberships m
-                SET process_generation = $6, resident_state = 'live', updated_at = NOW()
+                SET process_generation = $7, resident_state = 'live', updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.generation = $4
+                  AND g.generation = $4 AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND m.activation_generation = $5
+                  AND m.residency_generation = $6 AND m.residency_status = 'hot'
+                  AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
+                  AND m.process_generation <= $7
+                  AND m.native_state <> 'lost' AND m.context_status <> 'lost'
+                  AND (
+                      m.process_generation < $7
+                      OR m.resident_state IN ('starting', 'restarting', 'live')
+                  )
                   AND a.id = $2 AND a.lease_generation = $3
-                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                  AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
                 RETURNING m.thread_id
                 """,
                 thread_id,
@@ -286,6 +1305,7 @@ class PostgresSandboxRepository:
                 lease_generation,
                 sandbox_generation,
                 activation_generation,
+                residency_generation,
                 process_generation,
             )
             return shared is not None
@@ -304,14 +1324,30 @@ class PostgresSandboxRepository:
             # The new ledger FK locks its attempt too. Acquire that lock
             # before membership, matching terminal transition/reaper order,
             # and keep the live-attempt fence stable through the capture.
-            if (
-                await conn.fetchval(
-                    "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 "
-                    "AND status = 'running' AND lease_expires_at > NOW() FOR SHARE",
-                    attempt_id,
-                    lease_generation,
-                )
-                is None
+            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+                return False
+            locked_membership = await conn.fetchval(
+                """
+                SELECT thread_id FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1 AND sandbox_id = $2
+                  AND residency_generation = $3 AND residency_status = 'hot'
+                  AND active_attempt_id = $4
+                FOR UPDATE
+                """,
+                thread_id,
+                sandbox_id,
+                residency_generation,
+                attempt_id,
+            )
+            if locked_membership is None or not await conn.fetchval(
+                """
+                SELECT a.lease_expires_at > clock_timestamp()
+                   AND m.residency_lease_expires_at > clock_timestamp()
+                FROM agent_attempts a, agent_thread_sandbox_memberships m
+                WHERE a.id = $1 AND m.thread_id = $2
+                """,
+                attempt_id,
+                thread_id,
             ):
                 return False
             shared = await conn.fetchval(
@@ -324,9 +1360,10 @@ class PostgresSandboxRepository:
                 WHERE m.thread_id = $1 AND m.sandbox_id = $4
                   AND g.id = m.sandbox_id
                   AND m.residency_generation = $5 AND m.residency_status = 'hot'
+                  AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
-                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                  AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
                 RETURNING m.thread_id
                 """,
                 thread_id,
@@ -349,6 +1386,7 @@ class PostgresSandboxRepository:
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
     ) -> bool:
         """Reserve one prompt delivery durably before Agent CLI stdin.
 
@@ -360,32 +1398,51 @@ class PostgresSandboxRepository:
         async with self._pool.acquire() as conn, conn.transaction():
             # Keep the same attempt -> membership order as startup capture
             # and finishing an attempt. The FK insert must not invert it.
-            if (
-                await conn.fetchval(
-                    "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 "
-                    "AND status = 'running' AND lease_expires_at > NOW() FOR SHARE",
-                    attempt_id,
-                    lease_generation,
-                )
-                is None
+            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+                return False
+            locked_membership = await conn.fetchval(
+                """
+                SELECT thread_id FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1 AND activation_generation = $2
+                  AND residency_generation = $3 AND residency_status = 'hot'
+                  AND active_attempt_id = $4
+                FOR UPDATE
+                """,
+                thread_id,
+                activation_generation,
+                residency_generation,
+                attempt_id,
+            )
+            if locked_membership is None or not await conn.fetchval(
+                """
+                SELECT a.lease_expires_at > clock_timestamp()
+                   AND m.residency_lease_expires_at > clock_timestamp()
+                FROM agent_attempts a, agent_thread_sandbox_memberships m
+                WHERE a.id = $1 AND m.thread_id = $2
+                """,
+                attempt_id,
+                thread_id,
             ):
                 return False
             shared = await conn.fetchval(
                 """
                 UPDATE agent_thread_sandbox_memberships m
-                SET admitted_job_id = $6,
+                SET admitted_job_id = $7,
                     admitted_at = COALESCE(m.admitted_at, NOW()),
                     updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a, agent_jobs j
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.generation = $4
+                  AND g.generation = $4 AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND m.activation_generation = $5
+                  AND m.residency_generation = $6 AND m.residency_status = 'hot'
+                  AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
-                  AND a.status = 'running' AND a.lease_expires_at > NOW()
-                  AND j.id = $6 AND j.current_attempt_id = a.id
+                  AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
+                  AND j.id = $7 AND j.current_attempt_id = a.id
                   AND j.thread_id = m.thread_id AND j.state = 'running'
-                  AND (m.admitted_job_id IS NULL OR m.admitted_job_id = $6)
+                  AND (m.admitted_job_id IS NULL OR m.admitted_job_id = $7)
                 RETURNING m.thread_id
                 """,
                 thread_id,
@@ -393,6 +1450,7 @@ class PostgresSandboxRepository:
                 lease_generation,
                 sandbox_generation,
                 activation_generation,
+                residency_generation,
                 job_id,
             )
             if shared is None:
@@ -417,6 +1475,7 @@ class PostgresSandboxRepository:
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         job_id: str,
         context_status: str,
         native_session_id: str | None,
@@ -425,9 +1484,17 @@ class PostgresSandboxRepository:
     ) -> dict[str, Any] | None:
         """Close one turn boundary and arm deactivation without deleting state."""
         async with self._pool.acquire() as conn, conn.transaction():
-            # Match create_follow_up and fork finalization: thread -> job ->
-            # membership. Taking the membership first while a concurrent send
-            # held the job produced a real PostgreSQL deadlock cycle.
+            # Attempt first, then thread -> job -> membership. Terminal
+            # transition and the reaper use the same outer order; taking the
+            # membership first while a concurrent send held the job produced a
+            # real PostgreSQL deadlock cycle.
+            locked_attempt = await conn.fetchval(
+                "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 FOR SHARE",
+                attempt_id,
+                lease_generation,
+            )
+            if locked_attempt is None:
+                return None
             locked_thread = await conn.fetchval(
                 "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE",
                 thread_id,
@@ -443,8 +1510,11 @@ class PostgresSandboxRepository:
                 return None
             # A committed settlement can lose only its HTTP acknowledgement.
             # Return that same boundary without incrementing workspace_epoch or
-            # creating another snapshot. The original attempt must still own
-            # a live fence; a retry cannot resurrect a superseded activation.
+            # creating another snapshot. Exact attempt, lease, job, activation,
+            # residency, and settled-boundary fences prevent a retry from
+            # acknowledging a superseding activation. The attempt clock may
+            # have expired after the settlement committed, so this read-only
+            # replay deliberately does not require a currently live lease.
             # No sandbox-mode predicate: the rewritten schema has no ``mode``
             # column, and the retained shared-session topology is unconditional,
             # so every sandbox row is a shared-live one.
@@ -457,12 +1527,12 @@ class PostgresSandboxRepository:
                 JOIN agent_jobs j ON j.id = a.job_id
                 WHERE m.thread_id = $1
                   AND g.generation = $4 AND m.activation_generation = $5
+                  AND m.residency_generation = $6
                   AND m.active_attempt_id IS NULL
-                  AND m.admitted_job_id = $6 AND m.last_settled_job_id = $6
-                  AND m.native_state = 'ready' AND m.context_status = $7
-                  AND ($8::text IS NULL OR m.native_session_id = $8)
-                  AND a.lease_generation = $3 AND a.job_id = $6
-                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                  AND m.admitted_job_id = $7 AND m.last_settled_job_id = $7
+                  AND m.native_state = 'ready' AND m.context_status = $8
+                  AND ($9::text IS NULL OR m.native_session_id = $9)
+                  AND a.lease_generation = $3 AND a.job_id = $7
                   AND j.thread_id = m.thread_id AND j.current_attempt_id = a.id
                   AND j.state = 'running'
                 """,
@@ -471,6 +1541,7 @@ class PostgresSandboxRepository:
                 lease_generation,
                 sandbox_generation,
                 activation_generation,
+                residency_generation,
                 job_id,
                 context_status,
                 native_session_id,
@@ -481,23 +1552,54 @@ class PostgresSandboxRepository:
                     thread_id,
                 )
                 return sandbox_row_to_dict(row)
+            locked_membership = await conn.fetchval(
+                """
+                SELECT thread_id FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1 AND activation_generation = $2
+                  AND residency_generation = $3 AND active_attempt_id = $4
+                  AND admitted_job_id = $5
+                FOR UPDATE
+                """,
+                thread_id,
+                activation_generation,
+                residency_generation,
+                attempt_id,
+                job_id,
+            )
+            if locked_membership is None or not await conn.fetchval(
+                """
+                SELECT a.status = 'running'
+                   AND a.job_id = $3
+                   AND a.lease_expires_at > clock_timestamp()
+                   AND m.residency_status = 'hot'
+                   AND m.residency_lease_expires_at > clock_timestamp()
+                FROM agent_attempts a, agent_thread_sandbox_memberships m
+                WHERE a.id = $1 AND m.thread_id = $2
+                """,
+                attempt_id,
+                thread_id,
+                job_id,
+            ):
+                return None
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m
-                SET active_attempt_id = NULL, last_settled_job_id = $6,
-                    context_status = $7,
-                    native_session_id = COALESCE($8, m.native_session_id),
+                SET active_attempt_id = NULL, last_settled_job_id = $7,
+                    context_status = $8,
+                    native_session_id = COALESCE($9, m.native_session_id),
                     native_state = 'ready', resident_state = 'live',
                     last_error = NULL, updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
                   AND g.generation = $4
                   AND m.activation_generation = $5
+                  AND m.residency_generation = $6 AND m.residency_status = 'hot'
+                  AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
-                  AND m.admitted_job_id = $6
+                  AND m.admitted_job_id = $7
                   AND a.id = $2 AND a.lease_generation = $3
-                  AND a.job_id = $6 AND a.status = 'running'
-                  AND a.lease_expires_at > NOW()
+                  AND a.job_id = $7 AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp()
                 RETURNING m.sandbox_id
                 """,
                 thread_id,
@@ -505,6 +1607,7 @@ class PostgresSandboxRepository:
                 lease_generation,
                 sandbox_generation,
                 activation_generation,
+                residency_generation,
                 job_id,
                 context_status,
                 native_session_id,
@@ -549,7 +1652,7 @@ class PostgresSandboxRepository:
                                 WHERE peer.sandbox_id = g.id
                                   AND peer.active_attempt_id IS NOT NULL
                              )
-                            THEN NOW() + make_interval(secs => $2)
+                            THEN clock_timestamp() + make_interval(secs => $2)
                             ELSE NULL
                         END,
                         workspace_epoch = workspace_epoch + 1,
@@ -633,6 +1736,8 @@ class PostgresSandboxRepository:
         activity_active: bool | None = None,
         idle_remaining_seconds: float | None = None,
         members: list[dict[str, Any]] | None = None,
+        resource_usage: dict[str, Any] | None = None,
+        terminal_count: int | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
         return await self._reconcile_shared_sandbox_observation(
@@ -645,6 +1750,8 @@ class PostgresSandboxRepository:
             activity_active=activity_active,
             idle_remaining_seconds=idle_remaining_seconds,
             members=members or [],
+            resource_usage=resource_usage,
+            terminal_count=terminal_count,
         )
 
     async def due_thread_sandbox_stop(
@@ -663,11 +1770,18 @@ class PostgresSandboxRepository:
                 SELECT origin_thread_id AS thread_id, generation,
                        0::bigint AS activation_generation,
                        CASE
+                           WHEN stop_requested_at IS NOT NULL THEN 'idle'
                            WHEN state IN ('stopped_dirty', 'lost') THEN 'lost'
                            WHEN state = 'stopping' THEN 'orphaned_attempt'
                            ELSE 'idle'
                        END AS reason,
-                       TRUE AS shared_live
+                       TRUE AS shared_live,
+                       CASE WHEN stop_requested_at IS NOT NULL THEN (
+                           SELECT COALESCE(jsonb_object_agg(m.thread_id, m.activation_generation),
+                                           '{}'::jsonb)
+                           FROM agent_thread_sandbox_memberships m
+                           WHERE m.sandbox_id = g.id AND m.resident_slot_id IS NOT NULL
+                       ) END AS member_activation_generations
                 FROM agent_sandboxes g
                 WHERE g.id = $1 AND g.origin_thread_id = $2 AND g.host = $3
                   AND g.container_id = $4 AND g.generation = $5
@@ -679,7 +1793,7 @@ class PostgresSandboxRepository:
                   )
                   AND (
                         (state = 'running' AND idle_deadline IS NOT NULL
-                            AND idle_deadline <= NOW())
+                            AND idle_deadline <= clock_timestamp())
                         OR state IN ('stopping', 'stopped_dirty', 'lost')
                   )
                 """,
@@ -689,7 +1803,11 @@ class PostgresSandboxRepository:
                 container_id,
                 sandbox_generation,
             )
-        return None if row is None else dict(row)
+        if row is None:
+            return None
+        result = dict(row)
+        result["member_activation_generations"] = load_json(result["member_activation_generations"])
+        return result
 
     async def abandon_thread_sandbox(
         self,
@@ -776,7 +1894,7 @@ class PostgresSandboxRepository:
                               AND peer.context_status <> 'lost'
                               AND peer.native_state <> 'lost'
                          )
-                        THEN NOW() + make_interval(secs => $2)
+                        THEN clock_timestamp() + make_interval(secs => $2)
                         ELSE NULL
                     END,
                     last_error = CASE WHEN $3 THEN $4 ELSE g.last_error END,
@@ -832,12 +1950,15 @@ class PostgresSandboxRepository:
         resident_slot_capacity: int,
         memory_limit: str,
         cpu_limit: str,
+        disk_limit_mib: int,
         stop_timeout_seconds: int,
         fork_helper_version: str | None,
         user_id: str,
         job_id: str,
     ) -> dict[str, Any] | None:
         """Reserve one independently fenced member in a shared-live group."""
+        if type(disk_limit_mib) is not int or not 0 <= disk_limit_mib <= 16777216:
+            raise ValueError("sandbox disk limit must be an integer between 0 and 16777216 MiB")
         if not 2 <= resident_slot_capacity <= 128:
             raise ValueError("shared sandbox resident slot capacity must be between 2 and 128")
         # Lock membership first everywhere; Docker reconciliation uses the
@@ -878,9 +1999,9 @@ class PostgresSandboxRepository:
                     id, origin_thread_id, user_id, host, container_name,
                     runtime_id, runtime_version, sandbox_image_digest,
                     execution_profile, resident_slot_capacity, memory_limit,
-                    cpu_limit, stop_timeout_seconds, fork_helper_version
+                    cpu_limit, stop_timeout_seconds, fork_helper_version, disk_limit_mib
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
                 sandbox_id,
                 thread_id,
@@ -897,6 +2018,7 @@ class PostgresSandboxRepository:
                 stop_timeout_seconds,
                 # An image without the label says nothing, not "".
                 fork_helper_version or None,
+                disk_limit_mib,
             )
             await conn.execute(
                 """
@@ -939,11 +2061,17 @@ class PostgresSandboxRepository:
             "execution_profile": execution_profile,
             "memory_limit": memory_limit,
             "cpu_limit": cpu_limit,
+            "disk_limit_mib": disk_limit_mib,
             "stop_timeout_seconds": stop_timeout_seconds,
         }
         if any(group[key] != value for key, value in immutable.items()):
             raise ValueError("shared sandbox immutable identity or runtime changed")
-        if group["state"] in {"lost", "stopped_dirty"} or membership["native_state"] == "lost":
+        if (
+            group["state"] in {"lost", "stopped_dirty", "stopping"}
+            or group["stop_requested_at"] is not None
+            or group["deletion_state"] in {"pending", "archived", "deleted"}
+            or membership["native_state"] == "lost"
+        ):
             return None
         if membership["fork_operation_id"] is not None:
             # The dequeue query carries the same fence, but admission is a
@@ -961,6 +2089,11 @@ class PostgresSandboxRepository:
             "starting",
             "running",
         }
+        # The membership/group locks above may have waited until after the
+        # attempt lease expired.  Evaluate wall time only after those waits and
+        # immediately before granting this attempt control of the member.
+        if not await self._attempt_is_live(conn, attempt_id):
+            return None
         activation_generation = int(membership["activation_generation"])
         if not already_admitted:
             activation_generation += 1
@@ -979,10 +2112,14 @@ class PostgresSandboxRepository:
             activation_generation,
             context_status,
         )
+        # Activation starts this member's process, not the group's container:
+        # an idle retained group is already running until Docker says otherwise.
+        # Newly created and stopped groups still await the startup confirmation.
         await conn.execute(
             """
             UPDATE agent_sandboxes
-            SET state = 'starting', idle_deadline = NULL,
+            SET state = CASE WHEN state = 'running' THEN 'running' ELSE 'starting' END,
+                idle_deadline = NULL, archived_at = NULL,
                 last_activity_at = NOW(), updated_at = NOW()
             WHERE id = $1
             """,
@@ -1037,6 +2174,8 @@ class PostgresSandboxRepository:
         activity_active: bool | None,
         idle_remaining_seconds: float | None,
         members: list[dict[str, Any]],
+        resource_usage: dict[str, Any] | None,
+        terminal_count: int | None,
     ) -> str | None:
         """Join one Docker group observation with independently fenced members."""
         async with self._pool.acquire() as conn, conn.transaction():
@@ -1072,15 +2211,45 @@ class PostgresSandboxRepository:
                 return None
             if group["container_id"] not in {None, container_id}:
                 return None
+            if group["deletion_state"] in {"pending", "archived", "deleted"}:
+                # Host samples predate this transaction. They cannot reopen
+                # admission or resurrect a container fenced for deletion.
+                return None
             await conn.execute(
                 """
                 UPDATE agent_sandboxes
-                SET container_id = COALESCE(container_id, $2), updated_at = NOW()
+                SET container_id = COALESCE(container_id, $2),
+                    archived_at = CASE WHEN $3 THEN NULL ELSE archived_at END,
+                    updated_at = NOW()
                 WHERE id = $1
                 """,
                 sandbox_id,
                 container_id,
+                running,
             )
+            # Terminal observations fence administrator stops independently of
+            # optional monitoring. Resource failures must not roll back a fresh
+            # terminal count, and neither savepoint can lose lifecycle progress.
+            try:
+                async with conn.transaction():
+                    await self._record_terminal_observation(
+                        conn,
+                        sandbox_id=sandbox_id,
+                        running=running,
+                        terminal_count=terminal_count,
+                    )
+            except Exception:
+                logger.warning("sandbox_terminal_observation_unavailable", exc_info=True)
+            try:
+                async with conn.transaction():
+                    await self._record_resource_observation(
+                        conn,
+                        sandbox_id=sandbox_id,
+                        running=running,
+                        resource_usage=resource_usage,
+                    )
+            except Exception:
+                logger.warning("sandbox_resource_snapshot_unavailable", exc_info=True)
             for member in members[:128]:
                 member_thread = str(member.get("thread_id") or "")
                 if not member_thread:
@@ -1160,12 +2329,18 @@ class PostgresSandboxRepository:
                 )
                 return None if recovered is None else str(recovered)
             if running:
+                if group["stop_requested_at"] is not None:
+                    # A heartbeat is an observation of a still-running
+                    # container, not cancellation of an administrator's
+                    # request. Keep admission closed and retry the safe
+                    # host-side idle check on every subsequent heartbeat.
+                    return "stopping"
                 deadline_sql = "idle_deadline"
                 deadline_arg: float | None = None
                 if activity_active is True or durable_activity:
                     deadline_sql = "NULL"
                 elif activity_active is False and idle_remaining_seconds is not None:
-                    deadline_sql = "NOW() + make_interval(secs => $2)"
+                    deadline_sql = "clock_timestamp() + make_interval(secs => $2)"
                     deadline_arg = idle_remaining_seconds
                 elif activity_active is None:
                     # A broker reconstructed this running container without
@@ -1176,7 +2351,7 @@ class PostgresSandboxRepository:
                     # concrete decreasing remainder through the branch above.
                     deadline_sql = (
                         "COALESCE(idle_deadline, "
-                        "NOW() + make_interval(secs => idle_timeout_seconds))"
+                        "clock_timestamp() + make_interval(secs => idle_timeout_seconds))"
                     )
                 row = await conn.fetchrow(
                     f"""
@@ -1195,11 +2370,12 @@ class PostgresSandboxRepository:
             row = await conn.fetchrow(
                 """
                 UPDATE agent_sandboxes
-                SET state = 'stopped', idle_deadline = NULL, updated_at = NOW()
+                SET state = 'stopped', idle_deadline = NULL,
+                    stop_requested_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND (
                     state IN ('stopping', 'stopped_dirty', 'lost')
                     OR (state = 'running' AND idle_deadline IS NOT NULL
-                        AND idle_deadline <= NOW())
+                        AND idle_deadline <= clock_timestamp())
                 )
                 RETURNING state
                 """,
@@ -1218,3 +2394,68 @@ class PostgresSandboxRepository:
                 sandbox_id,
             )
             return None if row is None else str(row["state"])
+
+    @staticmethod
+    async def _record_terminal_observation(
+        conn: asyncpg.Connection,
+        *,
+        sandbox_id: str,
+        running: bool,
+        terminal_count: int | None,
+    ) -> None:
+        """Persist current terminal safety data for an already fenced container."""
+        count = terminal_count if running else None
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096
+        ):
+            count = None
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET terminal_count = $2,
+                terminal_count_observed_at = CASE WHEN $2::integer IS NULL THEN NULL ELSE NOW() END
+            WHERE id = $1
+            """,
+            sandbox_id,
+            count,
+        )
+
+    @staticmethod
+    async def _record_resource_observation(
+        conn: asyncpg.Connection,
+        *,
+        sandbox_id: str,
+        running: bool,
+        resource_usage: dict[str, Any] | None,
+    ) -> None:
+        """Store only new, valid counters for an already fenced container."""
+        if not running:
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET resource_snapshot = NULL, resource_sampled_at = NULL,
+                    resource_received_at = NULL
+                WHERE id = $1
+                """,
+                sandbox_id,
+            )
+            return
+        sample = parse_sandbox_resource_sample(resource_usage)
+        if sample is None:
+            return
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET resource_snapshot = $2::jsonb,
+                resource_sampled_at = NOW() - make_interval(secs => $3),
+                resource_received_at = NOW()
+            WHERE id = $1
+              AND resource_snapshot->>'sample_id' IS DISTINCT FROM $4
+              AND (resource_sampled_at IS NULL
+                   OR resource_sampled_at < NOW() - make_interval(secs => $3))
+            """,
+            sandbox_id,
+            json.dumps(sample.model_dump(mode="json")),
+            sample.sample_age_ms / 1000.0,
+            sample.sample_id,
+        )

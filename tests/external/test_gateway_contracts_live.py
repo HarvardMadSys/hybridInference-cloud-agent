@@ -1,6 +1,6 @@
 """Drive a running Gateway's real answers against the contract documents.
 
-`contracts/*.openapi.yaml` are hand-transcriptions of the gateway's routers, and
+`gateway_contracts/*.openapi.yaml` are hand-transcriptions of the gateway's routers, and
 the tests under `tests/unit/` pin this service's *consumer* half against them.
 What neither can check is the producer: a document that has drifted from the
 router it transcribes agrees perfectly with a client that drifted with it, and

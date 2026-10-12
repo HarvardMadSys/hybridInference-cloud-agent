@@ -36,7 +36,14 @@ export interface AgentAttempt {
  */
 export type AgentEvent =
   | { kind: 'lifecycle'; text: string; attemptNo?: number; sourceEventId?: number }
-  | { kind: 'thinking'; text: string; attemptNo?: number; sourceEventId?: number }
+  | {
+      kind: 'thinking';
+      text: string;
+      /** Native reasoning can record both a summary and detailed text. */
+      reasoningBlocks?: { text: string; channel?: string }[];
+      attemptNo?: number;
+      sourceEventId?: number;
+    }
   | {
       kind: 'message';
       text: string;
@@ -54,7 +61,14 @@ export type AgentEvent =
       kind: 'tool_use';
       tool: string;
       detail: string;
+      /** Complete recorded arguments, retained separately from the compact preview. */
+      input?: unknown;
       id?: string;
+      /** Explicit delegation owner; never inferred from event order. */
+      parentToolUseId?: string;
+      /** Native call identity keeps anchors stable when an earlier start backfills. */
+      activityKey?: string;
+      resultState?: 'received' | 'failed' | 'waiting' | 'not_recorded' | 'cancelled' | 'unknown';
       /** Event time, ISO. Present so per-tool durations are derivable. */
       at?: string | null;
       /**
@@ -64,6 +78,8 @@ export type AgentEvent =
       durationMs?: number;
       /** Collapsed tool output preview (mono block), e.g. pytest tail. */
       output?: string[];
+      /** Native structured result, retained alongside the readable output. */
+      structuredOutput?: unknown;
       outputIsError?: boolean;
       /** e.g. "+12 −3" for Edit rows. */
       diffStat?: string;
@@ -73,7 +89,10 @@ export type AgentEvent =
   | {
       kind: 'tool_result';
       text: string;
+      structuredOutput?: unknown;
       toolUseId?: string;
+      parentToolUseId?: string;
+      cancelled?: boolean;
       isError: boolean;
       /** Event time, ISO — paired with its tool_use to time the call. */
       at?: string | null;
@@ -294,15 +313,19 @@ export interface AgentJob {
   /** Complete current-turn prompt. Older fixtures may only have `title`. */
   prompt?: string;
   state: AgentJobState;
+  /** A cancelled live turn must no longer request an answer or approval. */
+  cancelRequested?: boolean;
   /** Authoritative activity across all turns, including when viewing a historical job. */
   conversationState?: ConversationState;
   /** Short badge text next to the title, e.g. gate hold or failure reason. */
   stateNote?: string;
   /**
    * Why a failed turn failed, when the cause outlives the attempt: a follow-up
-   * would meet it again, so the run guidance must not suggest one.
+   * would meet it again, so the run guidance must not suggest one. A
+   * `site_misconfigured` turn is the deployment's fault, which only an admin
+   * can clear, so it is shown as an alert rather than a run outcome.
    */
-  failureCause?: 'repository_too_large';
+  failureCause?: 'repository_too_large' | 'site_misconfigured';
   repo: string;
   baseRef?: string;
   baseSha: string;
@@ -335,8 +358,10 @@ export interface AgentJob {
   /** Display number whose continuity/resources came from the telemetry read. */
   telemetryAttemptNo?: number;
   events: AgentEvent[];
-  /** Bottom-of-stream live line while running, e.g. "turn 15 · …". */
+  /** Current attempt's tool or model activity, derived from its live events. */
   liveNote?: string;
+  /** Recorded start of the current activity, retained across refreshes. */
+  liveNoteStartedAt?: string;
   diffFiles: string[];
   /** Whether the current shared workspace diff was actually readable. */
   workspaceDiffAvailable?: boolean;

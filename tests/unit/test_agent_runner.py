@@ -79,6 +79,7 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
 
 
@@ -95,6 +96,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
 
     ready_file.write_text("different-sha\n")
@@ -104,6 +106,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
 
     ready_file.write_text("target-sha\n")
@@ -113,6 +116,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
         "shared-sandbox-deployment:target-sha",
     ]
 
@@ -242,6 +246,50 @@ def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
     assert rows[0]["idle_remaining_seconds"] is None
 
 
+@pytest.mark.parametrize("invalid_usage", [False, True])
+@pytest.mark.parametrize("terminal_count", [2, 4096, 4097])
+def test_retained_heartbeat_passes_group_resources_and_terminal_count(
+    monkeypatch, invalid_usage, terminal_count
+):
+    sample = {
+        "sample_id": "resource-sample",
+        "sample_age_ms": 4000,
+        "memory_bytes": "invalid" if invalid_usage else 1024,
+        "cpu_cores": 1.5,
+    }
+    supervisor = SimpleNamespace(
+        list=lambda: [
+            {
+                "thread_id": "athr_source",
+                "sandbox_id": "asbx_source",
+                "container_id": "container-source",
+                "generation": 1,
+                "activation_generation": 1,
+                "running": True,
+                "shared_live": True,
+                "terminal_count": terminal_count,
+                "members": [],
+                "resource_usage": sample,
+            }
+        ],
+        close=Mock(),
+    )
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    rows = runner_mod._retained_sandbox_heartbeat_rows()
+    assert rows is not None
+    assert rows[0]["container_id"] == "container-source"
+    assert rows[0]["activity_active"] is True
+    assert rows[0]["terminal_count"] == (terminal_count if terminal_count <= 4096 else None)
+    if invalid_usage:
+        assert rows[0]["resource_usage"] is None
+    else:
+        assert rows[0]["resource_usage"]["sample_id"] == "resource-sample"
+        assert rows[0]["resource_usage"]["sample_age_ms"] == 4000
+        assert rows[0]["resource_usage"]["memory_bytes"] == 1024
+        assert rows[0]["resource_usage"]["scope"] == "container"
+    supervisor.close.assert_called_once()
+
+
 def test_resume_requires_the_exact_native_session():
     assert (
         runner_mod._verified_native_session_id(
@@ -324,6 +372,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "goal_report_v1",
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
     ]
     assert dispatched[0]["job"] is _JOB
     assert dispatched[0]["gateway_base_url"] == "http://gateway"
@@ -489,7 +538,7 @@ def _run_shared_boundary_case(
         "native_session_id": "native-existing",
         "resident_slot_id": 0,
     }
-    control.mark_chat_sandbox_running.return_value = {}
+    control.mark_chat_sandbox_running.return_value = {"residency_generation": 11}
     supervisor = Mock()
 
     def acquire_shared(_thread_id, **kwargs):
@@ -680,6 +729,9 @@ def test_settled_success_survives_a_failed_completion_event_upload(
     assert result == expected_code
     supervisor.settle_shared.assert_called_once()
     control.settle_chat_sandbox.assert_called_once()
+    assert control.record_chat_process.call_args.kwargs["residency_generation"] == 11
+    assert control.admit_chat_turn.call_args.kwargs["residency_generation"] == 11
+    assert control.settle_chat_sandbox.call_args.kwargs["residency_generation"] == 11
     control.abandon_chat_sandbox.assert_not_called()
     if expected_code == 0:
         finish.assert_called_once()
@@ -994,7 +1046,8 @@ def test_a_turn_that_reported_no_error_has_no_reason():
     assert reported is None
 
 
-def test_shared_turn_streams_events_and_requires_a_result():
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
+def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     supervisor = _Supervisor(
         [
             {
@@ -1015,7 +1068,7 @@ def test_shared_turn_streams_events_and_requires_a_result():
 
     code, tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
-        job=_JOB,
+        job=replace(_JOB, runtime=runtime_id),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         lease_token="lease",
@@ -1024,7 +1077,52 @@ def test_shared_turn_streams_events_and_requires_a_result():
 
     assert (code, tail, errors) == (0, "raw\n", [])
     assert result is not None and result["status"] == "completed"
-    assert control.events == [("assistant", {"text": "done"})]
+    assert control.events == [
+        ("lifecycle", {"phase": "turn_started"}),
+        ("assistant", {"text": "done"}),
+    ]
+
+
+def test_shared_turn_reports_dispatch_before_waiting_for_runtime_output():
+    control = _Control()
+
+    def frames():
+        assert control.events == [("lifecycle", {"phase": "turn_started"})]
+        yield {"kind": "result", "status": "completed", "exit_code": 0}
+
+    supervisor = _Supervisor()
+    supervisor.stream.frames = frames
+
+    code, _tail, _errors, _result, _reported = runner_mod._stream_shared_agent_turn(
+        supervisor=supervisor,
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
+    assert supervisor.stream.closed is True
+
+
+def test_shared_turn_does_not_report_dispatch_when_prompt_handoff_is_rejected():
+    supervisor = _Supervisor()
+    supervisor.start_shared_turn = Mock(side_effect=SessionSupervisorError(409, "turn rejected"))
+    control = _Control()
+
+    with pytest.raises(SessionSupervisorError, match="turn rejected"):
+        runner_mod._stream_shared_agent_turn(
+            supervisor=supervisor,
+            job=_JOB,
+            control=control,
+            heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+            lease_token="lease",
+            timeout_s=30,
+        )
+
+    assert control.events == []
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):

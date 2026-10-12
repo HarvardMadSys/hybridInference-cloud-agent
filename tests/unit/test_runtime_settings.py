@@ -12,6 +12,7 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
 )
+from cloud_agent_shared.host_settings import BROKER_SETTING_KEYS, default_values
 
 LOCAL = {
     "agent_timeout_s": 3600.0,
@@ -80,9 +81,16 @@ def test_the_broker_is_sent_only_its_share_and_its_answer_is_what_is_reported():
         {"agent_timeout_s": 900, "terminal_max_sessions": 16, "chat_idle_timeout_s": 600}
     )
 
-    assert broker.sent == [{"terminal_max_sessions": 16, "chat_idle_timeout_s": 600}]
+    assert broker.sent == [
+        {
+            **default_values(BROKER_SETTING_KEYS),
+            "terminal_max_sessions": 16,
+            "chat_idle_timeout_s": 600,
+        }
+    ]
     applied, local = settings.report()
     assert applied == {
+        **default_values(BROKER_SETTING_KEYS),
         "agent_timeout_s": 900,
         "chat_idle_timeout_s": 600,
         "source_import_max_mib": 1024,
@@ -117,6 +125,14 @@ def test_apply_reports_a_change_only_when_the_report_would_change():
     assert settings.apply({}) is False
     assert settings.apply({"agent_timeout_s": 900}) is True
     assert settings.apply({"agent_timeout_s": 900}) is False
+
+
+def test_adopting_defaults_without_a_broker_does_not_resend_an_unchanged_report():
+    settings = RuntimeSettings(LOCAL)
+    previous = settings.report()
+    assert settings.apply({}) is False
+    assert settings.adopted
+    assert settings.report() == previous
 
 
 @pytest.mark.parametrize(
@@ -248,3 +264,23 @@ def test_with_no_broker_the_runners_value_is_the_whole_truth():
 
     applied, _local = settings.report()
     assert applied["chat_idle_timeout_s"] == 600
+
+
+def test_first_adoption_and_reset_replace_legacy_environment_values():
+    legacy = {**LOCAL, "agent_timeout_s": 7200, "chat_idle_timeout_s": 600}
+    broker = _Broker()
+    broker.local["terminal_max_sessions"] = 99
+    settings = RuntimeSettings(legacy, broker=broker)
+    assert settings.turn_settings()["agent_timeout_s"] == 7200
+
+    settings.apply({})
+    assert settings.turn_settings() == LOCAL
+    applied, local = settings.report()
+    assert applied["terminal_max_sessions"] == 64
+    assert local["terminal_max_sessions"] == 99
+    assert local["agent_timeout_s"] == 7200
+
+    settings.apply({"agent_timeout_s": 900, "terminal_max_sessions": 16})
+    settings.apply({})
+    assert settings.turn_settings() == LOCAL
+    assert settings.report()[0]["terminal_max_sessions"] == 64

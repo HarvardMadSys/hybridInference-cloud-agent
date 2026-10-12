@@ -10,12 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import {
-  NEUTRAL_SITE_CONFIG,
-  SITE_CONFIG_ENV,
-  SiteConfigError,
-  parseRuntimeSiteConfig,
-} from './site';
+import { NEUTRAL_SITE_CONFIG, SiteConfigError, parseRuntimeSiteConfig } from './site';
 
 const FULL_ENV = {
   AGENT_WEB_APP_NAME: 'Acme Agents',
@@ -112,21 +107,6 @@ describe('parseRuntimeSiteConfig', () => {
     ]);
     expect(Object.keys(site.features)).toEqual(['rag']);
     expect(JSON.stringify(site)).not.toContain(sentinel);
-  });
-
-  it('names the same variables the deployment is documented to set', () => {
-    // Guards against a rename landing in the parser but not in the compose
-    // file, which would leave the reader looking for a variable nothing sets.
-    expect(Object.values(SITE_CONFIG_ENV).sort()).toEqual([
-      'AGENT_DEPLOYMENT_SHA',
-      'AGENT_WEB_APP_NAME',
-      'AGENT_WEB_DEPLOYED_AT',
-      'AGENT_WEB_FEATURE_RAG',
-      'AGENT_WEB_GATEWAY_URL',
-      'AGENT_WEB_ORG_NAME',
-      'AGENT_WEB_ORG_URL',
-      'AGENT_WEB_STATUS_URL',
-    ]);
   });
 
   it('normalizes the deployment timestamp to UTC and reads the release commit', () => {

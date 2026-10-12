@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 from xml.etree import ElementTree
 
 import httpx
 from pydantic import Field, ValidationError, field_validator
 
+from cloud_agent.domain.compute import normalize_user_public_key
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     AcquisitionResolution,
@@ -34,6 +35,8 @@ from cloud_agent.ports.external.compute_provider import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent.ports.external.compute_provider import SecretResolver
 
 
@@ -50,8 +53,23 @@ class CloudLabConfig(ComputeValue):
     duration: int = Field(default=4, ge=1, le=168)
     bindings: dict[str, Any] = Field(default_factory=dict)
     ssh_username: str | None = Field(default=None, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+    # Extra public key CloudLab installs for this experiment's SSH user.
+    ssh_public_key: str | None = Field(default=None, max_length=8192)
     ssh_credential_ref: str | None = None
     ssh_known_hosts_ref: str | None = None
+    # "known_hosts": every node key must already be in the administrator's
+    # verified list. The registry also uses this old, rollback-readable value
+    # with a reserved reference for explicitly unchecked CloudLab SSH.
+    # "registration" pins the key supplied by the node's first-boot script.
+    host_key_source: Literal["known_hosts", "registration"] = "known_hosts"
+
+    @field_validator("ssh_public_key")
+    @classmethod
+    def validate_ssh_public_key(cls, value: str | None) -> str | None:
+        """Keep a blank key out of the persisted configuration."""
+        if value is None or not value.strip():
+            return None
+        return normalize_user_public_key(value.strip())
 
     @field_validator("external_id")
     @classmethod
@@ -60,25 +78,76 @@ class CloudLabConfig(ComputeValue):
         return str(UUID(value)) if value else None
 
 
+# Parameters of deploy/cloudlab/cloud-agent-node.py the boot script reads.
+REGISTRATION_URL_BINDING = "registrationUrl"
+REGISTRATION_TOKEN_BINDING = "registrationToken"
+
+
+def _error_text(response: httpx.Response) -> str:
+    """Return a short portal error, never a body that could echo a credential."""
+    try:
+        value = response.json()
+    except (ValueError, UnicodeError):
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    error = value.get("error")
+    if not isinstance(error, str):
+        return ""
+    text = " ".join(error.split())
+    if not text or text == "Internal server error" or len(text) > 300:
+        return ""
+    return text
+
+
+def _wire_bindings(bindings: dict[str, Any]) -> dict[str, Any]:
+    """Send parameter values the way the Portal stores them.
+
+    Since 2026-10-09 the Portal answers a JSON boolean binding with HTTP 400
+    ("Not a HASH reference"). It keeps every binding as a string and parses
+    booleans from "True"/"False" itself, as experiments created earlier show.
+    """
+    return {
+        key: ("True" if value else "False") if isinstance(value, bool) else value
+        for key, value in bindings.items()
+    }
+
+
 class CloudLabProvider(ComputeProvider):
     """Adapt CloudLab experiments to the common resource lifecycle contract."""
 
     def __init__(
-        self, *, api_url: str, resolver: SecretResolver, client: httpx.AsyncClient | None = None
+        self,
+        *,
+        api_url: str | Callable[[], str],
+        resolver: SecretResolver,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
-        url = urlsplit(api_url)
-        if (
-            url.scheme != "https"
-            or not url.hostname
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-        ):
-            raise ValueError("CloudLab requires an operator-verified HTTPS API endpoint")
-        self._api_url = api_url.rstrip("/")
+        if isinstance(api_url, str):
+            api_url = self._validated_api_url(api_url)
+        self._api_url = api_url
         self._resolver = resolver
         self._client = client
+
+    @staticmethod
+    def _validated_api_url(api_url: str) -> str:
+        """Keep credentials on the configured HTTPS endpoint without redirects."""
+        try:
+            url = urlsplit(api_url)
+            valid = (
+                url.scheme == "https"
+                and bool(url.hostname)
+                and not url.username
+                and not url.password
+                and not url.query
+                and not url.fragment
+            )
+            _ = url.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("CloudLab requires an operator-verified HTTPS API endpoint")
+        return api_url.rstrip("/")
 
     def capabilities(self) -> ProviderCapabilities:
         """Return the actions this adapter implements."""
@@ -102,11 +171,19 @@ class CloudLabProvider(ComputeProvider):
                 "invalid_configuration",
                 "Provision requires a profile and its project, without an existing experiment ID",
             )
-        ssh_fields = (parsed.ssh_username, parsed.ssh_credential_ref, parsed.ssh_known_hosts_ref)
-        if any(ssh_fields) and not all(ssh_fields):
+        ssh_fields = (parsed.ssh_username, parsed.ssh_credential_ref)
+        trusts_list = parsed.host_key_source == "known_hosts"
+        if (any(ssh_fields) or parsed.ssh_known_hosts_ref) and not (
+            all(ssh_fields) and (parsed.ssh_known_hosts_ref or not trusts_list)
+        ):
             raise ProviderError(
                 "invalid_configuration",
-                "SSH username, credential and verified host keys must be supplied together",
+                "SSH username, credential and host-key policy must be supplied together",
+            )
+        if not trusts_list and mode != "provision":
+            raise ProviderError(
+                "invalid_configuration",
+                "Only a node created from the Cloud Agent profile can register its host keys",
             )
         return parsed.model_dump(mode="json", exclude_none=True)
 
@@ -123,6 +200,16 @@ class CloudLabProvider(ComputeProvider):
     async def _request(
         self, method: str, path: str, credential_ref: str, *, payload: dict[str, Any] | None = None
     ) -> httpx.Response:
+        # Snapshot the endpoint before awaiting credentials, so an admin edit
+        # cannot change the destination midway through this request.
+        try:
+            api_url = self._validated_api_url(
+                self._api_url() if callable(self._api_url) else self._api_url
+            )
+        except ValueError:
+            raise ProviderError(
+                "provider_unavailable", "CloudLab API endpoint is not configured correctly"
+            ) from None
         token = (await self._resolver.resolve(credential_ref)).strip()
         if not token or "\n" in token or "\r" in token:
             raise ProviderError("credential_invalid", "CloudLab credential is missing or malformed")
@@ -130,7 +217,7 @@ class CloudLabProvider(ComputeProvider):
             if self._client is not None:
                 response = await self._client.request(
                     method,
-                    self._api_url + path,
+                    api_url + path,
                     headers={"X-Api-Token": token, "X-Api-Elaborate": "true"},
                     json=payload,
                     follow_redirects=False,
@@ -140,12 +227,19 @@ class CloudLabProvider(ComputeProvider):
                 async with httpx.AsyncClient() as client:
                     response = await client.request(
                         method,
-                        self._api_url + path,
+                        api_url + path,
                         headers={"X-Api-Token": token, "X-Api-Elaborate": "true"},
                         json=payload,
                         follow_redirects=False,
                         timeout=60,
                     )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            # No byte of the request left this process: the TCP or TLS
+            # handshake failed (the API host has intermittently served an
+            # expired certificate). Even a mutation is safe to send again.
+            raise ProviderError(
+                "temporarily_unavailable", "CloudLab could not be reached", retryable=True
+            ) from None
         except httpx.RequestError:
             mutation = method != "GET"
             raise ProviderError(
@@ -168,9 +262,21 @@ class CloudLabProvider(ComputeProvider):
                 "capacity_unavailable", "CloudLab capacity or request limit reached", retryable=True
             )
         if status >= 500:
+            # A finished HTTP 500 on create is not a lost request: the portal
+            # answered. Acquire looks up the experiment name and, when it is
+            # absent, reports a rejection that can be corrected and retried.
+            # Timeouts stay result_unknown and are never posted again.
+            code = (
+                "temporarily_unavailable"
+                if method == "GET"
+                else "server_error"
+                if method == "POST" and path.split("?", 1)[0].rstrip("/") == "/experiments"
+                else "result_unknown"
+            )
+            detail = _error_text(response)
             raise ProviderError(
-                "temporarily_unavailable" if method == "GET" else "result_unknown",
-                "CloudLab could not confirm the request",
+                code,
+                detail or "CloudLab could not confirm the request",
                 retryable=method == "GET",
             )
         if status >= 300:
@@ -189,6 +295,56 @@ class CloudLabProvider(ComputeProvider):
             raise ProviderError("invalid_response", "CloudLab returned an invalid object")
         return value
 
+    async def _require_profile(self, config: CloudLabConfig) -> None:
+        """Reject a missing profile before create. A 500 from that create is not recoverable."""
+        query = urlencode(
+            {"project": config.profile_project or "", "profile_name": config.profile_name or ""}
+        )
+        data = self._json(await self._request("GET", "/profiles/?" + query, config.credential_ref))
+        profiles = data.get("profiles")
+        if not isinstance(profiles, list):
+            raise ProviderError(
+                "invalid_response", "CloudLab API endpoint did not return a profile list"
+            )
+        if any(
+            isinstance(item, dict)
+            and item.get("name") == config.profile_name
+            and item.get("project") == config.profile_project
+            for item in profiles
+        ):
+            return
+        raise ProviderError(
+            "request_rejected",
+            f"CloudLab project {config.profile_project} has no profile {config.profile_name}.",
+        )
+
+    async def _created_experiment(self, name: str, config: CloudLabConfig) -> str | None:
+        """Return the id of the experiment this create would have named, if it exists."""
+        query = urlencode({"project": config.project})
+        data = self._json(
+            await self._request("GET", "/experiments/?" + query, config.credential_ref)
+        )
+        experiments = data.get("experiments")
+        if not isinstance(experiments, list):
+            raise ProviderError(
+                "invalid_response", "CloudLab API endpoint did not return an experiment list"
+            )
+        matches = [
+            item.get("id")
+            for item in experiments
+            if isinstance(item, dict)
+            and item.get("name") == name
+            and item.get("project") == config.project
+            and item.get("id")
+        ]
+        if len(matches) > 1:
+            raise ProviderError(
+                "result_unknown", "CloudLab returned more than one experiment with this name"
+            )
+        if not matches:
+            return None
+        return str(UUID(str(matches[0])))
+
     async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:
         """Execute the persisted acquisition intent and return its acknowledgement."""
         validated = self.validate_config(request.mode, request.config)
@@ -203,16 +359,29 @@ class CloudLabProvider(ComputeProvider):
         # No vendor idempotency key exists. The orchestrator must call this
         # only on an unsent persisted intent; recovery must never re-POST it.
         name = config.name or "ca-" + intent.allocation_id.replace("-", "")[:13]
+        bindings = dict(config.bindings)
+        if config.host_key_source == "registration":
+            if request.registration is None:
+                raise ProviderError(
+                    "registration_unavailable", "Node registration is not configured"
+                )
+            # Only the outgoing request carries the token; the persisted
+            # configuration below never does.
+            bindings[REGISTRATION_URL_BINDING] = request.registration.url
+            bindings[REGISTRATION_TOKEN_BINDING] = request.registration.token.get_secret_value()
         payload = {
             "name": name,
             "project": config.project,
             "profile_name": config.profile_name,
             "profile_project": config.profile_project,
             "duration": config.duration,
-            "bindings": config.bindings,
+            "bindings": _wire_bindings(bindings),
         }
         if config.group:
             payload["group"] = config.group
+        if config.ssh_public_key:
+            payload["sshpubkey"] = config.ssh_public_key
+        await self._require_profile(config)
         try:
             response = await self._request(
                 "POST", "/experiments/", config.credential_ref, payload=payload
@@ -220,9 +389,22 @@ class CloudLabProvider(ComputeProvider):
             data = self._json(response)
             external_id = str(UUID(str(data["id"])))
         except ProviderError as exc:
-            if exc.code in {"result_unknown", "invalid_response"}:
+            if exc.code == "server_error":
+                try:
+                    created = await self._created_experiment(name, config)
+                except ProviderError:
+                    return ProviderReceipt(outcome="unknown")
+                if created is None:
+                    raise ProviderError(
+                        "request_rejected",
+                        "CloudLab did not create the experiment. "
+                        "Check the profile name and its parameters.",
+                    ) from None
+                external_id = created
+            elif exc.code in {"result_unknown", "invalid_response"}:
                 return ProviderReceipt(outcome="unknown")
-            raise
+            else:
+                raise
         except (KeyError, ValueError):
             return ProviderReceipt(outcome="unknown")
         ref = ResourceRef(
@@ -388,7 +570,11 @@ class CloudLabProvider(ComputeProvider):
                     )
                 identities.add(node_id)
                 connection = None
-                if config.ssh_username and config.ssh_credential_ref and config.ssh_known_hosts_ref:
+                if (
+                    config.ssh_username
+                    and config.ssh_credential_ref
+                    and (config.ssh_known_hosts_ref or config.host_key_source == "registration")
+                ):
                     # Manifest is authoritative for forwarded VM SSH ports.
                     # Never silently assume port 22 for an unobserved login.
                     destination = logins.get((aggregate_id, str(node["client_id"])))
@@ -399,7 +585,11 @@ class CloudLabProvider(ComputeProvider):
                                 port=destination[1],
                                 username=config.ssh_username,
                                 credential_ref=config.ssh_credential_ref,
-                                known_hosts_ref=config.ssh_known_hosts_ref,
+                                # A registering node is trusted only through
+                                # the key it registered, never the list.
+                                known_hosts_ref=config.ssh_known_hosts_ref
+                                if config.host_key_source == "known_hosts"
+                                else None,
                             )
                         except ValidationError:
                             raise ProviderError(

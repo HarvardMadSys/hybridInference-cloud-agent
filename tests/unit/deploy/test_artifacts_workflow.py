@@ -13,13 +13,18 @@ table, and the job is only the wiring that runs it.
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
-from deploy.release import release_manifest as rm, smoke
+from deploy.release import build_host_bundle, release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
@@ -74,12 +79,6 @@ def test_each_cell_runs_on_its_own_architecture() -> None:
         )
 
 
-def test_the_matrix_covers_the_roles_the_release_names() -> None:
-    role_args = [cell["smoke_args"] for cell in cells()]
-    roles = {arg.split()[1] for arg in role_args}
-    assert roles == set(rm.EXPECTED_PLATFORMS)
-
-
 def test_nothing_in_ci_publishes() -> None:
     """A pull request must not be able to reach a registry, however it changes the file.
 
@@ -108,24 +107,34 @@ def test_the_start_check_runs_the_image_this_job_built() -> None:
 
 
 def test_the_build_loads_the_image_it_is_about_to_start() -> None:
+    """The docker exporter puts the image on the daemon, uncompressed.
+
+    The daemon is its only consumer, and on a hosted VM the sandbox spent a
+    minute gzipping layers the daemon then unpacked. `load: true` is the same
+    exporter with its default compression, so it is not set beside this.
+    """
     for fragment in (
         "Build ${{ matrix.artifact.name }}",
         "Build ${{ matrix.artifact.name }} (retry)",
     ):
         build = step(fragment)
-        assert build["with"]["load"] is True, (
+        assert build["with"]["outputs"] == "type=docker,compression=uncompressed", (
             f"{fragment} must load the image onto this runner's daemon; the next step starts it "
             "from there, and a self-hosted runner shares no filesystem with the job that built it"
         )
+        assert "load" not in build["with"]
         assert build["with"]["push"] is False
 
 
-def test_the_build_does_not_export_an_unused_remote_cache() -> None:
+def test_no_cell_exports_a_cache_and_only_the_sandbox_imports_one() -> None:
     """The persistent per-runner builder is the cache used by later builds.
 
     A GHA exporter without an importer uploaded the sandbox's large runtime
     layers on every run but no build ever consumed them. The export alone took
-    minutes and occupied every x64 runner on their shared physical host.
+    minutes and occupied every x64 runner on their shared physical host. So no
+    cell exports; `pr-caches` does, from a hosted VM, and only the sandbox —
+    the one image whose cold build is long — imports it. Which events import
+    is pinned in `test_ci_workflow_policy.py`, where the expression is evaluated.
     """
     for fragment in (
         "Build ${{ matrix.artifact.name }}",
@@ -133,7 +142,9 @@ def test_the_build_does_not_export_an_unused_remote_cache() -> None:
     ):
         build = step(fragment)
         assert "cache-to" not in build["with"]
-        assert "cache-from" not in build["with"]
+        imported = str(build["with"]["cache-from"])
+        assert "matrix.artifact.name == 'sandbox'" in imported
+        assert "'type=gha,scope=sandbox-amd64'" in imported
 
 
 def test_the_build_tags_the_image_the_smoke_starts() -> None:
@@ -173,6 +184,124 @@ def test_mcp_interactions_run_in_isolated_parallel_workers() -> None:
     assert run.index("createdb") < run.index("uv run pytest")
 
 
+PARITY = "tests/external/test_resident_mcp_parity.py"
+
+# Copied verbatim from `artifacts` into `mcp`, so the cases a pull request runs
+# use the image the sandbox cell builds and starts, built and freed the same way.
+SHARED_MCP_STEPS = (
+    "Free unused SDKs on the hosted sandbox runner",
+    "Reuse this runner's builder, or make one",
+    "Build ${{ matrix.artifact.name }}",
+    "Build ${{ matrix.artifact.name }} (retry)",
+    "Free the hosted sandbox builder's unused cache",
+    "Isolate uv cache dir",
+    "Install uv",
+    "Drop this run's containers and image",
+    "Drop this pull request's builder",
+)
+
+
+def _mcp_case_step() -> dict[str, Any]:
+    return next(
+        candidate
+        for candidate in workflow()["jobs"]["mcp"]["steps"]
+        if "retains MCP through approval" in str(candidate.get("name", ""))
+    )
+
+
+SANDBOX_CELL_SELECTION = "${{ github.event_name == 'pull_request' && 'not kilo]' || '' }}"
+
+
+def test_pull_requests_give_kilo_its_own_vms_and_trusted_events_run_every_case_together() -> None:
+    """Every event runs all fifteen cases; only where they run differs.
+
+    Each Kilo case needs most of the test's 180s turn timeout on a hosted VM by
+    itself, and beside another one it runs past it — the cause of most hosted
+    failures of this suite. Three cases of any other runtime take 20-40s
+    together. A pull request therefore runs the other twelve in the sandbox
+    cell and each Kilo case on a VM of its own. Trusted events keep all fifteen
+    in the persistent-pool step.
+    """
+    jobs = workflow()["jobs"]
+    in_cell = step("All five CLIs retain MCP")
+    assert in_cell["if"] == "matrix.artifact.name == 'sandbox'"
+    assert in_cell["env"]["MCP_TEST_SELECTION"] == SANDBOX_CELL_SELECTION
+    assert jobs["mcp"]["if"] == (
+        "github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'"
+    )
+    assert jobs["mcp"]["needs"] == "changes"
+    assert jobs["mcp"]["strategy"]["fail-fast"] is False
+    gate = jobs["ci-gate"]
+    assert "mcp" in gate["needs"]
+    assert "mcp=${{ needs.mcp.result }}" in str(step("Every job succeeded", job="ci-gate")["env"])
+
+
+def _selects(expression: str, case: str) -> bool:
+    """`-k` for the two shapes used here: `<id fragment>` and `not <id fragment>`.
+
+    Each fragment ends in `]`, which only an item name can contain, so a
+    substring of the collected id is exactly what `-k` matches.
+    """
+    negated = expression.startswith("not ")
+    fragment = expression.removeprefix("not ").lower()
+    return (fragment in case.lower()) != negated
+
+
+def test_the_mcp_cells_partition_the_parity_suite() -> None:
+    """On a pull request every case runs exactly once; on a trusted event, all of them.
+
+    Collected from the real test file, so a runtime or policy added to its
+    parametrization and not to these selections fails here rather than silently
+    going untested.
+    """
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-m", "external", PARITY],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    cases = {line for line in collected.splitlines() if line.startswith(f"{PARITY}::")}
+    assert len(cases) == 15
+    template = _mcp_case_step()["env"]["MCP_TEST_SELECTION"]
+    assert template == "${{ matrix.case }}-kilo]"
+    selections = ["not kilo]"] + [
+        template.replace("${{ matrix.case }}", case)
+        for case in workflow()["jobs"]["mcp"]["strategy"]["matrix"]["case"]
+    ]
+    selected: list[str] = []
+    for selection in selections:
+        mine = sorted(case for case in cases if _selects(selection, case))
+        assert mine, f"{selection} selects nothing"
+        selected.extend(mine)
+    assert sorted(selected) == sorted(cases), "the cells overlap or leave a case out"
+    assert len([case for case in cases if _selects("not kilo]", case)]) == 12
+
+
+def test_the_mcp_cells_build_and_clean_up_exactly_like_the_sandbox_cell() -> None:
+    jobs = workflow()["jobs"]
+    sandbox = next(cell for cell in cells() if cell["name"] == "sandbox")
+    assert jobs["mcp"]["strategy"]["matrix"]["artifact"] == [sandbox]
+    for name in SHARED_MCP_STEPS:
+        assert step(name, job="mcp") == step(name), f"{name} differs between artifacts and mcp"
+    ours, theirs = _mcp_case_step(), step("All five CLIs retain MCP")
+    assert ours["run"] == theirs["run"], "the cases must run the way the sandbox cell runs them"
+    assert ours["timeout-minutes"] == theirs["timeout-minutes"]
+    selection = {"MCP_TEST_SELECTION": "compared in the partition test"}
+    assert {**ours["env"], **selection} == {**theirs["env"], **selection}
+    assert '-k "${MCP_TEST_SELECTION}"' in ours["run"]
+
+
+def test_each_mcp_cell_removes_only_what_it_started() -> None:
+    """The cells of one run share its id, so the label carries the case too."""
+    steps = workflow()["jobs"]["mcp"]["steps"]
+    naming = str(step("Name this cell", job="mcp")["run"])
+    assert "matrix.case" in naming and "GITHUB_RUN_ATTEMPT" in naming
+    assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
+    assert steps[-1]["name"] == "Drop this pull request's builder"
+    assert not any("secrets." in str(candidate) for candidate in steps)
+
+
 def test_cleanup_cannot_reach_another_cell() -> None:
     """Six cells of one run share a run id, an attempt — and often a Docker host.
 
@@ -195,20 +324,63 @@ def test_the_build_passes_the_commit_every_image_must_name() -> None:
     assert "SOURCE_COMMIT=${{ github.sha }}" in str(build["with"]["build-args"])
 
 
-def _docker_patterns() -> list[str]:
-    """The regexes the classifier's docker decision is actually made of.
+@pytest.mark.parametrize("dockerfile", sorted({str(cell["dockerfile"]) for cell in cells()}))
+def test_the_commit_reaches_no_layer(dockerfile: str) -> None:
+    """A RUN after `ARG SOURCE_COMMIT` has the commit in its environment.
 
-    Read out of the `changes` job rather than restated here: a test that keeps
-    its own copy of the pattern stops testing the pattern the moment either one
-    is edited.
+    Every such layer then rebuilds on every commit, in every builder and every
+    layer cache. In the sandbox that was five layers below the label, rebuilt and
+    exported again on each run while nothing in them had changed.
     """
-    classify = str(step("Classify changed paths", job="changes")["run"])
-    block = classify.split("# Docker:", 1)[1].split("# A change to CI itself", 1)[0]
-    return re.findall(r"matches '([^']+)'", block)
+    text = re.sub(r"\\\n\s*", " ", (REPO_ROOT / dockerfile).read_text())
+    instructions = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    declared = [i for i, line in enumerate(instructions) if line.startswith("ARG SOURCE_COMMIT")]
+    assert declared, f"{dockerfile} never declares SOURCE_COMMIT"
+    after = instructions[declared[-1] :]
+    assert not [line for line in after if line.startswith("RUN ")], (
+        f"{dockerfile} runs a layer after ARG SOURCE_COMMIT; declare it after the last RUN"
+    )
 
 
 def _runs_the_image_jobs(path: str) -> bool:
-    return any(re.search(pattern, path) for pattern in _docker_patterns())
+    """Execute the classifier with one changed path and a local-only Git double."""
+    script = str(step("Classify changed paths", job="changes")["run"])
+    with tempfile.TemporaryDirectory(prefix="ci-classifier-") as directory:
+        temporary = Path(directory)
+        git = temporary / "git"
+        git.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "cat-file) exit 0 ;;\n"
+            'diff) printf "%s\\n" "$CHANGED_PATH" ;;\n'
+            "*) exit 1 ;;\n"
+            "esac\n"
+        )
+        git.chmod(0o755)
+        output = temporary / "outputs"
+        environment = {
+            **os.environ,
+            "PATH": f"{temporary}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": "b" * 40,
+            "BEFORE": "a" * 40,
+            "GITHUB_OUTPUT": str(output),
+            "CHANGED_PATH": path,
+        }
+        subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", script],
+            env=environment,
+            cwd=temporary,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    return values["docker"] == "true"
 
 
 def _copied_paths(dockerfile: Path) -> set[str]:
@@ -219,19 +391,74 @@ def _copied_paths(dockerfile: Path) -> set[str]:
     after the R5 move, and only the full path keeps the check meaningful in both.
     """
     sources = set()
-    for line in dockerfile.read_text().splitlines():
+    text = re.sub(r"\\\n\s*", " ", dockerfile.read_text())
+    for line in text.splitlines():
         if not line.startswith("COPY") or "--from=" in line:
             continue
-        source = line.split()[1]
-        if source.startswith("/"):  # a stage or an absolute path, not the context
-            continue
-        sources.add(source.rstrip("/"))
+        arguments = [word for word in shlex.split(line)[1:] if not word.startswith("--")]
+        for source in arguments[:-1]:
+            if not source.startswith("/"):
+                sources.add(source.rstrip("/"))
     return sources
 
 
 def _packages_both_images_ship() -> set[str]:
     """What the console and the runner images both COPY, read from the files."""
     return _copied_paths(CONSOLE_DOCKERFILE) & _copied_paths(RUNNER_DOCKERFILE)
+
+
+def _all_image_inputs() -> set[str]:
+    sources = {
+        ".dockerignore",
+        "tests/external/test_upload_edge_limits.py",
+        "tests/external/test_retained_command_limits.py",
+    }
+    # The control image embeds these reviewed source inputs using a bind
+    # mount, rather than a separate COPY instruction for each archive member.
+    sources.update(build_host_bundle.PACKAGE_ROOTS)
+    sources.update(build_host_bundle.HOST_FILES)
+    for cell in cells():
+        dockerfile = Path(str(cell["dockerfile"]))
+        sources.add(dockerfile.as_posix())
+        sources.update(_copied_paths(REPO_ROOT / dockerfile))
+    return sources
+
+
+@pytest.mark.parametrize("entry", sorted(_all_image_inputs()))
+def test_every_release_image_input_selects_image_checks(entry: str) -> None:
+    """COPY and the embedded Host bundle's source inputs all need coverage."""
+    probe = f"{entry}/module.py" if (REPO_ROOT / entry).is_dir() else entry
+    assert _runs_the_image_jobs(probe), f"image input {entry} selects no image checks"
+
+
+@pytest.mark.parametrize("path", ["docs/operations.md", "tests/unit/test_identity.py"])
+def test_non_image_inputs_do_not_select_image_checks(path: str) -> None:
+    """Full input coverage should preserve useful classification of unrelated changes."""
+    assert not _runs_the_image_jobs(path)
+
+
+def test_new_external_tests_select_image_checks() -> None:
+    """New integration files need the image jobs without classifier edits."""
+    assert _runs_the_image_jobs("tests/external/test_new_container_integration.py")
+
+
+def test_real_upload_limits_are_checked_by_compose_ci() -> None:
+    """Static caps also need a real nginx syntax/path/body-limit regression."""
+    check = step("Upload limits match encoded attachments", job="compose")
+    assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == "nginx:1.27.5-alpine"
+    assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
+    assert "pytest -q -m external tests/external/test_upload_edge_limits.py" in check["run"]
+
+
+def test_real_command_cleanup_is_checked_by_compose_ci() -> None:
+    """Timeout and output bounds must reap actual Docker process siblings."""
+    check = step("Retained commands clean up Docker siblings", job="compose")
+    assert check["env"]["AGENT_COMMAND_TEST_IMAGE"] == "postgres:15"
+    assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
+    assert (
+        "uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py"
+        in check["run"]
+    )
 
 
 def test_a_change_to_the_console_runs_the_image_jobs() -> None:
@@ -264,8 +491,9 @@ def test_a_change_to_what_both_images_ship_runs_the_image_jobs(entry: str) -> No
 
 
 def test_a_failed_run_leaves_nothing_behind() -> None:
+    """On every persistent runner, whatever happened; a hosted VM is deleted whole."""
     cleanup = step("Drop this run's")
-    assert cleanup["if"] == "always()"
+    assert cleanup["if"] == "always() && runner.environment != 'github-hosted'"
     run = str(cleanup["run"])
     assert run.index("docker rm") < run.index("docker image rm"), (
         "containers first: an image with a container still referencing it is not removed, "

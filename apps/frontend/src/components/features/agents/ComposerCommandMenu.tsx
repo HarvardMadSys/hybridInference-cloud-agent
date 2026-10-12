@@ -55,9 +55,7 @@ export function ComposerCommandMenu({
             onMouseEnter={() => onHighlight(index)}
             onClick={() => onChoose(index)}
             className={`${COMPOSER_MENU_ROW} ${
-              index === activeIndex
-                ? 'bg-gray-100 text-gray-900 dark:bg-white/10 dark:text-gray-100'
-                : ''
+              index === activeIndex ? 'bg-surface-hover text-foreground' : ''
             }`}
           >
             {entry.icon}

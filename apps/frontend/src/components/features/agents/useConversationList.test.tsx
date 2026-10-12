@@ -26,6 +26,55 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('conversation navigation queries', () => {
+  it('shows progress for initial loads and pagination while refreshing loaded lists quietly', async () => {
+    let resolvePage!: (page: {
+      conversations: AgentConversationApi[];
+      next_cursor: string | null;
+    }) => void;
+    api.list.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    const { result, rerender } = renderHook((options) => useConversationList(options), {
+      initialProps: { q: '', refresh: 0 },
+    });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.showLoading).toBe(true);
+    await act(async () => resolvePage({ conversations: [row('first')], next_cursor: 'next' }));
+
+    act(() => result.current.loadMore());
+    expect(result.current.showLoading).toBe(true);
+    await act(async () =>
+      resolvePage({ conversations: [row('second')], next_cursor: 'after-second' }),
+    );
+    expect(result.current.rows.map((row) => row.key)).toEqual(['first', 'second']);
+
+    rerender({ q: '', refresh: 1 });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.showLoading).toBe(false);
+    expect(result.current.rows.map((row) => row.key)).toEqual(['first', 'second']);
+    // A pagination click cannot start a competing read during a background refresh.
+    const requests = api.list.mock.calls.length;
+    act(() => result.current.loadMore());
+    expect(api.list).toHaveBeenCalledTimes(requests);
+    await act(async () => resolvePage({ conversations: [], next_cursor: null }));
+
+    rerender({ q: '', refresh: 2 });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.showLoading).toBe(false);
+    expect(result.current.rows).toEqual([]);
+    await act(async () => resolvePage({ conversations: [], next_cursor: null }));
+
+    rerender({ q: 'new search', refresh: 2 });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.showLoading).toBe(true);
+    await act(async () => resolvePage({ conversations: [row('new')], next_cursor: null }));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.showLoading).toBe(false);
+  });
+
   it('isolates pin filters and stamps only the refresh that loaded the rows', async () => {
     api.list.mockResolvedValueOnce({
       conversations: [row('regular')],

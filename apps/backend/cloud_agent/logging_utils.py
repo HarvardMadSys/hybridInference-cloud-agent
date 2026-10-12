@@ -11,8 +11,9 @@ formatter below is duplicated into the host shim under that same rule.
 Call sites throughout this package already pass structured fields —
 ``extra={"event": ..., "job_id": ..., "duration_ms": ...}`` — but the text
 format renders ``%(message)s`` and nothing else, so every one of those fields
-was discarded before it reached the log. ``AGENT_LOG_FORMAT=json`` renders them
-instead. Text stays the default because it is what an operator reading
+was discarded before it reached the log. The admin Settings page's JSON format
+renders them instead. Environment values bootstrap logging and seed settings
+on first startup. Text stays the default because it is what an operator reading
 ``docker logs`` by eye already has, and changing that for everyone is not this
 switch's job.
 """
@@ -29,8 +30,8 @@ from typing import Any
 ENV_LOG_LEVEL = "AGENT_LOG_LEVEL"
 
 #: ``json`` renders one JSON object per record; anything else keeps the text
-#: format. Named per-process rather than per-handler: this service's entrypoint
-#: configures logging once, and a deployment picks the shape it can parse.
+#: format. The entrypoint reads this during bootstrap; the saved admin value
+#: controls subsequent changes to the handler the control plane owns.
 ENV_LOG_FORMAT = "AGENT_LOG_FORMAT"
 
 _FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -85,6 +86,8 @@ class JsonLogFormatter(logging.Formatter):
 #: declares no ``root`` entry at all — so nothing it writes reaches a handler
 #: installed here.
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+_process_handler: logging.StreamHandler[Any] | None = None
+_process_owns_uvicorn = False
 
 
 def _adopt_uvicorn_loggers() -> None:
@@ -120,21 +123,41 @@ def configure_process_logging(level: str | None = None, log_format: str | None =
             text. An unrecognised value falls back to text and says so, because
             a misspelled log format is not worth refusing to serve over.
     """
+    global _process_handler, _process_owns_uvicorn
     resolved = (level or os.environ.get(ENV_LOG_LEVEL) or "INFO").upper()
     requested = (log_format or os.environ.get(ENV_LOG_FORMAT) or "text").strip().lower()
-    if requested == "json":
-        handler = logging.StreamHandler()
-        handler.setFormatter(JsonLogFormatter())
-        logging.basicConfig(level=resolved, handlers=[handler])
-        if handler in logging.getLogger().handlers:
-            # Only when this call is the one that configured logging. An
-            # embedding process that got there first keeps its own setup, and
-            # reshaping uvicorn's loggers around a handler we did not install
-            # is not ours to do.
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonLogFormatter() if requested == "json" else logging.Formatter(_FORMAT))
+    logging.basicConfig(level=resolved, handlers=[handler])
+    if handler in logging.getLogger().handlers:
+        _process_handler = handler
+        _process_owns_uvicorn = requested == "json"
+        if requested == "json":
+            # Only the handler this process installed may adopt uvicorn.
             _adopt_uvicorn_loggers()
-        return
-    logging.basicConfig(level=resolved, format=_FORMAT)
-    if requested != "text":
+    if requested not in {"text", "json"}:
         get_logger(__name__).warning(
             "unrecognised %s=%r; logging as text", ENV_LOG_FORMAT, requested
         )
+
+
+def apply_logging_settings(level: str, log_format: str) -> bool:
+    """Update logging owned by this service, leaving embedding configuration alone.
+
+    A handler installed before this service, or additional root handlers added
+    later by an embedding process, keep their formatter and logging threshold.
+    The bootstrap handler is retained across updates instead of accumulating
+    handlers whenever settings synchronize.
+    """
+    global _process_owns_uvicorn
+    root = logging.getLogger()
+    handler = _process_handler
+    if handler is None or root.handlers != [handler]:
+        return False
+    handler.setFormatter(JsonLogFormatter() if log_format == "json" else logging.Formatter(_FORMAT))
+    handler.setLevel(level)
+    root.setLevel(level)
+    if log_format == "json" and not _process_owns_uvicorn:
+        _adopt_uvicorn_loggers()
+        _process_owns_uvicorn = True
+    return True

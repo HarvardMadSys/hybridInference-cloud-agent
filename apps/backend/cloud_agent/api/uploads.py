@@ -32,6 +32,8 @@ from cloud_agent.attachments.models import (
     MAX_CONTENT_TYPE_LENGTH,
     AttachmentError,
     AttachmentView,
+    attachment_max_file_bytes,
+    attachment_size_label,
     safe_attachment_path,
 )
 
@@ -87,6 +89,11 @@ async def create_upload(
     except (binascii.Error, ValueError) as exc:
         raise upload_http_error(AttachmentError("Upload content is not valid base64.")) from exc
     try:
+        max_file_bytes = attachment_max_file_bytes()
+        if len(content) > max_file_bytes:
+            raise AttachmentError(
+                f"Each file must be {attachment_size_label(max_file_bytes)} or smaller."
+            )
         row = await require_store(store).attachments.create_attachment(
             user_id=user["user_id"],
             path=path,

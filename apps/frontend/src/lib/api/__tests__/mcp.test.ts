@@ -19,6 +19,7 @@ import {
   replaceMcpThreadBindings,
   saveMcpImport,
   testMcpConnection,
+  validateMcpAuthorizationUrl,
 } from '../mcp';
 import * as client from '../client';
 
@@ -28,6 +29,42 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+describe('MCP browser authorization URL validation', () => {
+  it.each([
+    'javascript:alert(document.domain)',
+    'JaVaScRiPt:alert(document.domain)',
+    'data:text/html,<script>alert(1)</script>',
+    'file:///tmp/authorize',
+    'http://localhost:8080/authorize',
+    '/authorize',
+    '//login.example.com/authorize',
+    'https:login.example.com/authorize',
+    'https:///authorize',
+    'https://login.example.com:invalid/authorize',
+    'https://login.example.com:65536/authorize',
+    'https://[invalid]/authorize',
+    'https://user:password@login.example.com/authorize',
+    'https://@login.example.com/authorize',
+    'https://login.example.com/authorize#fragment',
+    'https://login.example.com/authorize#',
+    'https://login.example.com\\authorize',
+    'https://login.\nexample.com/authorize',
+    ' https://login.example.com/authorize',
+    'https://login.example.com/authorize\u0000',
+  ])('rejects an unsafe or ambiguous redirect: %s', (value) => {
+    expect(() => validateMcpAuthorizationUrl(value)).toThrow('unsafe sign-in address');
+  });
+
+  it.each([
+    'https://auth.example.com/authorize',
+    'https://login.other.example:8443/oauth/authorize?audience=mcp%3Aread&state=state',
+    'HTTPS://Login.other.example/authorize?prompt=consent',
+    'https://[::1]:8443/authorize',
+  ])('preserves a valid absolute HTTPS destination: %s', (value) => {
+    expect(validateMcpAuthorizationUrl(value)).toBe(value);
+  });
+});
 
 describe('mcp api', () => {
   let fetchWithAuth: ReturnType<typeof vi.spyOn>;
@@ -169,6 +206,24 @@ describe('mcp api', () => {
     );
   });
 
+  it('sends a confidential client secret with its client id for OAuth authorization', async () => {
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ authorization_url: null, needs_client_id: false, message: '' }),
+    );
+
+    await authorizeMcpConnection(7, 'client-abc', 'client-secret');
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/connections/7/authorize',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: 'client-abc', client_secret: 'client-secret' }),
+      },
+    );
+  });
+
   it('encodes a thread id in the bindings path', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ bindings: [] }));
 
@@ -224,6 +279,29 @@ describe('mcp api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/mcp/invocations?job_id=job%2F1&pending_only=true',
+    );
+  });
+
+  it('reads owner-wide pending pages using the returned keyset cursor', async () => {
+    const response = { invocations: [], has_more: true, next_before_id: 51 };
+    fetchWithAuth.mockResolvedValue(jsonResponse(response));
+    await expect(
+      listMcpInvocations({ pendingOnly: true, limit: 50, beforeId: 100 }),
+    ).resolves.toEqual(response);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/invocations?pending_only=true&limit=50&before_id=100',
+    );
+  });
+
+  it('paginates scoped request history with an encoded conversation ID', async () => {
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ invocations: [], has_more: false, next_before_id: null }),
+    );
+    await listMcpInvocations({ threadId: 'conversation/1', limit: 100, beforeId: 9 });
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/invocations?thread_id=conversation%2F1&limit=100&before_id=9',
     );
   });
 

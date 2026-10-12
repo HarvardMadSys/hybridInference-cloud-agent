@@ -1,124 +1,113 @@
 # Native conversation recall
 
-A retained native session and a correct answer about its history are separate
-checks. PR96's local Flash reproduction kept every user/assistant message in the
-request, while the model claimed there had been no previous conversation.
-A small synthetic reproduction showed that file-memory instructions could
-trigger this confusion. Removing auto memory did not fix the full CLI case.
+Cloud Agent keeps each chat's native CLI session in its retained sandbox. The
+CLI owns the conversation history, and Agent passes each user message through
+unchanged.
 
-Native CLIs own the conversation history. Cloud Agent passes each user message
-unchanged and resumes the same native session; it does not append a reminder to
-persuade the model that history exists. The earlier continuation-prompt experiment
-has been withdrawn. Its passing behavior samples are not acceptance evidence for
-the unmodified-input implementation.
+Two questions need separate answers: did the same native session survive, and
+did the model answer correctly from its history? The September investigation
+found failures of both kinds. It reproduced native persistence bugs, but it also
+found models claiming that history was missing even when the request was
+complete.
 
-The persistence fixes remain: allow a settled CLI to flush its native history,
-report native API errors as failures, and retain a verifiably settled failed turn
-for retry. Those fixes do not establish that the downstream model will correctly
-answer a recall question. The unprompted Flash recall failure remains unresolved.
-
-A second, independent bug was reproduced with the pinned Claude 2.1.220 CLI
-against a loopback fixture, without any model server. After a retryable API error
-and a successful internal retry, a delayed native `system/api_error` record can
-become the next user's parent, bypassing the successful assistant reply. Live
-requests still contain that reply, but later native resume drops it.
-
-The driver detects the CLI's wire `system/api_retry` event, completes the current
-turn, and requests graceful process retirement after broker settlement saves its
-native locator. The next turn resumes the same native session and container.
-Uninterrupted successful turns continue using the live process. No conversation
-replay, JSONL rewriting or continuity prompt is added. Previously damaged parent
-chains are not retroactively repaired by this change.
+For session architecture, see the
+[native Fork/shared-workspace design](specs/2026-08-31-native-session-fork-shared-workspace-design.md).
+The dated findings below are local acceptance evidence. They do not describe
+the current state of a remote deployment.
 
 ## Native session identity at the shared boundary
 
-The shared runner introduced by PR96 did not call the existing
-`_verified_native_session_id` check before saving the broker's settled locator.
-It could therefore accept a different session ID as a successful continuation.
-That check is now applied to both successful and verifiably settled failed turns.
-An unexpected locator fails the attempt before it can replace the durable one.
+After each turn settles, the runner verifies the native session ID before saving
+it. This check also covers API failures that settled normally. If a continuation
+reports a different ID, the turn fails before it can replace the durable
+locator.
 
-The broker also uses the retained member's locator when a launch omits it,
-rejects a conflicting requested or observed locator, and verifies identity again
-at settlement. The normal runner already rejects an absent resume locator for a
-retained chat; the broker check protects that boundary independently. These
-fault-injection cases prove a validation gap, not that a staging request actually
-sent a missing or wrong ID.
+If launch omits the locator, the broker uses the retained member's saved value.
+It rejects a conflict between the requested and observed locators, then checks
+the identity again when the turn settles. The runner also rejects any retained
+chat that has no resume locator.
 
-Claude root stream events are checked before normalization can overwrite the
-saved session ID or expose another session's output. Events with
-`parent_tool_use_id` belong to a child agent and cannot replace the root locator.
-The other bundled adapters already validate their native resume handshake.
-This uses the CLI's own history; it does not reconstruct context from UI text.
+Claude root stream events are checked before normalization, so child-agent
+events with `parent_tool_use_id` cannot replace the root session ID. The other
+bundled adapters validate their own native resume handshakes.
+
+History comes directly from the native session. Cloud Agent does not replay
+transcripts, rewrite JSONL, or add a continuation reminder. An earlier
+continuation-prompt experiment was withdrawn, so its successful samples do not
+validate the current unchanged-input implementation. Fault-injection tests
+found a validation gap in the older shared runner; they did not show that a
+staging request had actually supplied the wrong locator.
 
 ## Other native CLIs
 
-The same failure-retention policy now applies to every bundled CLI. Previously
-the runner restricted it to Claude Code. A local Codex task remembered its
-function name before an injected API failure, but its next follow-up returned
-`sandbox_context_lost` despite the native session still existing. Pi also
-reported a terminal API error as a successful empty turn.
+All five bundled CLIs can keep a failed query for a follow-up, but only when the
+native turn verifiably ended, activation cleanup completed, and both the
+transport and native locator remain usable.
 
-| CLI | Evidence that the failed query ended normally |
+| CLI | Native settlement evidence |
 | --- | --- |
-| Claude Code | Native `result` boundary, including `is_error` |
+| Claude Code | `result`, including its `is_error` value |
 | Codex | `turn/completed` for the active native turn ID |
 | Pi | `agent_end`; the last assistant's `stopReason` determines failure |
-| OpenCode / Kilo | Bridge `settled` for the active turn, emitted at native idle |
+| OpenCode / Kilo | Bridge `settled` for the active turn at native idle |
 
-A command rejection, dead transport, timeout or cancellation cannot substitute
-for this evidence. The broker must also complete activation cleanup and verify
-that the resident transport and native locator remain usable before settlement.
+A command rejection, dead transport, timeout, or cancellation does not count as
+native settlement. Pi reports terminal API errors as failures, not successful
+empty turns. OpenCode/Kilo use message-role metadata to collect only
+assistant-owned text. They resolve late metadata at settlement and exclude
+events from earlier bridge turns. This keeps user text out of assistant output
+without changing the native model history.
 
-OpenCode and Kilo additionally emit text parts for user messages. Their bridge
-now forwards `message.updated` metadata whose session ID is nested in `info`.
-The driver joins only parts owned by assistant messages, resolves late metadata
-at settlement, and excludes events attributed to a previous bridge turn. This
-fixes user prompts being copied into the visible assistant reply; native model
-history was already separate from that incorrect display text.
+The pinned Claude 2.1.220 CLI has a reproduced retry-parent-chain defect: a
+delayed `system/api_error` can bypass a successfully retried assistant reply on
+a later resume. When the driver sees `system/api_retry`, it settles the current
+turn, saves the native locator, and gracefully retires the process. The next
+turn resumes that same session in the same container. A successful turn without
+a retry keeps the live process. This handling does not repair transcripts that
+the older behavior already damaged.
 
-The sandbox advertises `http-agent-live-bridge=2`, required by host attestation.
-Deploy the broker/runner and sandbox image together. An image without this
-helper version must not advertise readiness for the new host. This is not an
-automatic migration or repair of legacy retained transcripts.
+The sandbox's `http-agent-live-bridge=4` helper pin is required by host
+attestation. Version 4 gates every turn on the current live SSE subscription,
+and aborts an active native turn if that non-replayable stream is lost. It also
+extends autonomous permission replies for both OpenCode and Kilo to the Task
+child sessions the root turn explicitly reports, retries a failed one-shot
+permission reply, and aborts instead of leaving that request pending. Version 3
+added correlated native question replies. Deploy the broker/runner and sandbox
+image together;
+an older helper image must not advertise readiness for the new host.
 
 ## Release scope and remaining findings
 
-The Cloud Agent fixes cover the reproduced retry/flush history loss, retention
-of verifiably settled failures across all five CLIs, Pi API-error reporting,
-OpenCode/Kilo assistant-message ownership, and native session identity at the
-shared runner/broker boundary. The local Responses fixture and smoke acceptance
-checks are also corrected. No unresolved PR review comment was present when
-this update was prepared.
+The implementation addresses the reproduced retry/flush history loss and keeps
+verifiably settled failures across all five CLIs. It also covers Pi error
+reporting, OpenCode/Kilo assistant-message ownership, and runner/broker session
+identity. The same work corrected the local Responses fixtures and smoke checks.
 
-Two investigation findings remain separate from those fixes:
+The documented investigation also left two separate findings:
 
-| Finding | Status and ownership |
+| Finding | Evidence and limit |
 | --- | --- |
-| Flash sometimes gives an incorrect missing-history explanation despite complete outbound native history. | Unresolved response behavior. This also occurred in fresh synthetic API requests without Cloud Agent or a CLI. Explicit reasoning effort and a newer CLI did not reliably eliminate it. The available client evidence does not identify the remote engine/template/model cause. |
-| The gateway source snapshot drops Anthropic effort when the model configuration omits its allowed values, and loses historical thinking blocks during translation. | Reproduced locally; separate gateway/configuration patches exist outside this repository. They are not included in this PR and their deployment has not been verified. Fixing these compatibility defects is not proof that all Flash recall responses are fixed. |
+| Flash can claim missing history with complete outbound messages | Reproduced in native and direct synthetic API calls. Reasoning effort and newer CLIs did not reliably fix it; client evidence does not identify the upstream engine/template/model cause. |
+| Gateway snapshot loses effort configuration and historical thinking blocks in translation | Reproduced locally. Separate patches outside this repository were not deployment-verified by this investigation; they do not establish that Flash recall is fixed. |
 
-The behavior preflight reports recall and observed thinking independently so
-neither finding is concealed by a successful HTTP response. Existing damaged
-native transcripts and old disposable chats are not migrated by this release.
+A successful HTTP response does not prove factual recall, and neither does a
+persisted native session. These fixes do not migrate already damaged transcripts
+or old disposable chats. Start a new chat when legacy history has no native
+shared-live membership.
 
 ## Verification before accepting a deployment
 
-1. Require the existing CI Gate. Its pinned native CLI regression checks actual
-   outbound requests, not just launch flags: user/assistant history must survive
-   live follow-ups, immediate close/restore,
-   a failed API call followed by a retry, and a successful internal retry on
-   either the first or a later turn followed by multiple native restores.
-   Assertions match exact user/assistant text, roles, order and repeated-message
-   occurrences. Shared runner and broker tests also reject a changed native ID
-   before persistence, including normally settled API failures.
-   This uses a loopback model fixture
-   without external credentials or inference charges.
-2. Keep the deployment's exact host/API SHA, reverse broker probe and fresh
-   heartbeat checks. A successful model call is not evidence that the intended
-   host revision is serving jobs.
-3. Run the opt-in behavior preflight from the target source checkout against
-   the inference gateway used by the deployment:
+1. Require **CI Gate**, including the pinned native CLI request-history
+   regressions. They compare exact user/assistant text, roles, order and repeated
+   occurrences through live follow-ups, immediate close/restore, failed-call
+   retries, and successful internal retries followed by native restores. Broker
+   and runner checks must also reject changed locators for successful and settled
+   failed turns. The loopback fixture needs no inference credentials or charges.
+2. Verify the exact host/API SHA, reverse broker probe and fresh heartbeat using
+   [deployment reliability](deployment-reliability.md). A working model call does
+   not prove the intended host revision is serving jobs.
+3. Run the opt-in behavior preflight from the target checkout against the target
+   inference Gateway:
 
    ```bash
    CLOUD_AGENT_TEST_API_KEY_FILE=/path/to/test-key \
@@ -126,37 +115,38 @@ native transcripts and old disposable chats are not migrated by this release.
      https://gateway.example.com --repetitions 3
    ```
 
-   `CLOUD_AGENT_TEST_PROXY` can point to a local HTTP proxy when needed. The key
-   stays in the trusted test process, never in an agent sandbox or process
-   arguments. The script sends only new synthetic messages, uses
-   `deepseek-v4-flash`, and prints replies and request IDs without auth headers.
-   It checks the greeting, repeated questions, a task, randomly generated user
-   and assistant facts with a requirement update, and a no-history negative
-   control. Three repetitions make fifteen model calls and incur ordinary
-   inference usage.
+   `CLOUD_AGENT_TEST_PROXY` optionally names an HTTP proxy. The key remains in
+   the trusted test process, outside sandbox credentials and command arguments.
+   The script sends synthetic messages to `deepseek-v4-flash` and prints answers
+   and request IDs without authentication headers. Greeting, repeated-question,
+   task, fact/update and no-history cases produce five calls per repetition;
+   the default three repetitions make 15 calls with ordinary inference usage.
 
-   A missing key, non-200 response, stream error, truncation, failure to recall
-   the required facts, or a recognized missing-history claim produces a nonzero
-   exit. The script requests the observed native CLI `adaptive/high` settings
-   and also requires a thinking output. Each completed response independently
-   reports `recall_passed` and `thinking_observed`, keeping the answer even if
-   thinking is absent. Neither missing thinking output nor observed thinking
-   proves anything about history loss or recall accuracy; inspect both checks.
-   Thinking output also does not prove the exact effort reached the engine.
-   Inspect failures; the conservative claim detector can also
-   reject an answer that quotes a previous bad claim to correct it. HTTP 200
-   alone is not a pass.
-4. Check a new Cloud Agent chat and its follow-up/idle restore through the
-   deployed app before calling rollout verification complete. Old disposable
-   chats without native shared-live membership still need a new chat; this
-   change does not migrate their history.
+   A non-200 response, stream error, truncation, missing required facts or a
+   recognized missing-history claim fails the check. The script requests native
+   `adaptive/high` settings and also requires observed thinking. Results report
+   `recall_passed` and `thinking_observed` separately, retaining the answer even
+   when thinking is absent. Observed thinking does not prove the engine received
+   the exact effort, and missing thinking does not prove history loss. Inspect
+   conservative detector failures: it may reject a reply quoting a bad claim in
+   order to correct it. HTTP 200 alone is insufficient.
+4. Use the deployed app to check a new chat, live follow-up and idle restore.
+   Confirm the same retained sandbox and native locator. If an answer reports
+   lost context, compare the outbound request history and settlement evidence
+   before attributing it to persistence.
 
-The behavior preflight is deliberately opt-in: CI pull requests never receive
-an inference key, and no deployment credential is provisioned by this change.
-It is not automatically run by the deploy workflows. Run it again after changes
-to the gateway's model routes, model deployment, or CLI pin. Finite samples do
-not guarantee that a model can never make another incorrect claim; they test
-this reported recall failure separately from native history persistence.
+The preflight is opt-in and is not automatically run by deployment workflows.
+CI receives no inference key. Repeat it when Gateway model routes, model
+deployment or CLI pins change. Finite samples test the reported failure without
+guaranteeing that a model never makes another incorrect claim.
+
+Implementation and checks:
+[`runner.py`](../apps/backend/cloud_agent_host/runner.py),
+[`drivers.py`](../apps/backend/cloud_agent_host/drivers.py),
+[`shared_session_supervisor.py`](../apps/backend/cloud_agent_host/shared_session_supervisor.py),
+[`shared_protocol.py`](../apps/backend/cloud_agent_shared/shared_protocol.py),
+[`check_model_context.py`](../deploy/preflight/check_model_context.py) and
+[`test_claude_driver_context.py`](../tests/external/test_claude_driver_context.py).
 
 ## Current investigation evidence (2026-09-07)
 

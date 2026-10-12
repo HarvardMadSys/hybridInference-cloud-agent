@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -32,15 +34,18 @@ class PostgresGrantRepository:
         it, so the renewal pass never picks it up and the capability dies at its
         own TTL.
 
-        **The same three predicates as ``list_renewable_grants``, deliberately.**
-        That query is the fence, and this write is what puts a row inside it —
-        so a row this accepts and that rejects is a grant nothing will ever
-        renew, bound to an attempt whose lease another runner may already have
-        taken. The expiry check was missing here while being present there,
-        which is exactly the pair that produces two live sandboxes for one job:
-        a lease can lapse between the claim and this call without the
-        generation changing, because nothing bumps a generation on expiry
-        alone.
+        **The same attempt predicates as ``list_renewable_grants``,
+        deliberately.** That query is the fence, and this write is what puts a
+        row inside it — so a row this accepts and that rejects is a grant
+        nothing will ever renew, bound to an attempt whose lease another runner
+        may already have taken. The expiry check was missing here while being
+        present there, which is exactly the pair that produces two live
+        sandboxes for one job: a lease can lapse between the claim and this
+        call without the generation changing, because nothing bumps a
+        generation on expiry alone. The live-host check is shared for the same
+        reason. Only the owner's cancellation is not: a turn being stopped
+        still owns the grant it was minted, which the revocation pass collects
+        when the turn ends.
 
         Args:
             attempt_id: The attempt the grant belongs to.
@@ -50,14 +55,26 @@ class PostgresGrantRepository:
         Returns:
             Whether the row was still current enough to write.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT id FROM agent_attempts "
+                "WHERE id = $1 AND lease_generation = $2 AND status = 'running' FOR UPDATE",
+                attempt_id,
+                lease_generation,
+            )
+            if locked is None or not await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
+                attempt_id,
+            ):
+                return False
             result = await conn.execute(
-                """
-                UPDATE agent_attempts SET grant_id = $3
-                WHERE id = $1
-                  AND lease_generation = $2
-                  AND status = 'running'
-                  AND lease_expires_at > NOW()
+                f"""
+                UPDATE agent_attempts a SET grant_id = $3
+                WHERE a.id = $1
+                  AND a.lease_generation = $2
+                  AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp()
+                  AND {LIVE_ATTEMPT_HOST}
                 """,
                 attempt_id,
                 lease_generation,
@@ -72,9 +89,14 @@ class PostgresGrantRepository:
         renewed whatever it minted would keep a superseded attempt's sandbox
         alive and spending, and the gateway could not catch it — it has no
         attempt state to check. Every predicate here is load-bearing:
-        ``status = 'running'`` drops superseded and finished attempts, and
-        ``lease_expires_at > NOW()`` drops the ones whose lease died before the
-        reaper noticed.
+        ``status = 'running'`` drops superseded and finished attempts,
+        ``lease_expires_at > clock_timestamp()`` drops the ones whose lease died before the
+        reaper noticed, the live-host check drops the work of a machine that
+        was removed or disabled, and ``cancel_requested`` drops a turn its
+        owner has stopped. A stopped turn is interrupted at its next heartbeat
+        and settles on the lease it already holds; renewing the capability it
+        was minted would only keep it spendable for a worker that ignores the
+        stop.
 
         ``lease_generation`` rides along because the renewal pass may have to
         *end* one of these attempts — a grant the gateway keeps refusing — and
@@ -90,12 +112,15 @@ class PostgresGrantRepository:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
-                SELECT id AS attempt_id, job_id, grant_id, lease_generation
-                FROM agent_attempts
-                WHERE grant_id IS NOT NULL
-                  AND status = 'running'
-                  AND lease_expires_at > NOW()
+                f"""
+                SELECT a.id AS attempt_id, a.job_id, a.grant_id, a.lease_generation
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                WHERE a.grant_id IS NOT NULL
+                  AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp()
+                  AND NOT j.cancel_requested
+                  AND {LIVE_ATTEMPT_HOST}
                 -- **Most urgent first, not lowest id.** `ORDER BY id` returns
                 -- the same first `limit` rows on every pass, so in a pool with
                 -- more live attempts than that, everything above the cut is
@@ -108,7 +133,7 @@ class PostgresGrantRepository:
                 -- and this side cannot sort on it — which is why the caller
                 -- logs a truncated pass rather than trusting the ordering to
                 -- be sufficient on its own.
-                ORDER BY lease_expires_at ASC, id ASC
+                ORDER BY a.lease_expires_at ASC, a.id ASC
                 LIMIT $1
                 """,
                 limit,
@@ -159,7 +184,10 @@ class PostgresGrantRepository:
                     SELECT id, job_id, grant_id
                     FROM agent_attempts
                     WHERE grant_id IS NOT NULL
-                      AND (status <> 'running' OR lease_expires_at <= NOW())
+                      AND (
+                          status <> 'running'
+                          OR lease_expires_at <= clock_timestamp()
+                      )
                     ORDER BY id
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
@@ -189,21 +217,31 @@ class PostgresGrantRepository:
         grant_id: str,
         binding_id: str | None = None,
     ) -> bool:
-        """Record the grant a residency runs on — only its own generation.
+        """Record the grant a residency runs on — only its own live generation.
 
         A link that matched nothing means the residency was taken over between
-        mint and link; the caller revokes the orphan grant rather than handing
-        out a credential nothing owns.
+        mint and link, or its lease has already expired. The caller revokes
+        the orphan grant rather than handing out a credential nothing owns.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE thread_id = $1 AND residency_generation = $2 "
+                "AND residency_status = 'hot' FOR UPDATE",
+                thread_id,
+                generation,
+            )
+            if locked is None:
+                return False
             return bool(
                 await conn.fetchval(
                     """
                     UPDATE agent_thread_sandbox_memberships
                     SET residency_grant_id = $3, residency_binding_id = $4,
-                        updated_at = NOW()
+                        updated_at = clock_timestamp()
                     WHERE thread_id = $1 AND residency_generation = $2
                       AND residency_status = 'hot'
+                      AND residency_lease_expires_at > clock_timestamp()
                     RETURNING thread_id
                     """,
                     thread_id,

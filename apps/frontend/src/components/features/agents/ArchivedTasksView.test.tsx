@@ -10,8 +10,11 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   setArchived: vi.fn(),
   deleteSessions: vi.fn(),
+  review: vi.fn(),
   locale: 'en' as 'en' | 'zh-CN',
 }));
+
+vi.mock('./useSessionReview', () => ({ useSessionReview: mocks.review }));
 
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.ComponentProps<'a'>) => (
@@ -120,6 +123,7 @@ beforeEach(() => {
     },
   );
   mocks.locale = 'en';
+  mocks.review.mockReturnValue(null);
   sessions = [session('one')];
   mocks.list.mockImplementation(async (options: AgentSessionListOptions) => listing(options));
   mocks.setArchived.mockImplementation(async (ids: string[], archived: boolean) => {
@@ -199,6 +203,28 @@ describe('archived session management', () => {
       expect.any(AbortSignal),
     );
     expect(mocks.setArchived).not.toHaveBeenCalled();
+  });
+
+  it('marks an archived live session waiting for an answer beside its activity and archive date', async () => {
+    sessions = [
+      session('question', { can_delete: false }, { state: 'running', current_attempt_id: 7 }),
+    ];
+    mocks.review.mockReturnValue('question');
+    render(<ArchivedTasksView />);
+    const row = await screen.findByRole('link', { name: /Session question/ });
+    const badge = within(row).getByRole('status', { name: 'Waiting for your answer' });
+    expect(badge).toBeVisible();
+    expect(badge).toHaveTextContent('Needs review');
+    expect(badge).toHaveAttribute('title', 'Waiting for your answer');
+    expect(within(row).getByText('Running')).toBeVisible();
+    expect(row.querySelector('time')).toHaveAttribute('datetime', '2026-09-09T16:27:00Z');
+    expect(mocks.review).toHaveBeenCalledWith({
+      id: 'job-question',
+      state: 'running',
+      threadId: 'thread-question',
+      currentAttemptId: 7,
+      cancelRequested: undefined,
+    });
   });
 
   it('unarchives a whole session, offers its history link, and undoes the change', async () => {
@@ -303,6 +329,66 @@ describe('archived session management', () => {
     );
     expect(await screen.findByRole('link', { name: /Old timeout investigation/ })).toBeVisible();
     expect(screen.queryByRole('link', { name: /Session latest/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps filters editable while requests are pending and discards superseded results', async () => {
+    sessions = [
+      session('latest'),
+      session('failed', { title: 'Deployment failure' }, { state: 'failed', repo: 'other/beta' }),
+    ];
+    render(<ArchivedTasksView />);
+    await screen.findByRole('link', { name: /Session latest/ });
+    const pending: {
+      options: AgentSessionListOptions;
+      signal: AbortSignal;
+      resolve: (result: ReturnType<typeof listing>) => void;
+    }[] = [];
+    mocks.list.mockImplementation((options: AgentSessionListOptions, signal: AbortSignal) => {
+      if (options.limit !== 1) return Promise.resolve(listing(options));
+      return new Promise<ReturnType<typeof listing>>((resolve) =>
+        pending.push({ options, signal, resolve }),
+      );
+    });
+    const search = screen.getByRole('searchbox', { name: 'Search archived sessions' });
+    const status = screen.getByRole('combobox', { name: 'Filter by status' });
+    const project = screen.getByRole('combobox', { name: 'Filter by project' });
+    search.focus();
+    fireEvent.change(search, { target: { value: 'Deployment' } });
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    expect(search).toBeEnabled();
+    expect(search).toHaveFocus();
+    expect(status).toBeEnabled();
+    expect(project).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete filtered' })).toBeDisabled();
+
+    fireEvent.change(search, { target: { value: 'failure' } });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(search).toHaveValue('failure');
+    expect(search).toHaveFocus();
+    expect(pending[0].signal.aborted).toBe(true);
+
+    fireEvent.change(status, { target: { value: 'failed' } });
+    await waitFor(() => expect(pending).toHaveLength(3));
+    expect(pending[1].signal.aborted).toBe(true);
+    expect(project).toBeEnabled();
+    fireEvent.change(project, { target: { value: 'other/beta' } });
+    await waitFor(() => expect(pending).toHaveLength(4));
+    expect(pending[2].signal.aborted).toBe(true);
+    expect(pending[3].options).toMatchObject({
+      search: 'failure',
+      state: 'failed',
+      repo: 'other/beta',
+    });
+
+    await act(async () => pending[3].resolve(listing(pending[3].options)));
+    expect(await screen.findByRole('link', { name: /Deployment failure/ })).toBeVisible();
+    await act(async () => pending[0].resolve(listing()));
+
+    expect(screen.getByRole('link', { name: /Deployment failure/ })).toBeVisible();
+    expect(screen.queryByRole('link', { name: /Session latest/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete filtered' })).toBeEnabled();
+    expect(mocks.deleteSessions).not.toHaveBeenCalled();
   });
 
   it('prepares every filtered page, excludes busy sessions, and deletes only the confirmed IDs', async () => {

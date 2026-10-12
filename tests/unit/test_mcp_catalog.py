@@ -248,6 +248,40 @@ async def test_restart_uses_fresh_cache_without_network_and_searches_locally():
     repo.save_mcp_catalog.assert_not_called()
 
 
+async def test_saved_registry_url_replaces_fresh_catalog_on_next_refresh(monkeypatch):
+    from cloud_agent.mcp import catalog as catalog_module
+
+    values = {"mcp_registry_url": "https://registry.modelcontextprotocol.io"}
+    monkeypatch.setattr(
+        catalog_module, "text_setting", lambda name, default=None: values.get(name, default)
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "number_setting",
+        lambda name, default=None: 7 if name == "mcp_catalog_request_timeout_s" else default,
+    )
+    repo = AsyncMock()
+    repo.load_mcp_catalog.return_value = {
+        "entries": [catalog_entry(record())],
+        "synced_at": datetime.now(timezone.utc),
+    }
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"servers": [record("com.example/new")], "metadata": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        catalog = McpCatalog(repo, http)
+        await catalog.refresh()
+        assert not requests
+        values["mcp_registry_url"] = "https://registry.example"
+        await catalog.refresh()
+    assert str(requests[0].url).startswith("https://registry.example/v0.1/servers")
+    assert requests[0].extensions["timeout"]["read"] == 7
+    assert catalog.search()["entries"][0]["name"] == "com.example/new"
+
+
 async def test_full_refresh_removes_deleted_entries_and_commits_before_serving():
     repo = AsyncMock()
     repo.load_mcp_catalog.return_value = {

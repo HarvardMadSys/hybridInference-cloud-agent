@@ -92,17 +92,17 @@ def test_the_current_image_may_continue_its_groups_and_create_new_ones() -> None
     assert shared_sandbox_claim_attested(current, expected_deployment_sha=TARGET)
 
 
-def test_a_runner_of_the_previous_release_keeps_serving_the_groups_it_owns() -> None:
-    """A host that owns groups may stay on the previous release.
+def test_the_previous_http_bridge_cannot_take_native_question_replies() -> None:
+    """Keep the historical claim intact: helper 2 cannot handle question replies.
 
-    Its image reports no fork helper, and an ordinary turn never runs one, so
-    it keeps its follow-ups. It cannot create a group, not even at its own
-    deployment.
+    Missing the fork helper alone still permits follow-ups, as tested below.
+    A changed turn-time helper does not: the new host sends a question command
+    that this previous image cannot execute.
     """
     previous = _as_the_api_reads_it(PREVIOUS_RELEASE_CLAIM)
 
     assert "shared_sandbox_protocol" not in previous
-    assert compatible_shared_sandbox_followup_attested(previous)
+    assert not compatible_shared_sandbox_followup_attested(previous)
     assert not shared_sandbox_claim_attested(previous, expected_deployment_sha=TARGET)
     assert not shared_sandbox_claim_attested(previous, expected_deployment_sha="previous-sha")
 

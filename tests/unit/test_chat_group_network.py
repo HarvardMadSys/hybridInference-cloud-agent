@@ -45,6 +45,8 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
+    RetainedChatFailStopped,
+    RetainedChatLost,
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
@@ -639,7 +641,11 @@ def test_idle_stop_releases_the_bridge_and_its_exceptions_and_wake_rebuilds(monk
     docker.connect(docker.network(name)["Id"], "sandbox-container", [])
     bridge = manager._network().bridge_name(name)
     checked: list[str] = []
-    monkeypatch.setattr(manager, "_verify_guest_network", lambda s: checked.append(s.sandbox_id))
+    monkeypatch.setattr(
+        manager,
+        "_verify_guest_network",
+        lambda s, **_kwargs: checked.append(s.sandbox_id),
+    )
 
     stopped = manager.stop(spec)
     assert docker.network(name) is None
@@ -681,9 +687,11 @@ def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(mon
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, problems, b""),
     )
 
-    with pytest.raises(SandboxError, match="agent-mcp:8000 unreachable"):
+    with pytest.raises(RetainedChatFailStopped, match="agent-mcp:8000 unreachable") as failed:
         manager.start(spec)
     # Stopped, its bridge released, its workspace (the container) kept.
+    assert failed.value.inspection.running is False
+    assert failed.value.inspection.container_id == "sandbox-container"
     assert docker.containers["sandbox-container"]["running"] is False
     assert docker.network(manager.network_for(spec)) is None
 
@@ -701,8 +709,28 @@ def test_the_guest_check_expects_the_resolver_each_runtime_really_uses(monkeypat
         seen.clear()
         monkeypatch.setattr(manager, "exec_capture", capture)
         manager._verify_guest_network(_spec())
-        assert seen[0][3] == resolver
-        assert json.loads(seen[0][4]) == [["agent-gateway", 8080], ["agent-mcp", 8000]]
+        assert seen[0][4] == resolver
+        assert json.loads(seen[0][5]) == [["agent-gateway", 8080], ["agent-mcp", 8000]]
+
+
+def test_the_guest_check_never_imports_modules_from_the_workspace(monkeypatch):
+    # The workspace is writable by the repository and the agent: a planted
+    # socket.py or json.py there must not replace the standard library and
+    # spoof or stall the check.
+    seen: list[tuple[list[str], dict[str, Any]]] = []
+
+    def capture(_spec, argv, **kwargs):
+        seen.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, b"[]", b"")
+
+    manager, docker, _ = _world(monkeypatch)
+    docker.add_sandbox(_spec(), running=True)
+    monkeypatch.setattr(manager, "exec_capture", capture)
+    manager._verify_guest_network(_spec())
+
+    argv, kwargs = seen[0]
+    assert argv[:4] == ["/usr/bin/python3", "-I", "-c", _GUEST_NETWORK_CHECK]
+    assert kwargs.get("workdir") == "/"
 
 
 def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):
@@ -970,6 +998,8 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
     resolv = tmp_path / "resolv.conf"
     hosts.write_text("127.0.0.1 localhost\n")
     resolv.write_text("nameserver 127.0.0.11\n")
+    hosts.chmod(0o644)
+    resolv.chmod(0o644)
     paths = {"/etc/hosts": hosts, "/etc/resolv.conf": resolv}
     actual_open, actual_stat = os.open, os.fstat
     monkeypatch.setattr(os, "open", lambda path, flags: actual_open(paths.get(path, path), flags))
@@ -1118,6 +1148,42 @@ def test_stale_cleanup_leaves_a_same_name_replacement_alone(monkeypatch):
     )
 
     assert docker.network(name) is not None
+
+
+def test_final_network_release_refuses_a_same_name_container_replacement(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=False)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    release = manager._release_sandbox_networks
+
+    def replace_before_release(release_spec, current, **kwargs):
+        original["Name"] = "/renamed-original"
+        replacement = docker.add_container(
+            "replacement-container",
+            name=spec.container_name,
+            running=False,
+            labels={**spec.docker_labels(), CHAT_NAMESPACE_LABEL: _NAMESPACE},
+            image=spec.sandbox_image_digest or "img",
+        )
+        docker.connect(network["Id"], replacement["Id"], [])
+        return release(release_spec, current, **kwargs)
+
+    monkeypatch.setattr(manager, "_release_sandbox_networks", replace_before_release)
+    docker.calls.clear()
+
+    with pytest.raises(RetainedChatLost, match="identity changed"):
+        manager.release_stopped_networks(
+            spec,
+            expected_container_id=original["Id"],
+        )
+
+    assert docker.network(name) is not None
+    assert docker.names_on(name) == {original["Id"], "replacement-container"}
+    assert not any(
+        call[1:3] in (["network", "disconnect"], ["network", "rm"]) for call in docker.calls
+    )
 
 
 def test_a_network_outside_this_chat_is_never_removed(monkeypatch):

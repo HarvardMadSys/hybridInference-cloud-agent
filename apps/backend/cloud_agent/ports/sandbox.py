@@ -9,11 +9,164 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class SandboxRepository(Protocol):
     """Port: retained sandbox groups and the members that live in them."""
+
+    async def request_admin_delete(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+        broker_confirmed_stopped: bool = False,
+        discard: bool = False,
+    ) -> str:
+        """Fence an idle stopped sandbox for deletion.
+
+        A durable request closes admission before the host removes Docker. The
+        default path exports and verifies an S3 archive first. ``discard``
+        removes the exact stopped container without uploading it. No native
+        state or ledger row is removed until the host confirms that removal.
+        An admin recovery may also repair a stale RUNNING row, but only after
+        the API independently proves the exact host container is stopped and idle.
+        """
+        ...
+
+    async def claim_due_admin_sandbox_deletion(
+        self, *, ttl_seconds: float
+    ) -> dict[str, Any] | None:
+        """Lease one pending or archive-verified deletion without duplicate workers."""
+        ...
+
+    async def record_admin_sandbox_archive(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+        archive_key: str,
+        sha256: str,
+        size_bytes: int,
+        archive_version_id: str | None = None,
+    ) -> bool:
+        """Checkpoint an independently verified S3 receipt under the live worker lease."""
+        ...
+
+    async def complete_admin_sandbox_deletion(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> bool:
+        """Retain the archive and ledger after an exact host deletion acknowledgement."""
+        ...
+
+    async def complete_admin_sandbox_discard(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> bool:
+        """Mark native context lost after the host removes a container with no archive."""
+        ...
+
+    async def fail_admin_sandbox_deletion(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+        error: str,
+        retain_pending: bool = False,
+    ) -> bool:
+        """Release safe pre-archive failures but keep ambiguous deletion fenced."""
+        ...
+
+    async def renew_admin_sandbox_deletion_claim(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+        ttl_seconds: float = 300,
+        for_cleanup: bool = False,
+        cleanup_archive_key: str | None = None,
+    ) -> bool:
+        """Extend an unexpired exact worker claim before bounded host cleanup."""
+        ...
+
+    async def set_admin_archived(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str | None,
+        last_activity_at: datetime,
+        archived: bool,
+        actor_id: str,
+        admin_ip: str,
+        allow_stale_host: bool = False,
+    ) -> str:
+        """Audit a reviewed inventory removal or restore without deleting state.
+
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
+        """
+        ...
+
+    async def record_terminal_observation(
+        self,
+        *,
+        sandbox_id: str,
+        host: str,
+        generation: int,
+        container_id: str,
+        terminal_count: int,
+    ) -> bool:
+        """Refresh terminal activity only for the exact running container."""
+        ...
+
+    async def request_admin_stop(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+    ) -> str:
+        """Queue a reviewed, quiescent container stop under its admission fence.
+
+        The host still checks its local terminals and operations before acting.
+        The database marker survives observations and excludes new admission
+        until Docker confirms the stop. No container or workspace is deleted.
+        """
+        ...
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
@@ -52,6 +205,7 @@ class SandboxRepository(Protocol):
         resident_slot_capacity: int = 8,
         memory_limit: str = "4g",
         cpu_limit: str = "2",
+        disk_limit_mib: int = 0,
         stop_timeout_seconds: int = 10,
         fork_helper_version: str | None = None,
     ) -> dict[str, Any] | None:
@@ -89,9 +243,10 @@ class SandboxRepository(Protocol):
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         process_generation: int,
     ) -> bool:
-        """Record the supervisor's diagnostic CLI process generation."""
+        """Record an equal or newer supervisor CLI process generation."""
         ...
 
     async def record_shared_thread_residency(
@@ -115,6 +270,7 @@ class SandboxRepository(Protocol):
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
     ) -> bool:
         """Reserve one prompt delivery durably before Agent CLI stdin.
 
@@ -133,6 +289,7 @@ class SandboxRepository(Protocol):
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         job_id: str,
         context_status: str,
         native_session_id: str | None,
@@ -154,6 +311,8 @@ class SandboxRepository(Protocol):
         activity_active: bool | None = None,
         idle_remaining_seconds: float | None = None,
         members: list[dict[str, Any]] | None = None,
+        resource_usage: dict[str, Any] | None = None,
+        terminal_count: int | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
         ...

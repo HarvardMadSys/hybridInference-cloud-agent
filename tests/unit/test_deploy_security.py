@@ -1,9 +1,7 @@
 """Security properties of the standalone deployment.
 
-The source repo's whole `test_agent_deploy_config.py` is ported as
-`test_deploy_config.py`, re-pointed at the standalone compose. This file holds
-only what that port could not carry: assertions the standalone topology needs
-that the overlay never had, and the record of what did not port.
+These checks complement test_deploy_config.py with CI trust boundaries,
+listener destinations, and the complete set of Docker socket holders.
 
 The Kata preflight lives in `test_setup_kata_runtime.py`, which drives the
 real script.
@@ -42,23 +40,31 @@ def _mounts(service: dict) -> list[str]:
     return out
 
 
-def test_trusted_ci_events_keep_the_existing_self_hosted_pools() -> None:
-    """Every job keeps the pool whose cache and hardware it was measured on."""
+def test_ci_runner_routing_keeps_local_pools_and_isolates_every_pull_request() -> None:
+    """Trusted events stay local; every PR, fork or branch, selects a hosted runner."""
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     assert workflow["permissions"] == {"contents": "read"}
     jobs = workflow["jobs"]
     special_runners = {
-        "artifacts": "fromJSON(matrix.artifact.runner)",
+        "artifacts": "matrix.artifact.runner",
+        "mcp": "matrix.artifact.runner",
         "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
         "kata": ["self-hosted", "Linux", "X64", "image-verify-x64"],
     }
     assert special_runners.keys() <= jobs.keys()
     for name, job in jobs.items():
         expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
-        if isinstance(expected, list):
+        if name == "kata":
             assert job["runs-on"] == expected, f"{name} left its pool"
+            continue
+        routing = job["runs-on"]
+        assert "github.event_name == 'pull_request'" in routing, name
+        assert "head.repo" not in routing, f"{name} trusts a pull request by where it came from"
+        assert "ubuntu-24.04" in routing, name
+        if isinstance(expected, list):
+            assert json.dumps(expected, separators=(",", ":")) in routing, name
         else:
-            assert expected in job["runs-on"], f"{name} left its pool"
+            assert expected in routing, f"{name} left its pool"
 
 
 def test_kata_validation_cannot_run_pull_request_code_on_the_deployment_host() -> None:
@@ -229,26 +235,3 @@ def test_every_docker_socket_holder_is_known_and_read_only(compose: dict) -> Non
 def test_the_sandbox_image_is_required_not_defaulted(compose: dict) -> None:
     """A defaulted image name is how a host silently runs something else."""
     assert ":?" in compose["services"]["runner"]["environment"]["AGENT_SANDBOX_IMAGE"]
-
-
-# ---------------------------------------------------------------------------
-# The sandbox image
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# What did not port
-# ---------------------------------------------------------------------------
-
-
-def test_the_dropped_assertions_stay_dropped_deliberately(compose: dict) -> None:
-    """Two source assertions do not port, and this records why.
-
-    `test_the_gateway_is_reachable_from_the_sandbox_network` and the
-    backend-service egress-network assertion both keyed on the gateway's own
-    `backend:` service. In this topology the gateway is not a service at all —
-    it is reached through the tunnel — so there is nothing to assert against.
-    If a `backend` service ever appears here, that reasoning has expired and
-    those assertions need rewriting rather than staying dropped.
-    """
-    assert "backend" not in compose["services"]

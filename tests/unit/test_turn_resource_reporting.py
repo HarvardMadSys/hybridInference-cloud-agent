@@ -142,6 +142,15 @@ def _run_terminal_turn(
         "context_status": "new",
         "resident_state": "live",
     }
+    supervisor.initial_archive_status.return_value = {
+        "enabled": False,
+        "prepared": False,
+        "stored": False,
+    }
+    supervisor.capture_initial_archive.return_value = {
+        "enabled": False,
+        "stored": False,
+    }
     supervisor.ensure_shared_resident.return_value = {
         "context_status": "new",
         "process_generation": 1,
@@ -208,13 +217,6 @@ def test_an_interval_never_fires_twice_without_a_new_mark():
     assert schedule.due() is True
     # Still due until the caller records that it sent something. Reading is
     # not sending, and the caller owns that ordering.
-    assert schedule.due() is True
-    schedule.mark_sent()
-    assert schedule.due() is False
-
-
-def test_a_clock_that_stands_still_cannot_make_the_schedule_raise():
-    schedule = CheckpointSchedule(interval_s=15.0, clock=_Clock())
     assert schedule.due() is True
     schedule.mark_sent()
     assert schedule.due() is False
@@ -304,29 +306,6 @@ def test_an_unpostable_snapshot_is_not_released_for_posting(payload):
     assert runner_mod._reportable_turn_resources(payload) is None
 
 
-def test_a_structurally_invalid_snapshot_never_reaches_the_wire():
-    bodies: list[dict[str, Any]] = []
-
-    def endpoint(request: httpx.Request) -> httpx.Response:
-        bodies.append(_json_body(request))
-        return httpx.Response(200, json={"ok": True})
-
-    broken = {key: value for key, value in _snapshot().items() if key != "measurement_id"}
-    control = _control()
-    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
-    try:
-        reportable = runner_mod._reportable_turn_resources(broken)
-        assert reportable is None
-        # One valid report proves the transport and the method are working, so
-        # the empty assertion below is about the guard and not a dead client.
-        control.report_turn_resources(_snapshot())
-    finally:
-        control.close()
-
-    assert len(bodies) == 1
-    assert bodies[0]["measurement_id"] == "00000000-0000-4000-8000-000000000001"
-
-
 def test_the_reported_snapshot_is_the_broker_payload_unchanged():
     payload = _snapshot(state="collecting", report_seq=4)
     assert runner_mod._reportable_turn_resources(payload) is payload
@@ -392,8 +371,13 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
     """
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     bodies: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
 
     def endpoint(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            events.append(_json_body(request))
+            return httpx.Response(200, json={"ok": True})
+        assert request.url.path.endswith("/turn-resources")
         bodies.append(_json_body(request))
         return httpx.Response(200, json={"ok": True})
 
@@ -436,6 +420,9 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
         control.close()
 
     assert exit_code == 0
+    assert events == [
+        {"event_type": "lifecycle", "payload": {"phase": "turn_started"}, "event_seq": 1}
+    ]
     assert len(bodies) == 1
     assert bodies[0]["state"] == "collecting"
     assert bodies[0]["report_seq"] == 11

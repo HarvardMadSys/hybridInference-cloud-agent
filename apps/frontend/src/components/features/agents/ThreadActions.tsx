@@ -118,7 +118,7 @@ export function ThreadActions({
   }
 
   const itemClass =
-    'flex w-full rounded-md px-3 py-2 text-left text-sm text-gray-800 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none disabled:opacity-40 dark:text-gray-100 dark:hover:bg-white/10 dark:focus:bg-white/10';
+    'ui-button ui-button-ghost w-full justify-start text-left text-foreground focus:bg-surface-hover';
   return (
     <div className="relative shrink-0">
       <button
@@ -133,7 +133,7 @@ export function ThreadActions({
           setError(null);
           setOpen(!open);
         }}
-        className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 dark:text-gray-400 dark:hover:bg-white/10"
+        className="ui-icon-button ui-button-ghost"
       >
         <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
           <circle cx="5" cy="12" r="1.75" />
@@ -147,7 +147,7 @@ export function ThreadActions({
           ref={menu}
           role="menu"
           aria-label={t('taskActions.options')}
-          className="absolute right-0 top-full z-50 mt-1 w-48 rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl dark:border-white/10 dark:bg-gray-800"
+          className="ui-card absolute right-0 top-full z-50 mt-1 w-48 p-1.5 shadow-xl"
           onKeyDown={(event) => {
             if (event.key === 'Tab') {
               setOpen(false);
@@ -206,7 +206,7 @@ export function ThreadActions({
             {t('taskActions.fork')}
           </button>
           {error && (
-            <p role="alert" className="px-3 py-2 text-xs text-red-600 dark:text-red-400">
+            <p role="alert" className="px-3 py-2 text-xs text-status-error">
               {error}
             </p>
           )}
@@ -226,7 +226,7 @@ export function ThreadActions({
               aria-modal="true"
               aria-labelledby={`${id}-title`}
               aria-busy={busy}
-              className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl dark:border-white/10 dark:bg-gray-900"
+              className="ui-card w-full max-w-md p-6 shadow-xl"
               onSubmit={(event) => {
                 event.preventDefault();
                 void saveTitle();
@@ -249,16 +249,10 @@ export function ThreadActions({
                 }
               }}
             >
-              <h2
-                id={`${id}-title`}
-                className="mb-4 text-base font-semibold text-gray-900 dark:text-gray-100"
-              >
+              <h2 id={`${id}-title`} className="mb-4 text-base font-semibold text-foreground">
                 {t('taskActions.renameTitle')}
               </h2>
-              <label
-                htmlFor={`${id}-input`}
-                className="mb-2 block text-sm text-gray-600 dark:text-gray-300"
-              >
+              <label htmlFor={`${id}-input`} className="mb-2 block text-sm text-muted">
                 {t('taskActions.title')}
               </label>
               <input
@@ -269,10 +263,10 @@ export function ThreadActions({
                 maxLength={160}
                 required
                 readOnly={busy}
-                className="w-full rounded-lg border border-gray-300 bg-transparent px-3 py-2 text-sm text-gray-900 focus:border-crimson focus:outline-none dark:border-white/20 dark:text-gray-100"
+                className="ui-input w-full"
               />
               {error && (
-                <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
+                <p role="alert" className="mt-3 text-sm text-status-error">
                   {error}
                 </p>
               )}
@@ -281,14 +275,14 @@ export function ThreadActions({
                   type="button"
                   disabled={busy}
                   onClick={close}
-                  className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/10"
+                  className="ui-button ui-button-ghost"
                 >
                   {t('taskActions.cancel')}
                 </button>
                 <button
                   type="submit"
                   disabled={busy || !title.trim()}
-                  className="rounded-lg bg-gray-900 px-3 py-2 text-sm text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+                  className="ui-button ui-button-primary"
                 >
                   {t(busy ? 'taskActions.saving' : 'taskActions.save')}
                 </button>

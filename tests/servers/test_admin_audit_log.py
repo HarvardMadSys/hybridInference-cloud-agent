@@ -118,18 +118,21 @@ async def test_a_filter_asks_only_for_its_own_actions(audit_api) -> None:
     await client.get("/admin/agent/audit-log?category=settings", headers=ADMIN)
 
     servers, settings = trail.calls
-    assert servers["actions"] == ("agent.runner_host.", "agent.compute.")
+    assert servers["actions"] == ("agent.runner_host.", "agent.compute.", "agent.sandbox.")
     # A server's own settings live under agent.runner_host. but are a settings
     # change; the Servers filter must not show them twice.
     assert "agent.runner_host.set_settings" in servers["excluded_actions"]
     assert "agent.runner_host.set_settings" in settings["actions"]
+    assert "agent.sandbox_archive_settings." in settings["actions"]
     assert "agent.runner_host.set_settings" not in settings["excluded_actions"]
+    assert "agent.compute.cloudlab_defaults.set" in settings["actions"]
 
 
 @pytest.mark.asyncio
 async def test_each_entry_says_which_filter_it_falls_under(audit_api) -> None:
     client, trail, _ = audit_api
     trail.rows = [
+        _row(8, "agent.sandbox_archive_settings.set"),
         _row(7, "agent.host_settings.set"),
         _row(6, "agent.runner_host.set_settings"),
         _row(5, "agent.runtime_version.set"),
@@ -145,14 +148,15 @@ async def test_each_entry_says_which_filter_it_falls_under(audit_api) -> None:
         "settings",
         "settings",
         "settings",
+        "settings",
         "servers",
         "measurements",
         "content",
         None,
     ]
-    assert entries[5]["target_user_id"] == "user-7"
-    assert entries[6]["details"] is None
-    assert entries[6]["success"] is False
+    assert entries[6]["target_user_id"] == "user-7"
+    assert entries[7]["details"] is None
+    assert entries[7]["success"] is False
 
 
 @pytest.mark.asyncio
@@ -162,6 +166,18 @@ async def test_a_bad_filter_or_page_size_is_refused(audit_api) -> None:
         response = await client.get(f"/admin/agent/audit-log?{query}", headers=ADMIN)
         assert response.status_code == 422, query
     assert trail.calls == []
+
+
+@pytest.mark.asyncio
+async def test_database_reads_have_a_dedicated_audit_filter(audit_api) -> None:
+    client, trail, _ = audit_api
+    trail.rows = [_row(2, "agent.database.query"), _row(1, "agent.database.pgadmin.open")]
+
+    response = await client.get("/admin/agent/audit-log?category=database", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert trail.calls[0]["actions"] == ("agent.database.",)
+    assert [entry["category"] for entry in response.json()["entries"]] == ["database", "database"]
 
 
 @pytest.mark.asyncio
@@ -175,6 +191,8 @@ async def test_without_a_database_the_route_says_so(audit_api) -> None:
 def test_every_action_falls_under_at_most_one_filter() -> None:
     """The first filter that covers an action wins, so none is shown twice."""
     assert audit_category("agent.runner_host.set_settings") == "settings"
+    assert audit_category("agent.sandbox_archive_settings.set") == "settings"
     assert audit_category("agent.runner_host.set_slots") == "servers"
+    assert audit_category("agent.sandbox.stop") == "servers"
     assert audit_category("agent.runner_host_extra.drain") is None
     assert audit_category("agent.run.event_content.read") == "content"

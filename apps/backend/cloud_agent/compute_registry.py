@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 
+from cloud_agent.compute_config import current_cloudlab_api_url
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+)
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
 from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 
@@ -34,6 +38,7 @@ class ComputeProviderRegistration:
     credential_kind: Literal["ssh_key", "api_token"] = "api_token"
     connection_probe: Callable[[str], Awaitable[None]] | None = None
     can_import: bool = False
+    available: Callable[[], bool] | None = None
 
     def configuration(
         self, supplied: dict[str, Any], connection_id: str, ssh_connection_id: str | None
@@ -53,14 +58,35 @@ class ComputeProviderRegistration:
             if ssh_connection_id:
                 private, known = self.ssh_credential_fields
                 result[private] = ssh_connection_id
-                result[known] = f"{ssh_connection_id}:known_hosts"
+                host_key_source = supplied.get(
+                    "host_key_source", "none" if self.id == "cloudlab" else "known_hosts"
+                )
+                if self.id == "cloudlab":
+                    # Keep persisted configurations readable by the previous
+                    # release. Its resolver rejects this marker and therefore
+                    # fails closed instead of interpreting unchecked SSH.
+                    result["host_key_source"] = (
+                        "known_hosts" if host_key_source == "none" else host_key_source
+                    )
+                if self.id == "cloudlab" and host_key_source == "none":
+                    result[known] = UNCHECKED_CLOUDLAB_HOST_KEY_REF
+                elif host_key_source == "known_hosts":
+                    result[known] = f"{ssh_connection_id}:known_hosts"
         elif self.credential_kind == "ssh_key":
             result["known_hosts_ref"] = f"{connection_id}:known_hosts"
         return result
 
-    def catalog(self) -> dict[str, Any]:
+    def catalog(self, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         """Describe supported operations without code or credentials in the form."""
         capabilities = self.provider.capabilities()
+        effective = defaults or {}
+        fields = tuple(
+            {
+                **field,
+                **({"default": effective[field["key"]]} if field["key"] in effective else {}),
+            }
+            for field in self.fields
+        )
         return {
             "id": self.id,
             "label": self.label,
@@ -70,7 +96,7 @@ class ComputeProviderRegistration:
                 "release": capabilities.can_release,
                 "import": self.can_import,
             },
-            "fields": self.fields,
+            "fields": fields,
             "connection_fields": self.connection_fields,
             "secret_label": self.secret_label,
             "requires_ssh_connection": self.ssh_credential_fields is not None,
@@ -105,6 +131,11 @@ class ComputeProviderRegistration:
                 if len(parts) < 3:
                     raise ValueError("missing key")
                 serialization.load_ssh_public_key(f"{parts[1]} {parts[2]}".encode())
+        except (ValueError, TypeError, UnsupportedAlgorithm):
+            raise ComputeRefusal(
+                "invalid_host_keys", "Provide valid verified SSH host keys.", status=422
+            ) from None
+        try:
             try:
                 serialization.load_ssh_private_key(secret.encode(), password=None)
             except ValueError:
@@ -112,7 +143,7 @@ class ComputeProviderRegistration:
         except (ValueError, TypeError, UnsupportedAlgorithm):
             raise ComputeRefusal(
                 "invalid_ssh_key",
-                "Provide a supported private key without a passphrase and valid verified host keys.",
+                "Provide a supported private key without a passphrase.",
                 status=422,
             ) from None
         return {"known_hosts": known}
@@ -136,7 +167,16 @@ class ComputeProviderRegistry:
     """Resolve configured children without provider branches in Host operations."""
 
     def __init__(self, entries: list[ComputeProviderRegistration]) -> None:
-        self.entries = {entry.id: entry for entry in entries}
+        self._entries = {entry.id: entry for entry in entries}
+
+    @property
+    def entries(self) -> dict[str, ComputeProviderRegistration]:
+        """Current provider availability, including endpoints enabled after startup."""
+        return {
+            key: entry
+            for key, entry in self._entries.items()
+            if entry.available is None or entry.available()
+        }
 
     def get(self, provider_id: str) -> ComputeProviderRegistration:
         """Refuse a missing implementation or an unconfigured cloud endpoint."""
@@ -194,13 +234,23 @@ def build_registry(
             ),
         )
     ]
-    if configuration.cloudlab_api_url:
-        cloudlab = CloudLabProvider(api_url=configuration.cloudlab_api_url, resolver=resolver)
+    if configuration.admin_settings or configuration.cloudlab_api_url:
+        endpoint = (
+            (lambda: current_cloudlab_api_url(configuration))
+            if configuration.admin_settings
+            else configuration.cloudlab_api_url
+        )
+        cloudlab = CloudLabProvider(api_url=endpoint, resolver=resolver)
         entries.append(
             ComputeProviderRegistration(
                 id="cloudlab",
                 label="CloudLab",
                 provider=cloudlab,
+                available=(
+                    (lambda: bool(current_cloudlab_api_url(configuration)))
+                    if configuration.admin_settings
+                    else None
+                ),
                 connection_probe=cloudlab.validate_connection,
                 can_import=True,
                 ssh_credential_fields=("ssh_credential_ref", "ssh_known_hosts_ref"),
@@ -271,6 +321,40 @@ def build_registry(
                         "type": "text",
                         "required": True,
                         "deployment_only": True,
+                    },
+                    {
+                        "key": "ssh_public_key",
+                        "label": "SSH public key",
+                        "section": "access",
+                        "type": "textarea",
+                        "description": (
+                            "Installed for the CloudLab SSH user on new experiments. "
+                            "Leave blank to use keys already on the CloudLab account."
+                        ),
+                        "deployment_only": True,
+                        "modes": ["provision"],
+                        "max_length": 8192,
+                    },
+                    {
+                        "key": "host_key_source",
+                        "label": "SSH host-key checking",
+                        "section": "access",
+                        "type": "select",
+                        "default": "none",
+                        "options": [
+                            {
+                                "value": "none",
+                                "label": "Do not verify the CloudLab host",
+                            },
+                            {
+                                "value": "registration",
+                                "label": "Registered by the node at first boot",
+                            },
+                        ],
+                        "description": "Skipping verification permits automatic SSH but cannot detect an impersonated host. Registration needs the Cloud Agent profile (deploy/cloudlab/cloud-agent-node.py) and pins each new node's key.",
+                        "advanced": True,
+                        "deployment_only": True,
+                        "modes": ["provision"],
                     },
                 ),
             )

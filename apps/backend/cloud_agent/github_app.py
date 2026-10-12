@@ -19,6 +19,7 @@ network round trip and the publisher runs per job.
 
 from __future__ import annotations
 
+import asyncio
 import json as json_module
 import re
 import time
@@ -32,6 +33,7 @@ import httpx
 import jwt
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlCipher
 
 if TYPE_CHECKING:
@@ -71,6 +73,15 @@ class UserAuthorizationRevoked(GitHubAppError):
     authorization, or its refresh token expired or was spent. Retrying cannot
     change it, and the stored token is forgotten rather than tried again.
     """
+
+
+class RepositoryCreationError(GitHubAppError):
+    """A safe repository-creation failure, including an uncertain outcome."""
+
+    def __init__(self, reason: str, *, status: int | None = None) -> None:
+        """Keep an actionable reason without retaining GitHub's response body."""
+        super().__init__(f"GitHub repository creation failed: {reason}", status=status)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -190,7 +201,7 @@ class GitHubAppCredentials:
         self,
         config: AppConfig,
         *,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         """Build a minter.
@@ -204,7 +215,7 @@ class GitHubAppCredentials:
                 it alone.
         """
         self._config = config
-        self._timeout_s = timeout_s
+        self._timeout_override = timeout_s
         self._tokens: dict[tuple[int, str], _CachedToken] = {}
         self._installations: dict[str, int] = {}
         #: Per user, per set of connected installations: when the answer was
@@ -213,9 +224,13 @@ class GitHubAppCredentials:
         self._cipher: SourceControlCipher | None = None
         self._client = client
         self._owned: httpx.AsyncClient | None = None
+        self._active_http = 0
+        self._retired = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._retire_task: asyncio.Task[None] | None = None
 
     @asynccontextmanager
-    async def _http(self) -> AsyncIterator[httpx.AsyncClient]:
+    async def _http(self, *, timeout_s: float | None = None) -> AsyncIterator[httpx.AsyncClient]:
         """Yield a client for one GitHub call, reusing this object's own.
 
         A client per call meant a fresh TCP connection and a fresh TLS
@@ -229,12 +244,51 @@ class GitHubAppCredentials:
         use rather than in ``__init__`` because a client binds to the running
         loop, and this object is built during application startup.
         """
+        effective_timeout_s = self._timeout_s if timeout_s is None else timeout_s
         if self._client is not None:
             yield self._client
             return
+        # Requests that acquired the previous configuration may still finish
+        # after an admin saved a replacement. Their remaining calls use a
+        # temporary pool; the retired shared pool closes once its current
+        # callers finish, without interrupting an in-flight GitHub request.
+        if self._retired:
+            async with httpx.AsyncClient(timeout=effective_timeout_s) as client:
+                yield client
+            return
+        self._loop = asyncio.get_running_loop()
         if self._owned is None:
-            self._owned = httpx.AsyncClient(timeout=self._timeout_s)
-        yield self._owned
+            self._owned = httpx.AsyncClient(timeout=effective_timeout_s)
+        else:
+            self._owned.timeout = httpx.Timeout(effective_timeout_s)
+        self._active_http += 1
+        try:
+            yield self._owned
+        finally:
+            self._active_http -= 1
+            if self._retired and not self._active_http:
+                await self.aclose()
+
+    def retire(self) -> None:
+        """Release this configuration's pool after its current calls finish."""
+        self._retired = True
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._schedule_retirement)
+
+    @property
+    def _timeout_s(self) -> float:
+        if self._timeout_override is not None:
+            return self._timeout_override
+        return number_setting("github_request_timeout_s", 30.0)
+
+    @property
+    def request_timeout_s(self) -> float:
+        """Effective deadline used for the next provider request."""
+        return self._timeout_s
+
+    def _schedule_retirement(self) -> None:
+        if not self._active_http and self._owned is not None:
+            self._retire_task = asyncio.create_task(self.aclose())
 
     async def aclose(self) -> None:
         """Release the client this object created, if it created one.
@@ -341,9 +395,8 @@ class GitHubAppCredentials:
         installation token inherits *every* App permission unless it asks for
         less, so a consumer that only needs to read must say so. Combined with
         ``repository_scoped``, which limits the token to this repository alone,
-        that is how one App serves both the publisher (write, to push a branch)
-        and the runner (read, to check the repository out) without handing the
-        runner push rights on a host that executes untrusted code.
+        that is how one App serves checkout (read), sandbox branch/PR writes,
+        and the trusted publisher without sharing broader installation scope.
         """
         installation_id = await self.installation_id_for(repo)
         token, minted = await self._token_in_scope(
@@ -440,9 +493,12 @@ class GitHubAppCredentials:
             raise GitHubAppError(f"GitHub returned no user token: {body.get('error', 'unknown')}")
         return _user_tokens(body)
 
-    async def refresh_user_token(self, refresh_token: str) -> UserTokens:
+    async def refresh_user_token(
+        self, refresh_token: str, *, timeout_s: float | None = None
+    ) -> UserTokens:
         """Spend a refresh token for a new pair. Each refresh token works once."""
-        async with self._http() as client:
+        effective_timeout_s = self.request_timeout_s if timeout_s is None else timeout_s
+        async with self._http(timeout_s=effective_timeout_s) as client:
             response = await client.post(
                 "https://github.com/login/oauth/access_token",
                 headers={"Accept": "application/json"},
@@ -452,6 +508,7 @@ class GitHubAppCredentials:
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
                 },
+                timeout=effective_timeout_s,
             )
         if response.status_code >= 500:
             raise GitHubAppError(
@@ -494,7 +551,9 @@ class GitHubAppCredentials:
     ) -> list[str] | None:
         """This user's repositories if read within the last minute, else ``None``."""
         cached = self._user_repositories.get((user_id, installation_ids))
-        if cached is None or time.monotonic() - cached[0] > _USER_REPOSITORIES_TTL_S:
+        if cached is None or time.monotonic() - cached[0] > number_setting(
+            "github_repository_cache_s", _USER_REPOSITORIES_TTL_S
+        ):
             return None
         return list(cached[1])
 
@@ -508,6 +567,82 @@ class GitHubAppCredentials:
         """Drop a user's remembered answer, when their connection changed."""
         for key in [key for key in self._user_repositories if key[0] == user_id]:
             self._user_repositories.pop(key, None)
+
+    async def create_personal_repository(
+        self, user_token: str, *, name: str, description: str, private: bool
+    ) -> dict[str, str]:
+        """Create an initialized repository in the authorizing user's account.
+
+        A user token and GitHub's personal-account endpoint select the owner;
+        neither an installation credential nor an owner supplied by the browser
+        can do so. This write is sent once. If the response is lost, callers
+        must check GitHub before trying again rather than risk another write.
+        """
+        try:
+            async with self._http() as client:
+                response = await client.post(
+                    f"{self._config.api_base}/user/repos",
+                    headers={
+                        "Authorization": f"Bearer {user_token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    json={
+                        "name": name,
+                        "description": description,
+                        "private": private,
+                        "auto_init": True,
+                    },
+                )
+        except httpx.RequestError as exc:
+            raise RepositoryCreationError("uncertain") from exc
+        status = response.status_code
+        if status == 401:
+            raise UserAuthorizationRevoked("GitHub refused the user's token", status=status)
+        if status == 429 or (
+            status == 403
+            and (
+                response.headers.get("x-ratelimit-remaining") == "0"
+                or "retry-after" in response.headers
+            )
+        ):
+            raise RepositoryCreationError("unavailable", status=status)
+        if status in (403, 404):
+            raise RepositoryCreationError("forbidden", status=status)
+        if status in (400, 422):
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            errors = body.get("errors", []) if isinstance(body, dict) else []
+            duplicate = isinstance(errors, list) and any(
+                isinstance(error, dict)
+                and error.get("resource") == "Repository"
+                and error.get("field") == "name"
+                and (
+                    error.get("code") == "already_exists"
+                    or (
+                        error.get("code") == "custom"
+                        and str(error.get("message", "")).lower().startswith("name already exists")
+                    )
+                )
+                for error in errors
+            )
+            raise RepositoryCreationError(
+                "already_exists" if duplicate else "invalid", status=status
+            )
+        if status != 201:
+            raise RepositoryCreationError("uncertain", status=status)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RepositoryCreationError("uncertain", status=status) from exc
+        fields = ("full_name", "html_url", "default_branch")
+        if not isinstance(body, dict) or any(
+            not isinstance(body.get(field), str) or not body[field] for field in fields
+        ):
+            raise RepositoryCreationError("uncertain", status=status)
+        return {field: body[field] for field in fields}
 
     async def writable_repositories_for_user(
         self, user_token: str, installation_id: int

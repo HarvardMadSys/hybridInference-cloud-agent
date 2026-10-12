@@ -27,7 +27,9 @@ async def test_gateway_refusal_matches_contract_and_agent():
         pytest.fail("Set AGENT_CONTRACT_GATEWAY_URL and AGENT_CONTRACT_DISPATCH_TOKEN")
     subject = f"contract-missing-{uuid4().hex}"
     path = f"/internal/users/{subject}/agent-access"
-    contract = Path(__file__).resolve().parents[2] / "contracts/internal-lookups.openapi.yaml"
+    contract = (
+        Path(__file__).resolve().parents[2] / "gateway_contracts/internal-lookups.openapi.yaml"
+    )
     document = yaml.safe_load(contract.read_text())
     schema = document["paths"]["/internal/users/{user_id}/agent-access"]["get"]["responses"]["403"][
         "content"

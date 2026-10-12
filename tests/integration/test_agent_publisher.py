@@ -16,7 +16,12 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
+from cloud_agent.publisher import (
+    PublishError,
+    TransientPublishError,
+    fetch_base_bundle,
+    publish_patch,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -74,6 +79,248 @@ def _branches(bare_url: str) -> list[str]:
         check=True,
     ).stdout
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _blob_patch(
+    origin: tuple[str, str],
+    tmp_path: Path,
+    *,
+    before: bytes | None,
+    after: bytes | None,
+    path: str = "asset.bin",
+) -> tuple[str, str]:
+    """Generate an actual Git binary patch against an optional existing blob."""
+    clone_url, base_sha = origin
+    editor = tmp_path / "editor"
+    _git(["clone", "--quiet", clone_url, str(editor)], cwd=tmp_path)
+    target = editor / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if before is not None:
+        target.write_bytes(before)
+        _git(["add", "--all"], cwd=editor)
+        _git(["commit", "--quiet", "-m", "baseline binary asset"], cwd=editor)
+        _git(["push", "--quiet", "origin", "main"], cwd=editor)
+        base_sha = _git(["rev-parse", "HEAD"], cwd=editor).strip()
+    if after is None:
+        target.unlink()
+    else:
+        target.write_bytes(after)
+    _git(["add", "--all"], cwd=editor)
+    patch = _git(["diff", "--cached", "--binary", "--full-index"], cwd=editor)
+    assert "GIT binary patch" in patch
+    return patch, base_sha
+
+
+def _published_blob(clone_url: str, branch: str, path: str = "asset.bin") -> bytes:
+    return subprocess.run(
+        ["git", "show", f"{branch}:{path}"],
+        cwd=clone_url,
+        env=_GIT_ENV,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+
+@pytest.mark.parametrize("allow_workflow_changes", [False, True])
+def test_binary_credential_is_refused_before_commit_or_push(
+    origin, tmp_path, monkeypatch, allow_workflow_changes
+):
+    """Encoded credentials cannot use either binary data or human release to bypass scanning."""
+    from cloud_agent import publisher
+
+    credential = ("gh" + "p_" + "a" * 36).encode()
+    path = ".github/workflows/asset.bin" if allow_workflow_changes else "asset.bin"
+    patch, base_sha = _blob_patch(
+        origin, tmp_path, before=None, after=b"\0\xff" + credential + b"\0", path=path
+    )
+    real_run_git = publisher._run_git
+    commands: list[str] = []
+
+    def record_command(args, **kwargs):
+        commands.append(args[0])
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(publisher, "_run_git", record_command)
+    with pytest.raises(PublishError, match=r"after apply.*github_token") as excinfo:
+        publish_patch(
+            job_id="ajob_binary_secret",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: binary asset",
+            allow_workflow_changes=allow_workflow_changes,
+        )
+    assert credential.decode() not in str(excinfo.value)
+    assert "commit" not in commands
+    assert "push" not in commands
+    assert _branches(origin[0]) == ["main"]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_clean_binary_literals_and_deltas_publish(origin, tmp_path, existing):
+    """Legitimate binary assets still round-trip through publication."""
+    baseline = bytes(range(256)) * 32
+    content = baseline[:1000] + b"binary update" + baseline[1013:]
+    patch, base_sha = _blob_patch(
+        origin, tmp_path, before=baseline if existing else None, after=content
+    )
+    assert ("delta " if existing else "literal ") in patch
+    result = publish_patch(
+        job_id="ajob_clean_binary",
+        patch=patch,
+        clone_url=origin[0],
+        base_sha=base_sha,
+        commit_message="agent: update binary asset",
+    )
+    assert _published_blob(origin[0], result.branch) == content
+
+
+@pytest.mark.parametrize("change", ["unrelated", "remove", "delete"])
+def test_binary_preexisting_or_removed_credentials_do_not_block(origin, tmp_path, change):
+    """The scanner holds the patch responsible only for credentials it adds."""
+    credential = ("gh" + "p_" + "a" * 36).encode()
+    baseline = b"\0" + credential + b"\0existing asset"
+    after = {
+        "unrelated": baseline + b" updated",
+        "remove": b"\0clean asset",
+        "delete": None,
+    }[change]
+    patch, base_sha = _blob_patch(origin, tmp_path, before=baseline, after=after)
+    result = publish_patch(
+        job_id="ajob_existing_binary",
+        patch=patch,
+        clone_url=origin[0],
+        base_sha=base_sha,
+        commit_message="agent: update existing binary asset",
+    )
+    if after is not None:
+        assert _published_blob(origin[0], result.branch) == after
+    else:
+        assert "asset.bin" not in _git(
+            ["ls-tree", "--name-only", result.branch], cwd=tmp_path / "origin.git"
+        )
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_binary_new_or_duplicated_credential_is_blocked(origin, tmp_path, duplicate):
+    """An existing credential shape does not waive new values or extra copies."""
+    credential = ("gh" + "p_" + "a" * 36).encode()
+    new_credential = credential if duplicate else ("gh" + "p_" + "b" * 36).encode()
+    baseline = b"\0" + credential + b"\0"
+    patch, base_sha = _blob_patch(
+        origin, tmp_path, before=baseline, after=baseline + new_credential + b"\0"
+    )
+    with pytest.raises(PublishError, match=r"after apply.*github_token"):
+        publish_patch(
+            job_id="ajob_added_binary_secret",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: append binary asset",
+        )
+    assert _branches(origin[0]) == ["main"]
+
+
+def test_binary_expansion_limit_refuses_before_git(origin, tmp_path, monkeypatch):
+    """A compressed literal exceeding the decoded cap cannot reach Git apply."""
+    from cloud_agent import publisher
+    from cloud_agent_shared.git.patch_gate import MAX_BLOB_BYTES, MAX_PATCH_BYTES
+
+    patch, base_sha = _blob_patch(origin, tmp_path, before=None, after=b"\0" * (MAX_BLOB_BYTES + 1))
+    assert len(patch.encode()) < MAX_PATCH_BYTES
+
+    def refuse_git(*args, **kwargs):
+        pytest.fail("an oversized decoded binary must be rejected before any Git command")
+
+    monkeypatch.setattr(publisher, "_run_git", refuse_git)
+    with pytest.raises(PublishError, match="decoded blob byte limit"):
+        publish_patch(
+            job_id="ajob_binary_expansion",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: oversized binary",
+        )
+    assert _branches(origin[0]) == ["main"]
+
+
+def test_post_apply_blob_limit_cannot_be_bypassed_by_patch_parser(origin, tmp_path, monkeypatch):
+    """Actual object sizes are bounded independently of pre-apply declarations."""
+    from cloud_agent import publisher
+
+    patch, base_sha = _blob_patch(origin, tmp_path, before=None, after=b"\0" * 129)
+    monkeypatch.setattr(publisher, "MAX_BLOB_BYTES", 128)
+    with pytest.raises(PublishError, match=r"after apply.*128 byte limit"):
+        publish_patch(
+            job_id="ajob_binary_post_size",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: oversized binary",
+        )
+    assert _branches(origin[0]) == ["main"]
+
+
+def test_binary_delta_assembling_credential_from_existing_fragments_is_blocked(origin, tmp_path):
+    """Copied bytes in a delta are scanned after they become contiguous."""
+    padding = bytes(range(256)) * 32
+    prefix = b"gh" + b"p_"
+    suffix = b"a" * 36
+    baseline = padding + b"\0" + prefix + b" separator " + suffix + b"\0"
+    after = padding + b"\0" + prefix + suffix + b"\0"
+    patch, base_sha = _blob_patch(origin, tmp_path, before=baseline, after=after)
+    assert "delta " in patch
+    with pytest.raises(PublishError, match=r"after apply.*github_token"):
+        publish_patch(
+            job_id="ajob_binary_fragment_secret",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: reassemble binary asset",
+        )
+    assert _branches(origin[0]) == ["main"]
+
+
+def test_gitattributes_cannot_hide_plaintext_credential_as_binary(origin, tmp_path):
+    """Git's user-controlled binary classification does not control the scan."""
+    clone_url, base_sha = origin
+    editor = tmp_path / "editor"
+    _git(["clone", "--quiet", clone_url, str(editor)], cwd=tmp_path)
+    (editor / ".gitattributes").write_text("asset.txt -diff\n", encoding="utf-8")
+    (editor / "asset.txt").write_bytes(("gh" + "p_" + "a" * 36).encode())
+    _git(["add", "--all"], cwd=editor)
+    patch = _git(["diff", "--cached", "--binary", "--full-index"], cwd=editor)
+    assert "GIT binary patch" in patch
+    with pytest.raises(PublishError, match=r"after apply.*github_token"):
+        publish_patch(
+            job_id="ajob_binary_attributes_secret",
+            patch=patch,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: classify text as binary",
+        )
+    assert _branches(clone_url) == ["main"]
+
+
+def test_staged_total_blob_limit_refuses_before_push(origin, tmp_path, monkeypatch):
+    """Many small decoded files cannot evade the aggregate staged size cap."""
+    from cloud_agent import publisher
+
+    patch, base_sha = _blob_patch(origin, tmp_path, before=None, after=b"\0" * 64)
+    editor = tmp_path / "editor"
+    (editor / "another.bin").write_bytes(b"\0" * 64)
+    _git(["add", "--all"], cwd=editor)
+    patch = _git(["diff", "--cached", "--binary", "--full-index"], cwd=editor)
+    monkeypatch.setattr(publisher, "MAX_CHANGED_BLOB_BYTES", 127)
+    with pytest.raises(PublishError, match=r"after apply.*127 total byte limit"):
+        publish_patch(
+            job_id="ajob_binary_total_size",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: too many decoded bytes",
+        )
+    assert _branches(origin[0]) == ["main"]
 
 
 def test_publishes_branch_with_applied_patch(origin):
@@ -398,6 +645,142 @@ def test_follow_up_fast_forwards_its_own_branch(origin):
     assert second.branch == first.branch == "agent/athr_thread1"
 
 
+def test_retry_adopts_the_matching_commit_already_pushed_before_a_crash(origin):
+    """A lost DB/PR write reuses the exact remote commit, not a rebuilt one."""
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_lost_result",
+        branch_id="athr_lost_result",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: first process",
+        include_base_bundle=True,
+    )
+    retry = publish_patch(
+        job_id="ajob_lost_result",
+        branch_id="athr_lost_result",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: a rebuilt commit would differ",
+        include_base_bundle=True,
+    )
+
+    assert retry.commit_sha == first.commit_sha
+    assert retry.changed_files == first.changed_files
+    assert retry.base_bundle is not None
+
+
+def test_retry_rejects_matching_tree_hidden_in_a_merge_commit(origin, tmp_path):
+    """Matching tree and first parent are insufficient: publisher commits never merge."""
+    clone_url, base_sha = origin
+    human = tmp_path / "merge"
+    _git(["clone", "--quiet", clone_url, str(human)], cwd=tmp_path)
+    _git(["checkout", "--quiet", "--detach", base_sha], cwd=human)
+
+    # The second parent contains work that the matching tree deliberately hides.
+    _git(["checkout", "--quiet", "-b", "hidden", base_sha], cwd=human)
+    (human / "HIDDEN.md").write_text("human work\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    _git(["commit", "--quiet", "-m", "human: hidden parent"], cwd=human)
+    hidden_parent = _git(["rev-parse", "HEAD"], cwd=human).strip()
+
+    _git(["checkout", "--quiet", "--detach", base_sha], cwd=human)
+    (human / "app.py").write_text("def main():\n    x = 1\n    return 0\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    expected_tree = _git(["write-tree"], cwd=human).strip()
+    forged_merge = _git(
+        [
+            "commit-tree",
+            expected_tree,
+            "-p",
+            base_sha,
+            "-p",
+            hidden_parent,
+            "-m",
+            "human: forged matching merge",
+        ],
+        cwd=human,
+    ).strip()
+    _git(
+        ["push", "--quiet", "origin", f"{forged_merge}:refs/heads/agent/athr_merge"],
+        cwd=human,
+    )
+
+    with pytest.raises(PublishError, match="has moved") as refused:
+        publish_patch(
+            job_id="ajob_merge",
+            branch_id="athr_merge",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: must not adopt a merge",
+        )
+    assert not isinstance(refused.value, TransientPublishError)
+
+
+def test_retry_fences_a_branch_advance_after_recovered_tip_validation(
+    origin, tmp_path, monkeypatch
+):
+    """The final ordinary push prevents recording an old reconciled tip."""
+    from cloud_agent import publisher as publisher_module
+
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_reconcile_race",
+        branch_id="athr_reconcile_race",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: first process",
+    )
+
+    human = tmp_path / "reconcile-racer"
+    _git(["clone", "--quiet", clone_url, str(human)], cwd=tmp_path)
+    _git(
+        ["checkout", "--quiet", "-b", "agent/athr_reconcile_race", first.commit_sha],
+        cwd=human,
+    )
+    (human / "HOTFIX.md").write_text("human edit\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    _git(["commit", "--quiet", "-m", "human: advance during reconciliation"], cwd=human)
+    human_tip = _git(["rev-parse", "HEAD"], cwd=human).strip()
+
+    real_run_git = publisher_module._run_git
+    advanced = False
+
+    def race_on_fence(args, **kwargs):
+        nonlocal advanced
+        expected_refspec = f"{first.commit_sha}:refs/heads/agent/athr_reconcile_race"
+        if args[0] == "push" and args[-1] == expected_refspec and not advanced:
+            advanced = True
+            _git(
+                ["push", "--quiet", "origin", f"{human_tip}:refs/heads/agent/athr_reconcile_race"],
+                cwd=human,
+            )
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(publisher_module, "_run_git", race_on_fence)
+    with pytest.raises(TransientPublishError, match="git push failed"):
+        publish_patch(
+            job_id="ajob_reconcile_race",
+            branch_id="athr_reconcile_race",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: retry after lost result",
+        )
+
+    assert advanced
+    assert (
+        _git(
+            ["rev-parse", "refs/heads/agent/athr_reconcile_race"], cwd=tmp_path / "origin.git"
+        ).strip()
+        == human_tip
+    )
+
+
 def _prerequisites(bundle: bytes) -> list[str]:
     """The commits a bundle requires the receiving repository to hold."""
     header = bundle.split(b"\n\n", 1)[0].decode()
@@ -442,6 +825,41 @@ def test_base_bundle_carries_only_what_the_published_commit_adds(origin, tmp_pat
         _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
     _git(["cat-file", "-e", f"{result.commit_sha}^{{commit}}"], cwd=workspace)
     assert _git(["rev-parse", "HEAD"], cwd=workspace).strip() == base_sha
+
+
+def test_republishing_the_same_patch_reuses_the_commit_already_pushed(origin):
+    """A retry after the push, and before the PR is recorded, must not refuse.
+
+    The second commit object differs because its timestamps do, but it is the
+    same change on the same base. The branch already has that change, and the
+    platform does not force-push, so the retry keeps the existing tip.
+    """
+    clone_url, base_sha = origin
+    kwargs = {
+        "job_id": "ajob_retry",
+        "branch_id": "athr_retry",
+        "patch": _PATCH_APP,
+        "clone_url": clone_url,
+        "base_sha": base_sha,
+        "commit_message": "agent: turn 1",
+        "include_base_bundle": True,
+    }
+    first = publish_patch(**kwargs)
+    second = publish_patch(**kwargs)
+
+    assert second.commit_sha == first.commit_sha
+    assert second.branch == first.branch
+    assert second.changed_files == first.changed_files
+    assert second.base_bundle is not None
+    tip = subprocess.run(
+        ["git", "rev-parse", "refs/heads/agent/athr_retry"],
+        cwd=clone_url,
+        env=_GIT_ENV,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert tip == first.commit_sha
 
 
 def test_branch_moved_by_someone_else_is_refused_with_the_reason(origin, tmp_path):
@@ -493,3 +911,40 @@ def test_branch_moved_by_someone_else_is_refused_with_the_reason(origin, tmp_pat
         check=True,
     ).stdout.strip()
     assert out == moved_tip
+
+
+def test_non_fast_forward_race_retries_once_then_reports_divergence(origin, tmp_path, monkeypatch):
+    """An uncertain push retries; the next read makes human movement permanent."""
+    from cloud_agent import publisher as publisher_module
+
+    clone_url, base_sha = origin
+    human = tmp_path / "racer"
+    _git(["clone", "--quiet", clone_url, str(human)], cwd=tmp_path)
+    _git(["checkout", "--quiet", "-b", "agent/athr_race", base_sha], cwd=human)
+    (human / "HOTFIX.md").write_text("human edit\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    _git(["commit", "--quiet", "-m", "human: win push race"], cwd=human)
+    _git(["push", "--quiet", "origin", "agent/athr_race"], cwd=human)
+
+    monkeypatch.setattr(publisher_module, "_remote_branch_tip", lambda *_args: None)
+    with pytest.raises(TransientPublishError, match="git push failed"):
+        publish_patch(
+            job_id="ajob_race",
+            branch_id="athr_race",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: lost race",
+        )
+
+    monkeypatch.undo()
+    with pytest.raises(PublishError, match="has moved") as refused:
+        publish_patch(
+            job_id="ajob_race",
+            branch_id="athr_race",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: retry after race",
+        )
+    assert not isinstance(refused.value, TransientPublishError)

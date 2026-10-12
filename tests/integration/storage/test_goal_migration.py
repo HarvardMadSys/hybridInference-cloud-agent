@@ -21,14 +21,14 @@ from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
-#: The message a ``0017`` row stopped on, kept verbatim as the pause detail.
+#: The message a ``0019`` row stopped on, kept verbatim as the pause detail.
 BLOCK_MESSAGE = "the goal used its whole automatic round budget"
 
 
-async def _rebuild_at_0017(config) -> None:
-    """Build the shape ``0017`` leaves, from an empty database.
+async def _rebuild_at_0019(config) -> None:
+    """Build the shape ``0019`` leaves, from an empty database.
 
-    Downgrading across ``0018`` is the other way to get here, and it is what the
+    Downgrading across ``0020`` is the other way to get here, and it is what the
     round-trip case at the end uses. This path exists because the cases below
     are about *upgrading*: the previous release's schema is their input, and how
     it was built is not what they are testing.
@@ -100,7 +100,7 @@ async def _upgrade_to_head(config, *, thread_id: str) -> None:
         raise
 
 
-async def _seed_0017_goal(
+async def _seed_0019_goal(
     config,
     *,
     goal_state: str,
@@ -109,7 +109,7 @@ async def _seed_0017_goal(
     blocked_message: str | None = None,
     with_succeeded_turn: bool = False,
 ) -> tuple[str, str | None]:
-    """One conversation as ``0017`` held it, with the goal the caller describes."""
+    """One conversation as ``0019`` held it, with the goal the caller describes."""
     thread_id = f"athr_{uuid.uuid4().hex}"
     job_id = f"ajob_{uuid.uuid4().hex}" if with_succeeded_turn else None
     conn = await asyncpg.connect(**config)
@@ -193,10 +193,10 @@ async def at_0020():
 
 
 @pytest_asyncio.fixture
-async def at_0017():
-    """A database built to ``0017``'s shape, restored to head afterwards."""
+async def at_0019():
+    """A database built to ``0019``'s shape, restored to head afterwards."""
     config = _db_config()
-    await _rebuild_at_0017(config)
+    await _rebuild_at_0019(config)
     try:
         yield config
     finally:
@@ -208,20 +208,20 @@ async def at_0017():
     [("round-limit", "round_limit"), ("model-reported", "needs_input")],
 )
 async def test_a_blocked_goal_becomes_paused_with_the_message_it_stopped_on(
-    at_0017, blocked_code, reason
+    at_0019, blocked_code, reason
 ):
     """``blocked`` was never a state, it was a reason — and it keeps saying which."""
-    thread_id, _ = await _seed_0017_goal(
-        at_0017,
+    thread_id, _ = await _seed_0019_goal(
+        at_0019,
         goal_state="blocked",
         goal_revision=7,
         blocked_code=blocked_code,
         blocked_message=BLOCK_MESSAGE,
     )
 
-    await _upgrade_to_head(at_0017, thread_id=thread_id)
+    await _upgrade_to_head(at_0019, thread_id=thread_id)
 
-    conn = await asyncpg.connect(**at_0017)
+    conn = await asyncpg.connect(**at_0019)
     try:
         row = dict(
             await conn.fetchrow(
@@ -244,15 +244,15 @@ async def test_a_blocked_goal_becomes_paused_with_the_message_it_stopped_on(
     assert (row["goal_objective"], row["goal_max_rounds"]) == ("ship it", 5)
 
 
-async def test_a_completed_goal_keeps_the_turn_that_earned_it(at_0017):
+async def test_a_completed_goal_keeps_the_turn_that_earned_it(at_0019):
     """A first-version completion was completed because the model said so."""
-    thread_id, job_id = await _seed_0017_goal(
-        at_0017, goal_state="complete", goal_revision=4, with_succeeded_turn=True
+    thread_id, job_id = await _seed_0019_goal(
+        at_0019, goal_state="complete", goal_revision=4, with_succeeded_turn=True
     )
 
-    await _upgrade_to_head(at_0017, thread_id=thread_id)
+    await _upgrade_to_head(at_0019, thread_id=thread_id)
 
-    conn = await asyncpg.connect(**at_0017)
+    conn = await asyncpg.connect(**at_0019)
     try:
         row = dict(
             await conn.fetchrow(
@@ -270,13 +270,13 @@ async def test_a_completed_goal_keeps_the_turn_that_earned_it(at_0017):
     assert row["goal_id"] is not None
 
 
-async def test_a_completed_goal_with_no_turn_to_name_is_judged_again(at_0017):
+async def test_a_completed_goal_with_no_turn_to_name_is_judged_again(at_0019):
     """Nothing is backfilled that cannot be proven, including a completion."""
-    thread_id, _ = await _seed_0017_goal(at_0017, goal_state="complete", goal_revision=4)
+    thread_id, _ = await _seed_0019_goal(at_0019, goal_state="complete", goal_revision=4)
 
-    await _upgrade_to_head(at_0017, thread_id=thread_id)
+    await _upgrade_to_head(at_0019, thread_id=thread_id)
 
-    conn = await asyncpg.connect(**at_0017)
+    conn = await asyncpg.connect(**at_0019)
     try:
         row = dict(
             await conn.fetchrow(

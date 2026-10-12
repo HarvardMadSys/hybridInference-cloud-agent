@@ -44,6 +44,9 @@ async def pool(db_config):
         f'CREATE TABLE "{schema}".agent_identity_namespace '
         "(LIKE public.agent_identity_namespace INCLUDING ALL)"
     )
+    await admin.execute(
+        f'CREATE TABLE "{schema}".agent_settings (LIKE public.agent_settings INCLUDING ALL)'
+    )
     # The runtime guard discovers ownership columns rather than guessing which
     # existing kinds of tasks or connections happen to have data today.
     await admin.execute(f'CREATE TABLE "{schema}".agent_threads (id TEXT, user_id TEXT)')
@@ -167,6 +170,30 @@ async def test_deployment_check_initializes_an_empty_database(pool, identity_cli
     assert status == 0, output
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace") == ISSUER
+
+
+async def test_deployment_check_uses_the_saved_issuer_and_ignores_stale_environment(
+    pool, identity_cli
+):
+    await ensure_gateway_namespace(pool, ISSUER)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'INSERT INTO agent_settings (id, revision, "values") VALUES '
+            "(TRUE, 1, jsonb_build_object('gateway_issuer', $1::text))",
+            ISSUER,
+        )
+    status, output = await identity_cli(pool, "--check", issuer="https://stale.example")
+    assert status == 0, output
+
+
+async def test_deployment_check_requires_setup_when_saved_issuer_is_empty(pool, identity_cli):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'INSERT INTO agent_settings (id, revision, "values") '
+            'VALUES (TRUE, 1, \'{"gateway_issuer": ""}\')'
+        )
+    status, output = await identity_cli(pool, "--check")
+    assert status != 0 and "Admin Settings" in output
 
 
 @pytest.mark.parametrize(

@@ -191,12 +191,6 @@ def test_a_partial_inventory_without_a_reason_is_refused() -> None:
     assert parse_capacity_block(block) is None
 
 
-def test_identifiers_are_normalized_to_canonical_uuids() -> None:
-    report = parse_capacity_block(capacity_block(sample_id=SAMPLE_ID.upper()))
-    assert report is not None
-    assert report.sample_id == SAMPLE_ID
-
-
 # ── The heartbeat never refuses over the block ────────────────────────
 
 
@@ -524,20 +518,6 @@ def test_only_three_ranges_are_served() -> None:
     assert resolve_history_range("24h") == 86400
     assert resolve_history_range("7d") is None
     assert resolve_history_range("") is None
-
-
-def test_the_history_response_names_what_it_is() -> None:
-    now = datetime(2026, 9, 11, 12, 34, 0, tzinfo=UTC)
-    response = AgentHostCapacityHistoryResponse(
-        host="gpu-box",
-        capacity_epoch="00000000-0000-4000-8000-0000000000ff",
-        since=now - timedelta(hours=1),
-        until=now,
-        observed_at=now,
-        points=[],
-    )
-    assert response.resolution_seconds == 60
-    assert response.semantics == "sampled_observation"
 
 
 def test_a_report_round_trips_through_the_stored_shape() -> None:

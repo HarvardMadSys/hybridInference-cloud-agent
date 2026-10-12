@@ -1,6 +1,6 @@
 'use client';
 
-import { DEFAULT_SKILL_LIMITS } from '@/lib/skillLimits';
+import { formatBytes } from '@/lib/attachmentLimits';
 
 import { getErrorMessage } from '@/lib/utils/errors';
 
@@ -12,6 +12,7 @@ import {
   type SkillApi,
   type SkillImportPreviewApi,
 } from '@/lib/api/skills';
+import { useSkillLimits } from './useSkillLimits';
 import {
   SkillDefault,
   SkillDialog,
@@ -28,6 +29,7 @@ export function SkillImportDialog({
   onClose: () => void;
   onSaved: (skill: SkillApi) => void;
 }) {
+  const limits = useSkillLimits();
   const [mode, setMode] = useState<'github' | 'upload'>('github');
   const [url, setUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -48,8 +50,10 @@ export function SkillImportDialog({
         input = { url: url.trim() };
       } else {
         if (!file) throw new Error('Choose a SKILL.md file.');
-        if (file.size > DEFAULT_SKILL_LIMITS.max_skill_bytes)
-          throw new Error('SKILL.md must be no larger than 64 KB.');
+        if (file.size > limits.max_skill_bytes)
+          throw new Error(
+            `SKILL.md must be no larger than ${formatBytes(limits.max_skill_bytes)}.`,
+          );
         input = { content: await file.text() };
       }
       const result = await previewSkillImport(input);
@@ -144,7 +148,7 @@ export function SkillImportDialog({
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
-              maxLength={DEFAULT_SKILL_LIMITS.max_name_length}
+              maxLength={limits.max_name_length}
               disabled={busy}
               className={SKILL_FIELD}
             />
@@ -226,8 +230,8 @@ export function SkillImportDialog({
                 className={SKILL_FIELD}
               />
               <span className="mt-2 block text-xs font-normal text-gray-500 dark:text-gray-400">
-                Up to 64 KB. Include YAML frontmatter with name and description, followed by
-                Markdown instructions.
+                Up to {formatBytes(limits.max_skill_bytes)}. Include YAML frontmatter with name and
+                description, followed by Markdown instructions.
               </span>
             </label>
           )}

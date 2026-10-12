@@ -22,7 +22,7 @@ from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
 from cloud_agent.ports import AuditLogQueries  # noqa: TC001 — FastAPI resolves this at runtime.
 from cloud_agent.schemas import AdminAuditLogEntry, AdminAuditLogResponse
 
-AuditCategory = Literal["settings", "servers", "measurements", "content"]
+AuditCategory = Literal["settings", "servers", "measurements", "content", "database"]
 
 #: The Audit log's filters and the actions each covers. A name ending in ``.``
 #: is a prefix; any other is one exact action. ``settings`` comes first: a
@@ -30,13 +30,17 @@ AuditCategory = Literal["settings", "servers", "measurements", "content"]
 #: a settings change, and an action belongs to the first filter that covers it.
 AUDIT_CATEGORIES: dict[AuditCategory, tuple[str, ...]] = {
     "settings": (
+        "agent.settings.",
         "agent.host_settings.",
+        "agent.sandbox_archive_settings.",
         "agent.runtime_version.",
         "agent.runner_host.set_settings",
+        "agent.compute.cloudlab_defaults.set",
     ),
-    "servers": ("agent.runner_host.", "agent.compute."),
+    "servers": ("agent.runner_host.", "agent.compute.", "agent.sandbox."),
     "measurements": ("agent.profiling.",),
     "content": ("agent.run.event_content.",),
+    "database": ("agent.database.",),
 }
 
 #: Reads the Servers page polls, recorded as actions before this release. They
@@ -103,7 +107,10 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-router = APIRouter(prefix="/admin/agent/audit-log", dependencies=[Depends(_no_store)])
+router = APIRouter(
+    prefix="/admin/agent/audit-log",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+)
 
 
 def _entry(row: dict[str, Any]) -> AdminAuditLogEntry:
@@ -126,7 +133,6 @@ async def list_admin_audit_log(
     category: AuditCategory | None = None,
     before: int | None = Query(None, ge=1, description="Return entries older than this id."),
     limit: int = Query(50, ge=1, le=MAX_PAGE),
-    _admin: str = Depends(verify_admin_access),
     queries: AuditLogQueries = Depends(get_audit_log_queries),
 ) -> AdminAuditLogResponse:
     """Return recorded admin actions, newest first, a page at a time."""

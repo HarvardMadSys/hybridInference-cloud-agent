@@ -21,11 +21,7 @@ from cloud_agent.ledger import (
 
 if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
-    from cloud_agent.ports import (
-        ConversationQueries,
-        ExecutionQueries,
-        LedgerRepository,
-    )
+    from cloud_agent.ports import ConversationQueries, LedgerRepository
 
 
 class _UsageStorage(Protocol):
@@ -36,7 +32,6 @@ class _UsageStorage(Protocol):
     """
 
     conversation_queries: ConversationQueries
-    execution_queries: ExecutionQueries
     ledger: LedgerRepository
 
 
@@ -128,19 +123,39 @@ async def get_message_request(
     return MessageRequestDetail(status="available", request=next(iter(matches.values())))
 
 
-async def _usage_response(store: _UsageStorage, job: dict[str, Any]) -> JobUsageResponse:
-    job_id = job["id"]
-    rows = await store.ledger.ledger_rows_for_job(job_id=job_id)
-    inputs = await store.execution_queries.job_usage_inputs(job_id=job_id)
-    return summarize_job_usage(
-        ledger_rows=rows,
-        runtime_inputs=inputs,
+async def job_usage_response(
+    store: _UsageStorage, *, job_id: str, user_id: str
+) -> JobUsageResponse | None:
+    """An owner's job usage, as they read it here and are pushed it on change.
+
+    Read from one snapshot, whose version it carries, so that a tab holding two
+    of them, one read and one pushed, keeps the newer. ``None`` when the job is
+    not theirs.
+    """
+    reads = await store.ledger.job_usage_reads(job_id=job_id, user_id=user_id)
+    if reads is None:
+        return None
+    job = reads["job"]
+    usage = summarize_job_usage(
+        ledger_rows=reads["ledger_rows"],
+        runtime_inputs=reads["inputs"],
         runtime=job.get("runtime"),
         terminal=job.get("state") in TERMINAL_STATES,
-        conversation=summarize_conversation(
-            await store.ledger.ledger_rows_for_conversation(job_id=job_id, user_id=job["user_id"])
-        ),
+        conversation=summarize_conversation(reads["conversation_rows"]),
     )
+    usage.version = reads["version"]
+    return usage
+
+
+async def _owner_usage(store: _UsageStorage, job: dict[str, Any]) -> JobUsageResponse:
+    usage = await job_usage_response(store, job_id=job["id"], user_id=job["user_id"])
+    if usage is None:
+        # Deleted between the ownership check and the read.
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "not_found", "message": f"No such agent job: {job['id']}"}},
+        )
+    return usage
 
 
 @router.get("/jobs/{job_id}/usage", response_model=JobUsageResponse)
@@ -152,7 +167,7 @@ async def get_job_usage(
     """Read cached Gateway snapshots and runtime usage for the same job."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
-    return await _usage_response(job_store, job)
+    return await _owner_usage(job_store, job)
 
 
 @router.post("/jobs/{job_id}/usage/refresh", response_model=JobUsageResponse)
@@ -165,4 +180,4 @@ async def refresh_job_usage(
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
     await job_store.ledger.queue_job_ledger_refresh(job_id=job_id)
-    return await _usage_response(job_store, job)
+    return await _owner_usage(job_store, job)

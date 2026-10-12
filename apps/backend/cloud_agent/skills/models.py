@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cloud_agent.settings import integer_setting
+
 MAX_SKILL_BYTES = 64 * 1024
 MAX_SELECTION_BYTES = 128 * 1024
 MAX_SELECTED_SKILLS = 16
@@ -18,11 +20,36 @@ MAX_SKILL_DESCRIPTION_LENGTH = 1024
 class SkillLimits(BaseModel):
     """Advertise the server's selection and editor bounds to clients."""
 
-    max_selected: int = MAX_SELECTED_SKILLS
-    max_selection_bytes: int = MAX_SELECTION_BYTES
-    max_skill_bytes: int = MAX_SKILL_BYTES
+    max_selected: int = Field(default_factory=lambda: skill_max_selected())
+    max_selection_bytes: int = Field(default_factory=lambda: skill_max_selection_bytes())
+    max_skill_bytes: int = Field(default_factory=lambda: skill_max_bytes())
     max_name_length: int = MAX_SKILL_NAME_LENGTH
     max_description_length: int = MAX_SKILL_DESCRIPTION_LENGTH
+
+
+def skill_max_bytes() -> int:
+    """Read the active editor/import byte limit within the fixed schema cap."""
+    return integer_setting("skills.max_skill_bytes", MAX_SKILL_BYTES)
+
+
+def skill_max_selection_bytes() -> int:
+    """Read the combined instruction quota for one turn and account defaults."""
+    return integer_setting("skills.max_selection_bytes", MAX_SELECTION_BYTES)
+
+
+def skill_max_selected() -> int:
+    """Read how many skills one turn may select."""
+    return integer_setting("skills.max_selected", MAX_SELECTED_SKILLS)
+
+
+def skill_max_library() -> int:
+    """Read the quota for live entries in an owner's library."""
+    return integer_setting("skills.max_library", MAX_LIBRARY_SKILLS)
+
+
+def skill_size_label(size: int) -> str:
+    """Describe a configured instruction quota, including sub-kilobyte values."""
+    return f"{size / 1024:g} KB" if size >= 1024 else f"{size} bytes"
 
 
 class SkillError(ValueError):
@@ -48,8 +75,9 @@ class SkillContent(BaseModel):
         """Reject NUL and bound UTF-8 bytes, not just Python characters."""
         if "\x00" in value:
             raise ValueError("Skill text cannot contain NUL characters.")
-        if len(value.encode("utf-8")) > MAX_SKILL_BYTES:
-            raise ValueError("A skill must be no larger than 64 KB.")
+        max_bytes = skill_max_bytes()
+        if len(value.encode("utf-8")) > max_bytes:
+            raise ValueError(f"A skill must be no larger than {skill_size_label(max_bytes)}.")
         return value
 
 

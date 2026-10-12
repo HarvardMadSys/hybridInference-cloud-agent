@@ -117,8 +117,10 @@ SHARED_SANDBOX_HELPER_PINS = {
     # pin is the whole statement that an image's fork helper may be handed an
     # anchor; there is no separate shared-sandbox protocol number.
     FORK_HELPER: "2",
-    # The host's OpenCode/Kilo reply collector requires message-role metadata.
-    "http-agent-live-bridge": "2",
+    # 4 gates turns on live SSE, follows OpenCode/Kilo root Task children when
+    # auto-answering permissions, and fails closed on a stream or permission
+    # reply loss; 3 added questions, and 2 message metadata.
+    "http-agent-live-bridge": "4",
     # Bumped with the observer's own protocol: the image that carries a v2
     # observer publishes v2 here, and a host whose pin still said v1 refused to
     # attest at all rather than reporting a mismatch.

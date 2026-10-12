@@ -9,12 +9,9 @@ const mocks = vi.hoisted(() => ({
   restore: vi.fn(),
   reload: vi.fn(),
   reloadProjects: vi.fn(),
-  loadRepo: vi.fn(),
   replace: vi.fn(),
-  useAgentJobList: vi.fn(),
   useConversationList: vi.fn(),
   useAgentProjects: vi.fn(),
-  useProjectJobs: vi.fn(),
 }));
 
 vi.mock('next/navigation', () => ({
@@ -50,9 +47,7 @@ vi.mock('@/lib/api/agents', () => ({
 vi.mock('./useConversationList', () => ({ useConversationList: mocks.useConversationList }));
 
 vi.mock('./useAgentJobs', () => ({
-  useAgentJobList: mocks.useAgentJobList,
   useAgentProjects: mocks.useAgentProjects,
-  useProjectJobs: mocks.useProjectJobs,
 }));
 
 import { AgentsSidebar } from './AgentsSidebar';
@@ -100,12 +95,6 @@ beforeEach(() => {
     error: null,
     reload: mocks.reloadProjects,
   });
-  mocks.useProjectJobs.mockReturnValue({
-    jobsByRepo: new Map(),
-    loadingRepos: new Set(),
-    errorRepos: new Map(),
-    load: mocks.loadRepo,
-  });
 });
 
 afterEach(() => {
@@ -115,12 +104,6 @@ afterEach(() => {
 
 describe('agent task archiving', () => {
   it('archives a conversation from its sidebar row and leaves an active task', async () => {
-    mocks.useAgentJobList.mockReturnValue({
-      jobs: [job()],
-      loading: false,
-      error: null,
-      reload: mocks.reload,
-    });
     mocks.archive.mockResolvedValue({
       thread_id: 'thread-1',
       archived: true,
@@ -141,12 +124,6 @@ describe('agent task archiving', () => {
   });
 
   it('shows a locally hidden sidebar conversation again after it is unarchived elsewhere', async () => {
-    mocks.useAgentJobList.mockReturnValue({
-      jobs: [job()],
-      loading: false,
-      error: null,
-      reload: mocks.reload,
-    });
     mocks.archive.mockResolvedValue({
       thread_id: 'thread-1',
       archived: true,

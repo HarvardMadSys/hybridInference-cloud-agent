@@ -18,7 +18,6 @@ branch so the caller can open the PR against it.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -27,9 +26,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 from cloud_agent_shared.git.patch_gate import (
+    MAX_BLOB_BYTES,
+    MAX_CHANGED_BLOB_BYTES,
     PatchGateResult,
     branch_name_for,
+    scan_blob_secrets,
     validate_change_set,
     validate_patch,
 )
@@ -50,11 +53,11 @@ _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
 # name the software rather than one site. Read from the runner's environment,
 # which a patch cannot reach — the whole point of the dictionary below.
 def _identity_name() -> str:
-    return os.environ.get("AGENT_GIT_AUTHOR_NAME") or "HybridInference Agent"
+    return setting_env("AGENT_GIT_AUTHOR_NAME") or "HybridInference Agent"
 
 
 def _identity_email() -> str:
-    return os.environ.get("AGENT_GIT_AUTHOR_EMAIL") or "agent@localhost"
+    return setting_env("AGENT_GIT_AUTHOR_EMAIL") or "agent@localhost"
 
 
 # A patch must not be able to reach configuration that changes what git does.
@@ -63,15 +66,22 @@ _GIT_ENV = {
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": "/bin/true",
-    "GIT_COMMITTER_NAME": _identity_name(),
-    "GIT_COMMITTER_EMAIL": _identity_email(),
-    "GIT_AUTHOR_NAME": _identity_name(),
-    "GIT_AUTHOR_EMAIL": _identity_email(),
 }
 
 
 class PublishError(Exception):
     """Raised when publication fails; the message is safe to store as detail."""
+
+
+class TransientPublishError(PublishError):
+    """An external publication failure that is safe to retry durably.
+
+    The branch name is deterministic and the publisher reconciles an already
+    pushed matching commit before it writes again. Callers may therefore put
+    these failures back on the publication queue without duplicating remote
+    work. Gate, patch, and branch-divergence failures remain ``PublishError``
+    and require a person rather than a retry loop.
+    """
 
 
 @dataclass
@@ -84,32 +94,57 @@ class PublishResult:
     base_bundle: bytes | None = None
 
 
+def _git_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the hermetic environment for text commands and binary blob reads."""
+    return {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        **_GIT_ENV,
+        "GIT_COMMITTER_NAME": _identity_name(),
+        "GIT_COMMITTER_EMAIL": _identity_email(),
+        "GIT_AUTHOR_NAME": _identity_name(),
+        "GIT_AUTHOR_EMAIL": _identity_email(),
+        **(env_extra or {}),
+    }
+
+
 def _run_git(
     args: list[str],
     *,
     cwd: Path | None = None,
     env_extra: dict[str, str] | None = None,
+    remote: bool = False,
 ) -> str:
     """Run one git command hermetically and return stdout."""
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", **_GIT_ENV, **(env_extra or {})}
+    timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
     try:
         completed = subprocess.run(
             ["git", *args],
             cwd=str(cwd) if cwd else None,
-            env=env,
+            env=_git_env(env_extra),
             capture_output=True,
             text=True,
-            timeout=_GIT_TIMEOUT_S,
+            timeout=timeout_s,
             stdin=subprocess.DEVNULL,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise PublishError(f"git {args[0]} timed out after {_GIT_TIMEOUT_S:.0f}s") from exc
+        error = TransientPublishError if remote else PublishError
+        raise error(f"git {args[0]} timed out after {timeout_s:.0f}s") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         tail = detail[-1] if detail else "no output"
-        raise PublishError(f"git {args[0]} failed: {tail}")
+        error = TransientPublishError if remote else PublishError
+        raise error(f"git {args[0]} failed: {tail}")
     return completed.stdout
+
+
+@dataclass
+class _StagedBlob:
+    """A regular staged file and its same-path object from the base commit."""
+
+    path: str
+    sha: str
+    base_sha: str | None
 
 
 @dataclass
@@ -118,42 +153,93 @@ class _StagedChangeSet:
 
     paths: list[str]
     symlinks: list[str]
+    blobs: list[_StagedBlob]
 
 
 def _remote_branch_tip(repo: Path, branch: str) -> str | None:
     """Return the remote tip of ``branch``, or ``None`` when it does not exist."""
     raw = _run_git(
-        ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"], cwd=repo
+        ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"],
+        cwd=repo,
+        remote=True,
     ).strip()
     if not raw:
         return None
     return raw.split()[0]
 
 
-def _check_branch_unmoved(repo: Path, branch: str, base_sha: str) -> None:
-    """Refuse to publish onto a branch that has commits this run did not build on.
-
-    A turn's commit is built on its pinned ``base_sha`` — for a follow-up,
-    that is the previous turn's published commit, so the push fast-forwards.
-    If the remote tip is anything else, someone (a human, most likely) pushed
-    to the agent branch after the sandbox last saw it, and this patch was
-    generated against a tree that does not contain their work. Pushing would
-    fail anyway (the refspec never forces); the point of checking first is the
-    recorded reason: "failed to push some refs" reads like an infrastructure
-    fault, and this reads like what happened.
-    """
-    tip = _remote_branch_tip(repo, branch)
-    if tip is None:
-        return
-    if tip.lower().startswith(base_sha.lower()):
-        return
-    raise PublishError(
+def _branch_moved(branch: str, tip: str, base_sha: str) -> PublishError:
+    """The recorded reason when the agent branch is not this run's base."""
+    return PublishError(
         f"branch {branch} has moved: its tip is {tip[:12]} but this run built on "
         f"{base_sha[:12]}. Commits were pushed to the branch after this run started — "
         "the platform never force-pushes, so review them and either start a new "
         "follow-up (which builds on the branch's published state) or delete the "
         "branch to republish from scratch."
     )
+
+
+def _displaced_remote_tip(repo: Path, branch: str, base_sha: str) -> str | None:
+    """Return a remote tip that is not the base this patch was built on.
+
+    ``None`` when the branch is absent or still at ``base_sha``: the push
+    creates it or fast-forwards it. Another tip may be this publication's own
+    previous push, which the caller reuses instead of force-pushing.
+    """
+    tip = _remote_branch_tip(repo, branch)
+    if tip is None or tip.lower().startswith(base_sha.lower()):
+        return None
+    return tip
+
+
+def _reuse_pushed_commit(
+    repo: Path, *, branch: str, tip: str, base_sha: str, local_sha: str
+) -> str:
+    """Return ``tip`` when it is already this patch; otherwise the branch moved.
+
+    A retry builds a second commit for the same tree, because the timestamps
+    differ. The branch already points at the first object. Reusing it keeps
+    the push idempotent. Anything else on the branch is still a refusal.
+    """
+    if tip.lower() == local_sha.lower():
+        return local_sha
+    _run_git(
+        [
+            "fetch",
+            "--quiet",
+            "--depth",
+            "2",
+            "origin",
+            "--end-of-options",
+            f"refs/heads/{branch}",
+        ],
+        cwd=repo,
+        remote=True,
+    )
+    fetched = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo).strip()
+    if not fetched.lower().startswith(tip.lower()) and not tip.lower().startswith(fetched.lower()):
+        raise _branch_moved(branch, fetched, base_sha)
+    ancestry = _run_git(["rev-list", "--parents", "-n", "1", "FETCH_HEAD"], cwd=repo).split()
+    # Publisher commits have exactly one parent. A matching tree and first
+    # parent must never disguise a merge that also carries human ancestry.
+    if len(ancestry) != 2 or not ancestry[1].lower().startswith(base_sha.lower()):
+        raise _branch_moved(branch, tip, base_sha)
+    tip_tree = _run_git(["rev-parse", "FETCH_HEAD^{tree}"], cwd=repo).strip()
+    local_tree = _run_git(["rev-parse", f"{local_sha}^{{tree}}"], cwd=repo).strip()
+    if tip_tree.lower() != local_tree.lower():
+        raise _branch_moved(branch, tip, base_sha)
+    # Ordinary receive-pack is the final compare-and-set fence. It changes
+    # nothing while the branch still names ``fetched`` and fails transiently
+    # if somebody advanced it while we reconciled.
+    _run_git(
+        ["push", "--quiet", "origin", f"{fetched}:refs/heads/{branch}"],
+        cwd=repo,
+        remote=True,
+    )
+    # The retained bundle names HEAD, so the recorded commit has to be the one
+    # the branch actually points at, not the retry's duplicate object.
+    _run_git(["checkout", "--quiet", "--detach", fetched], cwd=repo)
+    return fetched
 
 
 def _staged_change_set(repo: Path) -> _StagedChangeSet:
@@ -163,9 +249,10 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
     quoting git applies in a *diff header* is exactly what a hostile patch used
     to hide a path from the pre-apply gate.
     """
-    raw = _run_git(["diff", "--cached", "--raw", "-z", "--no-renames"], cwd=repo)
+    raw = _run_git(["diff", "--cached", "--raw", "-z", "--no-renames", "--abbrev=64"], cwd=repo)
     paths: list[str] = []
     symlinks: list[str] = []
+    blobs: list[_StagedBlob] = []
     # `:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0`
     fields = raw.split("\0")
     index = 0
@@ -183,8 +270,72 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
             paths.append(path)
             if dst_mode == "120000":
                 symlinks.append(path)
+            if dst_mode in ("100644", "100755"):
+                blobs.append(
+                    _StagedBlob(
+                        path=path,
+                        sha=parts[3],
+                        base_sha=parts[2] if parts[0] in ("100644", "100755") else None,
+                    )
+                )
         index += 2
-    return _StagedChangeSet(paths=paths, symlinks=symlinks)
+    return _StagedChangeSet(paths=paths, symlinks=symlinks, blobs=blobs)
+
+
+def _blob_size(repo: Path, sha: str) -> int:
+    """Check an immutable object's size before capturing any of its contents."""
+    size = int(_run_git(["cat-file", "-s", sha], cwd=repo).strip())
+    if size > MAX_BLOB_BYTES:
+        raise PublishError(
+            f"patch rejected after apply: blob exceeds the {MAX_BLOB_BYTES} byte limit"
+        )
+    return size
+
+
+def _read_blob(repo: Path, sha: str, size: int) -> bytes:
+    """Read a size-checked object as bytes, without ever logging its contents."""
+    timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
+    try:
+        completed = subprocess.run(
+            ["git", "cat-file", "blob", sha],
+            cwd=str(repo),
+            env=_git_env(),
+            capture_output=True,
+            timeout=timeout_s,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PublishError(f"git cat-file timed out after {timeout_s:.0f}s") from exc
+    if completed.returncode or len(completed.stdout) != size:
+        raise PublishError("could not read publication blob")
+    return completed.stdout
+
+
+def _validate_staged_blobs(repo: Path, blobs: list[_StagedBlob]) -> None:
+    """Reject new credentials in staged text or binary files before committing."""
+    sizes = [_blob_size(repo, blob.sha) for blob in blobs]
+    if sum(sizes) > MAX_CHANGED_BLOB_BYTES:
+        raise PublishError(
+            f"patch rejected after apply: blobs exceed the {MAX_CHANGED_BLOB_BYTES} total byte limit"
+        )
+    for blob, size in zip(blobs, sizes, strict=True):
+        content = _read_blob(repo, blob.sha, size)
+        # Most files need no baseline read. A match requires checking the same
+        # path's original object; deletion has no new blob and is never scanned.
+        if not scan_blob_secrets(content):
+            continue
+        baseline = (
+            _read_blob(repo, blob.base_sha, _blob_size(repo, blob.base_sha))
+            if blob.base_sha
+            else b""
+        )
+        secrets = scan_blob_secrets(content, baseline)
+        if secrets:
+            raise PublishError(
+                "patch rejected after apply: credential-shaped content in "
+                f"{blob.path!r}: {', '.join(secrets)}"
+            )
 
 
 def publish_patch(
@@ -204,6 +355,8 @@ def publish_patch(
     caller minted — it never leaves this process and never enters the sandbox.
     ``allow_workflow_changes`` is the explicit human release for patches that
     touch ``.github/``; it defaults to False so the gate holds by default.
+    Actual staged files, including binary assets, are size-checked and scanned
+    for newly introduced credentials before committing or pushing.
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
     violation or git failure.
@@ -225,9 +378,10 @@ def publish_patch(
         # a patch cannot be applied onto some other branch's tree by accident.
         _run_git(["init", "--quiet", str(repo)])
         _run_git(["remote", "add", "origin", clone_url], cwd=repo)
-        # Before any expensive work: a branch someone pushed to gets a clear
-        # refusal naming their commits, not a late "failed to push some refs".
-        _check_branch_unmoved(repo, branch, base_sha)
+        # A tip other than this base may be our own previous push. It is reused
+        # after the local commit when the tree matches, and refused when it
+        # does not — never force-pushed.
+        displaced = _displaced_remote_tip(repo, branch, base_sha)
         # `--end-of-options` plus the shape check above: git parses a leading
         # `--` argument as an option even after the remote name, so an
         # owner-supplied base_sha of `--upload-pack=/bin/sh -c ...` would run a
@@ -236,6 +390,7 @@ def publish_patch(
         _run_git(
             ["fetch", "--quiet", "--depth", "1", "origin", "--end-of-options", base_sha],
             cwd=repo,
+            remote=True,
         )
         _run_git(["checkout", "--quiet", "-b", branch, "FETCH_HEAD"], cwd=repo)
 
@@ -243,10 +398,18 @@ def publish_patch(
         patch_file.write_text(patch, encoding="utf-8")
         # `--3way` recovers from minor context drift; `--whitespace=nowarn`
         # keeps whitespace-only noise from failing the apply.
-        _run_git(
-            ["apply", "--3way", "--whitespace=nowarn", str(patch_file)],
-            cwd=repo,
-        )
+        try:
+            _run_git(
+                ["apply", "--3way", "--whitespace=nowarn", str(patch_file)],
+                cwd=repo,
+            )
+        except PublishError as exc:
+            # The branch is not this base, and the patch does not apply onto
+            # it. That is the moved-branch refusal. A timeout is not: the
+            # caller retries those.
+            if displaced is not None and "timed out" not in str(exc).lower():
+                raise _branch_moved(branch, displaced, base_sha) from None
+            raise
 
         _run_git(["add", "--all"], cwd=repo)
         if not _run_git(["status", "--porcelain"], cwd=repo).strip():
@@ -262,9 +425,18 @@ def publish_patch(
         post = validate_change_set(staged.paths, staged.symlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
             raise PublishError(f"patch rejected after apply: {post.reason}")
+        _validate_staged_blobs(repo, staged.blobs)
         gate = post
         _run_git(["commit", "--quiet", "--no-verify", "-m", commit_message], cwd=repo)
         commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo).strip()
+        if displaced is not None:
+            commit_sha = _reuse_pushed_commit(
+                repo,
+                branch=branch,
+                tip=displaced,
+                base_sha=base_sha,
+                local_sha=commit_sha,
+            )
         base_bundle = (
             build_base_bundle(str(repo), commit=commit_sha, prerequisite=_head_parent(repo))
             if include_base_bundle
@@ -272,11 +444,14 @@ def publish_patch(
         )
 
         # Pinned refspec: this process can only ever write the one branch, and
-        # never force-updates it.
-        _run_git(
-            ["push", "--quiet", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
-            cwd=repo,
-        )
+        # never force-updates it. A retry whose commit is already the tip does
+        # not push again.
+        if displaced is None:
+            _run_git(
+                ["push", "--quiet", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
+                cwd=repo,
+                remote=True,
+            )
         logger.info(
             "agent_job_published",
             extra={
@@ -320,6 +495,7 @@ def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
         _run_git(
             ["fetch", "--quiet", "--depth", "2", "origin", "--end-of-options", commit_sha],
             cwd=repo,
+            remote=True,
         )
         _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo)
         try:

@@ -28,7 +28,7 @@ dependencies they asked for there. Three kinds arrive at this module:
   **Both were deleted on 2026-08-04.** A dependency that answers 503 in every
   real deployment is dead code that looks alive, and the only way to "fix" it
   from inside this repository is to reach back into the gateway's database.
-  Resolving a key to a user needs a gateway contract in ``contracts/`` and a
+  Resolving a key to a user needs a gateway contract in ``gateway_contracts/`` and a
   ``GatewayClient`` method; until one exists the session is the only owner
   credential. See MIGRATION.md's deferred register and its discarded-test row.
 
@@ -60,6 +60,7 @@ from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import (
     RETRY_INTERVAL_S,
     GitHubAppState,
@@ -73,6 +74,9 @@ if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import AuditRepository
     from cloud_agent.storage.assembly import Storage
+    from cloud_agent.workers.job_event_signal import JobEventSignal
+    from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
+    from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
     from cloud_agent.workers.work_signal import WorkSignal
 
 
@@ -145,6 +149,34 @@ def get_work_signal(request: Request) -> WorkSignal | None:
     return getattr(request.app.state, "work_signal", None)
 
 
+def get_job_event_signal(request: Request) -> JobEventSignal | None:
+    """Dependency to obtain the wake-ups owners' event streams wait on.
+
+    ``None`` where nothing listens for job events: the MCP relay, and a test
+    application that has not set one. Streams there read on a clock instead.
+    """
+    return getattr(request.app.state, "job_event_signal", None)
+
+
+def get_owner_change_signal(request: Request) -> OwnerChangeSignal | None:
+    """Dependency to obtain the per-owner change sets tabs' change streams read.
+
+    ``None`` where nothing listens for owner changes: the MCP relay, and a test
+    application that has not set one. Tabs there read on their own clocks.
+    """
+    return getattr(request.app.state, "owner_change_signal", None)
+
+
+def get_mcp_decision_signal(request: Request) -> McpDecisionSignal | None:
+    """The wake-ups for tool calls the MCP relay holds for their owner's decision.
+
+    ``None`` where nothing listens for decisions: the main listener, which holds
+    no calls, and a test application that has not set one. A held call there
+    reads its row on a clock instead.
+    """
+    return getattr(request.app.state, "mcp_decision_signal", None)
+
+
 def get_source_control(request: Request) -> SourceControlRuntime | None:
     """Dependency to obtain the process's source-control runtime.
 
@@ -171,7 +203,9 @@ def source_control_unavailable(provider: str) -> HTTPException:
                 "message": f"{name} is temporarily unavailable. Please try again shortly.",
             }
         },
-        headers={"Retry-After": str(int(RETRY_INTERVAL_S))},
+        headers={
+            "Retry-After": str(int(number_setting("github_reload_interval_s", RETRY_INTERVAL_S)))
+        },
     )
 
 
@@ -459,7 +493,7 @@ def get_client_ip(request: Request) -> str:
     the header unconditionally would let any caller write any address into the
     audit trail, which is worse than recording the proxy's address honestly.
     """
-    if (os.environ.get(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
+    if (setting_env(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
         forwarded = request.headers.get("x-forwarded-for") or ""
         first_hop = forwarded.split(",")[0].strip()
         if first_hop:

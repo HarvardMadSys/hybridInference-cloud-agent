@@ -2,11 +2,9 @@
 //
 // `next.config.js` is plain CommonJS loaded before any TypeScript exists, so
 // this test runs the real file in a subprocess instead of restating the rule.
-// A restatement is what `basePath.test.ts` has to do for normalization — it
-// cannot import a CommonJS module into the TS pipeline — and a copy keeps
-// passing after the file it copies has changed. The throw under test happens
-// while the module reads `process.env` at load time, so it cannot be caught in
-// this process either: a fresh `node` per case is the cheap way to see it.
+// A copy would keep passing after the file it copies has changed. The throw
+// under test happens while the module reads `process.env` at load time, so a
+// fresh `node` per case is the cheap way to see it.
 
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';

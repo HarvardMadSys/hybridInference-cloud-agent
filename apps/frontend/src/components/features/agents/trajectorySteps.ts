@@ -155,6 +155,10 @@ export interface TrajectoryStep {
   callId?: string;
   toolName?: string;
   parentKey?: string;
+  /** The tool that delegated this agent, separate from model-message ownership. */
+  delegationParentKey?: string;
+  /** Explicitly recorded activity from the agent this tool delegated. */
+  delegatedKeys?: string[];
   /** Tool steps: the argument value, only when an argument key was recorded. */
   payloadValue?: unknown;
   /** Tool steps: a recorded one-line argument preview, when that is all there is. */
@@ -354,7 +358,9 @@ function assistantKeyOf(event: StoredEvent, usageId: string): string {
     : `assistant:${jobIdOf(event)}:${event.attempt_id}:event:${event.id}`;
 }
 
-function toolKeyOf(event: StoredEvent, callId: string): string {
+// Adapted tool rows can address their diagnostic step without constructing the
+// rest of the trajectory. Native protocol rows supply their projected call id.
+export function toolStepKey(event: StoredEvent, callId = callIdOf(event)): string {
   const scope = `tool:${jobIdOf(event)}:${event.attempt_id}`;
   // A call with no recorded id has no identity to share, so the record's own
   // event id keeps it a step of its own instead of folding it into the call
@@ -394,10 +400,15 @@ function statusOfTool(
 ): StepStatus {
   if (result) {
     const payload = asRecord(result.payload);
+    if (payload.native_tool_status === 'cancelled') return 'cancelled';
     const exitCode = payload.exit_code;
     const failed = payload.is_error === true || (typeof exitCode === 'number' && exitCode !== 0);
     return failed ? 'failed' : 'completed';
   }
+  const nativeStatus = asRecord(call.payload).native_tool_status;
+  if (nativeStatus === 'completed') return 'completed';
+  if (nativeStatus === 'failed') return 'failed';
+  if (nativeStatus === 'cancelled') return 'cancelled';
   // No result record. Only an attempt that is still running can still produce one.
   if (context.isAttemptActive(jobIdOf(call), call.attempt_id)) return 'waiting';
   return 'not_recorded';
@@ -546,7 +557,7 @@ export function buildTrajectorySteps(
   const pushTool = (event: StoredEvent): TrajectoryStep => {
     const payload = asRecord(event.payload);
     const callId = asText(payload.id);
-    const key = toolKeyOf(event, callId);
+    const key = toolStepKey(event, callId);
     const hasInput = Object.prototype.hasOwnProperty.call(payload, 'input');
     const resultEvents = resultsByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
     const outputs = outputByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
@@ -556,6 +567,15 @@ export function buildTrajectorySteps(
     // computed: the step reports what it can, which is that the records exist.
     const repeatedCall = callId !== '' && (callCounts.get(`${scopeOf(event)}:${callId}`) ?? 0) > 1;
     const ambiguous = repeatedCall || resultEvents.length > 1;
+    const timing: StepTiming = ambiguous
+      ? { source: null, startedAt: event.created_at ?? null, finishedAt: null, durationMs: null }
+      : timingOf(event, resultEvents[0]);
+    if (payload.native_tool_completion_only === true) {
+      timing.source = null;
+      timing.startedAt = null;
+      timing.finishedAt = null;
+      timing.durationMs = null;
+    }
     const step: TrajectoryStep = {
       key,
       kind: 'tool',
@@ -575,21 +595,25 @@ export function buildTrajectorySteps(
           : asText(payload.name || payload.tool) || 'tool',
       detail: preview(hasInput ? payload.input : (payload.detail ?? payload.text)),
       at: event.created_at ?? null,
-      isError: resultEvents.some((item) => asRecord(item.payload).is_error === true),
+      isError:
+        payload.is_error === true ||
+        resultEvents.some((item) => asRecord(item.payload).is_error === true),
       status: ambiguous ? 'unknown' : statusOfTool(event, resultEvents[0], context),
       truncated:
         isTruncatedPayload(payload) ||
         resultEvents.some((item) => isTruncatedPayload(asRecord(item.payload))),
-      timing: ambiguous
-        ? { source: null, startedAt: event.created_at ?? null, finishedAt: null, durationMs: null }
-        : timingOf(event, resultEvents[0]),
+      timing,
       callId,
       toolName: asText(payload.name || payload.tool) || 'tool',
       ...(hasInput ? { payloadValue: payload.input } : {}),
       ...(!hasInput && payload.detail !== undefined
         ? { payloadPreview: preview(payload.detail, 200) }
         : {}),
-      ...(resultEvents.length ? { result: resultView(resultEvents) } : {}),
+      ...(resultEvents.length
+        ? { result: resultView(resultEvents) }
+        : payload.native_tool_status && payload.output !== undefined
+          ? { result: resultView([event]) }
+          : {}),
       ...(outputs.length
         ? { outputPreview: outputs.map((item) => asText(asRecord(item.payload).text)).join('') }
         : {}),
@@ -713,7 +737,7 @@ export function buildTrajectorySteps(
 
     if (event.event_type === 'tool_use') {
       const callId = asText(payload.id);
-      const key = toolKeyOf(event, callId);
+      const key = toolStepKey(event, callId);
       const existing = toolStepByKey.get(key);
       if (existing) {
         // The same call id twice in one attempt: keep both records on the step
@@ -740,7 +764,7 @@ export function buildTrajectorySteps(
 
     if (event.event_type === 'tool_result') {
       const callId = asText(payload.tool_use_id);
-      if (callId && toolStepByKey.has(toolKeyOf(event, callId))) continue; // joined to its call
+      if (callId && toolStepByKey.has(toolStepKey(event, callId))) continue; // joined to its call
       steps.push({
         key: `tool-result:${jobIdOf(event)}:${event.attempt_id}:${event.id}`,
         kind: 'tool',
@@ -839,6 +863,21 @@ export function buildTrajectorySteps(
   }
 
   for (const input of inputs.values()) pushUser(input.jobId, input.turnNo, input.text, input.at);
+  // Link only explicit runtime delegation owners after all calls are indexed,
+  // so backfilled parents and concurrent siblings keep their real identities.
+  for (const step of steps) {
+    const source = step.sourceEvents.find((event) => {
+      const parent = asRecord(event.payload).parent_tool_use_id;
+      return typeof parent === 'string' && parent.length > 0;
+    });
+    if (!source) continue;
+    const callId = asText(asRecord(source.payload).parent_tool_use_id);
+    const parent = toolStepByKey.get(toolStepKey(source, callId));
+    if (!parent || parent === step || parent.ambiguity || step.ambiguity) continue;
+    step.delegationParentKey = parent.key;
+    (parent.delegatedKeys ??= []).push(step.key);
+    if (step.kind === 'assistant') step.label = 'Subagent message';
+  }
   // A queued turn may have an input but no stored event yet.
   steps.sort((left, right) => left.turnNo - right.turnNo);
 
@@ -915,7 +954,14 @@ function usageOf(events: StoredEvent[]): AssistantUsage {
   const snapshots = events
     .filter((event) => asRecord(event.payload).usage_scope !== 'attempt')
     .sort((left, right) => right.seq - left.seq)
-    .map((event) => asRecord(asRecord(event.payload).usage));
+    .map((event) => {
+      const payload = asRecord(event.payload);
+      // pi reports a response's counters as a usage event whose payload is
+      // the usage itself; the other runtimes nest it under `usage`.
+      return event.event_type === 'usage' && payload.usage === undefined
+        ? payload
+        : asRecord(payload.usage);
+    });
   const latestCount = (keys: string[]): number | null =>
     snapshots.map((usage) => firstCount(usage, keys)).find((count) => count !== null) ?? null;
   return {

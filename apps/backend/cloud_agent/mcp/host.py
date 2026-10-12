@@ -52,7 +52,6 @@ from cloud_agent.mcp.models import (
 )
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.transports import (
-    DEFAULT_REQUEST_TIMEOUT,
     RemoteTransportConfig,
     TransportError,
     connect_legacy_sse,
@@ -633,7 +632,7 @@ class McpHost:
             secret=secret,
             headers={},
             protocol_version="",
-            request_timeout=connection.request_timeout_s or DEFAULT_REQUEST_TIMEOUT,
+            request_timeout=connection.request_timeout_s,
             allow_plain_http=self._policy.allow_plain_http,
         )
         try:
@@ -668,6 +667,16 @@ class McpHost:
         session.snapshot = snapshot
         return session, snapshot
 
+    def _tool_schema(self, session: Session, name: str) -> Mapping[str, Any] | None:
+        """The input schema discovered for one tool, when this session has it."""
+        snapshot = session.snapshot
+        if snapshot is None:
+            return None
+        for tool in snapshot.tools:
+            if tool.name == name and isinstance(tool.input_schema, Mapping):
+                return tool.input_schema
+        return None
+
     async def call_tool(
         self,
         session: Session,
@@ -676,6 +685,7 @@ class McpHost:
         arguments: Mapping[str, Any] | None = None,
         input_responses: Mapping[str, Any] | None = None,
         request_state: str | None = None,
+        input_schema: Mapping[str, Any] | None = None,
     ) -> ToolResult:
         """Call a tool without closing its transport during concurrent credential rotation."""
         async with session.using():
@@ -685,6 +695,7 @@ class McpHost:
                 arguments=arguments,
                 input_responses=input_responses,
                 request_state=request_state,
+                input_schema=input_schema,
             )
 
     async def _call_tool(
@@ -695,6 +706,7 @@ class McpHost:
         arguments: Mapping[str, Any] | None = None,
         input_responses: Mapping[str, Any] | None = None,
         request_state: str | None = None,
+        input_schema: Mapping[str, Any] | None = None,
     ) -> ToolResult:
         """Call one tool, answering a multi-round-trip request when asked.
 
@@ -713,7 +725,17 @@ class McpHost:
                     request_state=state,
                     base={"name": name, "arguments": dict(arguments or {})},
                 )
-            result = await session.transport.request(protocol.TOOLS_CALL, params)
+            schema = (
+                input_schema
+                if isinstance(input_schema, Mapping)
+                else self._tool_schema(session, name)
+            )
+            if schema is None:
+                result = await session.transport.request(protocol.TOOLS_CALL, params)
+            else:
+                result = await session.transport.request(
+                    protocol.TOOLS_CALL, params, input_schema=schema
+                )
             if not protocol.input_required(result):
                 return self.render_result(result)
             requests = protocol.input_requests(result)

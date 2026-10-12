@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint test test-db test-all check clean
+.PHONY: help setup-dev format lint typecheck test test-db test-all check ci ci-backend ci-database ci-frontend clean
 
 .DEFAULT_GOAL := help
 
@@ -6,6 +6,8 @@
 #   make lint UV_RUN="uv run --active"
 UV_RUN ?= uv run
 PYTHON_VERSION ?= 3.12
+# Match CI's execution mode; use PYTEST_WORKERS=0 for a serial debugging run.
+PYTEST_WORKERS ?= 4
 
 RESET := \033[0m
 BOLD := \033[1m
@@ -42,7 +44,7 @@ typecheck:  ## Type-check all three packages (mypy; config in pyproject.toml)
 
 test:  ## Run tests (exclude external and db-dependent)
 	@echo "$(YELLOW)Running tests (not external, not dbtest)...$(RESET)"
-	$(UV_RUN) pytest -q -m "not external and not dbtest"
+	$(UV_RUN) pytest -n $(PYTEST_WORKERS) --dist loadfile -q -m "not external and not dbtest"
 	@echo "$(GREEN)OK Tests passed$(RESET)"
 
 test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.md)
@@ -53,6 +55,18 @@ test-all:  ## Run all tests except external (includes db-dependent)
 
 check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
 
+ci:  ## Run all local CI tiers (check-only; needs uv, Python 3.12, Node 22, and Docker)
+	./scripts/ci-local.sh
+
+ci-backend:  ## Run local backend CI (lint, mypy, and non-external/non-db tests)
+	./scripts/ci-local.sh backend
+
+ci-database:  ## Run local database CI against disposable PostgreSQL 15
+	./scripts/ci-local.sh database
+
+ci-frontend:  ## Run local frontend CI (lint, format check, types, tests, and build guards)
+	./scripts/ci-local.sh frontend
+
 clean:  ## Remove caches and build artifacts
-	rm -rf .pytest_cache .ruff_cache .coverage htmlcov build dist *.egg-info
-	find . -type d -name __pycache__ -not -path "./.venv/*" -exec rm -rf {} +
+	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info
+	find . -type d \( -name .venv -o -name venv -o -name node_modules \) -prune -o -type d -name __pycache__ -exec rm -rf {} +

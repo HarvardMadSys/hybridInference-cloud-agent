@@ -24,8 +24,15 @@ import {
 } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 
+import {
+  PUSH_BATCH_MS,
+  PUSH_FALLBACK_POLL_MS,
+  receiveHint,
+  resetAgentPush,
+  setAgentPushLive,
+} from './agentPush';
 import { PendingMessageQueue } from './PendingMessageQueue';
-import { usePendingMessages } from './usePendingMessages';
+import { IDLE_QUEUE_POLL_MS, usePendingMessages } from './usePendingMessages';
 
 vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/pendingMessages')>()),
@@ -114,7 +121,10 @@ beforeEach(() => {
   ]);
   vi.mocked(getThreadQueue).mockImplementation(async () => structuredClone(server));
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  resetAgentPush();
+});
 
 describe('PendingMessageQueue', () => {
   it('lists waiting messages in send order under one header, and says why one was refused', async () => {
@@ -444,6 +454,80 @@ describe('PendingMessageQueue', () => {
 });
 
 describe('usePendingMessages', () => {
+  it('retains waiting messages after a failed read and clears the stale notice on retry', async () => {
+    let queue!: ReturnType<typeof usePendingMessages>;
+    render(
+      <Harness
+        onQueue={(value) => {
+          queue = value;
+        }}
+      />,
+    );
+    await screen.findByText('A: add a regression test');
+    vi.mocked(getThreadQueue).mockRejectedValueOnce(new Error('Offline'));
+    await act(async () => queue.refresh());
+    expect(screen.getByText('A: add a regression test')).toBeInTheDocument();
+    expect(
+      screen.getByText('Refresh failed — showing the last successful read.'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(queue.refreshError).toBeNull());
+    expect(
+      screen.queryByText('Refresh failed — showing the last successful read.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not poll a hidden tab and reads immediately when visible again', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    try {
+      const { result } = renderHook(() => usePendingMessages({ threadId: 'athr_1', active: true }));
+      await act(async () => {});
+      const reads = vi.mocked(getThreadQueue).mock.calls.length;
+      visibility.mockReturnValue('hidden');
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads);
+      expect(result.current.messages).toHaveLength(2);
+      visibility.mockReturnValue('visible');
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+    } finally {
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+  it.each([
+    [false, IDLE_QUEUE_POLL_MS],
+    [true, PUSH_FALLBACK_POLL_MS],
+  ])(
+    'retries an unread idle queue, then stops polling (push live: %s)',
+    async (pushLive, interval) => {
+      vi.useFakeTimers();
+      try {
+        queueWith([], { latest_job_state: 'succeeded' });
+        vi.mocked(getThreadQueue).mockRejectedValue(new Error('Temporary read failure'));
+        act(() => setAgentPushLive(pushLive));
+        const { result } = renderHook(() =>
+          usePendingMessages({ threadId: 'athr_1', active: false }),
+        );
+        await act(async () => {});
+        expect(result.current.loaded).toBe(false);
+        const reads = vi.mocked(getThreadQueue).mock.calls.length;
+
+        vi.mocked(getThreadQueue).mockResolvedValue(structuredClone(server));
+        await act(async () => vi.advanceTimersByTimeAsync(interval));
+        expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+        expect(result.current.loaded).toBe(true);
+        expect(result.current.messages).toEqual([]);
+
+        await act(async () => vi.advanceTimersByTimeAsync(interval * 2));
+        expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('reports a message the server sent, with the turn it follows', async () => {
     const onSent = vi.fn();
     const { result } = renderHook(() =>
@@ -533,5 +617,34 @@ describe('usePendingMessages', () => {
     });
 
     expect(result.current.messages.map((row) => row.id)).toContain('apmsg_new');
+  });
+});
+
+describe('the queue with the owner change stream', () => {
+  it('reads a pushed change to its queue at once and drops the two-second clock', async () => {
+    vi.useFakeTimers();
+    try {
+      act(() => setAgentPushLive(true));
+      renderHook(() => usePendingMessages({ threadId: 'athr_1', active: true }));
+      await act(async () => {});
+      const reads = vi.mocked(getThreadQueue).mock.calls.length;
+
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads);
+
+      await act(async () => {
+        receiveHint('queue', 'athr_1');
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+
+      await act(async () => {
+        receiveHint('queue', 'athr_other');
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -246,7 +246,7 @@ BUDGET_FRACTION = 0.01
 
 #: Slack over warmup + iterations in the run descriptor's operation budget, so
 #: a cohort can never quietly run out mid-run and degrade into the ``off``
-#: path. ``_verify_cohort_ran_selected`` fails loudly if it ever does.
+#: path. ``_verify_cohort_selected`` fails loudly if it ever does.
 RUN_BUDGET_SLACK = 1000
 RUN_LIFETIME = timedelta(minutes=30)
 

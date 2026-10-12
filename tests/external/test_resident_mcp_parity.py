@@ -40,6 +40,7 @@ from tests.support.claude_cli import sse
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.protocol import presented_name
+from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
@@ -399,8 +400,20 @@ for directory in (".kilo", ".kilocode"):
         for key in [*env, "HOME"]:
             command.extend(["--env", key])
         if runtime == "kilo":
+            # `debug config` boots a whole Kilo instance and can exit while its
+            # background snapshot work is taking Kilo's cross-process lock,
+            # leaving an empty lock directory that Kilo treats as held for
+            # 60 s. The next turn then trips the 10 s slow-snapshot question
+            # and waits out its 120 s timeout. No Kilo process is running here.
             resolved = subprocess.run(
-                [*command, container, "kilo-freeinference", "debug", "config"],
+                [
+                    *command,
+                    container,
+                    "sh",
+                    "-c",
+                    "kilo-freeinference debug config; status=$?; "
+                    'rm -rf -- "${XDG_STATE_HOME:?}/kilo/locks"; exit "$status"',
+                ],
                 env=child_env,
                 capture_output=True,
                 text=True,
@@ -541,11 +554,15 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     for name, value in {
         "AGENT_DATABASE_URL": f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}",
         "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+        "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
         "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
         "AGENT_MCP_ALLOW_PLAIN_HTTP": "1",
     }.items():
         monkeypatch.setenv(name, value)
+    # The main listener imports deployment settings before the relay starts.
+    # This test runs only the relay, so perform the same real seed first.
+    await initialize_settings(Storage(pool).settings)
     upstream = Gateway(tmp_path / "model.jsonl", tool_name=tool_name)
     upstream_port, model_port = upstream.start()
     relay_port = _free_port()
@@ -553,10 +570,14 @@ async def test_resident_mcp_call_followup_resume_and_fork(
 
     relay_app = create_mcp_app()
     request_connections = []
+    request_transports = []
 
     async def traced_relay(scope, receive, send):
         if scope["type"] == "http" and scope["method"] == "POST":
             request_connections.append(tuple(scope["client"]))
+            # Uvicorn binds receive to its request cycle. Retain the transport
+            # itself so a closed connection's Python id cannot be recycled.
+            request_transports.append(receive.__self__.transport)
         await relay_app(scope, receive, send)
 
     server = uvicorn.Server(
@@ -708,10 +729,17 @@ async def test_resident_mcp_call_followup_resume_and_fork(
         assert "upstream-secret-token" not in model_transcript
         if runtime == "kilo":
             # Kilo's Bun HTTP pool can race a relay's idle socket closure.
-            # Check actual TCP connections, not just the generated config:
+            # Check actual TCP transports, not just the generated config:
             # each protocol request must use a fresh connection, with no
             # application retry that could repeat a dispatched tool write.
-            assert len(request_connections) == len(set(request_connections)), request_connections
+            # A fresh connection may recycle an earlier client's source port;
+            # its peer tuple alone does not identify the underlying connection.
+            assert len(request_transports) == len(
+                {id(transport) for transport in request_transports}
+            ), [
+                (peer, id(transport))
+                for peer, transport in zip(request_connections, request_transports, strict=True)
+            ]
         # Also exercise the resource protocol with the same member's current
         # token, through the actual relay, protocol host, upstream and DB.
         async with httpx.AsyncClient(timeout=20) as resource_client:

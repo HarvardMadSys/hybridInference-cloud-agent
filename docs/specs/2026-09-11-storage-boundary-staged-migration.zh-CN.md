@@ -369,9 +369,9 @@ Postgres 收到的语句就不再是原来的语句（§7 已警告过这一点�
 
 | 测试 | 约束 |
 |---|---|
-| `tests/unit/test_storage_ports.py` | port 与 repository 签名/docstring 逐字一致；每个公开方法恰属一个 port；port 不 import storage；从调用点反扫覆盖 |
+| `tests/unit/test_storage_ports.py` | 每个公开方法恰属一个 port；port 不 import storage。签名兼容性由 mypy 在装配根的 Protocol 类型赋值处检查 |
 | `tests/unit/test_storage_ports_gate.py` | mypy 必须拒绝刻意错接的 fixture（含「十个方法齐全、一个关键字拼写不同」——`runtime_checkable` 会放行的那种） |
-| `tests/unit/test_storage_boundary.py` | 旧入口在生产与测试中都不存在；`storage/` 之外无越界 pool 访问；`Postgres*` 只在装配与 repositories 中出现；装配的属性与 port 一一对应 |
+| `tests/unit/test_storage_boundary.py` | `storage/` 之外无越界 pool 访问；`Postgres*` 只在装配与 repositories 中出现 |
 | `tests/unit/test_schema_baseline.py` | 原先只扫 `store.py`，现扫整个 `cloud_agent/storage/`——同样的断言，覆盖面更大 |
 
 ### 11.4 验收

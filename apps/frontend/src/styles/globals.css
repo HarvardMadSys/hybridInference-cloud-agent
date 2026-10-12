@@ -13,21 +13,221 @@
   scrollbar-width: thin;
 }
 
+/* xterm's stylesheet paints the viewport black and its theme paints only the
+   rows, so the part of the pane below the last whole row showed as a black
+   strip. The pane's own background matches both terminal themes. */
+.agent-xterm .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
 .dark .agent-xterm .xterm-viewport {
   scrollbar-color: #4b5563 transparent;
 }
 
 @layer base {
+  :root {
+    --ui-surface: 255 255 255;
+    --ui-surface-raised: 255 255 255;
+    --ui-surface-muted: 248 248 250;
+    --ui-surface-hover: 240 240 243;
+    --ui-foreground: 24 24 27;
+    --ui-muted: 107 107 116;
+    --ui-border: 228 228 231;
+    --ui-border-strong: 161 161 170;
+    --ui-accent: 165 28 48;
+    --ui-accent-hover: 139 23 41;
+    --ui-accent-subtle: 252 236 239;
+    --ui-accent-foreground: 255 255 255;
+    --ui-focus: 165 28 48;
+    --ui-status-success: 4 120 87;
+    --ui-status-error: 185 28 28;
+    --ui-status-warning: 146 64 14;
+    --ui-status-info: 29 78 216;
+    --ui-duration-fast: 160ms;
+    --ui-duration-enter: 240ms;
+    --ui-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .dark {
+    --ui-surface: 24 24 27;
+    --ui-surface-raised: 30 30 34;
+    --ui-surface-muted: 19 19 22;
+    --ui-surface-hover: 39 39 44;
+    --ui-foreground: 244 244 245;
+    --ui-muted: 161 161 170;
+    --ui-border: 48 48 54;
+    --ui-border-strong: 113 113 122;
+    --ui-accent: 241 139 155;
+    --ui-accent-hover: 245 172 183;
+    --ui-accent-subtle: 57 36 45;
+    --ui-accent-foreground: 17 24 39;
+    --ui-focus: 241 139 155;
+    --ui-status-success: 110 231 183;
+    --ui-status-error: 248 113 113;
+    --ui-status-warning: 252 211 77;
+    --ui-status-info: 147 197 253;
+  }
+
   html {
     @apply min-h-full;
   }
+
+  body {
+    text-rendering: optimizeLegibility;
+  }
+
+  :where(*):not(.xterm-viewport) {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--ui-border-strong) / 0.45) transparent;
+  }
+
+  ::selection {
+    background: rgb(var(--ui-accent) / 0.18);
+  }
+
+  /* A fallback for controls that have not yet adopted the shared UI classes. */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid rgb(var(--ui-focus));
+    outline-offset: 2px;
+  }
 }
 
-@layer utilities {
-  @keyframes fade-in-up {
+@layer components {
+  /* These classes provide shared interaction states; consumers choose layout. */
+  .ui-focus-ring:focus-visible,
+  .ui-button:focus-visible,
+  .ui-icon-button:focus-visible,
+  .ui-tab:focus-visible,
+  .ui-tool-row:focus-visible,
+  .ui-input:focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-focus;
+  }
+
+  .ui-button,
+  .ui-icon-button {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md text-sm font-medium transition-colors duration-150;
+    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-duration: var(--ui-duration-fast);
+    transition-timing-function: var(--ui-ease);
+  }
+
+  .ui-button:active:not(:disabled),
+  .ui-icon-button:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  .ui-button {
+    @apply min-h-8 px-2.5 py-1;
+  }
+
+  .ui-icon-button {
+    @apply min-h-8 min-w-8 p-1.5;
+  }
+
+  .ui-button:disabled,
+  .ui-icon-button:disabled,
+  .ui-tool-row:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  .ui-button-primary {
+    @apply bg-accent text-accent-foreground;
+  }
+
+  .ui-button-primary:hover:not(:disabled) {
+    @apply bg-accent-hover;
+  }
+
+  .ui-button-secondary {
+    @apply border border-border-strong bg-surface text-foreground;
+  }
+
+  .ui-button-ghost {
+    @apply text-muted;
+  }
+
+  .ui-button-secondary:hover:not(:disabled),
+  .ui-button-ghost:hover:not(:disabled) {
+    @apply bg-surface-hover text-foreground;
+  }
+
+  .ui-card {
+    @apply rounded-lg border border-border bg-surface-raised text-foreground shadow-subtle;
+  }
+
+  .ui-tab {
+    @apply min-h-8 border-b-2 border-transparent text-muted transition-colors duration-150;
+  }
+
+  .ui-tab:hover {
+    @apply bg-surface-hover text-foreground;
+  }
+
+  .ui-tab[aria-selected='true'] {
+    @apply border-accent text-foreground;
+  }
+
+  /* Tabs sit in a scrolling strip; keep their focus indicator inside it. */
+  .ui-tab:focus-visible {
+    @apply -outline-offset-2;
+  }
+
+  .ui-tool-row {
+    @apply flex items-center gap-1.5 rounded-md border border-border bg-surface-muted text-muted transition-colors duration-150;
+  }
+
+  .ui-tool-row:hover:not(:disabled) {
+    @apply border-border-strong bg-surface-hover text-foreground;
+  }
+
+  .ui-input {
+    @apply min-h-8 rounded-md border border-border-strong bg-surface px-2.5 py-1 text-sm text-foreground placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .ui-input:focus-visible {
+    @apply border-accent;
+  }
+
+  .ui-composer {
+    @apply relative rounded-xl border border-border bg-surface text-foreground;
+    box-shadow: 0 1px 2px rgb(var(--ui-foreground) / 0.05);
+    transition:
+      border-color var(--ui-duration-fast) ease,
+      box-shadow var(--ui-duration-fast) ease,
+      background-color var(--ui-duration-fast) ease;
+  }
+
+  .ui-composer:focus-within {
+    border-color: rgb(var(--ui-accent) / 0.4);
+    box-shadow: 0 0 0 2px rgb(var(--ui-accent) / 0.08);
+  }
+
+  /* Opacity-only entrances keep measured menus and resizable panes stable. */
+  .ui-enter {
+    animation: ui-fade-in var(--ui-duration-enter) ease-out;
+  }
+
+  .ui-popover {
+    animation: ui-fade-in var(--ui-duration-fast) ease-out;
+  }
+
+  .ui-welcome-enter {
+    animation: ui-welcome-in 360ms var(--ui-ease);
+  }
+
+  @keyframes ui-fade-in {
     from {
       opacity: 0;
-      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes ui-welcome-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
     }
     to {
       opacity: 1;
@@ -35,50 +235,101 @@
     }
   }
 
-  .animate-fade-in-up {
-    animation: fade-in-up 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  @media (pointer: coarse) {
+    .ui-button,
+    .ui-icon-button,
+    .ui-tab,
+    .ui-tool-row,
+    .ui-input {
+      min-height: 44px;
+    }
+
+    .ui-icon-button {
+      min-width: 44px;
+    }
   }
 
-  @keyframes float-slow {
-    0%,
-    100% {
-      transform: translateY(0);
+  /* Keep mobile Safari from zooming the viewport when a field is focused. */
+  @media (pointer: coarse) and (max-width: 767px) {
+    .ui-input {
+      font-size: 16px;
     }
-    50% {
-      transform: translateY(-18px);
-    }
-  }
-
-  .animate-float-slow {
-    animation: float-slow 14s ease-in-out infinite;
   }
 }
 
+/* Cover legacy utility animations as well as the shared interaction classes. */
 @media (prefers-reduced-motion: reduce) {
-  .animate-fade-in-up,
-  .animate-float-slow {
-    animation: none;
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ui-button:active:not(:disabled),
+  .ui-icon-button:active:not(:disabled) {
+    transform: none;
   }
 }
 
-.dark-scrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+/* The sidebar and resizable workspace change available width independently of
+   the viewport, so these controls follow their own container. */
+/* Admin pages sit on a flat muted ground. Cards supply the only surface. */
+.admin-canvas {
+  background-color: rgb(var(--ui-surface-muted));
 }
 
-.dark-scrollbar::-webkit-scrollbar {
-  width: 6px;
+.agent-conversation-header {
+  container: conversation-header / inline-size;
 }
 
-.dark-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
+@container conversation-header (min-width: 900px) {
+  .agent-conversation-toolbar {
+    flex-direction: row;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .agent-conversation-context {
+    flex: 0 1 20rem;
+  }
+
+  .agent-conversation-controls {
+    flex: 1 1 0%;
+  }
 }
 
-.dark-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 3px;
+@container conversation-header (max-width: 600px) {
+  .agent-conversation-controls > label > span {
+    display: none;
+  }
 }
 
-.dark-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+.agent-git-workspace {
+  container: git-workspace / inline-size;
+}
+.agent-git-file-list,
+.agent-git-selected-path {
+  display: none;
+}
+.agent-git-file-picker {
+  display: block;
+}
+@container git-workspace (min-width: 640px) {
+  .agent-git-diff {
+    display: grid;
+    grid-template-columns: minmax(12rem, 0.35fr) minmax(0, 1fr);
+  }
+  .agent-git-file-list {
+    display: block;
+    border-bottom: 0;
+    border-right: 1px solid rgb(var(--ui-border));
+  }
+  .agent-git-selected-path {
+    display: block;
+  }
+  .agent-git-file-picker {
+    display: none;
+  }
 }

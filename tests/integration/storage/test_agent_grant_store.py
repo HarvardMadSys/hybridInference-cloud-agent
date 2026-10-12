@@ -21,6 +21,7 @@ So these three properties are checked against Postgres:
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -149,6 +150,56 @@ async def test_a_live_attempts_grant_is_renewable(
     assert await grants.take_revocable_grants() == []
 
 
+async def test_attempt_grant_record_rechecks_expiry_after_waiting_on_the_row(
+    db, store: Storage, grants: PostgresGrantRepository
+) -> None:
+    """A statement-start timestamp cannot preserve authority through a lock wait."""
+    claim = await _claimed(store)
+    recording = None
+
+    async with db.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.execute(
+            "UPDATE agent_attempts "
+            "SET lease_expires_at = clock_timestamp() + INTERVAL '250 milliseconds' "
+            "WHERE id = $1",
+            claim["attempt_id"],
+        )
+        recording = asyncio.create_task(
+            grants.record_attempt_grant(
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                grant_id="agr-too-late",
+            )
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        if not waiting:
+            recording.cancel()
+            await asyncio.gather(recording, return_exceptions=True)
+            pytest.fail("attempt grant recording did not wait on the attempt row lock")
+        await asyncio.sleep(0.35)
+
+    assert recording is not None
+    assert not await asyncio.wait_for(recording, timeout=2)
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT grant_id FROM agent_attempts WHERE id = $1",
+                claim["attempt_id"],
+            )
+            is None
+        )
+
+
 async def test_a_renewable_row_carries_the_fence_that_can_end_it(
     store: Storage, grants: PostgresGrantRepository
 ) -> None:
@@ -243,6 +294,66 @@ async def test_recording_against_a_stale_fence_is_refused(
         grant_id="agr_1",
     )
     assert await grants.list_renewable_grants() == []
+
+
+async def test_a_disabled_hosts_grant_is_neither_renewed_nor_recorded(
+    store: Storage, grants: PostgresGrantRepository
+) -> None:
+    """The worker token names no host, so the fence has to ask about it.
+
+    Disabling the machine leaves its attempt ``running`` with a live lease —
+    only the reaper or a revocation ends those — yet nothing on that host may
+    keep a capability alive from that moment on.
+    """
+    claim = await _claimed(store)
+    assert await grants.record_attempt_grant(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        grant_id="agr_1",
+    )
+
+    assert await store.host_pool.set_host_status(host="grant-runner", status="disabled") == "ok"
+
+    assert await grants.list_renewable_grants() == []
+    assert not await grants.record_attempt_grant(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        grant_id="agr_2",
+    )
+
+
+async def test_a_stopped_turns_grant_is_not_renewed(
+    store: Storage, grants: PostgresGrantRepository
+) -> None:
+    """Stop interrupts the turn at its next heartbeat; renewal must not outlast it.
+
+    The turn keeps its lease so it can settle, and its grant stays recorded so
+    the revocation pass collects it when the turn ends. Only the renewal stops.
+    """
+    claim = await _claimed(store)
+    assert await grants.record_attempt_grant(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        grant_id="agr_1",
+    )
+
+    assert await store.attempt_commands.request_cancel(job_id=claim["id"]) == "running"
+
+    assert await grants.list_renewable_grants() == []
+    beat = await store.attempt_commands.heartbeat(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        lease_ttl_seconds=60,
+    )
+    assert beat["ok"] is True and beat["cancel_requested"] is True
+    assert await store.attempt_commands.transition(
+        job_id=claim["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="cancelled",
+    )
+    assert [row["grant_id"] for row in await grants.take_revocable_grants()] == ["agr_1"]
 
 
 async def test_an_admin_action_is_recorded(db, store: Storage) -> None:

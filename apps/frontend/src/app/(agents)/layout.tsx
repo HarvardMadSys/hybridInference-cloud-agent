@@ -5,29 +5,29 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
+import { useAgentChangeStream } from '@/components/features/agents/agentPush';
+import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
+import { AgentReadProvider } from '@/components/features/agents/AgentReadProvider';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
+import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
+import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
+import { WebsitePreferences } from '@/components/features/settings/WebsitePreferences';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 const NAV_ITEM =
-  'rounded-md px-2.5 py-1.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100';
+  'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md px-2 py-1 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
 const NAV_ITEM_CURRENT =
-  'rounded-md bg-crimson/[0.06] px-2.5 py-1.5 text-crimson ring-1 ring-inset ring-crimson/10 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25';
+  'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md bg-surface-hover px-2 py-1 text-foreground transition-colors [@media(pointer:coarse)]:min-h-11';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
 // routes; only the marketing chrome is replaced.
-function AgentsHeader({
-  sidebarCollapsed,
-  onToggleSidebar,
-}: {
-  sidebarCollapsed: boolean;
-  onToggleSidebar: () => void;
-}) {
+function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname() ?? '/';
   const { state, logout } = useAuth();
@@ -42,7 +42,7 @@ function AgentsHeader({
   // app, and an `/admin/*` page added later without a nav entry of its own
   // lights neither item instead of wrongly lighting `Agents`.
   const onAdmin = pathname.startsWith('/admin/');
-  const onTasks = !pathname.startsWith('/admin');
+  const onTasks = !pathname.startsWith('/admin') && pathname !== '/approvals';
 
   const handleLogout = async () => {
     await logout();
@@ -50,40 +50,33 @@ function AgentsHeader({
   };
 
   return (
-    <header className="flex shrink-0 items-center justify-between border-b border-gray-200/80 bg-white/95 px-5 py-2.5 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur dark:border-white/10 dark:bg-gray-900/95">
-      <div className="flex min-w-0 items-baseline gap-2">
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-          aria-expanded={!sidebarCollapsed}
-          aria-controls="agents-sidebar"
-          aria-keyshortcuts="Meta+B Control+B"
-          title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-          className="-ml-1.5 self-center rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
-        >
-          <svg
-            aria-hidden="true"
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={1.8}
-          >
-            <rect x="3.5" y="4" width="17" height="16" rx="2" />
-            <path d="M9.5 4v16" />
-          </svg>
-        </button>
+    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
+      <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+        {sidebarToggle}
         <Link
           href="/"
-          className="text-[17px] font-semibold tracking-[-0.02em] text-gray-950 transition-colors hover:text-crimson dark:text-gray-50 dark:hover:text-crimson-light"
+          className="ui-focus-ring flex min-w-0 items-center gap-1.5 rounded-md text-sm font-semibold tracking-tight text-foreground transition-colors hover:text-accent"
         >
-          {branding.appName}
+          <span
+            aria-hidden="true"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-subtle text-accent"
+          >
+            <svg
+              className="h-3.5 w-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.8}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="m5 7 5 5-5 5m8 0h6" />
+            </svg>
+          </span>
+          <span className="truncate">{branding.appName}</span>
         </Link>
         {branding.orgName && (
           <a
             href={branding.orgUrl}
-            className="font-serif text-[13px] tracking-[0.01em] text-gray-500 transition-colors hover:text-crimson dark:text-gray-400 dark:hover:text-crimson-light"
+            className="hidden border-l border-border pl-2.5 text-xs text-muted transition-colors hover:text-accent lg:inline"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -91,9 +84,12 @@ function AgentsHeader({
           </a>
         )}
       </div>
+      <div className="md:col-start-3 md:row-start-1">
+        <WebsitePreferences compact />
+      </div>
       <nav
         aria-label={t('nav.aria')}
-        className="flex items-center gap-0.5 text-[13px] font-medium text-gray-600 dark:text-gray-400"
+        className="col-span-2 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto text-xs font-medium md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-end"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the
@@ -126,6 +122,12 @@ function AgentsHeader({
         >
           {t('nav.agents')}
         </Link>
+        {hasAgentPermission(state.user?.agent_access, 'agent.use') && (
+          <McpApprovalsLink
+            current={pathname === '/approvals'}
+            className={pathname === '/approvals' ? NAV_ITEM_CURRENT : NAV_ITEM}
+          />
+        )}
         {/* This service's own operations page, so it is a route rather than a
             link back to the gateway. Admin-only, matching the endpoints it
             calls — the guard on the page is the one that counts; hiding the
@@ -152,12 +154,59 @@ function AgentsHeader({
   );
 }
 
+function SidebarToggleButton({
+  sidebarCollapsed,
+  onToggleSidebar,
+}: {
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+}) {
+  const t = useT();
+  return (
+    <button
+      id="agents-sidebar-toggle"
+      type="button"
+      onClick={onToggleSidebar}
+      aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
+      aria-expanded={!sidebarCollapsed}
+      aria-controls="agents-sidebar"
+      aria-keyshortcuts="Meta+B Control+B"
+      title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
+      className="ui-focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+    >
+      <svg
+        aria-hidden="true"
+        className="h-4 w-4"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={1.8}
+      >
+        <rect x="3.5" y="4" width="17" height="16" rx="2" />
+        <path d="M9.5 4v16" />
+      </svg>
+    </button>
+  );
+}
+
+/** The owner's change stream, held once per tab for every list and page in it. */
+function AgentChangeStream({ userId }: { userId: string | undefined }) {
+  useAgentChangeStream(userId);
+  return null;
+}
+
 function AgentsShell({
   children,
   sidebarCollapsed,
+  sidebarToggle,
+  mobileSidebarOpen,
+  onSidebarNavigate,
 }: {
   children: React.ReactNode;
   sidebarCollapsed: boolean;
+  sidebarToggle?: React.ReactNode;
+  mobileSidebarOpen: boolean;
+  onSidebarNavigate: () => void;
 }) {
   const { state } = useAuth();
   const { branding } = useSiteConfig();
@@ -187,20 +236,64 @@ function AgentsShell({
   // rather than by each of them. Keyed by account, so another one starts over.
   return (
     <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
-      <div className="flex min-h-0 flex-1">
-        <AgentsSidebar collapsed={sidebarCollapsed} />
-        <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">
-          {children}
-        </main>
-      </div>
+      <AgentReadProvider userId={state.user?.id}>
+        <AgentChangeStream userId={state.user?.id} />
+        <AgentNotifications />
+        <div className="flex min-h-0 flex-1">
+          <div
+            className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}
+            onClick={(event) => {
+              if (mobileSidebarOpen && (event.target as HTMLElement).closest('a[href]'))
+                onSidebarNavigate();
+            }}
+          >
+            <AgentsSidebar collapsed={sidebarCollapsed} headerAction={sidebarToggle} />
+          </div>
+          <main
+            id="agents-workspace"
+            hidden={mobileSidebarOpen}
+            tabIndex={-1}
+            className="min-w-0 flex-1 overflow-y-auto bg-surface outline-none"
+          >
+            {children}
+          </main>
+        </div>
+      </AgentReadProvider>
     </FirstRunProvider>
   );
 }
 
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
+  const { state } = useAuth();
+  const pathname = usePathname();
+  const t = useT();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobile, setMobile] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  const closeMobileSidebar = useCallback(() => {
+    setMobileSidebarOpen(false);
+    window.requestAnimationFrame(() => document.getElementById('agents-workspace')?.focus());
+  }, []);
 
   const toggleSidebar = useCallback(() => {
+    // A portaled modal stays visible when the workspace is hidden. Keep its
+    // focus cycle intact instead of moving focus to the task list behind it.
+    if (
+      [...document.querySelectorAll('[aria-modal="true"], dialog[open]')].some(
+        (dialog) => !dialog.closest('[hidden], [aria-hidden="true"]'),
+      )
+    ) {
+      return;
+    }
+    if (mobile) {
+      if (mobileSidebarOpen) {
+        closeMobileSidebar();
+        return;
+      }
+      setMobileSidebarOpen((current) => !current);
+      return;
+    }
     setSidebarCollapsed((current) => {
       const next = !current;
       try {
@@ -210,7 +303,41 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       }
       return next;
     });
+  }, [mobile, mobileSidebarOpen, closeMobileSidebar]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(max-width: 767px)');
+    const sync = () => {
+      const hadSidebarFocus = document
+        .getElementById('agents-sidebar')
+        ?.contains(document.activeElement);
+      setMobile(query.matches);
+      setMobileSidebarOpen(false);
+      if (hadSidebarFocus)
+        window.requestAnimationFrame(() => document.getElementById('agents-workspace')?.focus());
+    };
+    sync();
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
   }, []);
+
+  useEffect(() => setMobileSidebarOpen(false), [pathname]);
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    document
+      .getElementById('agents-sidebar')
+      ?.querySelector<HTMLElement>('a[href], button:not([disabled]), input:not([disabled])')
+      ?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      setMobileSidebarOpen(false);
+      document.getElementById('agents-sidebar-toggle')?.focus();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [mobileSidebarOpen]);
 
   // Read after mount so the server-rendered shell and the first client render
   // agree; the sidebar then folds away on the same frame as hydration.
@@ -246,11 +373,43 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
 
   return (
     <ProtectedRoute>
-      <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
-        <AgentsHeader sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
-        <AgentsShell sidebarCollapsed={sidebarCollapsed}>{children}</AgentsShell>
-        <DeploymentFooter />
-      </div>
+      <McpApprovalsProvider
+        ownerId={state.user?.id}
+        enabled={hasAgentPermission(state.user?.agent_access, 'agent.use')}
+      >
+        <div className="fixed inset-0 z-50 flex flex-col bg-surface-muted">
+          <a
+            href="#agents-workspace"
+            onClick={closeMobileSidebar}
+            className="ui-focus-ring sr-only z-[60] rounded-lg bg-surface px-4 py-3 font-medium text-accent shadow-card focus:not-sr-only focus:absolute focus:left-3 focus:top-3"
+          >
+            {t('nav.skipToWorkspace')}
+          </a>
+          <AgentsHeader
+            sidebarToggle={
+              mobile || sidebarCollapsed ? (
+                <SidebarToggleButton
+                  sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+                  onToggleSidebar={toggleSidebar}
+                />
+              ) : undefined
+            }
+          />
+          <AgentsShell
+            sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+            sidebarToggle={
+              !mobile && !sidebarCollapsed ? (
+                <SidebarToggleButton sidebarCollapsed={false} onToggleSidebar={toggleSidebar} />
+              ) : undefined
+            }
+            mobileSidebarOpen={mobileSidebarOpen}
+            onSidebarNavigate={closeMobileSidebar}
+          >
+            {children}
+          </AgentsShell>
+          <DeploymentFooter />
+        </div>
+      </McpApprovalsProvider>
     </ProtectedRoute>
   );
 }

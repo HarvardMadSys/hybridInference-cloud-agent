@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 
 import {
   createComputeServer,
@@ -22,6 +22,7 @@ import {
   type CredentialDraft,
 } from './ComputeCredentials';
 import {
+  buttonClass,
   ErrorNotice,
   Field,
   initialFields,
@@ -44,16 +45,75 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+function parseSandboxStoragePath(value: string): string {
+  const path = value.trim();
+  const invalid = (message: string): never => {
+    throw new ProviderFieldError('sandbox_storage_path', message);
+  };
+  if (!path) return invalid('Sandbox storage path is required.');
+  if (path.length > 4096) {
+    return invalid('Sandbox storage path must be 4096 characters or fewer.');
+  }
+  if (!/^\/[A-Za-z0-9/_-]*$/.test(path) || path.includes('//')) {
+    return invalid(
+      'Sandbox storage path must be an absolute path using letters, numbers, /, _ or - with no repeated separators.',
+    );
+  }
+  const normalized = path.replace(/\/$/, '') || '/';
+  const systemRoots = [
+    '/',
+    '/home',
+    '/media',
+    '/mnt',
+    '/opt',
+    '/root',
+    '/srv',
+    '/tmp',
+    '/var',
+    '/var/lib',
+  ];
+  const protectedTrees = [
+    '/bin',
+    '/boot',
+    '/dev',
+    '/etc',
+    '/lib',
+    '/lib64',
+    '/proc',
+    '/run',
+    '/sbin',
+    '/sys',
+    '/usr',
+    '/var/lib/docker',
+    '/var/lib/containerd',
+    '/var/lib/cloud-agent',
+    '/var/lib/hybridinference',
+  ];
+  if (
+    systemRoots.includes(normalized) ||
+    protectedTrees.some((root) => normalized === root || normalized.startsWith(`${root}/`))
+  ) {
+    return invalid(
+      'Sandbox storage path must point to a dedicated mounted data disk outside system and service directories.',
+    );
+  }
+  return normalized;
+}
+
 export default function AddComputeServer({
   catalog,
   connections,
   onOperation,
   onConnectionSaved,
+  onConfigureSetup,
+  configureSetupButtonRef,
 }: {
   catalog: ComputeCatalog;
   connections: ComputeConnection[];
   onOperation: (operation: ComputeOperation, submitted: boolean) => void;
   onConnectionSaved: (connection: ComputeConnection) => void;
+  onConfigureSetup?: () => void;
+  configureSetupButtonRef?: Ref<HTMLButtonElement>;
 }) {
   const form = useRef<HTMLFormElement>(null);
   const [newConnections, setNewConnections] = useState<ComputeConnection[]>([]);
@@ -67,11 +127,25 @@ export default function AddComputeServer({
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [mode, setMode] = useState<'attach' | 'provision'>(provider?.modes[0] ?? 'attach');
   const [name, setName] = useState('');
+  const [sandboxStoragePath, setSandboxStoragePath] = useState('');
+  const storageId = useId();
   const [account, setAccount] = useState(() => initialCredential(provider, connections));
   const sshProvider = catalog.providers.find((item) => item.id === 'existing_ssh');
+  const hostKeySourceField = provider?.fields.find((field) => field.key === 'host_key_source');
+  const supportsUncheckedCloudLabSsh =
+    provider?.id === 'cloudlab' &&
+    hostKeySourceField?.default === 'none' &&
+    hostKeySourceField.options?.some((option) => option.value === 'none') === true;
+  const deploymentSshProvider =
+    supportsUncheckedCloudLabSsh && sshProvider
+      ? { ...sshProvider, connection_fields: [] }
+      : sshProvider;
   const [ssh, setSsh] = useState(() => initialCredential(sshProvider, connections));
   const deploymentConfigured = catalog.deployment_profiles.length > 0;
   const [values, setValues] = useState(() => initialFields(provider?.fields ?? []));
+  const skipsCloudLabHostKeyCheck =
+    supportsUncheckedCloudLabSsh &&
+    (mode === 'attach' || values.host_key_source !== 'registration');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
@@ -148,10 +222,11 @@ export default function AddComputeServer({
     let submitted = false;
     try {
       if (!observeOnly && !deploymentConfigured) {
-        throw new Error('Server setup is not configured. Contact your administrator.');
+        throw new Error('Configure server setup before this server can run sandboxes.');
       }
       const configuration = parseFields(fields, values);
-      if (needsSshKey && !observeOnly && !sshProvider) {
+      const storagePath = observeOnly ? undefined : parseSandboxStoragePath(sandboxStoragePath);
+      if (needsSshKey && !observeOnly && !deploymentSshProvider) {
         throw new Error('SSH access is not configured.');
       }
       stage = 'account';
@@ -159,7 +234,7 @@ export default function AddComputeServer({
       let sshConnectionId: string | undefined;
       if (needsSshKey && !observeOnly) {
         stage = 'ssh';
-        sshConnectionId = await saveCredential(ssh, sshProvider!, setSsh);
+        sshConnectionId = await saveCredential(ssh, deploymentSshProvider!, setSsh);
       }
       const body: ServerRequest = {
         request_id: requestId,
@@ -169,6 +244,7 @@ export default function AddComputeServer({
         connection_id: connectionId,
         ...(sshConnectionId ? { ssh_connection_id: sshConnectionId } : {}),
         configuration,
+        ...(storagePath ? { sandbox_storage_path: storagePath } : {}),
       };
       stage = 'server';
       submitted = true;
@@ -325,9 +401,54 @@ export default function AddComputeServer({
             </div>
           </Section>
         )}
+        {!observeOnly && (
+          <Section title="Sandbox storage">
+            <div>
+              <Field label="Sandbox storage path">
+                <input
+                  className={inputClass}
+                  required
+                  maxLength={4096}
+                  value={sandboxStoragePath}
+                  placeholder="e.g. /mnt/data"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-invalid={Boolean(fieldErrors.sandbox_storage_path) || undefined}
+                  aria-describedby={[
+                    `${storageId}-help`,
+                    fieldErrors.sandbox_storage_path && `${storageId}-error`,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onChange={(event) => setSandboxStoragePath(event.target.value)}
+                />
+              </Field>
+              <p id={`${storageId}-help`} className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Absolute path to an existing mounted data disk on this server. Sandboxes,
+                workspaces, and session data are stored there.
+              </p>
+              {fieldErrors.sandbox_storage_path && (
+                <p
+                  id={`${storageId}-error`}
+                  role="alert"
+                  className="mt-1 text-xs text-red-700 dark:text-red-300"
+                >
+                  {fieldErrors.sandbox_storage_path}
+                </p>
+              )}
+            </div>
+          </Section>
+        )}
         {!observeOnly && provider && (!cloud || needsSshKey || accessFields.length > 0) && (
           <Section title="SSH access">
-            <div className={accessFields.length === 2 ? 'grid gap-4 sm:grid-cols-2' : 'space-y-4'}>
+            <div
+              className={
+                accessFields.length === 2 &&
+                accessFields.every((field) => field.type !== 'textarea' && field.type !== 'json')
+                  ? 'grid gap-4 sm:grid-cols-2'
+                  : 'space-y-4'
+              }
+            >
               <ProviderFields
                 fields={accessFields}
                 values={values}
@@ -335,12 +456,13 @@ export default function AddComputeServer({
                 errors={fieldErrors}
               />
             </div>
-            {needsSshKey && sshProvider ? (
+            {needsSshKey && deploymentSshProvider ? (
               <CredentialPicker
-                provider={sshProvider}
+                provider={deploymentSshProvider}
                 connections={availableConnections}
                 value={ssh}
                 onChange={setSsh}
+                suppressUnverified={supportsUncheckedCloudLabSsh}
                 serverName={name}
                 error={sshError}
               />
@@ -354,6 +476,11 @@ export default function AddComputeServer({
                 error={accountError}
               />
             ) : null}
+            {skipsCloudLabHostKeyCheck && (
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                CloudLab SSH host identity will not be verified.
+              </p>
+            )}
           </Section>
         )}
         {(advancedFields.length > 0 || canObserve) && (
@@ -385,7 +512,22 @@ export default function AddComputeServer({
           </details>
         )}
         {!deploymentConfigured && !observeOnly && (
-          <ErrorNotice error="Server setup is not configured. Contact your administrator." />
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200"
+          >
+            <p>No server setup is configured. Configure it before this server can run sandboxes.</p>
+            {onConfigureSetup && (
+              <button
+                ref={configureSetupButtonRef}
+                className={`${buttonClass} mt-3 bg-white dark:bg-gray-900`}
+                type="button"
+                onClick={onConfigureSetup}
+              >
+                Configure server setup
+              </button>
+            )}
+          </div>
         )}
         <div className="flex flex-wrap items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-white/10">
           <p className="text-xs text-gray-500 dark:text-gray-400">

@@ -179,6 +179,14 @@ export interface AgentRunnerHost {
    * host, not fail on it.
    */
   status: AgentHostStatus;
+  /** Opaque automated-drain owner or its released idempotency receipt. */
+  drain_fence_token?: string | null;
+  /** Host state immediately before the current automated owner acquired it. */
+  drain_fence_status_before?: 'online' | 'draining' | null;
+  /** True while the automated owner keeps this host draining. */
+  drain_fence_active?: boolean;
+  /** Required V2 CAS generation, rotated whenever drain-relevant host state changes. */
+  drain_fence_epoch: string;
   /**
    * True when the host redeemed an enrollment token, which is the difference
    * between a name that is a scheduling label and a name that is an identity.
@@ -246,10 +254,12 @@ export interface AgentRunnerHost {
    * with no admin value. Clearing an admin value returns the host to this.
    */
   settings_local?: HostSettingValues | null;
+  /** Archive-policy revision this host's broker confirmed applying. */
+  sandbox_archive_settings_applied_revision?: number | null;
 }
 
 /** Which unit a runtime setting's whole number counts. */
-export type HostSettingUnit = 'seconds' | 'MiB' | 'count';
+export type HostSettingUnit = 'seconds' | 'MiB' | 'KiB' | 'count' | 'millicores';
 
 /**
  * One runtime setting an admin may set, as the control plane defines it
@@ -341,12 +351,6 @@ export interface AgentHostCapacityHistory {
   /** Each point is one observation per minute, not a continuous average. */
   semantics: 'sampled_observation';
   points: AgentHostCapacityPoint[];
-}
-
-export interface HostEnrollToken {
-  enroll_token: string;
-  host: string;
-  expires_at: string;
 }
 
 export async function getAgentRunnerHosts(signal?: AbortSignal): Promise<AgentRunnerHostPool> {
@@ -527,9 +531,9 @@ export async function setAgentRunnerHostSettings(
  * Revoke this host's credential and take it out of the pool.
  *
  * `force` is refused-by-default for a reason worth repeating at the call site:
- * attempts still running on that host are **not** stopped — nothing on this
- * side can reach them — they are left to their leases, which expire and requeue
- * the work exactly once.
+ * attempts still running on that host are ended. Their leases expire at once,
+ * and the work is requeued exactly once, or a chat whose turn may already have
+ * run is marked lost.
  */
 export async function removeAgentRunnerHost(
   host: string,
@@ -546,28 +550,8 @@ export async function removeAgentRunnerHost(
   return jsonOrThrow<AgentRunnerHostPool>(resp);
 }
 
-/**
- * Mint a one-time token that lets one named machine join the pool.
- *
- * The token comes back **once**: only its hash is stored, so there is no call
- * that can show it again. Lose it and issue another.
- */
-export async function issueHostEnrollToken(
-  host: string,
-  ttlSeconds?: number,
-): Promise<HostEnrollToken> {
-  const body: { host: string; ttl_seconds?: number } = { host };
-  if (ttlSeconds !== undefined) body.ttl_seconds = ttlSeconds;
-  const resp = await fetchWithAuth(API_BASE, `${HOSTS}/enroll-token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return jsonOrThrow<HostEnrollToken>(resp);
-}
-
 /** What an Audit log entry is about; the page filters by it. */
-export type AdminAuditCategory = 'settings' | 'servers' | 'measurements' | 'content';
+export type AdminAuditCategory = 'settings' | 'servers' | 'measurements' | 'content' | 'database';
 
 /** One recorded admin action (`GET /admin/agent/audit-log`). */
 export interface AdminAuditLogEntry {

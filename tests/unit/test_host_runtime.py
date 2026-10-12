@@ -163,7 +163,7 @@ def test_a_finished_turn_gives_its_slot_back(pool) -> None:
 
 
 def test_a_shutting_down_host_claims_nothing_more(pool) -> None:
-    """Shutdown stops claiming first; the turn in flight is still waited for."""
+    """Shutdown stops claiming first and waits without signalling the turn."""
     turns, _scripted, _launched, _clock = pool
     turns.launch(_job())
     handle = turns.turns()[0].handle
@@ -174,7 +174,7 @@ def test_a_shutting_down_host_claims_nothing_more(pool) -> None:
 
     turns.shutdown(wait=wait)
 
-    assert handle.terminated and not handle.killed
+    assert not handle.terminated and not handle.killed
     assert turns.may_claim(10) is False
 
 
@@ -272,10 +272,28 @@ def test_shutdown_lets_every_turn_finish(pool) -> None:
 
     finished = turns.shutdown(wait=wait)
 
-    assert all(handle.terminated for handle in handles)
+    assert not any(handle.terminated for handle in handles)
     assert not any(handle.killed for handle in handles)
     assert len(finished) == 3
     assert turns.running() == 0
+
+
+def test_graceful_shutdown_never_signals_an_uncertain_handover(pool) -> None:
+    """Silence is not permission to kill a child that may already own the turn."""
+    turns, scripted, _launched, _clock = pool
+    handle = FakeHandle()
+    scripted.append(LaunchResult(LAUNCH_UNCERTAIN, handle, "no answer yet"))
+    turns.launch(_job())
+
+    def wait(_seconds: float) -> None:
+        assert not handle.terminated
+        assert not handle.killed
+        handle.exit_code = 0
+
+    finished = turns.shutdown(wait=wait)
+
+    assert [turn.exit_code for turn in finished] == [0]
+    assert not handle.terminated and not handle.killed
 
 
 def test_an_immediate_shutdown_kills(pool) -> None:
@@ -315,8 +333,8 @@ def test_an_answer_is_read_back_whole() -> None:
     assert read_handover(read_fd) == f"{HANDOVER_ACCEPTED} ajob_1"
 
 
-def test_a_closed_descriptor_with_no_answer_reads_as_nothing_happened() -> None:
-    """Which is what a child exiting does, and how "it never began" arrives."""
+def test_a_closed_descriptor_is_eof_not_acceptance() -> None:
+    """The parser reports EOF; its ownership caller must treat that as ambiguous."""
     read_fd, write_fd = os.pipe()
     os.close(write_fd)
 
@@ -374,24 +392,43 @@ def test_a_real_child_answers_before_it_does_anything_else(tmp_path: Path) -> No
     script.write_text(
         textwrap.dedent(
             f"""
-            import os, sys, time
+            import os, sys
             fd = int(sys.argv[1])
+            release_fd = int(sys.argv[2])
             os.write(fd, b"{HANDOVER_ACCEPTED} ajob_1\\n")
             os.close(fd)
-            time.sleep(0.5)
+            os.read(release_fd, 1)
+            os.close(release_fd)
             open({str(marker)!r}, "w").write("ran")
             """
         )
     )
     read_fd, write_fd = os.pipe()
-    process = subprocess.Popen([sys.executable, str(script), str(write_fd)], pass_fds=(write_fd,))
+    release_read_fd, release_write_fd = os.pipe()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(script), str(write_fd), str(release_read_fd)],
+            pass_fds=(write_fd, release_read_fd),
+        )
+    except BaseException:
+        for fd in (read_fd, write_fd, release_read_fd, release_write_fd):
+            os.close(fd)
+        raise
     os.close(write_fd)
+    os.close(release_read_fd)
     try:
         answer = read_handover(read_fd, timeout_s=30)
         assert answer == f"{HANDOVER_ACCEPTED} ajob_1"
         assert not marker.exists(), "the answer must come before anything observable"
     finally:
-        process.wait(timeout=30)
+        # EOF releases the child even when an assertion fails.
+        os.close(release_write_fd)
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+            raise
     assert marker.exists()
 
 

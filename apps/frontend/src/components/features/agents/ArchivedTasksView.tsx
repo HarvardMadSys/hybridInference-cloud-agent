@@ -143,7 +143,8 @@ export function ArchivedTasksView() {
   const filtered = Boolean(query || repo || state);
   const hasCurrentIndex = loadedFilters.current === filters;
   const filterPending = search.trim() !== query;
-  const controlsDisabled = Boolean(busy || pendingDelete || refreshing);
+  const filtersDisabled = Boolean(busy || pendingDelete);
+  const controlsDisabled = filtersDisabled || refreshing;
   const matchingProjects = projects.filter((project) => !repo || project.repo === repo);
   const displayedProjects = matchingProjects.slice(0, shownGroups);
   const showNextProjects = useCallback(() => {
@@ -336,18 +337,18 @@ export function ArchivedTasksView() {
 
   return (
     <section
-      className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-7 lg:px-10 lg:py-10"
+      className="mx-auto w-full max-w-5xl px-4 py-4 sm:px-5 lg:px-6"
       aria-labelledby="archive-page-title"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1
             id="archive-page-title"
-            className="text-2xl font-medium tracking-tight text-gray-900 dark:text-gray-100"
+            className="text-lg font-medium tracking-tight text-gray-900 dark:text-gray-100"
           >
             {t('archive.title')}
           </h1>
-          <p className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+          <p className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
             {t('archive.subtitle')}
           </p>
         </div>
@@ -430,7 +431,7 @@ export function ArchivedTasksView() {
           <input
             type="search"
             value={search}
-            disabled={controlsDisabled}
+            disabled={filtersDisabled}
             onChange={(event) => setSearch(event.target.value)}
             placeholder={t('archive.search')}
             className="min-w-0 flex-1 bg-transparent py-2.5 text-xs text-gray-900 outline-none placeholder:text-gray-400 disabled:opacity-50 dark:text-gray-100 dark:placeholder:text-gray-500"
@@ -441,7 +442,7 @@ export function ArchivedTasksView() {
           <span className="sr-only">{t('archive.statusFilter')}</span>
           <select
             value={state}
-            disabled={controlsDisabled}
+            disabled={filtersDisabled}
             onChange={(event) => setState(event.target.value as ConversationState | '')}
             className="w-full min-w-0 cursor-pointer appearance-none bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
           >
@@ -462,7 +463,7 @@ export function ArchivedTasksView() {
           <span className="sr-only">{t('archive.projectFilter')}</span>
           <select
             value={repo}
-            disabled={controlsDisabled}
+            disabled={filtersDisabled}
             onChange={(event) => setRepo(event.target.value)}
             className="w-full min-w-0 cursor-pointer appearance-none truncate bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
           >

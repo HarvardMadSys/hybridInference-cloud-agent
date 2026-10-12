@@ -35,13 +35,6 @@ describe('ComposerPlusMenu', () => {
     );
   });
 
-  it('reads as an invitation when nothing is set', () => {
-    renderMenu();
-    expect(within(open()).getByRole('menuitem', { name: /Goal/ })).toHaveTextContent(
-      'Set or view the goal for a long-running task',
-    );
-  });
-
   it('hands the goal row to the caller rather than opening anything itself', () => {
     const onOpenGoal = vi.fn();
     renderMenu({ onOpenGoal });
@@ -66,6 +59,7 @@ describe('ComposerPlusMenu', () => {
     const menu = within(open());
     expect(menu.queryByRole('menuitem', { name: /Upload files/ })).not.toBeInTheDocument();
     expect(menu.queryByRole('menuitem', { name: /MCP servers/ })).not.toBeInTheDocument();
+    expect(menu.queryByRole('menuitem', { name: /Plugins/ })).not.toBeInTheDocument();
     expect(menu.getByRole('menuitem', { name: /Skills/ })).toBeInTheDocument();
     expect(menu.getByRole('menuitem', { name: /Goal/ })).toBeInTheDocument();
   });
@@ -75,6 +69,17 @@ describe('ComposerPlusMenu', () => {
     renderMenu({ onOpenSkills });
     fireEvent.click(within(open()).getByRole('menuitem', { name: /Skills/ }));
     expect(onOpenSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers plugins only when the caller provides a plugin action', () => {
+    const onOpenPlugins = vi.fn();
+    renderMenu({ onOpenPlugins, pluginSummary: '2' });
+    const item = within(open()).getByRole('menuitem', { name: /Plugins/ });
+    expect(item).toHaveTextContent('2');
+    fireEvent.click(item);
+    expect(onOpenPlugins).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
   });
 
   it('navigates the grouped rows without stopping on headings', () => {

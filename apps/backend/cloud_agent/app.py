@@ -29,22 +29,47 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
+from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 
 logger = get_logger(__name__)
 
 
+def install_repository_access_errors(app: FastAPI) -> None:
+    """Return a retryable, bounded error when repository permissions are unknown."""
+
+    async def unavailable(request: Request, exc: Exception) -> Response:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": {
+                        "type": "repo_access_unavailable",
+                        "message": "Repository access is temporarily unavailable. Please try again.",
+                    }
+                }
+            },
+            headers={"Cache-Control": "no-store", "Retry-After": "30"},
+        )
+
+    app.add_exception_handler(RepoAccessUnavailable, unavailable)
+
+
 #: The admin observation reads. Their bodies are time-varying and describe
 #: other users' runs, so no intermediary may store one.
 ADMIN_READ_PREFIXES = (
+    "/admin/agent/database",
+    "/admin/agent/database-tools",
+    "/admin/agent/pgadmin",
     "/admin/agent/audit-log",
     "/admin/agent/runs",
     "/admin/agent/steps",
     "/admin/agent/measurements",
     "/admin/agent/measurement-writer",
     "/admin/agent/profiling-runs",
+    "/admin/agent/settings",
 )
 
 
@@ -64,7 +89,25 @@ def install_admin_no_store(
     async def with_no_store(request: Request, exc: Exception) -> Response:
         response: Response
         if isinstance(exc, RequestValidationError):
-            response = await request_validation_exception_handler(request, exc)
+            path = request.url.path.rstrip("/")
+            if path in {
+                "/admin/agent/settings",
+                "/admin/agent/database-tools/setup",
+            } or path.startswith("/admin/agent/database/"):
+                # Validation errors normally echo invalid input. Settings,
+                # pgAdmin setup and query filters can contain credentials,
+                # even when the request body is malformed.
+                response = JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": [
+                            {"loc": error["loc"], "msg": error["msg"], "type": error["type"]}
+                            for error in exc.errors()
+                        ]
+                    },
+                )
+            else:
+                response = await request_validation_exception_handler(request, exc)
         else:
             response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
         if any(
@@ -106,22 +149,29 @@ def create_app() -> FastAPI:
         admin_audit,
         admin_compute,
         admin_conversations,
+        admin_database,
+        admin_database_browser,
         admin_hosts,
         admin_llm_requests,
         admin_measurements,
         admin_profiling_control,
         admin_runs,
+        admin_sandboxes,
+        admin_settings,
         admin_steps,
         admin_usage,
+        compute_registration,
         host_profiling,
         hosts,
         mcp_connections,
         routes,
         service_jobs,
         session,
+        site_config,
         skills,
         uploads,
         usage,
+        user_memory,
     )
 
     app = FastAPI(
@@ -138,6 +188,8 @@ def create_app() -> FastAPI:
     # public edge, so a sandbox's ``mcp`` token carried out and replayed there
     # must find no tool route at all, not one that merely refuses it.
     app.include_router(skills.router)
+    app.include_router(user_memory.router)
+    app.include_router(user_memory.project_router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(hosts.router)
@@ -147,8 +199,16 @@ def create_app() -> FastAPI:
     app.include_router(host_profiling.router)
     app.include_router(admin_hosts.router)
     app.include_router(admin_compute.router)
+    # A new compute node reports its SSH host keys here with a one-time token,
+    # before the control plane connects to it. Public by necessity: the node
+    # has no other credential yet.
+    app.include_router(compute_registration.router)
     app.include_router(admin_conversations.router)
+    app.include_router(admin_database.router)
+    app.include_router(admin_database_browser.router)
     app.include_router(admin_runs.router)
+    app.include_router(admin_sandboxes.router)
+    app.include_router(admin_settings.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)
     # Start/Stop for the same feature, in its own module so the write path's
@@ -165,7 +225,11 @@ def create_app() -> FastAPI:
     # Read-only, and its own module: the audit trail is written by every admin
     # handler and read by this one page.
     app.include_router(admin_audit.router)
-    install_admin_no_store(app)
+    install_admin_no_store(
+        app,
+        prefixes=(*ADMIN_READ_PREFIXES, "/v1/agent/user-memory", "/v1/agent/project-memory"),
+    )
+    install_repository_access_errors(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a
     # service holding a dispatch token, not a browser holding a session.
@@ -174,6 +238,7 @@ def create_app() -> FastAPI:
     # ``routes.py`` because it authenticates nothing on entry — it is the route
     # that *creates* the credential every other route requires.
     app.include_router(session.router)
+    app.include_router(site_config.router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

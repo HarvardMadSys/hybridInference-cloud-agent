@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from cloud_agent.domain.execution import JobStreamState
 
 
 class ConversationQueries(Protocol):
@@ -28,22 +31,32 @@ class ConversationQueries(Protocol):
         """Fetch one job by id."""
         ...
 
-    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The newest finished turn of this conversation, or ``None``.
+    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+        """Read only an owned job's state and publication URL for its event stream.
 
-        The parent an owner-initiated automatic round hangs from. It is not
-        always the newest turn: a queued round can be cancelled, and a
-        conversation resumed afterwards continues the same linear chain from the
-        last turn that actually happened.
+        Stream admission checks the full job's ownership and visibility first.
+        Subsequent reads stay scoped to that owner without loading the prompt,
+        conversation configuration, or shared sandbox on each event wake-up.
+        """
+        ...
+
+    async def owner_changes(
+        self, *, user_id: str, job_ids: list[str], thread_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The current values an owner's tabs show for these jobs and threads.
+
+        ``jobs`` and ``threads``, each row with its ``revision``. Only rows the
+        owner holds are returned; an id that is missing was removed or is not
+        theirs, and the caller reports it as gone.
         """
         ...
 
     async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest turn of this conversation, whatever state it is in.
 
-        Deliberately not :meth:`latest_terminal_turn`: the decision has to be
-        able to see a turn that is still running, because "a person's turn is in
-        flight" is the reason to wait rather than the reason to schedule.
+        Deliberately not only finished turns: the decision has to be able to see
+        a turn that is still running, because "a person's turn is in flight" is
+        the reason to wait rather than the reason to schedule.
         """
         ...
 
@@ -67,11 +80,6 @@ class ConversationQueries(Protocol):
         clipped one is a message whose answer may have been removed, and reading
         it as silence is exactly the failure the completeness rule exists to
         prevent.
-        """
-        ...
-
-    async def latest_assistant_message(self, *, job_id: str) -> str | None:
-        """The last thing this turn said, or ``None`` if it said nothing.
 
         Ordered by insert, not by time: every assistant message mirrors exactly
         one ``message`` event, and the insert order *is* the order the runtime

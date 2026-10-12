@@ -30,13 +30,17 @@ from cloud_agent.ports.operation_measurements import (
     OperationMeasurements,
 )
 from cloud_agent.ports.pending_messages import PendingMessageRepository
+from cloud_agent.ports.pr_archive import PrArchiveRepository
 from cloud_agent.ports.profiling_control import ProfilingControl
 from cloud_agent.ports.residency import ResidencyRepository
 from cloud_agent.ports.sandbox import SandboxRepository
 from cloud_agent.ports.session_fork import SessionForkRepository
+from cloud_agent.ports.settings import SettingsRepository
 from cloud_agent.ports.skills import SkillRepository
 from cloud_agent.ports.snapshot import SnapshotRepository
 from cloud_agent.ports.source_control import SourceControlRepository
+from cloud_agent.ports.user_memory import UserMemoryRepository
+from cloud_agent.ports.web_search import WebSearchAdmission, WebSearchRepository
 
 __all__ = [
     "AttachmentRepository",
@@ -59,11 +63,16 @@ __all__ = [
     "MeasurementWriteResult",
     "OperationMeasurements",
     "PendingMessageRepository",
+    "PrArchiveRepository",
     "ProfilingControl",
     "ResidencyRepository",
     "SandboxRepository",
     "SessionForkRepository",
+    "SettingsRepository",
     "SkillRepository",
     "SnapshotRepository",
     "SourceControlRepository",
+    "UserMemoryRepository",
+    "WebSearchAdmission",
+    "WebSearchRepository",
 ]

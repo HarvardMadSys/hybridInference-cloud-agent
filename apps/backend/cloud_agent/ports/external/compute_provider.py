@@ -6,7 +6,13 @@ from abc import ABC, abstractmethod
 from datetime import datetime  # noqa: TC003 - Pydantic resolves this annotation at runtime
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+# One OpenSSH public key: algorithm and base64 body, without a comment.
+HOST_KEY_PATTERN = r"^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/]+={0,2}$"
+
+# An old-model-valid, fail-closed reference used only for explicit CloudLab SSH.
+UNCHECKED_CLOUDLAB_HOST_KEY_REF = "cloudlab:unchecked-host-key-v1"
 
 
 class ComputeValue(BaseModel):
@@ -22,6 +28,10 @@ class SecretResolver(Protocol):
         """Return the secret for an authorized reference without logging it."""
         ...
 
+    async def bundle(self, ref: str) -> bytes:
+        """Return a trusted Admin-registered release bundle."""
+        ...
+
 
 class ProviderCapabilities(ComputeValue):
     """Declare supported acquisition and lifecycle actions."""
@@ -31,11 +41,24 @@ class ProviderCapabilities(ComputeValue):
     can_release: bool = False
 
 
+class NodeRegistration(ComputeValue):
+    """Where a new node registers its SSH host keys, and its one-time token.
+
+    Delivered to the node through the provider's own channel when it is
+    created. It is never part of the persisted configuration: only the
+    control plane's hash of the token is stored.
+    """
+
+    url: str = Field(min_length=1, max_length=2048, pattern=r"^https://[^\s'\"]+$")
+    token: SecretStr
+
+
 class AcquireRequest(ComputeValue):
     """An explicit attach or provision intent and validated vendor parameters."""
 
     mode: Literal["attach", "provision"]
     config: dict[str, Any]
+    registration: NodeRegistration | None = None
 
 
 class OperationIntent(ComputeValue):
@@ -57,13 +80,27 @@ class ResourceRef(ComputeValue):
 
 
 class SshConnection(ComputeValue):
-    """Verified SSH destination with references rather than credential values."""
+    """SSH destination with references rather than credential values.
+
+    Host trust comes from an administrator-verified known_hosts reference, or
+    from ``host_key``: one public key the node registered with a one-time
+    token at its first boot. CloudLab may explicitly disable this identity
+    check with a reserved known-hosts reference; all other connections remain
+    strict by default. The marker uses an existing field so persisted
+    observations remain readable by the immediately previous release.
+    """
 
     address: str = Field(min_length=1, max_length=253, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9.:-]*$")
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
     credential_ref: str = Field(min_length=1)
-    known_hosts_ref: str = Field(min_length=1)
+    known_hosts_ref: str | None = Field(default=None, min_length=1)
+    host_key: str | None = Field(default=None, max_length=8192, pattern=HOST_KEY_PATTERN)
+
+    @property
+    def verify_host_key(self) -> bool:
+        """Keep strict checking unless the exact CloudLab marker is present."""
+        return self.host_key is not None or self.known_hosts_ref != UNCHECKED_CLOUDLAB_HOST_KEY_REF
 
 
 class NodeObservation(ComputeValue):

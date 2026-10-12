@@ -27,6 +27,7 @@ from cloud_agent_host.host_runtime import (
     LaunchResult,
 )
 from cloud_agent_host.sandbox import ProcessBackend
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 from cloud_agent_shared.shared_protocol import HOST_SETTINGS_CAPABILITY
 
 if TYPE_CHECKING:
@@ -40,6 +41,12 @@ class FakeHandle:
         self.killed = False
 
     def poll(self) -> int | None:
+        # Service tests need a finite turn after the parent begins its drain,
+        # just as real one-turn children eventually exit on their own. This is
+        # deliberately not implemented through terminate(): graceful
+        # deployment must not signal a child whose ownership is ambiguous.
+        if self.exit_code is None and runner_mod._STOPPING.is_set():
+            self.exit_code = 0
         return self.exit_code
 
     def terminate(self) -> None:
@@ -83,9 +90,20 @@ class FakeHeartbeat:
     def start(self) -> None:
         self.started = True
         # A real host beats at once, and that first answer carries the runtime
-        # settings; a fake that never answered would hold every claim back.
-        if FakeHeartbeat.answers_on_start and self.kwargs.get("on_settings") is not None:
-            self.kwargs["on_settings"](dict(self.identity.settings))
+        # settings and archive policy; a fake that never answered holds every
+        # claim back because the archive boundary has no environment fallback.
+        if FakeHeartbeat.answers_on_start:
+            if self.kwargs.get("on_settings") is not None:
+                self.kwargs["on_settings"](dict(self.identity.settings))
+            if self.kwargs.get("on_sandbox_archive_settings") is not None:
+                settings = self.identity.sandbox_archive_settings
+                self.kwargs["on_sandbox_archive_settings"](
+                    None if settings is None else dict(settings)
+                )
+            # These callbacks model the first answer itself. A wake raised
+            # while applying that same answer cannot make it arrive sooner;
+            # keep later assertions scoped to post-start state changes.
+            self.wakes = 0
 
     def stop(self) -> None:
         self.stopped = True
@@ -98,15 +116,34 @@ def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")
 
 
+class _SettingsBroker:
+    """Acknowledge the two DB-owned settings contracts used by this suite."""
+
+    def apply_host_settings(self, settings: dict[str, int]) -> dict[str, object]:
+        return {"applied": dict(settings), "local": {}}
+
+    def apply_sandbox_archive_settings(self, settings: dict[str, Any]) -> dict[str, int]:
+        return {"applied_revision": int(settings["revision"])}
+
+    def close(self) -> None:
+        return None
+
+
 @pytest.fixture
 def service(monkeypatch):
     """``run_forever`` with its enrollment, heartbeat and attestation stubbed."""
     runner_mod._STOPPING.clear()
     monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "sha")
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
-    identity = HostIdentity(host="host-a", credential="host-cred", status="online")
+    identity = HostIdentity(
+        host="host-a",
+        credential="host-cred",
+        status="online",
+        sandbox_archive_settings=SandboxArchivePolicy().as_dict(),
+    )
     monkeypatch.setattr(runner_mod, "ensure_enrolled", lambda **_kw: identity)
     monkeypatch.setattr(runner_mod, "HostHeartbeat", FakeHeartbeat)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", _SettingsBroker)
     monkeypatch.setattr(runner_mod, "_start_host_capacity_collector", lambda _b: None)
     monkeypatch.setattr(
         runner_mod,
@@ -335,6 +372,148 @@ def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
         {"guest_kernel": "proved"},
     ]
     assert all(payload["worker_token"] == "ajt.1" for payload in delivered)
+
+
+def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
+    """Once spawned, an ambiguous child must remain in the graceful-drain set."""
+    import errno
+    import io
+    from types import SimpleNamespace
+
+    from cloud_agent_host import host_runtime as host_runtime_mod
+
+    process = SimpleNamespace(stdin=io.BytesIO(), killed=False)
+
+    def kill() -> None:
+        process.killed = True
+
+    process.kill = kill
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    def broken_select(*_args, **_kwargs):
+        raise OSError(errno.EIO, "handover pipe failed")
+
+    monkeypatch.setattr(host_runtime_mod.select, "select", broken_select)
+
+    result = runner_mod._spawn_turn(
+        _delivered_job(),
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert result.outcome == LAUNCH_UNCERTAIN
+    assert result.handle is process
+    assert "handover failed (OSError)" in result.detail
+    assert not process.killed
+
+
+def test_a_handover_pipe_failure_is_not_started(monkeypatch):
+    """Failure before a process exists may safely hand the claim back."""
+    import errno
+
+    def broken_pipe():
+        raise OSError(errno.EMFILE, "too many open files")
+
+    monkeypatch.setattr(runner_mod.os, "pipe", broken_pipe)
+    result = runner_mod._spawn_turn(
+        _delivered_job(),
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert result.outcome == LAUNCH_NOT_STARTED
+    assert result.handle is None
+    assert "handover pipe" in result.detail
+
+
+def test_handover_eof_keeps_the_spawned_child_tracked(monkeypatch):
+    """A failed accepted write and a pre-answer exit both look like EOF."""
+    import io
+    import os
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(stdin=io.BytesIO(), killed=False, waited=False)
+
+    def kill() -> None:
+        process.killed = True
+
+    def wait(*, timeout: float) -> int:
+        process.waited = True
+        return 0
+
+    process.kill = kill
+    process.wait = wait
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    def eof(fd: int) -> str:
+        os.close(fd)
+        return ""
+
+    monkeypatch.setattr(runner_mod, "read_handover", eof)
+
+    result = runner_mod._spawn_turn(
+        _delivered_job(),
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert result.outcome == LAUNCH_UNCERTAIN
+    assert result.handle is process
+    assert not process.killed
+    assert not process.waited
+
+
+def test_ctrl_c_during_handover_kills_and_reaps_the_untracked_child(monkeypatch):
+    """Immediate shutdown owns a child that TurnPool has not received yet."""
+    import io
+    import os
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(stdin=io.BytesIO(), killed=False, waited=False)
+
+    def kill() -> None:
+        process.killed = True
+
+    def wait(*, timeout: float) -> int:
+        assert timeout == 10
+        process.waited = True
+        return -9
+
+    process.kill = kill
+    process.wait = wait
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    def interrupted_read(fd: int) -> str:
+        os.close(fd)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner_mod, "read_handover", interrupted_read)
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_mod._spawn_turn(
+            _delivered_job(),
+            base_url="http://control",
+            gateway_url="http://gateway",
+            worker_id="runner-a",
+            lease_ttl=120.0,
+            agent_timeout_s=3600.0,
+            host="host-a",
+        )
+
+    assert process.killed
+    assert process.waited
 
 
 class FakeQualification:
@@ -634,12 +813,19 @@ def test_a_restarted_host_waits_for_its_first_answer_before_claiming(service, mo
     assert launched == [], "no answer within the wait, and the wait has not run out"
 
 
-def test_a_host_whose_heartbeat_fails_still_claims_once_the_wait_runs_out(service, monkeypatch):
-    """Claiming never comes to depend on the heartbeat: the wait is bounded."""
+def test_a_host_without_an_archive_policy_answer_never_claims(service, monkeypatch):
+    """The bounded settings fallback cannot bypass the archive safety boundary."""
     _identity, backend, _released = service
     monkeypatch.setattr(FakeHeartbeat, "answers_on_start", False)
     monkeypatch.setattr(runner_mod, "FIRST_SETTINGS_WAIT_S", 0.0)
-    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_job(0)]))
+    claims: list[dict[str, Any]] = []
+
+    def claim(**_kwargs: Any) -> dict[str, Any]:
+        payload = _job(0)
+        claims.append(payload)
+        return payload
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
     launched: list[dict] = []
 
     def launch(payload: dict) -> LaunchResult:
@@ -650,8 +836,8 @@ def test_a_host_whose_heartbeat_fails_still_claims_once_the_wait_runs_out(servic
 
     _serve(backend, launch=launch)
 
-    assert len(launched) == 1
-    assert launched[0]["_host_settings"]["agent_timeout_s"] == runner_mod.DEFAULT_AGENT_TIMEOUT_S
+    assert claims == []
+    assert launched == []
 
 
 def test_a_lowered_limit_stops_claiming_without_touching_a_running_turn(service, monkeypatch):
@@ -831,7 +1017,19 @@ def test_an_uncertain_handover_is_never_handed_back(service, monkeypatch):
     """
     _identity, backend, released = service
     monkeypatch.setattr(runner_mod, "claim_payload", _queue([_job(1)], stop_after=1))
-    handle = FakeHandle()
+
+    class NaturallyFinishingHandle(FakeHandle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.polls = 0
+
+        def poll(self) -> int | None:
+            self.polls += 1
+            if self.polls >= 2:
+                self.exit_code = 0
+            return self.exit_code
+
+    handle = NaturallyFinishingHandle()
 
     _serve(
         backend,
@@ -839,7 +1037,8 @@ def test_an_uncertain_handover_is_never_handed_back(service, monkeypatch):
     )
 
     assert released == []
-    assert handle.terminated, "still waited for, like any other turn in flight"
+    assert handle.polls >= 2, "still waited for, like any other turn in flight"
+    assert not handle.terminated and not handle.killed
 
 
 def test_a_turn_with_no_worker_token_is_not_released(service, monkeypatch):
@@ -1754,10 +1953,14 @@ def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_delivery_state():
-    """Every test starts having delivered nothing."""
+    """Every test starts with no cached profiling run or delivered records."""
+    from cloud_agent_shared import operation_profiling
+
+    operation_profiling.reset_cache()
     runner_mod.reset_delivery_state()
     yield
     runner_mod.reset_delivery_state()
+    operation_profiling.reset_cache()
 
 
 def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -> str:
@@ -1811,7 +2014,12 @@ class _StubControl:
     def __init__(self, answers: list[Any]) -> None:
         self.answers = answers
         self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.events: list[tuple[str, dict[str, Any]]] = []
         self.closed = False
+
+    def append_event(self, event: Any) -> None:
+        """Record execution milestones separately from measurement delivery."""
+        self.events.append((event.event_type, event.payload))
 
     def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
         """Record the body and return the next scripted answer."""
@@ -2015,10 +2223,11 @@ def test_the_streaming_helper_invokes_the_freeze_callback(startup_measurement):
     """
     measurement = startup_measurement
     frozen: list[Any] = []
+    control = _StubControl([])
     runner_mod._stream_shared_agent_turn(
         supervisor=_IdleSupervisor(),
         job=_claimed(job_id="ajob_1"),
-        control=_StubControl([]),
+        control=control,
         heart=_IdleHeart(),
         lease_token="lease",
         timeout_s=1.0,
@@ -2027,6 +2236,7 @@ def test_the_streaming_helper_invokes_the_freeze_callback(startup_measurement):
     )
 
     assert frozen == [measurement], "the record must leave the host at the handoff"
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
 
 
 def test_the_call_path_actually_passes_the_freeze_callback():
@@ -2351,6 +2561,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     delivered = threading.Event()
     release_delivery = threading.Event()
     release_turn = threading.Event()
+    frames_entered = threading.Event()
 
     class _Recorder:
         def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
@@ -2379,6 +2590,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     class _HangingStream:
         def frames(self) -> Any:
             """Block until the test is done with the assertion."""
+            frames_entered.set()
             release_turn.wait(timeout=10)
             return iter(({"kind": "result", "exit_code": 0},))
 
@@ -2389,14 +2601,14 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         operation=operation_profiling.STARTUP_OPERATION, host="host-a"
     )
     assert measurement is not None
-    real_control = runner_mod.ControlPlane
+    stream_control = _StubControl([])
     monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_a, **_k: _Recorder())
     try:
         turn = threading.Thread(
             target=lambda: runner_mod._stream_shared_agent_turn(
                 supervisor=_HangingSupervisor(),
                 job=_claimed(),
-                control=real_control("http://control", "t"),
+                control=stream_control,
                 heart=_IdleHeart(),
                 lease_token="lease",
                 timeout_s=10.0,
@@ -2413,6 +2625,8 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         turn.start()
         assert turn_is_running.wait(timeout=5), "the turn must have started"
         assert delivered.wait(timeout=5), "the startup sample must reach the destination"
+        assert frames_entered.wait(timeout=5), "the turn must be waiting for runtime output"
+        assert stream_control.events == [("lifecycle", {"phase": "turn_started"})]
 
         # The record is out while the model is still working. The delivery is
         # held open, so the turn cannot have finished before this was sent.

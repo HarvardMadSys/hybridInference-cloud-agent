@@ -6,6 +6,17 @@ them, and neither owns them.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class JobStreamState:
+    """The current turn state and publication URL an event stream needs."""
+
+    state: str
+    published_pr_url: str | None
+
+
 # Job lifecycle. ``cancel_requested`` is a flag orthogonal to ``state``: it is
 # delivered to the running worker via the heartbeat response, and the worker
 # performs the fenced transition to ``cancelled``.

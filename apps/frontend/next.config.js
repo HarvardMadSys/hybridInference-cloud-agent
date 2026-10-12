@@ -23,8 +23,8 @@
 // argument in the compose file and not a runtime variable.
 //
 // Duplicated from `src/config/env.ts` rather than imported — this file is
-// plain CommonJS loaded before the TS pipeline exists. `basePath.test.ts`
-// checks the two normalizations agree.
+// plain CommonJS loaded before the TS pipeline exists. `variantPairing.test.ts`
+// executes this config to check the supported base-path and API-prefix pairs.
 const rawBasePath = (process.env.NEXT_PUBLIC_BASE_PATH || '').trim().replace(/\/+$/, '');
 const basePath = !rawBasePath ? '' : rawBasePath.startsWith('/') ? rawBasePath : `/${rawBasePath}`;
 

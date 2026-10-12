@@ -8,8 +8,12 @@
 // its own ledger snapshot.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useT } from '@/components/providers';
+import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 
 import {
+  createAgentJob,
   getAgentJobUsage,
   refreshAgentJobUsage,
   type AgentJobApi,
@@ -32,22 +36,30 @@ import {
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
 import type { AgentJob } from './types';
+import { isOlderUsage, onAgentRecordsChanged } from './agentPush';
+import { isRepositoryTooLarge, ownerFailureMessage } from './adapt';
+import { hasLostContext, ownerRunNote } from './conversationJob';
 
-export type RunTab = 'overview' | 'usage' | 'raw';
+import type { RunTab } from './trajectoryInspectorTabs';
 
-export const RUN_TABS: Array<{ key: RunTab; label: string }> = [
-  { key: 'overview', label: 'Overview' },
-  { key: 'usage', label: 'Usage' },
-  { key: 'raw', label: 'Raw' },
-];
+export { RUN_TABS, type RunTab } from './trajectoryInspectorTabs';
 
-const STATE_LABEL: Record<AgentJobApiState, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  publishing: 'Publishing',
-  succeeded: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+const STATE_LABEL: Record<AgentJobApiState, TranslationKey> = {
+  queued: 'turnNavigation.state.queued',
+  running: 'turnNavigation.state.running',
+  publishing: 'runDetails.publishing',
+  succeeded: 'turnNavigation.state.needsReview',
+  failed: 'turnNavigation.state.failed',
+  cancelled: 'turnNavigation.state.cancelled',
+};
+
+const FALLBACK_STATE: Record<AgentJob['state'], AgentJobApiState> = {
+  queued: 'queued',
+  running: 'running',
+  done: 'succeeded',
+  needs_review: 'succeeded',
+  failed: 'failed',
+  cancelled: 'cancelled',
 };
 
 const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
@@ -68,6 +80,18 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
  * panel repeatedly is free.
  */
 const usageCache = new Map<string, AgentJobUsageApi | null>();
+
+/**
+ * Cache `next` for a job unless what is cached is newer, and return what is
+ * kept. Every write goes through here: a read, a refresh's answer and a push
+ * can arrive in any order, and their versions say which is newer.
+ */
+function rememberUsage(jobId: string, next: AgentJobUsageApi | null): AgentJobUsageApi | null {
+  const known = usageCache.get(jobId);
+  const kept = next && known && isOlderUsage(next, known) ? known : next;
+  usageCache.set(jobId, kept);
+  return kept;
+}
 
 /** How long to wait before reading a ledger whose work has not finished. */
 const LEDGER_POLL_MS = 15_000;
@@ -139,6 +163,9 @@ function useJobUsage(jobId: string): {
   const retries = useRef(0);
   const waits = useRef(0);
   const currentJob = useRef(jobId);
+  // Raised by each usage pushed for this job without a version: a read that
+  // left before it is taken to be older, and is dropped.
+  const pushes = useRef(0);
 
   useEffect(() => {
     if (currentJob.current !== jobId) {
@@ -156,10 +183,12 @@ function useJobUsage(jobId: string): {
     if (!mustRead) return undefined;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const pushesBefore = pushes.current;
     getAgentJobUsage(jobId, controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        usageCache.set(jobId, result);
+      .then((read) => {
+        if (controller.signal.aborted || pushes.current !== pushesBefore) return;
+        // A usage pushed while this read was on its way may be the newer one.
+        const result = rememberUsage(jobId, read);
         setUsage(result);
         setError(null);
         const next = ledgerNextRead(result, Date.now());
@@ -173,7 +202,7 @@ function useJobUsage(jobId: string): {
         }
       })
       .catch((cause: unknown) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && pushes.current === pushesBefore) {
           setError(cause instanceof Error ? cause.message : 'Could not load usage');
         }
       })
@@ -186,6 +215,27 @@ function useJobUsage(jobId: string): {
     };
   }, [jobId, read]);
 
+  // A pushed change to this job's usage is shown as sent, or read at once when
+  // it came without a value, outside the budget above: it is the server saying
+  // there is something new, not a guess.
+  useEffect(
+    () =>
+      onAgentRecordsChanged((change) => {
+        const pushed = change.usageValues[jobId];
+        if (pushed && !change.resync) {
+          if (!pushed.version) pushes.current += 1;
+          // A read that left after this was computed may already show more.
+          setUsage(rememberUsage(jobId, pushed));
+          setError(null);
+          setLoaded(true);
+        } else if (change.resync || change.usage.includes(jobId)) {
+          requested.current = true;
+          setRead((value) => value + 1);
+        }
+      }),
+    [jobId],
+  );
+
   const refresh = useCallback(() => {
     setRefreshing(true);
     // A reader who asks for fresh accounting restarts the panel's own budget.
@@ -193,8 +243,9 @@ function useJobUsage(jobId: string): {
     waits.current = 0;
     refreshAgentJobUsage(jobId)
       .then((result) => {
-        usageCache.set(jobId, result);
-        setUsage(result);
+        // The answer is cached usage as it was; a push may already be newer.
+        const kept = rememberUsage(jobId, result);
+        if (currentJob.current === jobId) setUsage(kept);
       })
       .catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : 'Could not refresh usage');
@@ -267,8 +318,12 @@ export function RunDetails({
   events: StoredEvent[];
   onOpenGitDiff: () => void;
 }) {
+  const t = useT();
+  const router = useRouter();
   const idPrefix = `run-${jobId}`;
   const { usage, loaded, refreshing, error, refresh } = useJobUsage(jobId);
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
 
   const runEvents = useMemo(
     () => (events as AgentThreadEventApi[]).filter((event) => event.job_id === jobId),
@@ -282,11 +337,70 @@ export function RunDetails({
     return [...grouped.entries()].sort(([a], [b]) => a - b);
   }, [runEvents]);
 
-  const state = job?.state ?? null;
-  const startedAt = job?.started_at ?? fallback?.startedAt ?? null;
-  const finishedAt = job?.finished_at ?? fallback?.finishedAt ?? null;
+  // The loaded conversation can describe a different turn while a historical
+  // row is unavailable. It must never supply that turn's status or metadata.
+  const turnFallback = !job && fallback?.id === jobId ? fallback : null;
+  const state = job?.state ?? (turnFallback ? FALLBACK_STATE[turnFallback.state] : null);
+  const startedAt = job ? (job.started_at ?? null) : (turnFallback?.startedAt ?? null);
+  const finishedAt = job ? (job.finished_at ?? null) : (turnFallback?.finishedAt ?? null);
   const attemptRows = job?.attempt_telemetry ?? [];
-  const openUrl = job?.published_pr_url ?? fallback?.prUrl ?? null;
+  const openUrl = job ? job.published_pr_url : (turnFallback?.prUrl ?? null);
+  const contextLost = job
+    ? job.native_state === 'lost' || job.context_status === 'lost'
+    : Boolean(turnFallback && hasLostContext(turnFallback));
+  const failedOrStopped = state === 'failed' || state === 'cancelled';
+  const failureNote = failedOrStopped
+    ? job?.detail
+      ? ownerFailureMessage(job.detail)
+      : turnFallback
+        ? ownerRunNote(turnFallback)
+        : state === 'failed'
+          ? t('runDetails.failureMissing')
+          : undefined
+    : undefined;
+  const guidance = contextLost
+    ? t('runDetails.contextLost')
+    : state === 'failed'
+      ? isRepositoryTooLarge(job?.detail) || turnFallback?.failureCause === 'repository_too_large'
+        ? t('runDetails.repositoryLimit')
+        : /^Site misconfigured:/i.test(job?.detail ?? '') ||
+            turnFallback?.failureCause === 'site_misconfigured'
+          ? t('runDetails.siteMisconfigured')
+          : t('runDetails.followUp')
+      : state === 'cancelled'
+        ? t('runDetails.stoppedFollowUp')
+        : null;
+
+  // "Restart in a new session" re-issues the same task (repo + prompt) as a
+  // fresh job/thread, so it is offered only for a failed run and only when the
+  // turn exposed enough to recreate it. A cancelled run is deliberately not
+  // offered: its follow-up continues from saved intermediate changes instead.
+  const repo = job?.repo ?? turnFallback?.repo;
+  const prompt = (job?.task_prompt ?? turnFallback?.prompt ?? '').trim();
+  const model = job?.model ?? turnFallback?.model;
+  const restartable = state === 'failed' && Boolean(repo && prompt && model) && !restarting;
+
+  async function restartInNewSession() {
+    if (!repo || !prompt || !model) return;
+    setRestarting(true);
+    setRestartError(null);
+    try {
+      const restart = await createAgentJob({
+        repo,
+        task_prompt: prompt,
+        model,
+        ...((job?.reasoning_effort ?? turnFallback?.reasoningEffort)
+          ? { reasoning_effort: job?.reasoning_effort ?? turnFallback?.reasoningEffort }
+          : {}),
+      });
+      router.push(`/${restart.id}`);
+    } catch (cause: unknown) {
+      setRestarting(false);
+      setRestartError(
+        cause instanceof Error ? cause.message : 'Could not restart in a new session',
+      );
+    }
+  }
 
   if (tab === 'usage') {
     if (!loaded) {
@@ -416,21 +530,67 @@ export function RunDetails({
 
   return (
     <TabPanel idPrefix={idPrefix} tab="overview">
+      <section
+        aria-label={t('runDetails.summary', { number: turnNo })}
+        className={`rounded-xl border p-4 ${
+          state === 'failed'
+            ? 'border-red-200 bg-red-50/60 dark:border-red-500/25 dark:bg-red-500/5'
+            : 'border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/5'
+        }`}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {t('turnNavigation.turn', { turn: turnNo })}
+            </p>
+            <h3
+              className={`mt-1 text-lg font-semibold ${state === 'failed' ? 'text-red-800 dark:text-red-300' : 'text-gray-900 dark:text-gray-100'}`}
+            >
+              {state ? t(STATE_LABEL[state]) : t('runDetails.notRecorded')}
+            </h3>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-500 dark:text-gray-400">{t('runDetails.elapsed')}</p>
+            <p className="mt-1 text-sm font-medium tabular-nums text-gray-800 dark:text-gray-200">
+              {elapsedLabel(startedAt, finishedAt)}
+            </p>
+          </div>
+        </div>
+        {failureNote ? (
+          <p className="mt-3 text-sm leading-relaxed text-gray-800 [overflow-wrap:anywhere] dark:text-gray-200">
+            {failureNote}
+          </p>
+        ) : null}
+        {guidance ? (
+          <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+            {guidance}
+          </p>
+        ) : null}
+        {restartable ? (
+          <div className="mt-4">
+            {restartError ? (
+              <p className="text-[11px] text-red-600 dark:text-red-400">{restartError}</p>
+            ) : null}
+            <button
+              type="button"
+              onClick={restartInNewSession}
+              disabled={restarting}
+              className="ui-focus-ring inline-flex min-h-9 items-center rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-700 transition-colors hover:border-red-300 hover:bg-red-50 disabled:opacity-60 dark:border-red-500/30 dark:bg-transparent dark:text-red-300 dark:hover:border-red-500/50 dark:hover:bg-red-500/10"
+            >
+              {restarting ? t('runDetails.restarting') : t('runDetails.restart')}
+            </button>
+          </div>
+        ) : null}
+      </section>
       <DetailRows>
-        <DetailRow
-          label="Status"
-          tone={state === 'failed' ? 'error' : state === 'succeeded' ? 'default' : 'muted'}
-        >
-          {state ? STATE_LABEL[state] : 'Not recorded'}
-        </DetailRow>
-        <DetailRow label="Turn">{turnNo}</DetailRow>
         <DetailRow label="Started">{recordedAt(startedAt)}</DetailRow>
         <DetailRow label="Finished">{recordedAt(finishedAt)}</DetailRow>
-        <DetailRow label="Elapsed">{elapsedLabel(startedAt, finishedAt)}</DetailRow>
-        <DetailRow label="Runtime">{job?.runtime ?? fallback?.runtime ?? 'Not recorded'}</DetailRow>
-        <DetailRow label="Model">{job?.model ?? fallback?.model ?? 'Not recorded'}</DetailRow>
+        <DetailRow label="Runtime">
+          {job?.runtime ?? turnFallback?.runtime ?? 'Not recorded'}
+        </DetailRow>
+        <DetailRow label="Model">{job?.model ?? turnFallback?.model ?? 'Not recorded'}</DetailRow>
         <DetailRow label="Reasoning effort">
-          {job?.reasoning_effort ?? fallback?.reasoningEffort ?? 'Auto'}
+          {job?.reasoning_effort ?? turnFallback?.reasoningEffort ?? 'Auto'}
         </DetailRow>
       </DetailRows>
 
@@ -464,7 +624,7 @@ export function RunDetails({
         <button
           type="button"
           onClick={onOpenGitDiff}
-          className="rounded border border-gray-200 px-2 py-1 text-[11px] text-gray-600 transition-colors hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-300 dark:hover:border-white/20 dark:hover:text-gray-50"
+          className="ui-focus-ring inline-flex min-h-9 items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-300 dark:hover:border-white/20 dark:hover:text-gray-50"
         >
           Open current Git diff
         </button>

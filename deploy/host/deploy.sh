@@ -17,7 +17,7 @@
 # Usage:  deploy.sh [--phase prepare|activate] <sha>
 #
 # With no `--phase` this is the whole rollout, which is what every caller before
-# the split invoked and what this repository's own workflows still do.
+# the split invoked.
 #
 # The phases are `sandbox_host.sh`'s two halves, with this script's own guards
 # and recovery around them. They exist because the release design sequences the
@@ -72,7 +72,7 @@ case "$AGENT_DEPLOY_MODE" in
   *) die "AGENT_DEPLOY_MODE must be source or artifacts" ;;
 esac
 export AGENT_DEPLOY_MODE
-[ -n "${DEPLOY_ROOT}" ] || die "DEPLOY_ROOT is not set (repository variable AGENT_HOST_DEPLOY_ROOT)"
+[ -n "${DEPLOY_ROOT}" ] || die "DEPLOY_ROOT is not set"
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
 

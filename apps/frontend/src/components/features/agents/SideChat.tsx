@@ -3,9 +3,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { cancelAgentJob, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
-import { submitThreadMessage } from '@/lib/api/pendingMessages';
+import { submitThreadMessage, type ThreadMessageRequest } from '@/lib/api/pendingMessages';
 import { useT } from '@/components/providers/LocaleProvider';
 import { hasLostContext, latestAttempt, latestJob, ownerRunNote } from './conversationJob';
+import { AttachmentStrip } from './attachments/AttachmentStrip';
+import { useAttachments } from './attachments/useAttachments';
 import { sideChatKeys } from './sideChatStorage';
 import {
   composerModels,
@@ -14,10 +16,13 @@ import {
   ComposerSendButton,
 } from './ConversationComposer';
 import { HistoryTurn } from './ChatMessages';
+import { codeReviewFixPrompt } from './codeReview';
+import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
+import { NativeQuestionPrompt } from './NativeQuestionPrompt';
 import { PendingMessageQueue } from './PendingMessageQueue';
 import { Picker } from './Picker';
 import { BackToBottom } from './TurnNavigator';
@@ -67,6 +72,8 @@ function SideChatContent({
   }, []);
   const active = selected && visible;
   const t = useT();
+  const attachments = useAttachments(t, config?.attachment_limits);
+  const { reset: resetAttachments } = attachments;
   const { session, status, error, recoverable, retry, restart, advance } = useSideChatSession(
     sourceJob,
     userId,
@@ -206,6 +213,23 @@ function SideChatContent({
       .map((turn, index) => ({ ...turn, displayNo: index + 1 }));
   }, [belongsToSide, job, session?.threadId, threadJobs]);
   const turnKeys = useMemo(() => turns.map((turn) => turn.key), [turns]);
+  const completedReview = Boolean(
+    tab?.reviewPrompt &&
+    session?.reviewSent &&
+    current?.prompt === tab.reviewPrompt &&
+    (current?.state === 'done' || current?.state === 'needs_review') &&
+    turns.some((turn) => turn.jobId === current.id) &&
+    latestJob(threadJobs)?.id === current.id,
+  );
+  const canFixReview = Boolean(
+    completedReview &&
+    ready &&
+    !unavailable &&
+    current?.conversationState !== 'running' &&
+    current?.conversationState !== 'queued' &&
+    !submitting &&
+    !queue.messages.some((message) => message.prompt === codeReviewFixPrompt),
+  );
   const scroll = useConversationScroll({
     conversationKey: session?.threadId ?? 'side-chat-preparing',
     turnKeys,
@@ -240,23 +264,49 @@ function SideChatContent({
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const prompt = draft.trim();
+    if (!ready) {
+      setActionError(t('sideChat.preparing'));
+      return;
+    }
+    if (!current || attachments.uploading) return;
+    await sendMessage(
+      {
+        prompt: draft.trim(),
+        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+        ...composerOverrides(current, model, effort),
+      },
+      true,
+    );
+  }
+
+  async function fixReview() {
+    if (!canFixReview || !current) return;
+    await sendMessage(
+      { prompt: codeReviewFixPrompt, skill_ids: [] },
+      false,
+      `review-fix-${current.id}`,
+    );
+  }
+
+  async function sendMessage(body: ThreadMessageRequest, clearDraft: boolean, requestId?: string) {
     if (!ready) {
       setActionError(t('sideChat.preparing'));
       return;
     }
     const threadId = current?.threadId ?? session?.threadId;
-    if (!current || !threadId || !prompt || unavailable || submission.current) return;
+    if (!current || !threadId || !body.prompt || unavailable || submission.current) return;
     submission.current = true;
     setSubmitting(true);
     setActionError(null);
     try {
-      const result = await submitThreadMessage(threadId, {
-        prompt,
-        ...composerOverrides(current, model, effort),
-      });
+      const result = requestId
+        ? await submitThreadMessage(threadId, body, { requestId })
+        : await submitThreadMessage(threadId, body);
       if (!mounted.current) return;
-      setDraft('');
+      if (clearDraft) {
+        setDraft('');
+        resetAttachments();
+      }
       queue.apply(result);
       // Idle, the message is the side chat's next turn now and the pane moves
       // to it; busy, it waits above the composer and nothing moves.
@@ -319,11 +369,14 @@ function SideChatContent({
   }, [active, stop, tab]);
   useEffect(() => {
     const clear = (event: Event) => {
-      if ((event as CustomEvent).detail === userId) setDraft('');
+      if ((event as CustomEvent).detail === userId) {
+        setDraft('');
+        resetAttachments();
+      }
     };
     window.addEventListener('agents:side-chat-drafts-cleared', clear);
     return () => window.removeEventListener('agents:side-chat-drafts-cleared', clear);
-  }, [userId]);
+  }, [resetAttachments, userId]);
   const failure = error ?? loadError ?? actionError;
   return (
     <section
@@ -342,6 +395,14 @@ function SideChatContent({
       }}
       className="flex h-full min-h-0 flex-col"
     >
+      {current ? (
+        <NativeQuestionPrompt
+          threadId={current.threadId ?? current.id}
+          jobId={current.id}
+          attemptId={current.currentAttemptId}
+          active={selected && current.state === 'running' && !unavailable}
+        />
+      ) : null}
       {toolsOpen && current ? (
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           <button
@@ -359,15 +420,10 @@ function SideChatContent({
           role="region"
           aria-label={t('sideChat.messages')}
           tabIndex={0}
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-none [overflow-anchor:none] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
         >
           <div className="flex-1 px-5 pt-3">
             {active && turns.map((turn) => <HistoryTurn key={turn.key} turn={turn} busy={false} />)}
-            {turns.length && current?.liveNote ? (
-              <p role="status" className="py-2 text-xs text-gray-500 dark:text-gray-400">
-                {current.liveNote}
-              </p>
-            ) : null}
             {turns.length && current && ownerRunNote(current) ? (
               <p className="py-2 text-xs text-gray-500 dark:text-gray-400">
                 {ownerRunNote(current!)}
@@ -375,6 +431,7 @@ function SideChatContent({
             ) : null}
           </div>
           <div ref={scroll.composerRef} className="sticky bottom-0 bg-white p-3 dark:bg-gray-900">
+            {active && current ? <LiveAgentStatus job={current} /> : null}
             {scroll.awayFromBottom ? (
               <div className="mb-2 flex justify-end">
                 <BackToBottom
@@ -391,6 +448,19 @@ function SideChatContent({
               />
             ) : null}
             <PendingMessageQueue queue={queue} disabled={unavailable} />
+            {completedReview ? (
+              <div className="mb-2 flex justify-end">
+                <button
+                  type="button"
+                  title={t('review.fixHint')}
+                  disabled={!canFixReview}
+                  onClick={() => void fixReview()}
+                  className="rounded-lg bg-crimson px-3 py-2 text-xs font-medium text-white hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t(submitting ? 'review.fixing' : 'review.fix')}
+                </button>
+              </div>
+            ) : null}
             <form
               onSubmit={(event) => void send(event)}
               className="rounded-xl border border-gray-200 bg-white focus-within:border-crimson/30 dark:border-white/10 dark:bg-gray-900"
@@ -402,9 +472,18 @@ function SideChatContent({
                 value={draft}
                 disabled={unavailable || !userId}
                 onChange={(event) => setDraft(event.target.value)}
+                onPaste={(event) => {
+                  if (!ready || unavailable || !userId || submission.current) return;
+                  attachments.onPaste(event);
+                }}
                 className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-50 dark:placeholder:text-gray-500"
               />
-              <div className="flex flex-wrap items-center gap-1 px-3 pb-2">
+              <AttachmentStrip
+                entries={attachments.entries}
+                onRemove={attachments.remove}
+                disabled={unavailable || submitting}
+              />
+              <div className="flex flex-wrap items-center gap-0.5 px-2.5 pb-1.5">
                 {models.length ? (
                   <>
                     <Picker
@@ -432,27 +511,31 @@ function SideChatContent({
                   </span>
                 )}
                 {running ? (
-                  <>
-                    <span className="text-xs text-gray-400 dark:text-gray-500">
-                      {t('sideChat.queued')}
-                    </span>
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
+                    {t('sideChat.queued')}
+                  </span>
+                ) : null}
+                <div className="ml-auto flex shrink-0 items-center gap-1">
+                  {running ? (
                     <button
                       type="button"
                       aria-label={t('sideChat.stop')}
                       disabled={stopping}
                       onClick={() => void stop()}
-                      className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900"
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900"
                     >
                       <span className="h-2.5 w-2.5 rounded-sm bg-current" />
                     </button>
-                  </>
-                ) : null}
-                <ComposerSendButton
-                  label={t('sideChat.send')}
-                  title={t('sideChat.sendHint')}
-                  busy={submitting || (active && status === 'preparing')}
-                  disabled={!ready || unavailable || !draft.trim() || submitting}
-                />
+                  ) : null}
+                  <ComposerSendButton
+                    label={t('sideChat.send')}
+                    title={t('sideChat.sendHint')}
+                    busy={submitting || (active && status === 'preparing')}
+                    disabled={
+                      !ready || unavailable || !draft.trim() || submitting || attachments.uploading
+                    }
+                  />
+                </div>
               </div>
             </form>
             {status === 'waiting' ? (
@@ -465,8 +548,15 @@ function SideChatContent({
                 {current?.archivedAt ? t('sideChat.archived') : t('sideChat.lost')}
               </p>
             ) : null}
-            {unavailable && draft ? (
-              <button type="button" onClick={() => setDraft('')} className="mt-2 text-xs underline">
+            {unavailable && (draft || attachments.entries.length) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft('');
+                  resetAttachments();
+                }}
+                className="mt-2 text-xs underline"
+              >
                 {t('sideChat.discard')}
               </button>
             ) : null}

@@ -123,6 +123,15 @@ def _run_turn(
         return lease
 
     supervisor.acquire_shared.side_effect = acquire
+    supervisor.initial_archive_status.return_value = {
+        "enabled": False,
+        "prepared": False,
+        "stored": False,
+    }
+    supervisor.capture_initial_archive.return_value = {
+        "enabled": False,
+        "stored": False,
+    }
     supervisor.ensure_shared_resident.return_value = {
         "context_status": "live" if has_context else "new",
         "process_generation": 1,

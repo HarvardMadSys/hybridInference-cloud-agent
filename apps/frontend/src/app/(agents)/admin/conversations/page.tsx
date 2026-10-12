@@ -17,8 +17,10 @@ import { conversationLink } from './filters';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { TurnResults } from '../runs/AllRuns';
 import { StepResults } from '../runs/StepResults';
+import { SandboxResults } from '../sandboxes/SandboxResults';
 import { presetKey } from '../usage/present';
 import {
   accessDenied,
@@ -83,12 +85,18 @@ function windowFilters(
 }
 
 /**
- * The levels the Sessions tab lists, one selection at a time.
+ * The levels Activity lists, one selection at a time.
  *
  * A session is made of turns, and a turn of steps (its model requests), so
- * each level is the same selection read at a finer grain.
+ * those levels share a turn selection. Sandboxes show the current fleet.
  */
 const LEVELS = [
+  {
+    key: 'sandboxes',
+    label: 'Sandboxes',
+    description:
+      'Current sandboxes across users, including idle containers retained between turns.',
+  },
   {
     key: 'sessions',
     label: 'Sessions',
@@ -122,8 +130,9 @@ export default function AdminConversationsPage() {
 /**
  * Read the linked filters once, keyed by the query so a new link remounts.
  *
- * `level=turns` or `level=steps` opens that level. It chooses what is listed
- * rather than which turns match, so it is taken off before the filters are read.
+ * `level=sandboxes`, `level=turns` or `level=steps` opens that level. It chooses
+ * what is listed rather than which turns match, so it is taken off before the
+ * filters are read.
  */
 function LinkedConversationsList() {
   const params = new URLSearchParams(useSearchParams().toString());
@@ -136,7 +145,7 @@ function LinkedConversationsList() {
 function ConversationsSkeleton() {
   return (
     <div className="min-w-0 flex-1">
-      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
+      <section className={ADMIN_PAGE}>
         <div className={`${CARD} mt-8 h-64 animate-pulse`} />
       </section>
     </div>
@@ -186,21 +195,22 @@ function ConversationsList({
   if (denied) return <AdminRequired />;
   return (
     <div className="min-w-0 flex-1">
-      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
+      <section className={ADMIN_PAGE}>
+        <AdminPageHeader
+          section="Activity"
+          description="Explore sandboxes, sessions, and turns across users."
+        />
         <AdminNavigation current="activity" />
 
         {/* One toolbar: what a row stands for on the left, which turns match on
             the right. The level's description is its tooltip, not a paragraph. */}
         <h2 className="sr-only">{active.label}</h2>
-        <div className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="ui-card mt-6 flex flex-wrap items-center gap-3 p-3">
           <div
             role="group"
             aria-label="Level"
             title={active.description}
-            className="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-white/5"
+            className="inline-flex max-w-full overflow-x-auto rounded-lg bg-surface-muted p-1"
           >
             {LEVELS.map((item) => (
               <button
@@ -208,17 +218,17 @@ function ConversationsList({
                 type="button"
                 aria-pressed={item.key === level}
                 onClick={() => setLevel(item.key)}
-                className={`rounded-md px-3 py-1 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson ${
+                className={`ui-focus-ring min-h-11 shrink-0 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
                   item.key === level
-                    ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-50'
-                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+                    ? 'bg-surface text-foreground shadow-subtle'
+                    : 'text-muted hover:bg-surface-hover hover:text-foreground'
                 }`}
               >
                 {item.label}
               </button>
             ))}
           </div>
-          {selection && (
+          {level !== 'sandboxes' && selection && (
             <span
               className="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400"
               title={selection}
@@ -226,91 +236,99 @@ function ConversationsList({
               {selection}
             </span>
           )}
-          <div role="group" aria-label="Filters" className="ml-auto flex items-center gap-2">
-            {windowDays === 'custom' && (
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                {shortDay(filters.since)} – {shortDay(filters.until)}
-              </span>
-            )}
-            <label className="shrink-0">
-              <span className="sr-only">Turn created</span>
-              <select
-                className={TOOLBAR_SELECT}
-                value={windowDays}
-                onChange={(e) => {
-                  // Choosing a preset is the only action that re-anchors the
-                  // window, and it keeps every other filter, including the
-                  // identity a usage link arrived with.
-                  const nextDays = Number(e.target.value);
-                  setLinkedWindow(false);
-                  setFilters((current) => windowFilters(nextDays, current));
-                }}
-              >
-                <option value={7}>Last 7 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={90}>Last 90 days</option>
-                {windowDays === 'custom' && <option value="custom">Custom</option>}
-              </select>
-            </label>
-            <label className="shrink-0">
-              <span className="sr-only">Turn result</span>
-              <select
-                className={TOOLBAR_SELECT}
-                value={filters.state ?? ''}
-                onChange={(e) =>
-                  // Status is not part of the window. Changing it keeps the exact
-                  // since/until on screen: re-deriving them from a preset here
-                  // widened a one-day link back to seven days.
-                  setFilters((current) => ({
-                    ...current,
-                    state: (e.target.value || undefined) as AgentJobApiState | undefined,
-                  }))
+          {level !== 'sandboxes' && (
+            <div
+              role="group"
+              aria-label="Filters"
+              className="ml-auto flex flex-wrap items-center gap-2"
+            >
+              {windowDays === 'custom' && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {shortDay(filters.since)} – {shortDay(filters.until)}
+                </span>
+              )}
+              <label className="shrink-0">
+                <span className="sr-only">Turn created</span>
+                <select
+                  className={TOOLBAR_SELECT}
+                  value={windowDays}
+                  onChange={(e) => {
+                    // Choosing a preset is the only action that re-anchors the
+                    // window, and it keeps every other filter, including the
+                    // identity a usage link arrived with.
+                    const nextDays = Number(e.target.value);
+                    setLinkedWindow(false);
+                    setFilters((current) => windowFilters(nextDays, current));
+                  }}
+                >
+                  <option value={7}>Last 7 days</option>
+                  <option value={30}>Last 30 days</option>
+                  <option value={90}>Last 90 days</option>
+                  {windowDays === 'custom' && <option value="custom">Custom</option>}
+                </select>
+              </label>
+              <label className="shrink-0">
+                <span className="sr-only">Turn result</span>
+                <select
+                  className={TOOLBAR_SELECT}
+                  value={filters.state ?? ''}
+                  onChange={(e) =>
+                    // Status is not part of the window. Changing it keeps the exact
+                    // since/until on screen: re-deriving them from a preset here
+                    // widened a one-day link back to seven days.
+                    setFilters((current) => ({
+                      ...current,
+                      state: (e.target.value || undefined) as AgentJobApiState | undefined,
+                    }))
+                  }
+                >
+                  <option value="">All results</option>
+                  {STATES.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className={ICON_BUTTON}
+                type="button"
+                aria-label="Refresh"
+                title="Refresh"
+                disabled={loading}
+                onClick={() =>
+                  setFilters((current) =>
+                    // A linked window is absolute and stays as linked. Any other
+                    // window keeps its own length and re-anchors at now, which is
+                    // what refreshing a list is for.
+                    linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
+                  )
                 }
               >
-                <option value="">All results</option>
-                {STATES.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              className={ICON_BUTTON}
-              type="button"
-              aria-label="Refresh"
-              title="Refresh"
-              disabled={loading}
-              onClick={() =>
-                setFilters((current) =>
-                  // A linked window is absolute and stays as linked. Any other
-                  // window keeps its own length and re-anchors at now, which is
-                  // what refreshing a list is for.
-                  linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
-                )
-              }
-            >
-              <svg
-                aria-hidden
-                viewBox="0 0 20 20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={1.6}
-                className="h-4 w-4"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
-                />
-              </svg>
-            </button>
-          </div>
+                <svg
+                  aria-hidden
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
+                  className="h-4 w-4"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
+                  />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
 
         {linked.error ? (
           // A broken link has nothing to retry: the URL has to change.
           <ErrorNotice>{linked.error}</ErrorNotice>
+        ) : level === 'sandboxes' ? (
+          <SandboxResults onDenied={onDenied} />
         ) : level === 'sessions' ? (
           <SessionResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         ) : level === 'turns' ? (
@@ -464,7 +482,12 @@ function ConversationsTable({
 }) {
   const now = Date.now();
   return (
-    <div className="mt-4 overflow-x-auto">
+    <div
+      role="region"
+      aria-label="Sessions table"
+      tabIndex={0}
+      className="ui-card ui-focus-ring mt-4 overflow-x-auto"
+    >
       <table className="w-full min-w-[900px] table-fixed text-left text-sm">
         <colgroup>
           <col />
@@ -474,13 +497,13 @@ function ConversationsTable({
           <col className="w-16" />
           <col className="w-24" />
         </colgroup>
-        <thead className="text-xs text-gray-400 dark:text-gray-500">
-          <tr className="border-b border-gray-100 dark:border-white/5">
+        <thead className="bg-surface-muted text-xs text-muted">
+          <tr className="border-b border-border">
             {['Session', 'User', 'State', 'Latest agent / model', 'Turns', 'Last activity'].map(
               (label) => (
                 <th
                   key={label}
-                  className={`px-3 py-2 font-normal ${
+                  className={`px-3 py-3 font-medium ${
                     label === 'Turns' || label === 'Last activity' ? 'text-right' : ''
                   }`}
                 >
@@ -490,9 +513,12 @@ function ConversationsTable({
             )}
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+        <tbody className="divide-y divide-border">
           {page.conversations.map((conversation) => (
-            <tr key={conversation.thread_id} className="hover:bg-gray-100 dark:hover:bg-gray-900">
+            <tr
+              key={conversation.thread_id}
+              className="transition-colors hover:bg-surface-hover/50"
+            >
               <th scope="row" className="px-3 py-2.5 font-normal">
                 <div className="flex min-w-0 items-baseline gap-2">
                   <Link
@@ -501,7 +527,7 @@ function ConversationsTable({
                       since: page.since,
                       until: page.until,
                     })}
-                    className="min-w-0 truncate font-medium text-gray-900 hover:underline dark:text-gray-100"
+                    className="ui-focus-ring min-w-0 truncate rounded-sm font-medium text-foreground hover:underline"
                     title={conversation.thread_id}
                   >
                     {conversation.title ?? conversation.thread_id}

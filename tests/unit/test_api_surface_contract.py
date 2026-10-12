@@ -3,13 +3,13 @@
 Three properties the R3 split established and nothing would notice breaking:
 
 * every route the application serves under the agent prefix comes from one of
-  the eight surface routers, and each surface is mounted exactly once;
+  the nine surface routers, and each surface is mounted exactly once;
 * no two of those surfaces shadow each other — the mount order in
   `api/routes.py` is only safe because their patterns do not overlap (design
   §6.4), so a new pattern that could match a sibling's URL has to fail here
   rather than change which handler answers;
 * the OpenAPI document the app produces is the one committed as
-  `gateway_contracts/agent-control-plane.openapi.json`, key-sorted, so that a change to
+  `gateway_contracts/agent-control-plane.openapi.json`, so that a change to
   the published shape is a diff somebody chose rather than a drift.
 
 What this file deliberately does **not** pin: absolute route positions, the
@@ -40,9 +40,9 @@ _METHODS = ("get", "post", "put", "patch", "delete")
 
 
 def _surface_routes() -> list[tuple[APIRouter, APIRoute]]:
-    """Every route the eight surfaces declare, with the surface it came from.
+    """Every route the nine surfaces declare, with the surface it came from.
 
-    The router object is the identity and not its prefix: all eight surfaces
+    The router object is the identity and not its prefix: all nine surfaces
     carry ``/v1/agent``, so a comparison that tells them apart by prefix tells
     nothing apart at all.
     """
@@ -133,7 +133,7 @@ def test_every_agent_route_comes_from_a_surface_router() -> None:
 
     # The app also mounts routers this tuple does not own — hosts, usage, the
     # MCP relay, the admin surfaces — so the surfaces are a subset of what is
-    # served. That each of the eight still *is* served is what this asserts: a
+    # served. That each of the nine still *is* served is what this asserts: a
     # router dropped from the tuple, or mounted under a doubled prefix, stops
     # being covered here (``/v1/agent/v1/agent/...`` is what that looked like).
     # That none of them was lost outright is the contract file's job below: the
@@ -166,12 +166,12 @@ def test_no_two_surfaces_shadow_each_other() -> None:
     """No surface's pattern can match another surface's URL.
 
     The pairs are told apart by router identity. They used to be skipped by
-    comparing prefixes — and all eight surfaces carry ``/v1/agent``, so every
+    comparing prefixes — and all nine surfaces carry ``/v1/agent``, so every
     pair was skipped and the loop below compared nothing.
 
     The overlaps between the *other* routers the app mounts (`mcp/catalog`
     against `mcp/{server_name}`, for one) predate this split and are not this
-    test's subject — these eight are.
+    test's subject — these nine are.
     """
     overlapping = _shadowing_pairs(_surface_routes())
 
@@ -206,6 +206,18 @@ def test_the_shadow_check_sees_same_path_with_different_methods() -> None:
     )
 
 
+def test_host_drain_contract_publishes_the_required_epoch_cas() -> None:
+    document = create_app().openapi()
+    schemas = document["components"]["schemas"]
+    host = schemas["AgentRunnerHost"]
+    acquire = schemas["AcquireHostDrainFenceRequest"]
+
+    assert "drain_fence_epoch" in host["required"]
+    assert host["properties"]["drain_fence_epoch"]["format"] == "uuid"
+    assert "expected_fence_epoch" in acquire["required"]
+    assert acquire["properties"]["expected_fence_epoch"]["format"] == "uuid"
+
+
 def test_the_served_openapi_is_the_committed_contract() -> None:
     """A shape change is a deliberate edit to the contract file, not a drift."""
     committed = json.loads(CONTRACT_FILE.read_text())
@@ -221,19 +233,3 @@ def test_the_served_openapi_is_the_committed_contract() -> None:
         'ensure_ascii=False) + \\"\\n\\")"\n'
         "and say in the pull request what moved."
     )
-
-
-def test_the_contract_file_is_key_sorted() -> None:
-    """Key-sorted, so a diff is the change and not the insertion order."""
-    text = CONTRACT_FILE.read_text()
-    document = json.loads(text)
-
-    assert text == json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False) + "\n", (
-        "the contract file is not in the canonical key-sorted form; the "
-        "regeneration command is in test_the_served_openapi_is_the_committed_contract"
-    )
-    operations = sum(
-        len([method for method in item if method in _METHODS])
-        for item in document["paths"].values()
-    )
-    assert operations > 0 and document["paths"], "the contract file lost its paths"

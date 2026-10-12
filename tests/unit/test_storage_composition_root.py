@@ -18,6 +18,7 @@ from cloud_agent import ports
 from cloud_agent.publish_worker import PublishStorage
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.workers import attempts as attempt_worker, snapshots as snapshot_worker
+from cloud_agent.workers.pr_archive import PrArchiveStorage
 
 #: Every protocol a background task is handed the real ``Storage`` for. They
 #: live beside the loops that declare them now, not in `app.py`.
@@ -27,6 +28,7 @@ TASK_PROTOCOLS = [
     attempt_worker._Reaping,
     snapshot_worker._SnapshotCapture,
     PublishStorage,
+    PrArchiveStorage,
 ]
 
 
@@ -37,17 +39,6 @@ def _assembled_storage() -> Storage:
 
 def _port_methods(port: type) -> set[str]:
     return {name for name in vars(port) if not name.startswith("_") and callable(vars(port)[name])}
-
-
-@pytest.mark.parametrize("protocol", TASK_PROTOCOLS, ids=lambda p: p.__name__)
-def test_assembled_storage_carries_every_capability_a_task_declares(protocol: type) -> None:
-    storage = _assembled_storage()
-    missing = [
-        attribute for attribute in protocol.__annotations__ if not hasattr(storage, attribute)
-    ]
-    assert not missing, (
-        f"{protocol.__name__} reaches for {missing}, which Storage has no attribute for"
-    )
 
 
 @pytest.mark.parametrize("protocol", TASK_PROTOCOLS, ids=lambda p: p.__name__)

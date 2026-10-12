@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { Fragment, useEffect, useId, useState, type ReactNode } from 'react';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
@@ -14,6 +14,12 @@ import {
   type ConversationTurnDescription,
 } from './conversationTurnNavigation';
 import type { AgentEvent, AgentThreadMessage, GoalTurn } from './types';
+import { ToolActivityDetails } from './ToolActivityDetails';
+import { parseToolActivity, recordedAgentStates, recordedTasks } from './toolActivity';
+import { toolNeedsAttention, toolSummary } from './toolSummary';
+import type { TranscriptPresentation } from './transcriptPresentation';
+
+export type InspectTranscriptEvent = (event: AgentEvent, jobId: string) => void;
 
 function Chevron({ className = '' }: { className?: string }) {
   return (
@@ -32,21 +38,24 @@ function Chevron({ className = '' }: { className?: string }) {
 
 function ToolIcon({ tool }: { tool: string }) {
   const normalized = tool.toLowerCase();
-  let path = 'M12 4v16m8-8H4';
-  if (normalized.includes('read') || normalized.includes('search')) {
+  let path =
+    'M14.7 6.3a5 5 0 0 0-6.4 6.4l-5 5a2.12 2.12 0 0 0 3 3l5-5a5 5 0 0 0 6.4-6.4l-3 3-3-3 3-3Z';
+  if (['read', 'search', 'grep', 'glob'].some((name) => normalized.includes(name))) {
     path =
       'M12 6.25c-2.5-2-6.5-2-9 0v12c2.5-2 6.5-2 9 0 2.5-2 6.5-2 9 0v-12c-2.5-2-6.5-2-9 0Zm0 0v12';
-  } else if (normalized.includes('bash') || normalized.includes('command')) {
+  } else if (
+    ['bash', 'command', 'exec', 'shell', 'terminal'].some((name) => normalized.includes(name))
+  ) {
     path =
       'm7 8 4 4-4 4m6 0h4M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z';
-  } else if (normalized.includes('edit') || normalized.includes('write')) {
+  } else if (['edit', 'write', 'patch'].some((name) => normalized.includes(name))) {
     path =
       'M16.86 4.49a1.5 1.5 0 0 1 2.12 0l.53.53a1.5 1.5 0 0 1 0 2.12L8.53 18.12 4 19.5l1.38-4.53L16.86 4.49Z';
   }
   return (
     <svg
       aria-hidden="true"
-      className="h-4 w-4 shrink-0 text-gray-400 dark:text-gray-500"
+      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
       fill="none"
       viewBox="0 0 24 24"
       stroke="currentColor"
@@ -79,6 +88,7 @@ function LifecycleRow({
 }) {
   const t = useT();
   const { text: label, milestone } = lifecyclePhaseLabel(text);
+  const attention = lifecycleNeedsAttention(text);
 
   // A phase this build does not recognise is a diagnostic, not an achievement:
   // no tick, muted, and clearly a passthrough of what the runtime said.
@@ -109,7 +119,11 @@ function LifecycleRow({
           stroke="currentColor"
           strokeWidth={2.5}
         >
-          <path strokeLinecap="round" strokeLinejoin="round" d="m6 12 4 4 8-9" />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d={attention ? 'm7 7 10 10M7 17 17 7' : 'm6 12 4 4 8-9'}
+          />
         </svg>
       </span>
       <span className="capitalize">{label}</span>
@@ -126,45 +140,482 @@ function LifecycleRow({
   );
 }
 
-function ToolActivity({
+type ToolActivityItem = {
+  event: Extract<AgentEvent, { kind: 'tool_use' }>;
+  blockKey?: string;
+};
+
+function toolResultLabel(event: ToolActivityItem['event'], t: ReturnType<typeof useT>): string {
+  return t(
+    event.resultState === 'unknown'
+      ? 'transcript.callUnknown'
+      : event.resultState === 'cancelled'
+        ? 'transcript.callInterrupted'
+        : event.outputIsError || event.resultState === 'failed'
+          ? 'transcript.callFailed'
+          : event.resultState === 'not_recorded'
+            ? 'transcript.callNotRecorded'
+            : event.resultState === 'waiting'
+              ? 'transcript.callWaiting'
+              : event.resultState === 'received' || event.output !== undefined
+                ? 'transcript.callReceived'
+                : 'transcript.callNotRecorded',
+  );
+}
+
+function RichToolActivity({
   event,
   blockKey,
+  presentation,
+  jobId,
+  onInspectEvent,
 }: {
   event: Extract<AgentEvent, { kind: 'tool_use' }>;
   blockKey?: string;
+  presentation?: TranscriptPresentation;
+  jobId?: string;
+  onInspectEvent?: InspectTranscriptEvent;
 }) {
-  return (
-    <details
-      data-block-key={blockKey}
-      className="group my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2 text-[13px] text-gray-700 dark:text-gray-300 marker:content-none">
-        <Chevron className="shrink-0 text-gray-400 dark:text-gray-500 transition-transform group-open:rotate-90" />
-        <ToolIcon tool={event.tool} />
-        <span className="font-medium">{event.tool}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-500 dark:text-gray-400">
-          {event.detail}
-        </span>
-        {event.diffStat ? (
-          <span className="shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400">
-            {event.diffStat}
+  const t = useT();
+  const activity = parseToolActivity(event.tool, event.input);
+  const resultLabel = toolResultLabel(event, t);
+  if (activity && presentation !== 'compact') {
+    return (
+      <section
+        data-block-key={blockKey}
+        aria-label={activity.kind === 'tasks' ? 'Task activity' : 'Subagent activity'}
+        className={`my-2 min-w-0 rounded-lg border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800 ${event.parentToolUseId ? 'ml-4 border-l-2' : ''}`}
+      >
+        <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-3 py-2 dark:border-gray-700">
+          <ToolIcon tool={event.tool} />
+          <span className="text-[13px] font-medium text-gray-700 dark:text-gray-300">
+            {activity.kind === 'tasks' ? 'Tasks' : 'Subagent'}
           </span>
-        ) : null}
-      </summary>
-      <div className="border-t border-gray-100 dark:border-white/5 px-3 py-2.5">
-        {event.output ? (
-          <pre
-            className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
-              event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
-            }`}
+          {onInspectEvent && jobId ? (
+            <button
+              type="button"
+              onClick={() => onInspectEvent(event, jobId)}
+              aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
+              className="ui-focus-ring min-w-0 truncate rounded text-left text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+            >
+              {toolSummary(event)}
+            </button>
+          ) : (
+            <span className="break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+              {toolSummary(event)}
+            </span>
+          )}
+          <span
+            className={`ml-auto text-[11px] ${event.outputIsError || event.resultState === 'failed' ? 'text-red-700 dark:text-red-300' : 'text-gray-500 dark:text-gray-400'}`}
           >
-            {event.output.join('\n')}
-          </pre>
-        ) : (
-          <p className="text-xs text-gray-400 dark:text-gray-500">Waiting for the tool result…</p>
-        )}
+            {resultLabel}
+          </span>
+        </div>
+        <div className="space-y-1.5 px-3 py-2">
+          <ToolActivityDetails
+            activity={activity}
+            output={event.output?.join('\n')}
+            isError={event.outputIsError}
+          />
+          <details className="group" open={presentation === 'detailed' || undefined}>
+            <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
+              Call details
+            </summary>
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-gray-950 p-3 font-mono text-xs text-gray-200">
+              {event.input === undefined ? event.detail : JSON.stringify(event.input, null, 2)}
+            </pre>
+            {event.output !== undefined ? (
+              <pre
+                className={`mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md p-3 font-mono text-xs ${event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'}`}
+              >
+                {event.output.join('\n')}
+              </pre>
+            ) : null}
+          </details>
+        </div>
+      </section>
+    );
+  }
+  return (
+    <ToolActivity tools={[{ event, blockKey }]} {...{ presentation, jobId, onInspectEvent }} />
+  );
+}
+
+function ToolActivity({
+  tools,
+  presentation,
+  jobId,
+  onInspectEvent,
+}: {
+  tools: ToolActivityItem[];
+  presentation?: TranscriptPresentation;
+  jobId?: string;
+  onInspectEvent?: InspectTranscriptEvent;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(presentation === 'detailed');
+  useEffect(() => {
+    setExpanded(presentation === 'detailed');
+  }, [presentation]);
+  const detailsId = useId();
+  const label = tools.length === 1 ? 'tool call' : 'tool calls';
+
+  return (
+    <div className={`my-1 min-w-0 ${tools[0]?.event.parentToolUseId ? 'ml-4' : ''}`}>
+      <div className="flex min-w-0 items-center gap-2 py-1 text-xs text-gray-500 dark:text-gray-400">
+        <ul
+          role="list"
+          aria-label="Tool calls"
+          tabIndex={0}
+          className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto rounded-md focus-visible:outline-crimson"
+        >
+          {tools.map(({ event, blockKey }, index) => {
+            // Compact shows the tool alone; richer views add what it ran on.
+            const label = presentation === 'compact' ? event.tool : toolSummary(event);
+            return (
+              <li
+                key={blockKey ?? index}
+                data-block-key={blockKey}
+                title={`${toolSummary(event)} · ${toolResultLabel(event, t)}`}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-gray-800"
+              >
+                <ToolIcon tool={event.tool} />
+                {event.parentToolUseId ? (
+                  <span
+                    title={`Delegated by ${event.parentToolUseId}`}
+                    className="text-[10px] text-gray-600 dark:text-gray-400"
+                  >
+                    Subagent tool
+                  </span>
+                ) : null}
+                {onInspectEvent && jobId ? (
+                  <button
+                    type="button"
+                    onClick={() => onInspectEvent(event, jobId)}
+                    aria-label={t('transcript.inspectTool', { summary: toolSummary(event) })}
+                    className="ui-focus-ring max-w-80 truncate rounded text-left font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+                  >
+                    {label}
+                  </button>
+                ) : (
+                  <span className="max-w-80 truncate font-medium text-gray-700 dark:text-gray-300">
+                    {label}
+                  </span>
+                )}
+                {event.diffStat ? (
+                  <span className="max-w-20 truncate font-mono" title={event.diffStat}>
+                    {event.diffStat}
+                  </span>
+                ) : null}
+                <span
+                  className={
+                    event.outputIsError || event.resultState === 'failed'
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-gray-500 dark:text-gray-400'
+                  }
+                >
+                  {toolResultLabel(event, t)}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          onClick={() => setExpanded((value) => !value)}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-crimson dark:hover:bg-white/10 dark:hover:text-gray-100"
+        >
+          <Chevron className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
+          {expanded ? `Hide ${label}` : `Show ${label}`}
+        </button>
       </div>
-    </details>
+      <div
+        id={detailsId}
+        hidden={!expanded}
+        className="mt-1 space-y-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-gray-700 dark:bg-gray-800"
+      >
+        {tools.map(({ event, blockKey }, index) => {
+          const call =
+            event.input === undefined
+              ? event.detail
+              : typeof event.input === 'string'
+                ? event.input
+                : JSON.stringify(event.input, null, 2);
+          return (
+            <section
+              key={blockKey ?? index}
+              className="space-y-2 border-b border-gray-200 pb-3 last:border-b-0 last:pb-0 dark:border-gray-700"
+            >
+              <p className="flex items-center gap-1.5 text-xs font-medium text-gray-700 dark:text-gray-300">
+                <ToolIcon tool={event.tool} />
+                <span>
+                  {event.tool} · Call {index + 1}
+                </span>
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">Tool call</p>
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-100 px-3 py-2.5 font-mono text-xs leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300">
+                {call}
+              </pre>
+              <p className="text-xs text-gray-500 dark:text-gray-400">Result</p>
+              {event.output !== undefined ? (
+                <pre
+                  className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
+                    event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
+                  }`}
+                >
+                  {event.output.join('\n') || 'No output text recorded.'}
+                </pre>
+              ) : (
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  {event.resultState && event.resultState !== 'waiting'
+                    ? toolResultLabel(event, t)
+                    : 'Waiting for the tool result…'}
+                </p>
+              )}
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Consecutive reasoning and calls share one activity group. */
+export function EventList({
+  events,
+  jobId,
+  renderEvent,
+  showActivityDetails = true,
+  presentation,
+  completed = false,
+  onInspectEvent,
+}: {
+  events: AgentEvent[];
+  jobId: string;
+  /** Ungrouped rows; reasoning and tool groups use the shared transcript views. */
+  renderEvent: (event: AgentEvent, index: number, blockKey: string) => ReactNode;
+  /** Keep task/delegation calls compact when their overview is shown elsewhere. */
+  showActivityDetails?: boolean;
+  presentation?: TranscriptPresentation;
+  /** Only a recorded completed turn may fold. Failed/interrupted/unknown turns stay open. */
+  completed?: boolean;
+  onInspectEvent?: InspectTranscriptEvent;
+}) {
+  const rows: {
+    key: string;
+    node: ReactNode;
+    foldable: boolean;
+    process: boolean;
+    count: number;
+    attemptNo?: number;
+  }[] = [];
+  const richActivity =
+    presentation === 'detailed' || (presentation !== 'compact' && showActivityDetails);
+  const isCompactActivity = (event: AgentEvent): boolean =>
+    event.kind === 'thinking' ||
+    (event.kind === 'tool_use' && (!richActivity || !parseToolActivity(event.tool, event.input)));
+
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    const blockKey = eventBlockKey(jobId, event, index);
+    if (!isCompactActivity(event)) {
+      rows.push({
+        key: blockKey,
+        node:
+          event.kind === 'tool_use' && presentation !== undefined ? (
+            <RichToolActivity
+              event={event}
+              blockKey={blockKey}
+              {...{ presentation, jobId, onInspectEvent }}
+            />
+          ) : (
+            renderEvent(event, index, blockKey)
+          ),
+        foldable: processMayFold(event),
+        process: isProcessEvent(event),
+        count: 1,
+        attemptNo: event.attemptNo,
+      });
+      continue;
+    }
+    const parentToolUseId = event.kind === 'tool_use' ? event.parentToolUseId : undefined;
+    const foldable = processMayFold(event);
+    const tools: ToolActivityItem[] = [];
+    const reasoning: {
+      event: Extract<AgentEvent, { kind: 'thinking' }>;
+      index: number;
+      blockKey: string;
+    }[] = [];
+    let nextIndex = index;
+    while (nextIndex < events.length) {
+      const next = events[nextIndex];
+      if (
+        !isCompactActivity(next) ||
+        next.attemptNo !== event.attemptNo ||
+        // Completed activity can fold around a call that still needs attention.
+        // Keep the same partitions in every mode so reading anchors stay put.
+        (completed && processMayFold(next) !== foldable) ||
+        (next.kind === 'tool_use' ? next.parentToolUseId : undefined) !== parentToolUseId
+      )
+        break;
+      const nextBlockKey = eventBlockKey(jobId, next, nextIndex);
+      if (next.kind === 'thinking') {
+        reasoning.push({ event: next, index: nextIndex, blockKey: nextBlockKey });
+      } else if (next.kind === 'tool_use') {
+        tools.push({ event: next, blockKey: nextBlockKey });
+      }
+      nextIndex += 1;
+    }
+    index = nextIndex - 1;
+    const firstReasoning = reasoning[0];
+    const reasoningBlocks = reasoning.flatMap(
+      ({ event: thought }) => thought.reasoningBlocks ?? [{ text: thought.text }],
+    );
+    rows.push({
+      key: blockKey,
+      node: (
+        <Fragment>
+          {firstReasoning ? (
+            <div key="reasoning" data-block-key={firstReasoning.blockKey} className="relative">
+              {/* The group owns its anchors outside the collapsed disclosure;
+                  the shared view keeps standalone and grouped reasoning identical. */}
+              <ReasoningMessage
+                event={{
+                  ...firstReasoning.event,
+                  text: reasoningBlocks.map((block) => block.text).join('\n\n'),
+                  reasoningBlocks,
+                }}
+              />
+              {/* Grouped reasoning keeps each reading anchor at its shared section. */}
+              {reasoning.slice(1).map((item) => (
+                <span
+                  key={item.blockKey}
+                  data-block-key={item.blockKey}
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0"
+                />
+              ))}
+            </div>
+          ) : null}
+          {tools.length > 0 ? (
+            <ToolActivity key="tools" tools={tools} {...{ presentation, jobId, onInspectEvent }} />
+          ) : null}
+        </Fragment>
+      ),
+      foldable: tools.every(({ event: tool }) => processMayFold(tool)),
+      process: true,
+      count: tools.length + reasoning.length,
+      attemptNo: event.attemptNo,
+    });
+  }
+  const content: ReactNode[] = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (!row.process) {
+      content.push(<Fragment key={row.key}>{row.node}</Fragment>);
+      continue;
+    }
+    const process = [row];
+    while (
+      index + 1 < rows.length &&
+      rows[index + 1].process &&
+      (!completed || rows[index + 1].foldable === row.foldable) &&
+      rows[index + 1].attemptNo === row.attemptNo
+    ) {
+      process.push(rows[++index]);
+    }
+    content.push(
+      <ProcessDisclosure
+        key={row.key}
+        enabled={completed && presentation === 'compact' && process.every((item) => item.foldable)}
+        count={process.reduce((count, item) => count + item.count, 0)}
+      >
+        {process.map((item) => (
+          <Fragment key={item.key}>{item.node}</Fragment>
+        ))}
+      </ProcessDisclosure>,
+    );
+  }
+  return <>{content}</>;
+}
+
+/** Fold classified process rows; input, replies and incomplete/error records stay readable. */
+function processMayFold(event: AgentEvent): boolean {
+  if (event.kind === 'tool_use') {
+    if (toolNeedsAttention(event)) return false;
+    const activity = parseToolActivity(event.tool, event.input);
+    if (activity) {
+      const output = event.output?.join('\n');
+      const states =
+        activity.kind === 'tasks'
+          ? [...activity.tasks, ...recordedTasks(output)]
+          : [...activity.states, ...recordedAgentStates(output)];
+      // A successful tool response does not establish that its delegated work succeeded.
+      if (states.some(({ status }) => !['completed', 'deleted', 'shutdown'].includes(status ?? '')))
+        return false;
+    }
+    return true;
+  }
+  if (event.kind === 'thinking' || event.kind === 'usage') return true;
+  if (event.kind === 'terminal') return event.isError === false;
+  if (event.kind === 'lifecycle')
+    return lifecyclePhaseLabel(event.text).milestone && !lifecycleNeedsAttention(event.text);
+  return false;
+}
+
+function isProcessEvent(event: AgentEvent): boolean {
+  return (
+    event.kind === 'tool_use' ||
+    event.kind === 'thinking' ||
+    event.kind === 'usage' ||
+    event.kind === 'terminal' ||
+    (event.kind === 'lifecycle' &&
+      lifecyclePhaseLabel(event.text).milestone &&
+      !lifecycleNeedsAttention(event.text))
+  );
+}
+
+function lifecycleNeedsAttention(text: string): boolean {
+  const phase = text.trim().toLowerCase();
+  return phase === 'cancelled_by_owner' || phase.includes('superseded');
+}
+
+function ProcessDisclosure({
+  enabled,
+  count,
+  children,
+}: {
+  enabled: boolean;
+  count: number;
+  children: ReactNode;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setExpanded(false);
+  }, [enabled]);
+  const bodyId = useId();
+  const collapsed = enabled && !expanded;
+  return (
+    <section data-transcript-process data-transcript-process-collapsed={collapsed || undefined}>
+      {enabled ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded((value) => !value)}
+          className="my-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 focus-visible:outline-crimson dark:text-gray-400 dark:hover:bg-white/5"
+        >
+          <Chevron className={expanded ? 'rotate-90' : ''} />
+          {t(expanded ? 'transcript.hideProcess' : 'transcript.showProcess', { count })}
+        </button>
+      ) : null}
+      <div id={bodyId} hidden={collapsed} aria-label={t('transcript.process')}>
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -248,28 +699,57 @@ export function MessageActionButton({
       disabled={disabled}
       aria-label={label}
       title={label}
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-40"
+      className="ui-focus-ring inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-40"
     >
       {children}
     </button>
   );
 }
 
-/** Hover-revealed per-message actions; focus keeps them visible for keyboards. */
+/** Actions stay visible on touch; hover and keyboard focus reveal them on desktop. */
 export function MessageActions({
   align = 'start',
+  className = '',
   children,
 }: {
   align?: 'start' | 'end';
+  className?: string;
   children: ReactNode;
 }) {
   return (
     <div
-      className={`mt-1 flex gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
+      className={`mt-1 flex flex-wrap gap-1 opacity-100 transition-opacity md:opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:!opacity-100 [@media(pointer:coarse)]:!opacity-100 ${
         align === 'end' ? 'justify-end' : ''
-      }`}
+      } ${className}`}
     >
       {children}
+    </div>
+  );
+}
+
+/** Compact messages keep Copy beside the content without reserving an action row. */
+export function MessageContent({
+  text,
+  presentation,
+}: {
+  text: string;
+  presentation?: TranscriptPresentation;
+}) {
+  if (presentation !== 'compact') return <Markdown text={text} />;
+  return (
+    <div className="flex items-start gap-2">
+      <div className="min-w-0 flex-1">
+        <Markdown text={text} />
+      </div>
+      <button
+        type="button"
+        aria-label="Copy message"
+        title="Copy message"
+        onClick={() => void copyMessage(text)}
+        className="ui-focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-500 transition-opacity hover:bg-gray-100 hover:text-gray-700 md:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200 [@media(hover:none)]:!opacity-100 [@media(pointer:coarse)]:!opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+      >
+        <CopyIcon />
+      </button>
     </div>
   );
 }
@@ -279,25 +759,30 @@ function AssistantMessage({
   extraActions,
   footer,
   blockKey,
+  presentation,
 }: {
   text: string;
   extraActions?: ReactNode;
   footer?: ReactNode;
   /** Stable row identity, so a layout change never moves a reader off it. */
   blockKey?: string;
+  presentation?: TranscriptPresentation;
 }) {
-  const actions = (
-    <MessageActions>
-      <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-        <CopyIcon />
-        Copy
-      </MessageActionButton>
-      {extraActions}
-    </MessageActions>
-  );
+  const actions =
+    presentation !== 'compact' || extraActions ? (
+      <MessageActions>
+        {presentation !== 'compact' ? (
+          <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
+            <CopyIcon />
+            Copy
+          </MessageActionButton>
+        ) : null}
+        {extraActions}
+      </MessageActions>
+    ) : null;
   return (
     <div data-block-key={blockKey} className="group py-3 text-gray-800 dark:text-gray-200">
-      <Markdown text={text} />
+      <MessageContent text={text} presentation={presentation} />
       {footer ? (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           {footer}
@@ -318,6 +803,7 @@ export function ThreadTurn({
   footer,
   blockKey,
   goalTurn,
+  presentation,
 }: {
   message: AgentThreadMessage;
   footer?: ReactNode;
@@ -327,6 +813,7 @@ export function ThreadTurn({
   blockKey?: string;
   /** How this turn came to exist, and what it reported about the goal. */
   goalTurn?: GoalTurn;
+  presentation?: TranscriptPresentation;
 }) {
   const t = useT();
   if (message.role === 'assistant') {
@@ -335,6 +822,7 @@ export function ThreadTurn({
         text={message.content}
         footer={footer}
         blockKey={blockKey}
+        presentation={presentation}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -384,7 +872,7 @@ export function ThreadTurn({
       </div>
     );
   }
-  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind }} />;
+  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind, presentation }} />;
 }
 
 /**
@@ -411,29 +899,85 @@ function UserMessage({
   blockKey,
   busy,
   onRewind,
+  presentation,
 }: {
   text: string;
   blockKey?: string;
   busy?: boolean;
   onRewind?: () => void;
+  presentation?: TranscriptPresentation;
 }) {
   return (
-    <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
-      <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
-        <Markdown text={text} />
+    <div data-block-key={blockKey} className="group my-2 ml-auto w-fit max-w-[88%]">
+      <div className="flex min-w-0 items-start gap-2 rounded-xl bg-gray-100 px-3 py-2 text-sm leading-6 text-gray-800 dark:bg-white/5 dark:text-gray-200">
+        <div className="min-w-0 flex-1">
+          <MessageContent text={text} presentation={presentation} />
+        </div>
+        {presentation !== 'compact' ? (
+          <MessageActions align="end" className="!mt-0 shrink-0">
+            <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
+              <CopyIcon />
+              Copy
+            </MessageActionButton>
+          </MessageActions>
+        ) : null}
       </div>
-      <MessageActions align="end">
-        <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-          <CopyIcon />
-          Copy
-        </MessageActionButton>
-        {onRewind ? (
+      {onRewind ? (
+        <MessageActions align="end" className="mt-0">
           <MessageActionButton label="Edit & rewind" onClick={onRewind} disabled={busy}>
             <RewindIcon />
             Edit & rewind
           </MessageActionButton>
-        ) : null}
-      </MessageActions>
+        </MessageActions>
+      ) : null}
+    </div>
+  );
+}
+
+function ReasoningMessage({
+  event,
+  blockKey,
+}: {
+  event: Extract<AgentEvent, { kind: 'thinking' }>;
+  blockKey?: string;
+}) {
+  const blocks = (event.reasoningBlocks ?? [{ text: event.text, channel: undefined }]).filter(
+    (block) => block.text.trim(),
+  );
+  if (blocks.length) {
+    return (
+      <details
+        data-block-key={blockKey}
+        aria-label="Agent reasoning"
+        className="group my-2 rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/[0.025]"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+          <Chevron className="transition-transform group-open:rotate-90" />
+          Reasoning
+        </summary>
+        <div className="space-y-3 border-t border-gray-200 px-3 py-3 text-gray-600 dark:border-white/10 dark:text-gray-400">
+          {blocks.map((block, index) => (
+            <div key={`${block.channel ?? 'text'}:${index}`}>
+              {blocks.length > 1 && block.channel ? (
+                <p className="mb-1 text-xs font-medium">
+                  {block.channel === 'summary' ? 'Summary' : 'Detailed reasoning'}
+                </p>
+              ) : null}
+              <Markdown text={block.text} />
+            </div>
+          ))}
+        </div>
+      </details>
+    );
+  }
+  return (
+    <div
+      data-block-key={blockKey}
+      aria-label="Agent reasoning"
+      className="flex items-center gap-2.5 py-2 text-[13px] text-gray-400 dark:text-gray-500"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
+      Agent is reasoning
     </div>
   );
 }
@@ -445,6 +989,9 @@ export function EventRow({
   footer,
   blockKey,
   firstRun,
+  presentation,
+  jobId,
+  onInspectEvent,
 }: {
   event: AgentEvent;
   onFork?: () => void;
@@ -454,27 +1001,21 @@ export function EventRow({
   blockKey?: string;
   /** The first turn of the owner's first conversation: milestones say what they mean. */
   firstRun?: boolean;
+  presentation?: TranscriptPresentation;
+  jobId?: string;
+  onInspectEvent?: InspectTranscriptEvent;
 }) {
+  const t = useT();
   if (event.kind === 'lifecycle')
     return <LifecycleRow text={event.text} blockKey={blockKey} firstRun={firstRun} />;
-  if (event.kind === 'thinking') {
-    return (
-      <div
-        data-block-key={blockKey}
-        aria-label="Agent reasoning"
-        className="flex items-center gap-2.5 py-2 text-[13px] text-gray-400 dark:text-gray-500"
-      >
-        <span className="h-1.5 w-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
-        Agent is reasoning
-      </div>
-    );
-  }
+  if (event.kind === 'thinking') return <ReasoningMessage event={event} blockKey={blockKey} />;
   if (event.kind === 'message') {
     return (
       <AssistantMessage
         text={event.text}
         footer={footer}
         blockKey={blockKey}
+        presentation={presentation}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -486,16 +1027,31 @@ export function EventRow({
       />
     );
   }
-  if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
-  if (event.kind === 'tool_use') return <ToolActivity event={event} blockKey={blockKey} />;
+  if (event.kind === 'user_message')
+    return <UserMessage text={event.text} blockKey={blockKey} presentation={presentation} />;
+  if (event.kind === 'tool_use')
+    return (
+      <RichToolActivity
+        event={event}
+        blockKey={blockKey}
+        {...{ presentation, jobId, onInspectEvent }}
+      />
+    );
   if (event.kind === 'tool_result') {
     return (
       <details
         data-block-key={blockKey}
         className="my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
       >
-        <summary className="cursor-pointer px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+        <summary
+          className={`cursor-pointer px-3 py-2 text-[13px] ${event.isError ? 'text-rose-600 dark:text-rose-400' : 'text-gray-500 dark:text-gray-400'}`}
+        >
           Unmatched tool result
+          {event.cancelled
+            ? ` · ${t('transcript.callInterrupted')}`
+            : event.isError
+              ? ` · ${t('transcript.callFailed')}`
+              : ''}
         </summary>
         <pre className="m-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200">
           {event.text || 'Command completed with no output.'}
@@ -527,6 +1083,10 @@ export function HistoryTurn({
   onFork,
   onRewind,
   onOpenRun,
+  showActivityDetails = true,
+  presentation,
+  onInspectEvent,
+  results,
 }: {
   turn: ConversationTurnDescription;
   rewindAnchorJobId?: string;
@@ -534,6 +1094,11 @@ export function HistoryTurn({
   onFork?: (jobId: string) => void;
   onRewind?: (jobId: string, prompt: string) => void;
   onOpenRun?: (jobId: string, turnNo: number) => void;
+  showActivityDetails?: boolean;
+  presentation?: TranscriptPresentation;
+  onInspectEvent?: InspectTranscriptEvent;
+  /** Recorded artifacts stay within this turn's navigation boundary. */
+  results?: ReactNode;
 }) {
   // What the transcript renders is decided once, by the turn description the
   // navigation rail also reads.
@@ -547,7 +1112,11 @@ export function HistoryTurn({
   return (
     <section aria-label={`Turn ${turn.displayNo}`} data-turn-key={turn.key}>
       {turn.promptCard !== null ? (
-        <UserMessage text={turn.promptCard} blockKey={`${jobId}:prompt`} />
+        <UserMessage
+          text={turn.promptCard}
+          blockKey={`${jobId}:prompt`}
+          presentation={presentation}
+        />
       ) : null}
       {/* The prompt opens the turn; a message sent into it reads where it arrived. */}
       {turn.messages
@@ -557,6 +1126,7 @@ export function HistoryTurn({
             key={message.id}
             message={message}
             goalTurn={turn.goalTurn}
+            presentation={presentation}
             blockKey={messageBlockKey(jobId, message.id)}
             busy={busy}
             onRewind={
@@ -567,24 +1137,35 @@ export function HistoryTurn({
           />
         ))}
       <div aria-label={`Turn ${turn.displayNo} agent activity`} className="mt-2">
-        {turn.events.map((event, index) => (
-          <EventRow
-            key={eventBlockKey(jobId, event, index)}
-            event={event}
-            blockKey={eventBlockKey(jobId, event, index)}
-            busy={busy}
-            onFork={
-              event.kind === 'message' && index === lastEventMessageIndex && onFork
-                ? () => onFork(turn.jobId)
-                : undefined
-            }
-          />
-        ))}
+        <EventList
+          events={turn.events}
+          jobId={jobId}
+          showActivityDetails={showActivityDetails}
+          presentation={presentation}
+          completed={turn.state === 'done' || turn.state === 'needs_review'}
+          onInspectEvent={onInspectEvent}
+          renderEvent={(event, index, blockKey) => (
+            <EventRow
+              event={event}
+              blockKey={blockKey}
+              busy={busy}
+              presentation={presentation}
+              jobId={jobId}
+              onInspectEvent={onInspectEvent}
+              onFork={
+                event.kind === 'message' && index === lastEventMessageIndex && onFork
+                  ? () => onFork(turn.jobId)
+                  : undefined
+              }
+            />
+          )}
+        />
         {turn.fallbackResponses.map((message) => (
           <ThreadTurn
             key={message.id}
             message={message}
             blockKey={messageBlockKey(jobId, message.id)}
+            presentation={presentation}
             busy={busy}
             onFork={
               message.id === lastFallbackMessageId && onFork ? () => onFork(turn.jobId) : undefined
@@ -592,8 +1173,9 @@ export function HistoryTurn({
           />
         ))}
       </div>
+      {results}
       {onOpenRun ? (
-        <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
+        <div className="mb-4 mt-2 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
           <button
             type="button"
             onClick={() => onOpenRun(turn.jobId, turn.displayNo)}

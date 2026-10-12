@@ -15,7 +15,21 @@ from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
+
+#: How long a capture handed back by a busy or unreachable host waits before it
+#: is claimed again. Until then the coordinator captures the workspaces behind
+#: it, and sleeps when there are none.
+CAPTURE_RETRY_S = 5.0
+#: How long a published base whose import failed waits before it is retried.
+BASE_IMPORT_RETRY_S = 15.0
+#: A publication whose entitlement preflight failed waits before retrying.
+PUBLISH_RETRY_S = 30.0
+#: How many transient failures may return a publication to the durable queue.
+#: The next failure exhausts it and preserves the lineage block for review.
+PUBLISH_MAX_ATTEMPTS = 5
 
 
 class PostgresSnapshotRepository:
@@ -40,7 +54,7 @@ class PostgresSnapshotRepository:
                        s.anchor_job_id, s.base_sha, g.generation,
                        g.origin_thread_id, g.container_id, g.container_name,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
-                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
                        g.resident_slot_capacity,
                        COALESCE((
                            SELECT jsonb_agg(
@@ -63,7 +77,10 @@ class PostgresSnapshotRepository:
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
                 WHERE s.state = 'pending'
+                  AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND g.state IN ('running', 'stopped')
+                  AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND g.snapshot_state = 'pending'
                   AND g.active_operation_count = 0
                   AND NOT EXISTS (
@@ -94,7 +111,7 @@ class PostgresSnapshotRepository:
             captured = await conn.fetchval(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET state = 'capturing', last_error = NULL, updated_at = NOW()
+                SET state = 'capturing', last_error = NULL, retry_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND state = 'pending'
                 RETURNING id
                 """,
@@ -206,7 +223,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = g.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.generation = $2 AND g.container_id = $3
@@ -228,7 +245,11 @@ class PostgresSnapshotRepository:
         detail: str,
         dirty: bool = False,
     ) -> bool:
-        """Release a failed host capture; busy retries, unsafe census dirties."""
+        """Release a failed host capture; busy retries, unsafe census dirties.
+
+        A capture handed back for a retry is not claimed again before its
+        ``retry_at``, so a busy host is asked on that clock, not in a loop.
+        """
         next_state = "failed" if dirty else "pending"
         group_state = "dirty" if dirty else "pending"
         async with self._pool.acquire() as conn, conn.transaction():
@@ -273,12 +294,15 @@ class PostgresSnapshotRepository:
             await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET state = $2, last_error = $3, updated_at = NOW()
+                SET state = $2, last_error = $3, updated_at = NOW(),
+                    retry_at = CASE WHEN $2 = 'pending'
+                                    THEN clock_timestamp() + make_interval(secs => $4) END
                 WHERE id = $1 AND state = 'capturing'
                 """,
                 snapshot_id,
                 next_state,
                 detail[:2000],
+                CAPTURE_RETRY_S,
             )
             await conn.execute(
                 """
@@ -290,7 +314,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = agent_sandboxes.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
                         ELSE NULL END,
                     last_error = CASE WHEN $2 = 'dirty' THEN $3 ELSE last_error END,
                     updated_at = NOW()
@@ -334,7 +358,7 @@ class PostgresSnapshotRepository:
                                 WHERE active.sandbox_id = agent_sandboxes.id
                                   AND active.active_attempt_id IS NOT NULL
                              )
-                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
                             ELSE NULL END,
                         updated_at = NOW()
                     WHERE id = ANY($1::text[]) AND snapshot_state = 'snapshotting'
@@ -351,11 +375,13 @@ class PostgresSnapshotRepository:
         preparation: a group snapshot may capture a succeeded boundary or a
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
+        Deferred publications are eligible only after their ``retry_at``.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             snapshot = await conn.fetchrow(
                 """
                 SELECT s.id AS snapshot_id, s.sandbox_id, s.workspace_epoch,
+                       s.publish_attempt_count,
                        s.anchor_job_id AS id, s.base_sha, s.patch_content AS patch,
                        (
                            SELECT COALESCE(
@@ -365,10 +391,59 @@ class PostgresSnapshotRepository:
                            FROM agent_snapshot_jobs included
                            WHERE included.snapshot_id = s.id
                        ) AS included_job_ids,
+                       COALESCE((
+                           SELECT jsonb_agg(summary.content ORDER BY included.created_at, included.job_id)
+                           FROM agent_snapshot_jobs included
+                           JOIN agent_jobs included_job ON included_job.id = included.job_id
+                           JOIN LATERAL (
+                               SELECT LEFT(message.content, 4000) AS content
+                               FROM agent_thread_messages message
+                               JOIN agent_job_events event ON event.id = message.source_event_id
+                               WHERE message.job_id = included.job_id
+                                 AND message.thread_id = included_job.thread_id
+                                 AND message.role = 'assistant'
+                                 AND event.attempt_id = included_job.current_attempt_id
+                               ORDER BY message.id DESC
+                               LIMIT 1
+                           ) summary ON TRUE
+                           WHERE included.snapshot_id = s.id
+                       ), '[]'::jsonb) AS session_summaries,
+                       COALESCE((
+                           SELECT jsonb_agg(
+                               jsonb_build_object(
+                                   'thread_id', message.thread_id,
+                                   'job_id', message.job_id,
+                                   'role', message.role,
+                                   'content', message.content
+                               ) ORDER BY history.thread_id, history.turn_no,
+                                   CASE WHEN message.role = 'user' AND NOT message.mid_turn
+                                        THEN 0 ELSE 1 END,
+                                   message.id
+                           )
+                           FROM (
+                               SELECT included_job.thread_id, MAX(included_job.turn_no) AS turn_no
+                               FROM agent_sandbox_snapshots captured
+                               JOIN agent_snapshot_jobs included ON included.snapshot_id = captured.id
+                               JOIN agent_jobs included_job ON included_job.id = included.job_id
+                               WHERE captured.sandbox_id = s.sandbox_id
+                                 AND captured.workspace_epoch <= s.workspace_epoch
+                               GROUP BY included_job.thread_id
+                           ) boundary
+                           JOIN agent_jobs history ON history.thread_id = boundary.thread_id
+                               AND history.turn_no <= boundary.turn_no
+                           JOIN agent_thread_messages message ON message.job_id = history.id
+                               AND message.thread_id = history.thread_id
+                           LEFT JOIN agent_job_events event ON event.id = message.source_event_id
+                           WHERE message.role = 'user'
+                              OR (message.role = 'assistant' AND (
+                                  message.source_event_id IS NULL
+                                  OR event.attempt_id = history.current_attempt_id
+                              ))
+                       ), '[]'::jsonb) AS session_messages,
                        g.origin_thread_id,
                        g.generation, g.container_id, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
-                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
                        g.resident_slot_capacity,
                        COALESCE((
                            SELECT jsonb_agg(
@@ -389,7 +464,7 @@ class PostgresSnapshotRepository:
                              AND member.resident_slot_id IS NOT NULL
                        ), '[]'::jsonb) AS members,
                        j.thread_id, j.parent_job_id, j.user_id, t.repo,
-                       j.task_prompt, j.metadata,
+                       j.task_prompt, j.metadata, j.model,
                        prior.published_pr_url AS parent_pr_url
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
@@ -404,6 +479,7 @@ class PostgresSnapshotRepository:
                     LIMIT 1
                 ) prior ON TRUE
                 WHERE s.state = 'captured'
+                  AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND s.patch_content IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_sandbox_snapshots earlier
@@ -420,7 +496,8 @@ class PostgresSnapshotRepository:
                 claimed = await conn.fetchval(
                     """
                     UPDATE agent_sandbox_snapshots
-                    SET state = 'publishing', last_error = NULL, updated_at = NOW()
+                    SET state = 'publishing', last_error = NULL, retry_at = NULL,
+                        updated_at = NOW()
                     WHERE id = $1 AND state = 'captured'
                     RETURNING id
                     """,
@@ -447,9 +524,12 @@ class PostgresSnapshotRepository:
                 return {
                     "publication_kind": "shared_snapshot",
                     "snapshot_id": int(snapshot["snapshot_id"]),
+                    "publish_attempt_count": int(snapshot["publish_attempt_count"]),
                     "sandbox_id": snapshot["sandbox_id"],
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
                     "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
+                    "session_summaries": load_json(snapshot["session_summaries"]) or [],
+                    "session_messages": load_json(snapshot["session_messages"]) or [],
                     "job_id": snapshot["id"],
                     "anchor_job_id": snapshot["id"],
                     "thread_id": snapshot["thread_id"],
@@ -462,6 +542,7 @@ class PostgresSnapshotRepository:
                     "sandbox_image_digest": snapshot["sandbox_image_digest"],
                     "memory_limit": snapshot["memory_limit"],
                     "cpu_limit": snapshot["cpu_limit"],
+                    "disk_limit_mib": snapshot["disk_limit_mib"],
                     "stop_timeout_seconds": int(snapshot["stop_timeout_seconds"]),
                     "resident_slot_capacity": int(snapshot["resident_slot_capacity"]),
                     "members": load_json(snapshot["members"]) or [],
@@ -471,15 +552,147 @@ class PostgresSnapshotRepository:
                     "repo": snapshot["repo"],
                     "base_sha": snapshot["base_sha"],
                     "task_prompt": snapshot["task_prompt"],
+                    "model": snapshot["model"],
                     "metadata": load_json(snapshot["metadata"]),
                     "patch": snapshot["patch"],
                 }
             return None
 
+    async def renew_snapshot_publish_claim(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int
+    ) -> bool:
+        """Heartbeat this exact publishing claim using database wall time."""
+        async with self._pool.acquire() as conn:
+            renewed = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET updated_at = clock_timestamp()
+                WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $2
+                RETURNING id
+                """,
+                snapshot_id,
+                expected_publish_attempt_count,
+            )
+        return renewed is not None
+
+    async def defer_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> bool:
+        """Retry a transient publication under this exact fenced claim."""
+        return await self._defer_snapshot_publish(
+            snapshot_id=snapshot_id,
+            expected_publish_attempt_count=expected_publish_attempt_count,
+            detail=detail,
+            stall_seconds=None,
+        )
+
+    async def _defer_snapshot_publish(
+        self,
+        *,
+        snapshot_id: int,
+        expected_publish_attempt_count: int,
+        detail: str,
+        stall_seconds: float | None,
+    ) -> bool:
+        """Retry a transient publication, or stop after the durable budget.
+
+        Deterministic branch and PR reconciliation makes replay safe even when
+        the process died after a remote effect. The counter survives restarts;
+        exhaustion marks the artifact and group dirty for manual review rather
+        than skipping it and publishing a later workspace epoch out of order.
+        The expected counter rejects a publisher whose stalled claim was
+        reclaimed. Returns ``False`` unless this exact claim is still
+        ``publishing``.
+        """
+        retry_detail = detail[:2000]
+        exhausted_detail = (
+            f"{detail[:1800]} Publication retry limit ({PUBLISH_MAX_ATTEMPTS}) exhausted; "
+            "manual review is required."
+        )[:2000]
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = CASE
+                        WHEN publish_attempt_count >= $5 THEN 'failed'
+                        ELSE 'captured'
+                    END,
+                    publish_attempt_count = CASE
+                        WHEN publish_attempt_count >= $5 THEN publish_attempt_count
+                        ELSE publish_attempt_count + 1
+                    END,
+                    last_error = CASE
+                        WHEN publish_attempt_count >= $5 THEN $6
+                        ELSE $3
+                    END,
+                    retry_at = CASE
+                        WHEN publish_attempt_count >= $5 THEN NULL
+                        ELSE clock_timestamp() + make_interval(secs => $4)
+                    END,
+                    updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $2
+                  AND (
+                      $7::double precision IS NULL
+                      OR updated_at < clock_timestamp() - make_interval(secs => $7)
+                  )
+                RETURNING id, sandbox_id, anchor_job_id, state, last_error
+                """,
+                snapshot_id,
+                expected_publish_attempt_count,
+                retry_detail,
+                PUBLISH_RETRY_S,
+                PUBLISH_MAX_ATTEMPTS,
+                exhausted_detail,
+                stall_seconds,
+            )
+            if row is None:
+                return False
+            if row["state"] != "failed":
+                return True
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET snapshot_state = 'dirty', last_error = $2,
+                    idle_deadline = CASE
+                        WHEN active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = agent_sandboxes.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
+                        ELSE NULL END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                row["sandbox_id"],
+                row["last_error"],
+            )
+            attempt_id = await conn.fetchval(
+                "SELECT current_attempt_id FROM agent_jobs WHERE id = $1",
+                row["anchor_job_id"],
+            )
+            if attempt_id is not None:
+                await insert_event(
+                    conn,
+                    job_id=row["anchor_job_id"],
+                    attempt_id=attempt_id,
+                    event_type="error",
+                    payload={
+                        "phase": "shared_snapshot_publish_retry_exhausted",
+                        "snapshot_id": snapshot_id,
+                        "detail": row["last_error"],
+                    },
+                )
+        return True
+
     async def record_snapshot_publish(
         self,
         *,
         snapshot_id: int,
+        expected_publish_attempt_count: int,
         pr_url: str,
         commit_sha: str,
     ) -> bool:
@@ -495,13 +708,15 @@ class PostgresSnapshotRepository:
                 UPDATE agent_sandbox_snapshots
                 SET state = 'published', published_pr_url = $2,
                     published_commit_sha = $3, published_at = NOW(),
-                    last_error = NULL, updated_at = NOW()
+                    last_error = NULL, retry_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $4
                 RETURNING sandbox_id, anchor_job_id
                 """,
                 snapshot_id,
                 pr_url,
                 commit_sha,
+                expected_publish_attempt_count,
             )
             if row is None:
                 return False
@@ -527,8 +742,8 @@ class PostgresSnapshotRepository:
             await conn.execute(
                 """
                 UPDATE agent_jobs
-                SET published_pr_url = COALESCE(published_pr_url, $2),
-                    published_commit_sha = COALESCE(published_commit_sha, $3),
+                SET published_pr_url = $2,
+                    published_commit_sha = $3,
                     updated_at = NOW()
                 WHERE id IN (
                     SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1
@@ -556,18 +771,23 @@ class PostgresSnapshotRepository:
                 )
         return True
 
-    async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
+    async def fail_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> None:
         """Retain a rejected group artifact without failing included turns."""
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET state = 'failed', last_error = $2, updated_at = NOW()
+                SET state = 'failed', last_error = $2, retry_at = NULL,
+                    updated_at = NOW()
                 WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $3
                 RETURNING sandbox_id, anchor_job_id
                 """,
                 snapshot_id,
                 detail[:2000],
+                expected_publish_attempt_count,
             )
             if row is None:
                 return
@@ -582,7 +802,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = agent_sandboxes.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
                 WHERE id = $1
@@ -616,7 +836,7 @@ class PostgresSnapshotRepository:
                        latest.anchor_job_id, latest.published_commit_sha,
                        g.origin_thread_id, g.generation, g.container_id,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
-                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
                        g.resident_slot_capacity, t.repo, j.user_id,
                        COALESCE((
                            SELECT jsonb_agg(
@@ -639,7 +859,7 @@ class PostgresSnapshotRepository:
                 FROM agent_sandboxes g
                 JOIN LATERAL (
                     SELECT s.id, s.sandbox_id, s.anchor_job_id,
-                           s.published_commit_sha
+                           s.published_commit_sha, s.retry_at
                     FROM agent_sandbox_snapshots s
                     WHERE s.sandbox_id = g.id AND s.state = 'published'
                       AND s.published_commit_sha = g.published_base_sha
@@ -649,6 +869,9 @@ class PostgresSnapshotRepository:
                 JOIN agent_jobs j ON j.id = latest.anchor_job_id
                 JOIN agent_threads t ON t.id = j.thread_id
                 WHERE g.snapshot_state = 'importing'
+                  AND g.stop_requested_at IS NULL
+                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+                  AND (latest.retry_at IS NULL OR latest.retry_at <= NOW())
                 ORDER BY g.updated_at
                 LIMIT 1
                 """
@@ -691,7 +914,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = g.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.snapshot_state = 'importing'
@@ -701,55 +924,99 @@ class PostgresSnapshotRepository:
                 sandbox_id,
                 commit_sha,
             )
+            if updated is not None:
+                await conn.execute(
+                    "UPDATE agent_sandbox_snapshots SET retry_at = NULL "
+                    "WHERE id = $1 AND retry_at IS NOT NULL",
+                    snapshot_id,
+                )
         return updated is not None
 
     async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
-        """Keep an idempotent import retry visible without losing the commit."""
+        """Keep an idempotent import retry visible without losing the commit.
+
+        The import is not retried before the snapshot's ``retry_at``.
+        """
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET last_error = $2, updated_at = NOW()
+                SET last_error = $2, updated_at = NOW(),
+                    retry_at = clock_timestamp() + make_interval(secs => $3)
                 WHERE id = $1 AND state = 'published'
                 """,
                 snapshot_id,
                 detail[:2000],
+                BASE_IMPORT_RETRY_S,
             )
 
+    async def next_snapshot_retry_due(self) -> datetime | None:
+        """When the earliest capture handed back for a retry may be claimed again.
+
+        ``None`` when none waits. Everything else that makes a capture due is
+        announced by a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
+                "WHERE state = 'pending' AND retry_at > NOW()"
+            )
+        return due
+
+    async def next_snapshot_publish_retry_due(self) -> datetime | None:
+        """When the earliest deferred publication may be claimed again.
+
+        ``None`` when no captured snapshot waits for a future retry. Capture
+        completion announces other publication work through a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
+                "WHERE state = 'captured' AND retry_at > NOW()"
+            )
+        return due
+
+    async def next_base_import_retry_due(self) -> datetime | None:
+        """When the earliest failed base import may be retried.
+
+        ``None`` when none waits; a workspace that starts importing is announced
+        by a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                """
+                SELECT MIN(s.retry_at)
+                FROM agent_sandbox_snapshots s
+                JOIN agent_sandboxes g ON g.id = s.sandbox_id
+                WHERE s.state = 'published' AND s.retry_at > NOW()
+                  AND g.snapshot_state = 'importing'
+                  AND s.published_commit_sha = g.published_base_sha
+                """
+            )
+        return due
+
     async def reap_stalled_snapshot_publishes(self, *, stall_seconds: float = 900.0) -> list[int]:
-        """Fail ambiguous shared publishes without changing Agent turn state."""
-        detail = "the publisher stopped before finishing; manual review required"
-        async with self._pool.acquire() as conn, conn.transaction():
+        """Reclaim a crashed publisher through deterministic remote reconciliation."""
+        detail = "the publisher stopped before finishing; deterministic publication will retry"
+        async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                UPDATE agent_sandbox_snapshots
-                SET state = 'failed', last_error = $2, updated_at = NOW()
+                SELECT id, publish_attempt_count FROM agent_sandbox_snapshots
                 WHERE state = 'publishing'
                   AND published_pr_url IS NULL
-                  AND updated_at < NOW() - make_interval(secs => $1)
-                RETURNING id, sandbox_id
+                  AND updated_at < clock_timestamp() - make_interval(secs => $1)
+                ORDER BY id
                 """,
                 stall_seconds,
-                detail,
             )
-            if rows:
-                await conn.execute(
-                    """
-                    UPDATE agent_sandboxes
-                    SET snapshot_state = 'dirty', last_error = $2,
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 0
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships active
-                                WHERE active.sandbox_id = agent_sandboxes.id
-                                  AND active.active_attempt_id IS NOT NULL
-                             )
-                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL END,
-                        updated_at = NOW()
-                    WHERE id = ANY($1::text[])
-                    """,
-                    [row["sandbox_id"] for row in rows],
-                    detail,
-                )
-        return [int(row["id"]) for row in rows]
+        reclaimed: list[int] = []
+        for row in rows:
+            snapshot_id = int(row["id"])
+            if await self._defer_snapshot_publish(
+                snapshot_id=snapshot_id,
+                expected_publish_attempt_count=int(row["publish_attempt_count"]),
+                detail=detail,
+                stall_seconds=stall_seconds,
+            ):
+                reclaimed.append(snapshot_id)
+        return reclaimed

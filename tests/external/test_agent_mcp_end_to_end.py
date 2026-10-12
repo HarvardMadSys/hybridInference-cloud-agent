@@ -51,6 +51,7 @@ import uvicorn
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
 
@@ -359,6 +360,7 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
                 f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
             ),
             "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+            "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
             "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
             "AGENT_MCP_ALLOW_PLAIN_HTTP": "1",
@@ -371,6 +373,9 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
     servers: list[uvicorn.Server] = []
     try:
         apply_migrations(db)
+        # Deployments initialize settings through the main listener first.
+        # This isolated relay test uses that same seed path before startup.
+        await initialize_settings(Storage(pool).settings)
         token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
 
         from cloud_agent.app import create_mcp_app
@@ -502,12 +507,19 @@ async def _seed(
         ],
     )
     async with pool.acquire() as conn:
+        # A running attempt belongs to an enrolled host: the relay fence asks
+        # that the machine holding the worker token still has a credential.
+        await conn.execute(
+            "INSERT INTO agent_runner_hosts (host, status, credential_hash) "
+            "VALUES ('e2e-host', 'online', 'e2e-credential-hash') ON CONFLICT (host) DO UPDATE "
+            "SET status = 'online', credential_hash = EXCLUDED.credential_hash"
+        )
         attempt_id = await conn.fetchval(
             """
             INSERT INTO agent_attempts
                 (job_id, thread_id, attempt_no, lease_owner, lease_generation,
-                 lease_expires_at, status)
-            VALUES ($1, $2, 1, 'e2e-worker', 3, NOW() + INTERVAL '1 hour', 'running')
+                 lease_expires_at, status, host_id)
+            VALUES ($1, $2, 1, 'e2e-worker', 3, NOW() + INTERVAL '1 hour', 'running', 'e2e-host')
             RETURNING id
             """,
             str(job["id"]),

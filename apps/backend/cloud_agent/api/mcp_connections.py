@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
 from collections.abc import Mapping
+from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -39,12 +40,17 @@ from pydantic import BaseModel, ConfigDict, Field
 # reimplemented, and deliberately one-directional: this module depends on
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_storage
+from cloud_agent.api.deps import get_current_user, get_storage
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import config_import, launch, oauth
+from cloud_agent.mcp import config_import, github_oauth, launch, oauth
 from cloud_agent.mcp.authorization import binding_from_selection
 from cloud_agent.mcp.binding_aliases import binding_aliases
+from cloud_agent.mcp.errors import (
+    McpConnectionCreateConflict,
+    McpCredentialWriteRejected,
+)
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
     AuthKind,
@@ -52,6 +58,7 @@ from cloud_agent.mcp.models import (
     ConnectionErrorKind,
     ConnectionStatus,
     ExecutionLocation,
+    HeaderAuth,
     InvocationStatus,
     LaunchSpec,
     ToolPolicy,
@@ -71,6 +78,7 @@ from cloud_agent.mcp.registry import (
     oauth_cipher,
     resolve_connection,
 )
+from cloud_agent.settings import setting_env
 from cloud_agent.source_control import SourceControlError
 
 if TYPE_CHECKING:
@@ -99,9 +107,74 @@ router = APIRouter(prefix="/v1/agent/mcp", tags=["agent-mcp"])
 #: proxy and fail the registration check.
 ENV_MCP_PUBLIC_BASE_URL = "AGENT_MCP_PUBLIC_BASE_URL"
 
+
+def _github_browser_client() -> tuple[str, str] | None:
+    """Read the service's app identity, never a user's access token."""
+    return github_oauth.client_credentials() if _public_base_url() else None
+
+
+def _templates() -> list[dict[str, Any]]:
+    """Offer browser sign-in only when the service can complete it."""
+    templates = [dict(template) for template in _TEMPLATES]
+    github = templates[0]
+    available = _github_browser_client() is not None
+    github["browser_sign_in_available"] = available
+    if available:
+        github["auth_kind"] = AuthKind.OAUTH.value
+        github["notes"] = ["Choose the GitHub account and repositories your agents can access."]
+    return templates
+
+
 #: Which template simplifications this deployment offers. Templates are a
 #: convenience, never a gate: a server with no template is added the same way.
 _TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "name": "github",
+        "label": "GitHub",
+        "description": (
+            "Read repositories, push file changes and create pull requests with your "
+            "GitHub account."
+        ),
+        "url": "https://api.githubcopilot.com/mcp/",
+        "transport": Transport.STREAMABLE_HTTP.value,
+        "auth_kind": AuthKind.STATIC.value,
+        "documentation_url": "https://github.com/github/github-mcp-server",
+        "notes": [
+            "Use a personal access token with access to the repositories your agents need.",
+            "To push file changes and create pull requests, give a fine-grained token "
+            "Contents and Pull requests read and write permissions for those repositories.",
+        ],
+    },
+    {
+        "name": "slack",
+        "label": "Slack",
+        "description": "Search conversations and work with messages in your Slack workspace.",
+        "url": "https://mcp.slack.com/mcp",
+        "transport": Transport.STREAMABLE_HTTP.value,
+        "auth_kind": AuthKind.OAUTH.value,
+        "documentation_url": "https://docs.slack.dev/ai/slack-mcp-server/",
+        "notes": [
+            "Slack requires a registered internal or Marketplace app. Have its OAuth client "
+            "id and client secret ready, and register the callback URL shown during sign-in.",
+        ],
+    },
+    {
+        "name": "google-drive",
+        "label": "Google Drive",
+        "description": "Find files and work with documents in your Google Drive.",
+        "url": "https://drivemcp.googleapis.com/mcp/v1",
+        "transport": Transport.STREAMABLE_HTTP.value,
+        "auth_kind": AuthKind.OAUTH.value,
+        "documentation_url": (
+            "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server"
+        ),
+        "notes": [
+            "Google Drive MCP requires Workspace Developer Preview membership. Enable the "
+            "Drive API and Google Drive MCP API in your Google Cloud project before connecting.",
+            "Have your OAuth client id and client secret ready, and register the callback URL "
+            "shown during sign-in.",
+        ],
+    },
     {
         "name": "linear",
         "label": "Linear",
@@ -129,34 +202,18 @@ _TEMPLATES: tuple[dict[str, Any], ...] = (
         "auth_kind": AuthKind.OAUTH.value,
         "notes": [],
     },
-    {
-        "name": "github",
-        "label": "GitHub",
-        "description": (
-            "Read issues, pull requests, code and releases across the repositories your "
-            "GitHub account can see."
-        ),
-        "url": "https://api.githubcopilot.com/mcp/readonly",
-        "transport": Transport.STREAMABLE_HTTP.value,
-        "auth_kind": AuthKind.OAUTH.value,
-        "notes": [
-            "GitHub does not register clients on behalf of an MCP host, so a client id is "
-            "required before the browser flow can start.",
-            "The /readonly variant is a GitHub-specific convenience, not a general rule.",
-        ],
-    },
 )
 
 
 def _public_base_url() -> str:
     """Reuse the configured public API address unless MCP has an explicit override."""
-    explicit = os.environ.get(ENV_MCP_PUBLIC_BASE_URL, "").strip().rstrip("/")
+    explicit = (setting_env(ENV_MCP_PUBLIC_BASE_URL) or "").strip().rstrip("/")
     if explicit:
         return explicit
     # Session sign-in already needs the public API callback, including its
     # proxy prefix. Reuse that operator-controlled URL, never Host/Forwarded
     # headers or the web origin (which may live on a different host).
-    callback = os.environ.get("AGENT_SESSION_REDIRECT_URI", "").strip()
+    callback = (setting_env("AGENT_SESSION_REDIRECT_URI") or "").strip()
     suffix = "/v1/session/callback"
     try:
         parsed = urlsplit(callback)
@@ -381,6 +438,7 @@ class AuthorizeResponse(BaseModel):
     authorization_url: str | None = None
     needs_client_id: bool = False
     message: str = ""
+    redirect_uri: str | None = None
 
 
 class BindingRequest(BaseModel):
@@ -437,10 +495,21 @@ class InvocationView(BaseModel):
 
     id: int
     job_id: str
+    #: The attempt that raised the call, even when the job has since been retried.
+    attempt_id: int | None = None
     thread_id: str
+    thread_title: str | None = None
     connection_id: int
     connection_label: str | None = None
     capability_name: str
+    capability_kind: str = CapabilityKind.TOOL.value
+    #: What the server says the capability does, from the catalogue the call
+    #: was held under. ``None`` once a newer discovery has replaced it, so a
+    #: card never explains a call with a description it was not made against.
+    capability_description: str | None = None
+    #: The server's hints (title, read-only, destructive, ...). Untrusted and
+    #: for display only; they never decide authorization.
+    capability_annotations: dict[str, Any] = Field(default_factory=dict)
     status: str
     arguments_digest: str
     arguments: dict[str, Any] | None = None
@@ -452,9 +521,11 @@ class InvocationView(BaseModel):
 
 
 class InvocationsResponse(BaseModel):
-    """The calls waiting on this user, or the history of one job."""
+    """A page of the owner's waiting calls or scoped history, newest first."""
 
     invocations: list[InvocationView] = Field(default_factory=list)
+    has_more: bool = False
+    next_before_id: int | None = None
 
 
 class DecisionRequest(BaseModel):
@@ -528,6 +599,15 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
     )
 
 
+#: Where each capability kind is kept in a stored snapshot, in display order.
+_SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
+    ("tools", CapabilityKind.TOOL),
+    ("resources", CapabilityKind.RESOURCE),
+    ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
+    ("prompts", CapabilityKind.PROMPT),
+)
+
+
 def _capability_view(entry: Mapping[str, Any], kind: CapabilityKind) -> dict[str, Any]:
     """Render one discovered capability for the selection dialog."""
     return {
@@ -595,7 +675,7 @@ async def list_templates(
     registry: adding a server with no template is the same code path.
     """
     del user
-    return [dict(template) for template in _TEMPLATES]
+    return _templates()
 
 
 @router.get("/connections", response_model=ConnectionsResponse)
@@ -607,9 +687,7 @@ async def list_connections(
     job_store = _require_store(store)
     rows = await job_store.mcp.list_mcp_connections(user_id=user["user_id"])
     views = [await _view(job_store, row) for row in rows]
-    return ConnectionsResponse(
-        connections=views, templates=[dict(template) for template in _TEMPLATES]
-    )
+    return ConnectionsResponse(connections=views, templates=_templates())
 
 
 @router.post("/connections", response_model=ConnectionView, status_code=201)
@@ -632,33 +710,56 @@ async def create_connection(
         # column means "which preset this came from", and a value that names
         # nothing makes the provenance unreadable.
         raise _bad_request(f"unknown template: {template!r}")
+    if body.connector_id is not None:
+        # The same ownership read the bind route makes. Without it the column
+        # could name another user's machine, and that user's revocation would
+        # then reach into this connection.
+        await _require_connector(job_store, connector_id=body.connector_id, user_id=user["user_id"])
 
-    row = await job_store.mcp.create_mcp_connection(
-        user_id=user["user_id"],
-        label=body.label.strip(),
-        transport=transport.value,
-        location=location.value,
-        url=url,
-        launch_spec=launch_spec,
-        auth_kind=auth_kind.value,
-        auth_config=auth_config,
-        template=template,
-        connector_id=body.connector_id,
-        account_label=body.account_label,
-        request_timeout_s=body.request_timeout_s,
-        reuse_pending=not body.secret and not body.env_secrets,
-    )
-    if body.secret:
-        await _store_static_secret(
-            job_store,
-            row=row,
-            secret=body.secret,
-            header_name=body.header_name,
-            header_scheme=body.header_scheme,
-            replaces_identity=False,
+    if body.connector_id is not None:
+        if location is not ExecutionLocation.USER_CONNECTOR:
+            raise _bad_request("connector_id is only valid when location is 'user-connector'")
+        connector = await _require_connector(
+            job_store, connector_id=body.connector_id, user_id=user["user_id"]
         )
-    if body.env_secrets:
-        await _store_env_secrets(job_store, row=row, secrets=body.env_secrets)
+        if str(connector.get("status")) == "revoked":
+            raise _conflict("that connector has been revoked")
+
+    # Encrypt before the insert. A missing key used to commit the row and then
+    # return 503, and the next attempt inserted another credential-less row.
+    access_token_ciphertext, auth_config_patch = _optional_static_credential(
+        secret=body.secret,
+        header_name=body.header_name,
+        header_scheme=body.header_scheme,
+        fallback_header=str(auth_config.get("header_name") or "Authorization"),
+    )
+    sealed_launch_spec = (
+        _sealed_launch_spec(launch_spec, body.env_secrets) if body.env_secrets else None
+    )
+
+    try:
+        row = await job_store.mcp.create_mcp_connection(
+            user_id=user["user_id"],
+            label=body.label.strip(),
+            transport=transport.value,
+            location=location.value,
+            url=url,
+            launch_spec=launch_spec,
+            auth_kind=auth_kind.value,
+            auth_config=auth_config,
+            template=template,
+            connector_id=body.connector_id,
+            account_label=body.account_label,
+            request_timeout_s=body.request_timeout_s,
+            reuse_pending=not body.secret and not body.env_secrets,
+            access_token_ciphertext=access_token_ciphertext,
+            auth_config_patch=auth_config_patch,
+            sealed_launch_spec=sealed_launch_spec,
+        )
+    except McpConnectionCreateConflict as exc:
+        raise _conflict(str(exc)) from exc
+    except McpCredentialWriteRejected as exc:
+        raise _conflict("the credential could not be stored with this connection") from exc
     logger.info(
         "agent_mcp_connection_created",
         extra={"event": "agent_mcp_connection_created", "connection_id": row["id"]},
@@ -696,54 +797,17 @@ async def import_connections(
             dialect=result.dialect,
         )
 
+    # Prepare every draft, including encryption, before any insert. A later
+    # missing key or rejected credential must not leave the earlier drafts saved.
+    prepared = [
+        _prepare_import_draft(draft, user_id=user["user_id"], body=body) for draft in result.drafts
+    ]
+    try:
+        rows = await job_store.mcp.create_mcp_connections(connections=prepared)
+    except McpCredentialWriteRejected as exc:
+        raise _conflict("the credential could not be stored with this connection") from exc
     saved: list[ConnectionView] = []
-    for draft in result.drafts:
-        location = body.locations.get(draft.label, draft.location)
-        parsed_location = _parse_location(location)
-        launch_spec = None
-        if draft.launch is not None:
-            launch_spec = {
-                "command": draft.launch.command,
-                "args": list(draft.launch.args),
-                "env": dict(draft.launch.env),
-                "cwd": draft.launch.cwd,
-                "mounts": [
-                    {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-                    for mount in config_import.mounts_for(draft.paths)
-                ]
-                if parsed_location is ExecutionLocation.MANAGED_WORKER
-                else [],
-            }
-        auth_kind = draft.auth_kind
-        auth_config: dict[str, Any] = {}
-        if auth_kind is AuthKind.STATIC and draft.secrets:
-            header_name = draft.secrets[0].name
-            auth_config = {
-                "header_name": header_name,
-                "scheme": draft.header_auth.scheme
-                if header_name == draft.header_auth.header_name
-                else "",
-            }
-        row = await job_store.mcp.create_mcp_connection(
-            user_id=user["user_id"],
-            label=draft.label,
-            transport=draft.transport.value,
-            location=parsed_location.value,
-            url=draft.url,
-            launch_spec=launch_spec,
-            auth_kind=auth_kind.value,
-            auth_config=auth_config,
-            template=None,
-            reuse_pending=not draft.secrets,
-        )
-        secrets = {secret.name: secret.value for secret in draft.secrets if secret.value}
-        supplied = body.server_secrets.get(draft.label, {})
-        for secret in draft.secrets:
-            value = supplied.get(secret.name, body.env_secrets.get(secret.name))
-            if secret.value is None and value is not None:
-                secrets[secret.name] = value
-        if secrets:
-            await _store_import_secrets(job_store, row=row, secrets=secrets)
+    for row in rows:
         refreshed = await job_store.mcp.get_mcp_connection(
             connection_id=int(row["id"]), user_id=user["user_id"]
         )
@@ -787,14 +851,26 @@ async def update_connection(
     if existing is None:
         raise _not_found("no such MCP connection")
 
+    transport = Transport(str(existing["transport"]))
+    location = ExecutionLocation(str(existing["location"]))
     url = body.url
     if url is not None:
-        transport = Transport(str(existing["transport"]))
         url, _unused = _validate_target(
             transport=transport,
-            location=ExecutionLocation(str(existing["location"])),
+            location=location,
             url=url,
             launch=None,
+        )
+    launch_spec = None
+    if body.launch is not None:
+        if location is ExecutionLocation.REMOTE:
+            raise _bad_request("a remote connection has no process to launch")
+        # The check create applies, and only the form it renders is stored. A
+        # submitted document is not stored as sent: its ``mounts`` are the
+        # plan's to decide and its ``env_secrets`` are ciphertext only the
+        # secret routes write, so neither may arrive through an edit.
+        _unused_url, launch_spec = _validate_target(
+            transport=transport, location=location, url=None, launch=body.launch
         )
     auth_kind = body.auth_kind
     if auth_kind is not None:
@@ -806,7 +882,7 @@ async def update_connection(
         expected_config_revision=body.expected_config_revision,
         label=body.label.strip() if body.label else None,
         url=url,
-        launch_spec=body.launch,
+        launch_spec=launch_spec,
         auth_kind=auth_kind,
         account_label=body.account_label,
         request_timeout_s=body.request_timeout_s,
@@ -947,12 +1023,7 @@ async def get_capabilities(
     if snapshot is None:
         return []
     rendered: list[dict[str, Any]] = []
-    for key, kind in (
-        ("tools", CapabilityKind.TOOL),
-        ("resources", CapabilityKind.RESOURCE),
-        ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
-        ("prompts", CapabilityKind.PROMPT),
-    ):
+    for key, kind in _SNAPSHOT_SURFACES:
         rendered.extend(_capability_view(item, kind) for item in snapshot.get(key) or [])
     return rendered
 
@@ -1154,16 +1225,60 @@ async def authorize_connection(
     settings = row.get("auth_config")
     configured = settings if isinstance(settings, Mapping) else {}
     client_id = str(configured.get("client_id") or "") or None
+    github_endpoint = github_oauth.is_endpoint(connection.config.url)
+    managed_client = (
+        _github_browser_client()
+        if github_endpoint
+        and (not client_id or configured.get("managed_github_oauth"))
+        and not (body is not None and body.client_id)
+        else None
+    )
     try:
         secret = None
-        if row.get("client_secret_ciphertext"):
+        if managed_client:
+            # Never send the shared secret to an endpoint supplied by discovery.
+            if (
+                metadata.issuer != "https://github.com/login/oauth"
+                or metadata.authorization_endpoint != "https://github.com/login/oauth/authorize"
+                or metadata.token_endpoint != "https://github.com/login/oauth/access_token"
+            ):
+                raise oauth.OAuthError("GitHub returned unexpected sign-in endpoints.")
+            client_id, secret = managed_client
+        elif configured.get("managed_github_oauth") and not (body is not None and body.client_id):
+            raise _bad_request(
+                "GitHub browser sign-in is unavailable. Ask the service administrator to enable it."
+            )
+        elif row.get("client_secret_ciphertext"):
             secret = oauth_cipher().decrypt(str(row["client_secret_ciphertext"]))
+        if github_endpoint and not client_id:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "message": "GitHub browser sign-in is not available yet. "
+                        "Use a personal access token or ask the service administrator to enable it."
+                    }
+                },
+            )
+        if (
+            github_endpoint
+            and metadata.token_endpoint == "https://github.com/login/oauth/access_token"
+        ):
+            # GitHub omits this field from metadata (RFC default: Basic), but
+            # documents client_secret in the form body for both app types.
+            metadata = replace(
+                metadata, token_endpoint_auth_methods_supported=("client_secret_post",)
+            )
         identity = oauth.choose_registration(
             metadata, preregistered_client_id=client_id, preregistered_client_secret=secret
         )
     except oauth.OAuthError as exc:
         if exc.kind == "client_registration_required":
-            return AuthorizeResponse(needs_client_id=True, message=str(exc))
+            return AuthorizeResponse(
+                needs_client_id=True,
+                message=str(exc),
+                redirect_uri=_callback_url(base_url, connection_id),
+            )
         raise _bad_request(str(exc)) from exc
 
     if identity.registration == "dcr":
@@ -1174,6 +1289,22 @@ async def authorize_connection(
     scopes = oauth.default_scopes(
         resource_metadata, metadata, connection.auth.oauth.scopes if connection.auth.oauth else ()
     )
+    if managed_client:
+        # Avoid requesting every optional toolset scope in GitHub's metadata.
+        scopes = ("repo", "read:org")
+    # The OAuth resource identifier can differ from the MCP transport URL.
+    # Reauthorization may reuse the issuer without fetching resource metadata;
+    # retain a saved resource only while it still describes the current URL.
+    resource = connection.config.url
+    if resource_metadata:
+        resource = resource_metadata.resource
+    elif connection.auth.oauth and connection.auth.oauth.resource:
+        # Editing the URL can leave the previous credential's resource on
+        # the row. Keep the current URL when that saved resource no longer fits.
+        with suppress(oauth.OAuthError):
+            resource = oauth.parse_protected_resource_metadata(
+                {"resource": connection.auth.oauth.resource}, expect=connection.config.url
+            ).resource
     flow = oauth.OAuthFlow(
         versions=oauth.FlowVersions(
             connection_id=str(connection_id),
@@ -1185,18 +1316,29 @@ async def authorize_connection(
         pkce=oauth.PkcePair.generate(),
         client=identity,
         metadata=metadata,
-        resource=connection.config.url,
-        redirect_uri=_callback_url(base_url, connection_id),
+        resource=resource,
+        redirect_uri=(
+            oauth.redirect_uri(base_url, "github")
+            if managed_client
+            else _callback_url(base_url, connection_id)
+        ),
         scopes=scopes,
     )
+    try:
+        authorization_url = flow.authorization_url()
+    except oauth.OAuthError as exc:
+        raise _bad_request(str(exc)) from exc
     cipher = oauth_cipher()
-    await job_store.mcp.create_mcp_oauth_flow(
+    # The generation is allocated in the store from the value just read. Passing
+    # ``snapshot + 1`` lets two starts both insert a flow for a generation the
+    # row has already left, and lets the later transaction delete the newer one.
+    allocated = await job_store.mcp.create_mcp_oauth_flow(
         state_hash=oauth.state_hash(flow.state),
         user_id=user["user_id"],
         connection_id=connection_id,
         config_revision=connection.config_revision,
         authorization_epoch=connection.authorization_epoch,
-        oauth_generation=connection.oauth_generation + 1,
+        expected_oauth_generation=connection.oauth_generation,
         code_verifier_ciphertext=cipher.encrypt(flow.pkce.verifier),
         client_id=identity.client_id,
         client_secret_ciphertext=(
@@ -1214,7 +1356,9 @@ async def authorize_connection(
         registration_endpoint=metadata.registration_endpoint,
         expires_at=datetime.now(timezone.utc) + oauth.FLOW_LIFETIME,
     )
-    return AuthorizeResponse(authorization_url=flow.authorization_url())
+    if allocated is None:
+        raise _conflict("this connection changed while you were authorizing it")
+    return AuthorizeResponse(authorization_url=authorization_url)
 
 
 async def _register_client(
@@ -1272,7 +1416,10 @@ async def _post_json(
         raise _bad_request(f"that address could not be resolved: {exc}") from exc
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0), follow_redirects=False, transport=pinned_transport()
+            timeout=httpx.Timeout(15.0),
+            follow_redirects=False,
+            headers=IDENTITY_ENCODING_HEADERS,
+            transport=pinned_transport(),
         ) as client:
             # Streamed, so the size limit is applied while the body arrives
             # rather than to a body the registration server already chose the
@@ -1283,7 +1430,7 @@ async def _post_json(
                     "POST",
                     endpoint.url,
                     json=dict(body),
-                    headers={"accept": "application/json"},
+                    headers={"accept": "application/json", **IDENTITY_ENCODING_HEADERS},
                 ),
                 stream=True,
             )
@@ -1322,6 +1469,31 @@ async def _resolve(host: str, port: int) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
+async def _callback_session_user(request: Request) -> str | None:
+    """The Agent account the returning browser is signed in as, or ``None``.
+
+    Read by the same verifier as every owner route, but answered rather than
+    raised: the callback is a browser navigation, and a 401 body is a dead end
+    where a redirect back to the app can say what to do. The session cookie is
+    ``SameSite=Lax``, so it travels on this top-level GET from the provider.
+    Only the cookie is read: a provider's redirect cannot carry a bearer, and
+    declaring that header would add a parameter to the served contract that no
+    real callback could use.
+    """
+    try:
+        user = await get_current_user(request, authorization=None)
+    except HTTPException:
+        return None
+    return str(user["user_id"])
+
+
+#: Why a callback without the starting account's session was refused. Fixed
+#: text: nothing about the flow, or about who started it, is disclosed.
+_CALLBACK_NEEDS_SESSION = (
+    "sign in to the account that started this authorization, then sign in to the server again"
+)
+
+
 @router.get("/oauth/callback/{provider}", response_model=None)
 async def oauth_callback(
     provider: str,
@@ -1330,30 +1502,59 @@ async def oauth_callback(
     code: str = Query(""),
     error: str = Query(""),
     store: _McpConnectionsStorage | None = Depends(get_storage),
+    session_user: str | None = Depends(_callback_session_user),
 ) -> Response:
     """Complete a browser authorization, fenced to the flow that started it.
 
-    Unauthenticated by design: the browser arriving here carries a session
-    cookie it may or may not still have, and the *state* is the credential that
-    identifies the flow. The user is taken from the flow row, which was written
-    by an authenticated request, rather than from whatever this request claims.
+    The *state* identifies the flow; the Agent session decides who may finish
+    it. A flow is consumed only for the account that started it, before any
+    code is exchanged. Without that, a consent URL started by one user and
+    approved in another person's browser would store that person's provider
+    grant on the first user's connection -- the authorization-code injection
+    RFC 9700 describes, which PKCE does not stop because the platform holds
+    the verifier. The connection is still taken from the flow row, written by
+    an authenticated request, rather than from anything this request claims.
     """
     job_store = _require_store(store)
     if error:
-        return _callback_redirect(provider, ok=False, message=error)
+        message = (
+            "GitHub sign-in was cancelled. You can try again."
+            if provider == "github" and error == "access_denied"
+            else error
+        )
+        return _callback_redirect(provider, ok=False, message=message)
     if not state or not code:
         return _callback_redirect(provider, ok=False, message="missing state or code")
+    if session_user is None:
+        return _callback_redirect(provider, ok=False, message=_CALLBACK_NEEDS_SESSION)
 
-    flow = await job_store.mcp.consume_mcp_oauth_flow(state_hash=oauth.state_hash(state))
+    flow = await job_store.mcp.consume_mcp_oauth_flow(
+        state_hash=oauth.state_hash(state), user_id=session_user
+    )
     if flow is None:
+        # Expired, already used, or started by another account: one answer,
+        # so a state value cannot be probed for whose flow it is.
         return _callback_redirect(
-            provider, ok=False, message="this authorization expired or was already used"
+            provider,
+            ok=False,
+            message=(
+                "this authorization expired, was already used, or was started by another account"
+            ),
         )
-    if str(flow["connection_id"]) != str(provider):
+    uses_github_client = (
+        flow["issuer"] == github_oauth.ISSUER
+        and flow["token_endpoint"] == github_oauth.TOKEN_ENDPOINT
+        and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
+        and github_oauth.is_endpoint(str(flow["resource"]))
+    )
+    managed_github = provider == "github" and uses_github_client
+    if str(flow["connection_id"]) != str(provider) and not managed_github:
         # A state minted for one connection cannot complete another's flow.
         return _callback_redirect(
             provider, ok=False, message="this authorization is not for that connection"
         )
+    if managed_github:
+        provider = str(flow["connection_id"])
 
     row = await job_store.mcp.get_mcp_connection(connection_id=int(flow["connection_id"]))
     if row is None or row.get("deleted_at") is not None:
@@ -1385,7 +1586,7 @@ async def oauth_callback(
     )
     identity = oauth.ClientIdentity(
         client_id=str(flow["client_id"]),
-        registration="dcr",
+        registration=flow.get("registration") or "dcr",
         client_secret=(
             cipher.decrypt(str(flow["client_secret_ciphertext"]))
             if flow.get("client_secret_ciphertext")
@@ -1413,6 +1614,9 @@ async def oauth_callback(
         return _callback_redirect(provider, ok=False, message=str(exc))
 
     credential_cipher = mcp_cipher()
+    auth_config_patch: dict[str, Any] = {"client_id": identity.client_id}
+    if uses_github_client or (row.get("auth_config") or {}).get("managed_github_oauth"):
+        auth_config_patch["managed_github_oauth"] = uses_github_client
     written = await job_store.mcp.set_mcp_credential(
         connection_id=int(flow["connection_id"]),
         expected_authorization_epoch=int(flow["authorization_epoch"]),
@@ -1446,12 +1650,16 @@ async def oauth_callback(
         # path: that one bumps the OAuth generation to invalidate a flow already
         # in flight, and this *is* the flow. Bumping it here would refuse the
         # write this same call is making.
-        auth_config_patch={"client_id": identity.client_id},
-        # The flow's own ciphertext, under the OAuth domain it was written with.
+        auth_config_patch=auth_config_patch,
+        # The managed app secret remains in encrypted settings, not the user's
+        # connection. Refresh resolves it there after checking GitHub's target.
+        # Otherwise retain the flow's ciphertext under its OAuth key domain.
         # For a public client it is absent and any earlier secret is left alone:
         # the authentication method written above is what decides whether one is
         # sent, so a leftover secret cannot be used by accident.
-        client_secret_ciphertext=flow.get("client_secret_ciphertext"),
+        client_secret_ciphertext=(
+            None if uses_github_client else flow.get("client_secret_ciphertext")
+        ),
         token_endpoint=metadata.token_endpoint,
         revocation_endpoint=metadata.revocation_endpoint,
         registration_endpoint=metadata.registration_endpoint,
@@ -1507,14 +1715,24 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
+            timeout=httpx.Timeout(20.0),
+            follow_redirects=False,
+            headers=IDENTITY_ENCODING_HEADERS,
+            transport=pinned_transport(),
         ) as client:
             # Streamed for the same reason as everywhere else on this path: a
             # token response is a body a server chooses the size of, and this
             # one carries the access and refresh tokens.
             response = await client.send(
                 client.build_request(
-                    "POST", endpoint.url, data=request.form(), headers=request.headers()
+                    "POST",
+                    endpoint.url,
+                    data=request.form(),
+                    headers={
+                        "Accept": "application/json",
+                        **request.headers(),
+                        **IDENTITY_ENCODING_HEADERS,
+                    },
                 ),
                 stream=True,
             )
@@ -1557,7 +1775,7 @@ def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
     """Send the browser back to the app with a result it can display."""
     # The registered callback belongs to the API; the result belongs to the web
     # app, whose origin and mount path may differ (for example /agents/api vs /agents).
-    base = os.environ.get("AGENT_WEB_BASE_URL", "").strip().rstrip("/")
+    base = (setting_env("AGENT_WEB_BASE_URL") or "").strip().rstrip("/")
     result = {"mcp_authorized": "1" if ok else "0", "mcp_connection": provider}
     if message:
         result["mcp_message"] = message
@@ -1772,10 +1990,12 @@ async def list_invocations(
     job_id: str | None = Query(default=None),
     thread_id: str | None = Query(default=None),
     pending_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=100),
+    before_id: int | None = Query(default=None, gt=0, le=2**63 - 1),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _McpConnectionsStorage | None = Depends(get_storage),
 ) -> InvocationsResponse:
-    """Calls that needed a decision, for one job or one conversation.
+    """Page one job's history, one conversation, or the owner's pending inbox.
 
     The owner is part of the query, not a check after it. These rows carry the
     tool call's arguments decrypted for display -- code, documents, whatever the
@@ -1785,11 +2005,15 @@ async def list_invocations(
     not exist": with a 404 that says nothing about which it was.
     """
     job_store = _require_store(store)
-    if job_id is None and thread_id is None:
+    if job_id is None and thread_id is None and not pending_only:
         raise _bad_request("name a job or a conversation")
     if job_id is not None:
         job = await job_store.conversation_queries.get_job(job_id)
-        if job is None or str(job.get("user_id")) != user["user_id"]:
+        if (
+            job is None
+            or str(job.get("user_id")) != user["user_id"]
+            or job.get("deleted_at") is not None
+        ):
             raise _not_found("no such job")
     statuses = [InvocationStatus.PENDING.value] if pending_only else None
     rows = await job_store.mcp.list_mcp_invocations(
@@ -1797,8 +2021,23 @@ async def list_invocations(
         thread_id=thread_id,
         statuses=statuses,
         user_id=user["user_id"],
+        limit=limit + 1,
+        before_id=before_id,
     )
-    return InvocationsResponse(invocations=[await _invocation_view(job_store, row) for row in rows])
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    # One catalogue read per connection, not per row: a history page is mostly
+    # calls to the same few servers, and a catalogue carries every schema.
+    snapshots: dict[int, Mapping[str, Any] | None] = {}
+    threads: dict[str, Mapping[str, Any] | None] = {}
+    return InvocationsResponse(
+        invocations=[
+            await _invocation_view(job_store, row, user["user_id"], snapshots, threads)
+            for row in rows
+        ],
+        has_more=has_more,
+        next_before_id=int(rows[-1]["id"]) if has_more else None,
+    )
 
 
 @router.post("/invocations/{invocation_id}/decision", response_model=InvocationView)
@@ -1819,20 +2058,31 @@ async def decide_invocation(
     if existing is None:
         raise _not_found("no such MCP call")
     job = await job_store.conversation_queries.get_job(str(existing["job_id"]))
-    if job is None or str(job.get("user_id")) != user["user_id"]:
+    if (
+        job is None
+        or str(job.get("user_id")) != user["user_id"]
+        or job.get("deleted_at") is not None
+    ):
         raise _not_found("no such MCP call")
     decided = await job_store.mcp.decide_mcp_invocation(
         invocation_id=invocation_id, approve=body.approve, decided_by=user["user_id"]
     )
     if decided is None:
         raise _conflict("this call was already decided, or it expired")
-    return await _invocation_view(job_store, decided)
+    return await _invocation_view(job_store, decided, user["user_id"])
 
 
 async def _invocation_view(
-    job_store: _McpConnectionsStorage, row: Mapping[str, Any]
+    job_store: _McpConnectionsStorage,
+    row: Mapping[str, Any],
+    user_id: str,
+    snapshots: dict[int, Mapping[str, Any] | None] | None = None,
+    threads: dict[str, Mapping[str, Any] | None] | None = None,
 ) -> InvocationView:
-    """Render one invocation, including the arguments the owner is approving."""
+    """Render one invocation, including the arguments the owner is approving.
+
+    ``snapshots`` and ``threads`` cache metadata across one bounded page.
+    """
     from cloud_agent.mcp.host import decode_arguments
     from cloud_agent.mcp.invocations import recovery_note
     from cloud_agent.mcp.models import Invocation, InvocationStatus as Status
@@ -1845,26 +2095,65 @@ async def _invocation_view(
             )
         except Exception:
             arguments = None
-    connection = await job_store.mcp.get_mcp_connection(connection_id=int(row["connection_id"]))
+    connection_id = int(row["connection_id"])
+    connection = await job_store.mcp.get_mcp_connection(connection_id=connection_id)
+    if snapshots is None:
+        snapshots = {}
+    if connection_id not in snapshots:
+        snapshots[connection_id] = await job_store.mcp.get_mcp_capabilities(
+            connection_id=connection_id
+        )
+    kind = str(row.get("capability_kind") or CapabilityKind.TOOL.value)
+    capability = _held_capability(snapshots[connection_id], row, kind)
+    thread_id = str(row["thread_id"])
+    if threads is None:
+        threads = {}
+    if thread_id not in threads:
+        threads[thread_id] = await job_store.conversation_queries.get_thread(thread_id)
+    thread = threads[thread_id]
+    thread_title = (
+        str(thread["title"])
+        if thread is not None and str(thread.get("user_id")) == user_id and thread.get("title")
+        else None
+    )
+    status = Status(str(row["status"]))
+    expires_at = row.get("expires_at")
+    # A worker persists expiry asynchronously. Display an elapsed deadline
+    # immediately, without writing during a read or reviving any decision.
+    if isinstance(expires_at, datetime) and status in {Status.PENDING, Status.APPROVED}:
+        deadline = (
+            expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)
+        )
+        if deadline <= datetime.now(timezone.utc):
+            status = Status.EXPIRED
     invocation = Invocation(
         invocation_id=str(row["id"]),
         job_id=str(row["job_id"]),
         attempt_id=str(row.get("attempt_id") or ""),
         lease_generation=int(row.get("lease_generation") or 0),
-        thread_id=str(row["thread_id"]),
+        thread_id=thread_id,
         connection_id=str(row["connection_id"]),
         capability_name=str(row["capability_name"]),
         arguments_digest=str(row["arguments_digest"]),
-        status=Status(str(row["status"])),
+        status=status,
     )
     return InvocationView(
         id=int(row["id"]),
         job_id=str(row["job_id"]),
-        thread_id=str(row["thread_id"]),
+        attempt_id=int(row["attempt_id"]) if row.get("attempt_id") is not None else None,
+        thread_id=thread_id,
+        thread_title=thread_title,
         connection_id=int(row["connection_id"]),
         connection_label=str(connection["label"]) if connection else None,
         capability_name=str(row["capability_name"]),
-        status=str(row["status"]),
+        capability_kind=kind,
+        capability_description=(
+            str(capability.get("description") or "") if capability is not None else None
+        ),
+        capability_annotations=(
+            dict(capability.get("annotations") or {}) if capability is not None else {}
+        ),
+        status=status.value,
         arguments_digest=str(row["arguments_digest"]),
         arguments=arguments,
         created_at=row.get("created_at"),
@@ -1873,6 +2162,28 @@ async def _invocation_view(
         result_summary=row.get("result_summary"),
         guidance=recovery_note(invocation),
     )
+
+
+def _held_capability(
+    snapshot: Mapping[str, Any] | None, row: Mapping[str, Any], kind: str
+) -> Mapping[str, Any] | None:
+    """The catalogue entry a held call names, if it is still the one it was held under.
+
+    A discovery that changed anything moves the capability revision, and a
+    call held under an older one cannot be dispatched on this approval. Its
+    entry in the newer catalogue may describe something else, so none is
+    returned rather than a description the call was not made against.
+    """
+    if snapshot is None or snapshot.get("capability_revision") != row.get("capability_revision"):
+        return None
+    key = next((key for key, surface in _SNAPSHOT_SURFACES if surface.value == kind), None)
+    if key is None:
+        return None
+    name = str(row["capability_name"])
+    for entry in snapshot.get(key) or []:
+        if isinstance(entry, Mapping) and str(entry.get("name") or "") == name:
+            return entry
+    return None
 
 
 def mcp_invocation_cipher() -> Any:
@@ -2135,7 +2446,7 @@ async def unbind_connector_connection(
     job_store = _require_store(store)
     await _require_connector(job_store, connector_id=connector_id, user_id=user["user_id"])
     unbound = await job_store.mcp.unbind_mcp_connection_connector(
-        connection_id=connection_id, user_id=user["user_id"]
+        connection_id=connection_id, user_id=user["user_id"], connector_id=connector_id
     )
     if unbound is None or unbound.get("connector_id") is not None:
         raise _not_found("that connection is not routed through this connector")
@@ -2203,11 +2514,12 @@ def _build_auth(
             if header_scheme is not None
             else ("Bearer" if name.lower() == "authorization" else "")
         ).strip()
-        from cloud_agent.mcp.net_policy import sanitize_headers
-
         # Validated here rather than at dispatch time, so a header the platform
         # would refuse is reported while the user is still on the form.
-        sanitize_headers({name: "x"})
+        try:
+            HeaderAuth(header_name=name, scheme=scheme).render("x")
+        except EndpointRejected as exc:
+            raise _bad_request(str(exc)) from exc
         return kind, {"header_name": name, "scheme": scheme}
     if kind is AuthKind.OAUTH:
         return kind, {}
@@ -2262,6 +2574,147 @@ def _validate_target(
     return None, rendered
 
 
+def _static_credential(
+    *,
+    secret: str,
+    header_name: str | None,
+    header_scheme: str | None,
+    fallback_header: str,
+) -> tuple[str, dict[str, Any]]:
+    """Validate and encrypt one static secret. No connection is written."""
+    _kind, config = _build_auth(
+        AuthKind.STATIC.value, header_name or fallback_header, header_scheme
+    )
+    try:
+        HeaderAuth(header_name=config["header_name"], scheme=config["scheme"]).render(secret)
+    except EndpointRejected as exc:
+        raise _bad_request(str(exc)) from exc
+    # Two characters and two more, so a person can tell *which* credential is
+    # stored without the page ever holding one it could be made to render.
+    config["hint"] = f"{secret[:2]}{secret[-2:]}" if len(secret) > 4 else ""
+    try:
+        ciphertext = mcp_cipher().encrypt(secret)
+    except SourceControlError as exc:
+        raise _no_encryption_key() from exc
+    return ciphertext, config
+
+
+def _optional_static_credential(
+    *,
+    secret: str | None,
+    header_name: str | None,
+    header_scheme: str | None,
+    fallback_header: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Encrypt a secret when the request carried one."""
+    if not secret:
+        return None, None
+    return _static_credential(
+        secret=secret,
+        header_name=header_name,
+        header_scheme=header_scheme,
+        fallback_header=fallback_header,
+    )
+
+
+def _sealed_launch_spec(
+    launch_spec: Mapping[str, Any] | None, secrets: Mapping[str, str]
+) -> dict[str, Any] | None:
+    """Copy a launch spec with its ``secret://`` values encrypted.
+
+    The reference stays ``secret://NAME``; the value lives as ciphertext under
+    the same name. ``None`` means the spec declares nothing to seal. A missing
+    encryption key is refused here, before a connection row exists.
+    """
+    spec = dict(launch_spec) if isinstance(launch_spec, Mapping) else {}
+    env = {str(key): str(value) for key, value in (spec.get("env") or {}).items()}
+    wanted = launch.declared_secret_names(env, {})
+    if not wanted:
+        return None
+    try:
+        cipher = mcp_cipher()
+    except SourceControlError as exc:
+        raise _no_encryption_key() from exc
+    stored = {str(key): str(value) for key, value in (spec.get("env_secrets") or {}).items()}
+    for name in wanted:
+        if name in secrets:
+            stored[name] = cipher.encrypt(secrets[name])
+    spec["env_secrets"] = stored
+    return spec
+
+
+def _import_secrets(draft: config_import.ImportDraft, body: ImportRequest) -> dict[str, str]:
+    """Values an imported draft carries or the caller supplied for it."""
+    secrets = {secret.name: secret.value for secret in draft.secrets if secret.value}
+    supplied = body.server_secrets.get(draft.label, {})
+    for secret in draft.secrets:
+        value = supplied.get(secret.name, body.env_secrets.get(secret.name))
+        if secret.value is None and value is not None:
+            secrets[secret.name] = value
+    return secrets
+
+
+def _prepare_import_draft(
+    draft: config_import.ImportDraft, *, user_id: str, body: ImportRequest
+) -> dict[str, Any]:
+    """One import draft, with credentials encrypted and nothing written yet."""
+    parsed_location = _parse_location(body.locations.get(draft.label, draft.location))
+    launch_spec = None
+    if draft.launch is not None:
+        launch_spec = {
+            "command": draft.launch.command,
+            "args": list(draft.launch.args),
+            "env": dict(draft.launch.env),
+            "cwd": draft.launch.cwd,
+            "mounts": [
+                {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
+                for mount in config_import.mounts_for(draft.paths)
+            ]
+            if parsed_location is ExecutionLocation.MANAGED_WORKER
+            else [],
+        }
+    auth_config: dict[str, Any] = {}
+    if draft.auth_kind is AuthKind.STATIC and draft.secrets:
+        header_name = draft.secrets[0].name
+        auth_config = {
+            "header_name": header_name,
+            "scheme": draft.header_auth.scheme
+            if header_name == draft.header_auth.header_name
+            else "",
+        }
+    secrets = _import_secrets(draft, body)
+    access_token_ciphertext = None
+    auth_config_patch = None
+    sealed_launch_spec = None
+    if secrets and draft.transport is Transport.STDIO:
+        sealed_launch_spec = _sealed_launch_spec(launch_spec, secrets)
+    elif secrets:
+        header_name = str(auth_config.get("header_name") or "Authorization")
+        secret = secrets.get(header_name)
+        if secret is not None:
+            access_token_ciphertext, auth_config_patch = _static_credential(
+                secret=secret,
+                header_name=header_name,
+                header_scheme=str(auth_config.get("scheme") or ""),
+                fallback_header=header_name,
+            )
+    return {
+        "user_id": user_id,
+        "label": draft.label,
+        "transport": draft.transport.value,
+        "location": parsed_location.value,
+        "url": draft.url,
+        "launch_spec": launch_spec,
+        "auth_kind": draft.auth_kind.value,
+        "auth_config": auth_config,
+        "template": None,
+        "reuse_pending": not draft.secrets,
+        "access_token_ciphertext": access_token_ciphertext,
+        "auth_config_patch": auth_config_patch,
+        "sealed_launch_spec": sealed_launch_spec,
+    }
+
+
 async def _store_static_secret(
     store: _McpConnectionsStorage,
     *,
@@ -2273,16 +2726,12 @@ async def _store_static_secret(
     expected_epoch: int | None = None,
 ) -> bool:
     """Encrypt and store one static credential."""
-    _kind, config = _build_auth(
-        AuthKind.STATIC.value, header_name or _header_of(row), header_scheme
+    ciphertext, config = _static_credential(
+        secret=secret,
+        header_name=header_name,
+        header_scheme=header_scheme,
+        fallback_header=_header_of(row),
     )
-    # Two characters and two more, so a person can tell *which* credential is
-    # stored without the page ever holding one it could be made to render.
-    config["hint"] = f"{secret[:2]}{secret[-2:]}" if len(secret) > 4 else ""
-    try:
-        ciphertext = mcp_cipher().encrypt(secret)
-    except SourceControlError as exc:
-        raise _no_encryption_key() from exc
     epoch = int(row["authorization_epoch"]) if expected_epoch is None else expected_epoch
     return await store.mcp.set_mcp_credential(
         connection_id=int(row["id"]),
@@ -2298,70 +2747,6 @@ def _header_of(row: Mapping[str, Any]) -> str:
     config = row.get("auth_config")
     settings = config if isinstance(config, Mapping) else {}
     return str(settings.get("header_name") or "Authorization")
-
-
-async def _store_env_secrets(
-    store: _McpConnectionsStorage, *, row: Mapping[str, Any], secrets: Mapping[str, str]
-) -> None:
-    """Encrypt a stdio connection's environment secrets into its launch spec.
-
-    The reference a launch spec carries is ``secret://NAME``; the value lives
-    here as ciphertext under the same name. Keeping them in one document means
-    a plan cannot be read without its secrets and cannot be executed without
-    them either, which is the property that stops a half-restored connection
-    from starting with an empty credential.
-    """
-    spec = row.get("launch_spec")
-    launch_spec = dict(spec) if isinstance(spec, Mapping) else {}
-    env = {str(k): str(v) for k, v in (launch_spec.get("env") or {}).items()}
-    wanted = launch.declared_secret_names(env, {})
-    if not wanted:
-        return
-    try:
-        cipher = mcp_cipher()
-    except SourceControlError as exc:
-        raise _no_encryption_key() from exc
-    stored = {str(k): str(v) for k, v in (launch_spec.get("env_secrets") or {}).items()}
-    for name in wanted:
-        if name in secrets:
-            stored[name] = cipher.encrypt(secrets[name])
-    launch_spec["env_secrets"] = stored
-    await store.mcp.set_mcp_launch_spec(
-        connection_id=int(row["id"]),
-        expected_authorization_epoch=int(row["authorization_epoch"]),
-        launch_spec=launch_spec,
-    )
-
-
-async def _store_import_secrets(
-    store: _McpConnectionsStorage, *, row: Mapping[str, Any], secrets: Mapping[str, str]
-) -> None:
-    """Store whatever an imported configuration carried, encrypted.
-
-    A header credential goes in the credential column and a stdio environment
-    value goes in the launch spec, because that is where each one is read from
-    at dispatch time. Storing either in the other's place would produce a
-    connection that looks configured and authenticates with nothing.
-    """
-    if not secrets:
-        return
-    if str(row.get("transport")) == Transport.STDIO.value:
-        await _store_env_secrets(store, row=row, secrets=secrets)
-        return
-    header_name = _header_of(row)
-    secret = secrets.get(header_name)
-    if secret is None:
-        return
-    config = row.get("auth_config")
-    settings = config if isinstance(config, Mapping) else {}
-    await _store_static_secret(
-        store,
-        row=row,
-        secret=secret,
-        header_name=header_name,
-        header_scheme=str(settings.get("scheme") or ""),
-        replaces_identity=False,
-    )
 
 
 def _no_encryption_key() -> HTTPException:

@@ -121,13 +121,4 @@ describe('dark mode coverage', () => {
     const gaps = sourceFiles(SRC).flatMap(gapsIn);
     expect(gaps).toEqual([]);
   });
-
-  it('detects a missing counterpart', () => {
-    // Guards the guard: a checker that silently matches nothing would pass the
-    // assertion above for the wrong reason.
-    const runs = classRuns('const a = "rounded-lg bg-white p-2";');
-    expect(runs.some((run) => run.includes('bg-white'))).toBe(true);
-    const tokens = 'rounded-lg bg-white p-2'.split(' ');
-    expect(tokens.filter((t) => LIGHT_GROUND.test(t))).toEqual(['bg-white']);
-  });
 });

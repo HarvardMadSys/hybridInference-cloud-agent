@@ -5,11 +5,12 @@ streams the member Agent CLI's output through the workspace broker. Its shape
 follows from the adjudicated security model rather than convenience:
 
 - **Narrow credentials.** The enrolled host claims with its own identity. Only
-  a member-scoped inference grant and an attempt-fenced MCP token enter the
-  sandbox; worker-control and repository credentials stay in this process.
+  a member-scoped inference grant, an attempt-fenced MCP token, and a
+  short-lived repository-scoped GitHub App write token enter the sandbox.
+  Worker-control, account and service credentials stay outside.
 - **Snapshot-out, not push.** The runner never pushes. The trusted publisher
   captures and validates a quiescent shared-workspace snapshot, then pushes it.
-  That is why neither the runner nor the sandbox needs a git write credential.
+  The sandbox may also publish directly using its repository-scoped token.
 - **Heartbeats are how cancellation arrives.** A background thread renews the
   lease and watches the reply for ``cancel_requested``; the agent is killed on
   the next beat. Losing the lease (409) is fatal by design — a runner whose
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.chat_sandbox import (
     CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
@@ -98,7 +100,7 @@ from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.runtime_qualification import VERDICT_KEY, HostQualification, adopt_verdict
-from cloud_agent_host.runtime_settings import RuntimeSettings
+from cloud_agent_host.runtime_settings import RuntimeSettings, SandboxArchiveRuntimeSettings
 from cloud_agent_host.runtimes import (
     AgentRuntime,
     NormalizedEvent,
@@ -128,12 +130,20 @@ from cloud_agent_host.shared_protocol import (
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
+from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_upload_archive,
 )
-from cloud_agent_shared.host_settings import RUNNER_SETTING_KEYS, reported_values
+from cloud_agent_shared.host_settings import (
+    HOST_SETTINGS_BY_KEY,
+    RUNNER_SETTING_KEYS,
+    reported_values,
+)
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
+from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     HOST_SETTINGS_CAPABILITY,
@@ -161,7 +171,7 @@ _WORK_WAIT_GRACE_S = 10.0
 #: One upload is capped at 5 MB by the control plane, but the connection can be
 #: slow; the default 30 s client timeout is too tight for a file transfer.
 _ATTACHMENT_TIMEOUT_S = 120.0
-DEFAULT_AGENT_TIMEOUT_S = 3600.0
+DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
 # The broker closes guest telemetry and enforces the member activation
@@ -229,6 +239,14 @@ ENV_SOURCE_IMPORT_MAX_MIB = "AGENT_SOURCE_IMPORT_MAX_MIB"
 #: A typo guard, not a statement about any machine.
 MAX_SOURCE_IMPORT_MIB = 64 * 1024
 
+#: What the owner reads when their chat uses connected tools and the host that
+#: ran it has no MCP relay. The fault is the deployment's, and only an admin can
+#: fix it, so this says that instead of naming a variable the owner cannot set.
+SITE_MISCONFIGURED_MCP = (
+    "Site misconfigured: this chat uses connected tools, but the server that ran it "
+    "has no MCP relay. Ask an admin to finish setting up the site."
+)
+
 # Hermetic git for anything the *runner* runs: no user config, no hooks, no
 # credential helpers, no prompts.
 _GIT_ENV = {
@@ -289,13 +307,11 @@ class ClaimedJob:
     # The inference credential that enters the sandbox: a gateway grant.
     sandbox_token: str
     execution_profile: str = "trusted-v1"
-    # The MCP credential, and the relay it opens. A *second* pair, because
-    # tools and inference are two services now: a leaked MCP token buys no
-    # inference and a leaked grant buys no tools. Empty means this run has no
-    # MCP, which the runtime refuses rather than resolving against the
-    # inference address.
+    # The MCP credential. A *second* credential, because tools and inference
+    # are two services now: a leaked MCP token buys no inference and a leaked
+    # grant buys no tools. The relay it opens is this host's own, from
+    # `_sandbox_mcp_url`, not anything the claim says.
     mcp_token: str = ""
-    mcp_base_url: str = ""
     # How hard the model should think on this turn, in the runtime's own
     # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
     # Defaulted rather than required, because absent and Auto are the same
@@ -305,10 +321,13 @@ class ClaimedJob:
     # Optional, so it carries a default rather than forcing every caller to
     # pass one.
     setup_script: str | None = None
-    # Read-only, single-repo, short-lived: what the runner clones with. Stays
-    # in the runner — it is never put in .git/config and never enters the
-    # sandbox environment. ``None`` for a public repository.
+    # Explicit CLI plugins installed in this chat's private member state.
+    plugins: list[dict[str, str]] = field(default_factory=list)
+    # Read-only, single-repo, short-lived: what the runner clones with. Never
+    # put in .git/config or the sandbox environment.
     clone_token: str | None = None
+    # A separate repository-scoped contents/PR write token for sandbox gh.
+    github_token: str | None = field(default=None, repr=False)
     parent_job_id: str | None = None
     turn_no: int = 1
     # MCP connection aliases this job was granted. Aliases only: the runner
@@ -338,6 +357,10 @@ class ClaimedJob:
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
         """Build from the claim endpoint's response."""
+        raw_plugins = body.get("plugins", [])
+        if not isinstance(raw_plugins, list) or len(raw_plugins) > MAX_SANDBOX_PLUGINS:
+            raise ValueError("claim plugins must be a bounded list")
+        plugins = validate_sandbox_plugins(body["runtime"], raw_plugins)
         return cls(
             job_id=body["job_id"],
             thread_id=body["thread_id"],
@@ -349,6 +372,7 @@ class ClaimedJob:
             base_sha=body.get("base_sha"),
             task_prompt=body["task_prompt"],
             setup_script=body.get("setup_script"),
+            plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],
             execution_profile=body.get("execution_profile") or "trusted-v1",
@@ -358,8 +382,8 @@ class ClaimedJob:
             worker_token=body["worker_token"],
             sandbox_token=body["sandbox_token"],
             mcp_token=body.get("mcp_token") or "",
-            mcp_base_url=body.get("mcp_base_url") or "",
             clone_token=body.get("clone_token") or None,
+            github_token=body.get("github_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(
@@ -566,6 +590,7 @@ class ControlPlane:
         *,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         process_generation: int,
     ) -> None:
         """Record a CLI process rotation inside the same chat container."""
@@ -574,6 +599,7 @@ class ControlPlane:
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
+                "residency_generation": residency_generation,
                 "process_generation": process_generation,
             },
         )
@@ -600,6 +626,7 @@ class ControlPlane:
         *,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
     ) -> None:
         """Reserve this job before its prompt may reach Agent CLI stdin."""
         self._post(
@@ -607,6 +634,7 @@ class ControlPlane:
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
+                "residency_generation": residency_generation,
             },
             timeout=10.0,
         )
@@ -616,6 +644,7 @@ class ControlPlane:
         *,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         context_status: str,
         native_session_id: str | None,
         idle_timeout_seconds: float,
@@ -627,6 +656,7 @@ class ControlPlane:
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
+                "residency_generation": residency_generation,
                 "context_status": context_status,
                 "native_session_id": native_session_id,
                 "base_sha": base_sha,
@@ -957,10 +987,10 @@ def _auth_env(clone_token: str | None) -> dict[str, str]:
 def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
-    No repository credential may reach the sandbox, and this tree is about to
-    be streamed into it. Asserting the property beats assuming it: git writes
-    several files during a fetch, and a future authentication change could
-    quietly start recording the token in one of them.
+    No repository credential may be stored in the source tree, which is about
+    to be streamed into the sandbox. Asserting the property beats assuming it:
+    git writes several files during a fetch, and a future authentication change
+    could quietly start recording the token in one of them.
     """
     if not clone_token:
         return
@@ -1123,38 +1153,36 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     """
     chunks: list[str] = []
     total = 0
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def _pump() -> None:
-        try:
-            for line in process.lines():
-                lines.put(line)
-        finally:
-            lines.put(None)
-
-    threading.Thread(target=_pump, daemon=True, name="agent-patch").start()
+    output = OutputPump(getattr(process, "chunks", process.lines)(), name="agent-patch")
     deadline = time.monotonic() + deadline_s
-    while True:
-        if time.monotonic() > deadline:
-            process.kill()
-            raise WorktreeError(
-                f"building the patch exceeded {deadline_s:.0f}s; the working tree's git "
-                "configuration is agent-controlled and may be hostile"
-            )
-        try:
-            line = lines.get(timeout=_POLL_INTERVAL_S)
-        except queue.Empty:
-            continue
-        if line is None:
-            break
-        total += len(line.encode())
-        if total > max_bytes:
-            process.kill()
-            raise WorktreeError(
-                f"the patch exceeded {max_bytes} bytes while being read; refusing to "
-                "buffer unbounded agent output"
-            )
-        chunks.append(line)
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise WorktreeError(
+                    f"building the patch exceeded {deadline_s:.0f}s; the working tree's git "
+                    "configuration is agent-controlled and may be hostile"
+                )
+            try:
+                chunk = output.get(timeout=_POLL_INTERVAL_S)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            total += len(chunk.encode())
+            if total > max_bytes:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise WorktreeError(
+                    f"the patch exceeded {max_bytes} bytes while being read; refusing to "
+                    "buffer unbounded agent output"
+                )
+            chunks.append(chunk)
+    finally:
+        output.close()
 
     exit_code = process.wait()
     if exit_code != 0:
@@ -1168,13 +1196,13 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
 def _resident_base_ready(workdir: str, job: ClaimedJob, backend: SandboxBackend) -> bool:
     """Is the turn's pinned base resolvable in the retained workspace?
 
-    Probed **inside the sandbox**, exactly like ``build_patch`` and for the
-    same reason: this tree — ``.git/config`` included — has belonged to the
-    agent since import, and trusted-runner git against it would execute
-    whatever the agent left in ``diff.external`` or ``core.fsmonitor`` with
-    the runner's privileges. A missing object is imported as a credential-free
-    Git bundle built in a temporary trusted clone; clone credentials never
-    enter the retained container or its agent-controlled filesystem.
+    Probed **inside the sandbox** because this tree — ``.git/config``
+    included — has belonged to the agent since import, and trusted-runner git
+    against it would execute whatever the agent left in ``diff.external`` or
+    ``core.fsmonitor`` with the runner's privileges. A missing object is
+    imported as a credential-free Git bundle built in a temporary trusted
+    clone; clone credentials never enter the retained container or its
+    agent-controlled filesystem.
     """
     if not job.base_sha:
         return True
@@ -1315,6 +1343,10 @@ def _shared_live_host_capabilities(
         # Named per runtime: the broker of this same deployment takes a
         # message into a running turn only through a driver that wires it.
         *steerable,
+        # This exact replica can accept the deployment-wide DB archive policy
+        # over its authenticated broker channel. A claim also attests the
+        # exact revision that broker confirmed.
+        SANDBOX_ARCHIVE_CAPABILITY,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1348,7 +1380,11 @@ def _shared_live_deployment_ready(
     )
 
 
-def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
+def _claim_attestation(
+    backend: SandboxBackend,
+    *,
+    sandbox_archive_settings_applied_revision: int | None = None,
+) -> dict[str, Any]:
     """Build the exact-replica proof required for every claim."""
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
@@ -1357,6 +1393,10 @@ def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    if sandbox_archive_settings_applied_revision is not None:
+        stamp["sandbox_archive_settings_applied_revision"] = (
+            sandbox_archive_settings_applied_revision
+        )
     if stamp["runner_capabilities"]:
         # For a control plane older than this release. Hosts roll out before
         # the API, so a replacement runner polls that API for a while, and it
@@ -1415,6 +1455,15 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             idle_remaining = None
             if activity_known and deadline is not None:
                 idle_remaining = max(0.0, float(deadline) - now)
+            resource_usage = parse_sandbox_resource_sample(row.get("resource_usage"))
+            terminal_count = row.get("terminal_count")
+            if (
+                isinstance(terminal_count, bool)
+                or not isinstance(terminal_count, int)
+                or terminal_count < 0
+                or terminal_count > 4096
+            ):
+                terminal_count = None
             observations.append(
                 {
                     "thread_id": str(row["thread_id"]),
@@ -1425,6 +1474,10 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "running": running,
                     "activity_active": active if activity_known else None,
                     "idle_remaining_seconds": idle_remaining,
+                    "terminal_count": terminal_count,
+                    "resource_usage": None
+                    if resource_usage is None
+                    else resource_usage.model_dump(),
                     "shared_live": True,
                     "members": members,
                 }
@@ -1442,8 +1495,135 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             client.close()
 
 
+_RETAINED_STOP_COMMAND_MAX = 128
+_RetainedStopKey = tuple[str, int, int]
+
+
+class _RetainedSandboxStopWorker:
+    """Keep synchronous broker stops off the host-heartbeat thread.
+
+    The control plane repeats a durable stop fence until Docker reports the
+    group stopped. Exact duplicate fences are ignored and overflow is left for
+    a later heartbeat. Closing discards pending work but joins the one request
+    already in flight, including a bounded synchronous final archive.
+    """
+
+    def __init__(
+        self,
+        apply: Callable[[list[dict[str, Any]]], None],
+        *,
+        max_commands: int = _RETAINED_STOP_COMMAND_MAX,
+    ) -> None:
+        if max_commands < 1:
+            raise ValueError("retained stop worker capacity must be positive")
+        self._apply = apply
+        self._max_commands = max_commands
+        self._condition = threading.Condition()
+        self._pending: dict[_RetainedStopKey, dict[str, Any]] = {}
+        self._active: set[_RetainedStopKey] = set()
+        self._closed = False
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _key(command: dict[str, Any]) -> _RetainedStopKey | None:
+        thread_id = command.get("thread_id")
+        generation = command.get("generation")
+        activation = command.get("activation_generation")
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or isinstance(activation, bool)
+            or not isinstance(activation, int)
+            or activation < 0
+        ):
+            return None
+        return thread_id, generation, activation
+
+    def submit(self, commands: list[dict[str, Any]]) -> None:
+        """Admit unique exact fences without ever waiting for broker I/O."""
+        invalid = 0
+        overflow = 0
+        with self._condition:
+            if self._closed:
+                return
+            for command in commands:
+                key = self._key(command)
+                if key is None:
+                    invalid += 1
+                    continue
+                if key in self._pending or key in self._active:
+                    continue
+                if len(self._pending) + len(self._active) >= self._max_commands:
+                    overflow += 1
+                    continue
+                self._pending[key] = dict(command)
+            if self._pending and self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    daemon=True,
+                    name="agent-retained-sandbox-stop",
+                )
+                self._thread.start()
+            self._condition.notify_all()
+        if invalid:
+            logger.warning(
+                "agent_retained_stop_command_invalid",
+                extra={"event": "agent_retained_stop_command_invalid", "count": invalid},
+            )
+        if overflow:
+            logger.warning(
+                "agent_retained_stop_queue_full",
+                extra={
+                    "event": "agent_retained_stop_queue_full",
+                    "count": overflow,
+                    "capacity": self._max_commands,
+                },
+            )
+
+    def close(self) -> None:
+        """Seal intake, abandon pending durable commands, and join active I/O."""
+        with self._condition:
+            self._closed = True
+            dropped = len(self._pending)
+            self._pending.clear()
+            self._condition.notify_all()
+            thread = self._thread
+        if dropped:
+            logger.info(
+                "agent_retained_stop_shutdown_drop",
+                extra={"event": "agent_retained_stop_shutdown_drop", "count": dropped},
+            )
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._pending:
+                    if self._closed:
+                        return
+                    self._condition.wait()
+                key = next(iter(self._pending))
+                command = self._pending.pop(key)
+                self._active.add(key)
+            try:
+                self._apply([command])
+            except Exception:
+                logger.exception(
+                    "agent_retained_stop_worker_failed",
+                    extra={"event": "agent_retained_stop_worker_failed"},
+                )
+            finally:
+                with self._condition:
+                    self._active.discard(key)
+                    self._condition.notify_all()
+
+
 def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
-    """Apply durable settled-idle stop commands without breaking host beats."""
+    """Apply one worker batch of durable settled-idle stop commands."""
     client: SessionSupervisorClient | None = None
     try:
         client = _session_supervisor_from_env()
@@ -1452,7 +1632,9 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
                 client.stop_shared_idle(
                     str(command["thread_id"]),
                     generation=int(command["generation"]),
+                    activation_generation=int(command["activation_generation"]),
                     reason=str(command.get("reason") or "idle"),
+                    member_activation_generations=command.get("member_activation_generations"),
                 )
             except (KeyError, TypeError, ValueError, SessionSupervisorError) as exc:
                 # A stale command is expected during a racing acquire. The
@@ -1845,21 +2027,9 @@ def _stream_shared_agent_turn(
     # grace period, which the endpoint correctly refuses.
     if measurement is not None and on_frozen is not None:
         on_frozen(measurement)
-    frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for frame in stream.frames():
-                frames.put(frame)
-        except Exception as exc:
-            frames.put({"kind": "client_error", "detail": str(exc)[:1000]})
-        finally:
-            frames.put(None)
-
-    reader = threading.Thread(target=pump, daemon=True, name="shared-agent-stream")
-    reader.start()
+    frames: OutputPump[dict[str, Any]] | None = None
     deadline = time.monotonic() + timeout_s
-    tail: list[str] = []
+    tail = TextTail()
     tool_errors: list[str] = []
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
@@ -1874,9 +2044,14 @@ def _stream_shared_agent_turn(
             reported = f"sandbox failed: {sandbox_error[:900]}"
         else:
             reported = None
-        return exit_code, "".join(tail), tool_errors, result_frame, reported
+        return exit_code, tail.text(), tool_errors, result_frame, reported
 
     try:
+        # The broker admits and dispatches the prompt before opening this
+        # response stream. Resident follow-ups need not emit a native init
+        # event, so report this shared boundary before waiting for CLI output.
+        control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
+        frames = OutputPump(stream.frames(), name="shared-agent-stream")
         while True:
             if heart.lease_lost:
                 with contextlib.suppress(Exception):
@@ -1903,6 +2078,10 @@ def _stream_shared_agent_turn(
                 frame = frames.get(timeout=_POLL_INTERVAL_S)
             except queue.Empty:
                 continue
+            except Exception as exc:
+                if result_frame is not None:
+                    break
+                raise SessionSupervisorError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
             kind = frame.get("kind")
@@ -1910,7 +2089,6 @@ def _stream_shared_agent_turn(
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):
                     tail.append(raw_line)
-                    del tail[:-40]
                 event_type = str(frame.get("event_type") or "")
                 payload = frame.get("payload")
                 if not isinstance(payload, dict):
@@ -1979,6 +2157,8 @@ def _stream_shared_agent_turn(
             )
         return outcome(exit_code)
     finally:
+        if frames is not None:
+            frames.close()
         stream.close()
 
 
@@ -2053,6 +2233,12 @@ def _run_shared_live_attempt(
     if getattr(driver, "launch_live", None) is None:
         finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
         return 2
+    mcp_url = _sandbox_mcp_url()
+    if job.mcp_bindings and not mcp_url:
+        # Before any container work: the runtime would refuse these tools only
+        # at the resident launch, after a checkout the turn could never use.
+        finish_attempt("failed", SITE_MISCONFIGURED_MCP)
+        return 2
 
     manager = ChatSandboxManager(backend)
     stamp = backend.version_stamp()
@@ -2079,11 +2265,26 @@ def _run_shared_live_attempt(
         existing.get("resident_slot_capacity")
         or settings.get("shared_resident_capacity")
         or os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
-        or 8
+        or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
     )
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
         return 2
+    if existing:
+        # Resource limits belong to the retained group. A settings edit must
+        # not change its reservation or a fork's shared container. Legacy
+        # groups have no disk quota, including when a new default is set.
+        memory_limit = str(existing.get("memory_limit") or "4g")
+        cpu_limit = str(existing.get("cpu_limit") or "2")
+        disk_limit_mib = int(existing.get("disk_limit_mib") or 0)
+    else:
+        try:
+            memory_limit = f"{_sandbox_resource_setting('sandbox_memory_mib', settings)}m"
+            cpu_limit = f"{_sandbox_resource_setting('sandbox_cpu_millicores', settings) / 1000:g}"
+            disk_limit_mib = _sandbox_resource_setting("sandbox_disk_mib", settings)
+        except ValueError as exc:
+            finish_attempt("failed", str(exc))
+            return 2
     sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
     origin_thread_id = str(existing.get("origin_thread_id") or job.thread_id)
     seed_spec = ChatSandboxSpec(
@@ -2099,6 +2300,10 @@ def _run_shared_live_attempt(
         ),
         shared_live=True,
         resident_slot_capacity=capacity,
+        memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        disk_limit_mib=disk_limit_mib,
+        stop_timeout_s=int(existing.get("stop_timeout_seconds") or 10),
     )
     if existing:
         if existing.get("host") != host:
@@ -2123,6 +2328,7 @@ def _run_shared_live_attempt(
                 "resident_slot_capacity": capacity,
                 "memory_limit": seed_spec.memory_limit,
                 "cpu_limit": seed_spec.cpu_limit,
+                "disk_limit_mib": seed_spec.disk_limit_mib,
                 "stop_timeout_seconds": seed_spec.stop_timeout_s,
                 # What the image a new container is created from declares, so
                 # Fork can ask it of this group after the host moves on to a
@@ -2138,6 +2344,18 @@ def _run_shared_live_attempt(
         finish_attempt("failed", f"could not reserve shared chat sandbox: {exc}")
         return 2
 
+    if (
+        reservation.get("memory_limit") != seed_spec.memory_limit
+        or reservation.get("cpu_limit") != seed_spec.cpu_limit
+        or reservation.get("disk_limit_mib", 0) != seed_spec.disk_limit_mib
+    ):
+        finish_attempt(
+            "failed",
+            "Site misconfigured: the control plane did not confirm the reserved "
+            "container CPU, memory and disk limits. Update the control plane and host together.",
+        )
+        return 2
+
     spec = ChatSandboxSpec(
         thread_id=str(reservation.get("origin_thread_id") or origin_thread_id),
         sandbox_id=str(reservation["sandbox_id"]),
@@ -2149,6 +2367,7 @@ def _run_shared_live_attempt(
         resident_slot_capacity=int(reservation.get("resident_slot_capacity") or capacity),
         memory_limit=str(reservation.get("memory_limit") or seed_spec.memory_limit),
         cpu_limit=str(reservation.get("cpu_limit") or seed_spec.cpu_limit),
+        disk_limit_mib=int(reservation.get("disk_limit_mib", seed_spec.disk_limit_mib)),
         stop_timeout_s=int(reservation.get("stop_timeout_seconds") or seed_spec.stop_timeout_s),
     )
     activation_generation = int(reservation["activation_generation"])
@@ -2204,8 +2423,11 @@ def _run_shared_live_attempt(
 
     try:
         if not has_context:
-            # Cloned on the host while the activation below creates and boots
-            # the guest; only the import, at the checkout stage, waits for both.
+            # Clone into a host-local temporary archive while the activation
+            # below creates and boots the guest. This cannot mutate the
+            # sandbox whose durable initial marker still has to be probed. If
+            # that probe recovers a prepared baseline, discard this speculative
+            # source instead of importing it.
             import_mib = settings.get("source_import_max_mib")
             source = _prefetch_retained_source(
                 job=job,
@@ -2289,36 +2511,75 @@ def _run_shared_live_attempt(
         terminals_suspended = True
 
         imported_base: str | None = None
+        recovered_initial = False
         if not has_context:
-            stage = _stage(measurement, "workspace_reset")
-            manager.reset_unsettled_state(spec)
-            stage = _stage(measurement, "checkout")
-            if source is None:
-                raise SandboxError("a new chat's source was never prepared")
-            base_sha = source.import_into(
-                manager, spec, observer=operation_profiling.stage_observer(measurement)
+            # A previous activation may have committed the immutable S3
+            # baseline and then died before returning its receipt. Resolve
+            # that durable marker before reset, setup, permissions, or uploads
+            # can alter the exact prepared bytes it names.
+            stage = _stage(measurement, "initial_archive_status")
+            initial_status = supervisor.initial_archive_status(
+                spec,
+                thread_id=job.thread_id,
+                token=lease_token,
+                members=manifest,
+                expected_container_id=str(lease["container_id"]),
+                preparation_id=job.job_id,
             )
-            reused_workspace = False
-            if job.setup_script:
-                stage = _stage(measurement, "setup")
-                setup = run_setup(
-                    script=job.setup_script,
-                    workdir=CHAT_WORKDIR,
-                    backend=retained,
+            status_enabled = initial_status.get("enabled")
+            status_prepared = initial_status.get("prepared")
+            status_stored = initial_status.get("stored")
+            valid_status = (
+                status_enabled is False and status_prepared is False and status_stored is False
+            ) or (status_enabled is True and status_prepared is False and status_stored is False)
+            if status_enabled is True and status_prepared is True and status_stored is True:
+                recovered_base = initial_status.get("base_sha")
+                if isinstance(recovered_base, str) and re.fullmatch(
+                    r"(?:[0-9a-f]{40}|[0-9a-f]{64})", recovered_base
+                ):
+                    base_sha = recovered_base
+                    recovered_initial = True
+                    reused_workspace = True
+                    valid_status = True
+            if not valid_status:
+                raise SandboxError("workspace broker returned an invalid initial archive status")
+            if recovered_initial and source is not None:
+                source.discard()
+                source = None
+
+        if not has_context:
+            if not recovered_initial:
+                # The marker probe above proved there is no prepared baseline.
+                # Only now may the prefetched source mutate the sandbox.
+                stage = _stage(measurement, "workspace_reset")
+                manager.reset_unsettled_state(spec)
+                stage = _stage(measurement, "checkout")
+                if source is None:
+                    raise SandboxError("a new chat's source was never prepared")
+                base_sha = source.import_into(
+                    manager, spec, observer=operation_profiling.stage_observer(measurement)
                 )
-                control.append_event(
-                    NormalizedEvent(
-                        "lifecycle",
-                        {"phase": "setup", "cached": False, "ran": setup.ran},
+                reused_workspace = False
+                if job.setup_script:
+                    stage = _stage(measurement, "setup")
+                    setup = run_setup(
+                        script=job.setup_script,
+                        workdir=CHAT_WORKDIR,
+                        backend=retained,
                     )
-                )
-                if setup.exit_code != 0:
-                    failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
-                    abandon_before_finish(lost=False, detail=failure_detail)
-                    finish_attempt("failed", failure_detail, base_sha=base_sha)
-                    return 1
-            stage = _stage(measurement, "workspace_permissions")
-            manager.prepare_shared_workspace(spec)
+                    control.append_event(
+                        NormalizedEvent(
+                            "lifecycle",
+                            {"phase": "setup", "cached": False, "ran": setup.ran},
+                        )
+                    )
+                    if setup.exit_code != 0:
+                        failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
+                        abandon_before_finish(lost=False, detail=failure_detail)
+                        finish_attempt("failed", failure_detail, base_sha=base_sha)
+                        return 1
+                stage = _stage(measurement, "workspace_permissions")
+                manager.prepare_shared_workspace(spec)
         else:
             stage = _stage(measurement, "native_workspace_resume")
             if not native_session_id:
@@ -2353,7 +2614,11 @@ def _run_shared_live_attempt(
             control=control,
             manager=manager,
             spec=spec,
-            fresh_container=not has_context,
+            # A recovered baseline belongs to the same retained container, so
+            # its earlier thread uploads are already present. A replacement
+            # first-turn job can still add files of its own and must import the
+            # thread's current attachment set before prompt admission.
+            fresh_container=not has_context and not recovered_initial,
         )
         if imported_uploads:
             control.append_event(
@@ -2363,6 +2628,50 @@ def _run_shared_live_attempt(
                         "phase": "uploads_imported",
                         "files": imported_uploads,
                         "path": CHAT_UPLOADS_DIR,
+                    },
+                )
+            )
+        if not has_context and not recovered_initial:
+            # Source, setup, permissions, and uploaded files are complete, and
+            # no resident CLI or prompt exists yet. Capture this point-in-time
+            # boundary before admitting either. The broker owns S3 access; the
+            # runner never receives cloud credentials.
+            stage = _stage(measurement, "initial_archive")
+            initial_archive = supervisor.capture_initial_archive(
+                spec,
+                thread_id=job.thread_id,
+                token=lease_token,
+                members=manifest,
+                expected_container_id=str(lease["container_id"]),
+                preparation_id=job.job_id,
+                base_sha=base_sha,
+            )
+            archive_enabled = initial_archive.get("enabled")
+            archive_stored = initial_archive.get("stored")
+            if not (
+                (archive_enabled is False and archive_stored is False)
+                or (archive_enabled is True and archive_stored is True)
+            ):
+                raise SandboxError("workspace broker returned an invalid initial archive receipt")
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "initial_archive",
+                        "enabled": archive_enabled,
+                        "stored": archive_stored,
+                    },
+                )
+            )
+        elif recovered_initial:
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "initial_archive",
+                        "enabled": True,
+                        "stored": True,
+                        "recovered": True,
                     },
                 )
             )
@@ -2414,12 +2723,15 @@ def _run_shared_live_attempt(
             reasoning_effort=job.reasoning_effort,
             gateway_base_url=gateway_base_url,
             credential=None,
+            github_token=job.github_token,
+            github_repo=job.repo,
+            plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
             # The MCP relay token is attempt-fenced. It is process-fixed only
             # when this turn actually exposes MCP endpoints; carrying an
             # otherwise-unused fresh token here would restart every ordinary
             # no-MCP chat and falsely erase HOT continuity.
-            mcp_base_url=job.mcp_base_url if job.mcp_bindings else "",
+            mcp_base_url=mcp_url if job.mcp_bindings else "",
             mcp_credential=job.mcp_token if job.mcp_bindings else "",
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
@@ -2498,6 +2810,7 @@ def _run_shared_live_attempt(
         control.record_chat_process(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
+            residency_generation=launch.residency_generation,
             process_generation=process_generation,
         )
         if context_status == "live":
@@ -2514,6 +2827,7 @@ def _run_shared_live_attempt(
             lambda: control.admit_chat_turn(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
+                residency_generation=launch.residency_generation,
             ),
         )
         turn_admitted = True
@@ -2641,6 +2955,7 @@ def _run_shared_live_attempt(
             lambda: control.settle_chat_sandbox(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
+                residency_generation=launch.residency_generation,
                 context_status=context_status,
                 native_session_id=settled_session_id,
                 base_sha=base_sha,
@@ -3037,6 +3352,28 @@ def _run_turn(
         backend = build_backend_from_env()
         backend.preflight()
 
+    storage_error = _new_sandbox_storage_error(job, host_settings)
+    if storage_error:
+        logger.warning(
+            "agent_storage_admission_declined",
+            extra={
+                "event": "agent_storage_admission_declined",
+                "job_id": job.job_id,
+                "detail": storage_error,
+            },
+        )
+        operation_profiling.discard(measurement)
+        return (
+            0
+            if release_turn(
+                base_url=base_url,
+                worker_token=job.worker_token,
+                job_id=job.job_id,
+                reason="storage_pressure",
+            )
+            else 2
+        )
+
     print(f"claimed {job.job_id} attempt {job.attempt_no} runtime={job.runtime}")
     logger.info(
         "agent_attempt_claimed job_id=%s attempt_id=%s worker_id=%s host=%s",
@@ -3118,17 +3455,14 @@ _STOPPING = threading.Event()
 def _drain_on_sigterm() -> None:
     """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
 
-    The split is deliberate. `docker stop` and `compose up -d` send SIGTERM and
-    then wait `stop_grace_period` — that wait is exactly the room to let a job
-    end, and the container is being replaced anyway, so exiting after it is
-    right. A person pressing Ctrl-C means *now*, and turning that into a
+    The split is deliberate. `docker stop` sends SIGTERM; supported activation
+    asks the Engine to wait indefinitely, so a job finishes before its runner
+    is replaced. Direct, out-of-band Compose operations retain their configured
+    grace period. A person pressing Ctrl-C means *now*, and turning that into a
     several-minute wait would be its own surprise.
 
-    The lease machinery remains the backstop, not the plan: a job outlasting
-    the grace period is SIGKILLed, its lease expires, and the control plane
-    supersedes the attempt — which is what happened to every job through a
-    deploy before this, and is exactly the outcome this narrows to the rare
-    case.
+    The lease machinery remains the backstop for a host failure or an explicit
+    forced kill, not the deployment plan.
     """
 
     def handler(signum: int, frame: object) -> None:
@@ -3243,13 +3577,14 @@ def _turn_host_settings(raw: Any) -> dict[str, float]:
     """The runner's share of the runtime settings a turn was handed, checked again.
 
     The parent already resolved them, so this only drops what no turn should
-    act on: a key the runner does not apply, or a value that is not a positive
-    finite number. A setting dropped here is read from the environment instead.
+    act on: a key the runner does not apply, or a value that is not a usable
+    finite number. Zero is valid for the optional disk quota. A setting
+    dropped here is read from the environment instead.
     """
     return {
         key: float(value)
         for key, value in (reported_values(raw) or {}).items()
-        if key in RUNNER_SETTING_KEYS and value > 0
+        if key in RUNNER_SETTING_KEYS and (value > 0 or key == "sandbox_disk_mib")
     }
 
 
@@ -3274,10 +3609,9 @@ def _spawn_turn(
     block the turn it was waiting for.
 
     Every path that returns ``LAUNCH_NOT_STARTED`` has shown the child never
-    had the turn: the spawn itself failed, delivery failed, or the child closed
-    its answer without giving one, which is what exiting does for it. A child
-    that answered owns the turn, and a child that answered nothing and is still
-    alive is not evidence of anything — the turn stays claimed and its lease
+    had the turn: no process was created or the child explicitly declined it.
+    Silence, EOF, an unexpected answer, and any failure after spawn are
+    ambiguous: the turn stays claimed, the child stays tracked, and its lease
     remains the backstop.
     """
     child = _child_turn_payload(payload)
@@ -3286,7 +3620,20 @@ def _spawn_turn(
         # Added after the claim's own underscore keys were stripped: only this
         # host, which proved the runtime itself, can spare the child the probe.
         child[VERDICT_KEY] = verdict
-    read_fd, write_fd = os.pipe()
+    try:
+        encoded_child = encode_turn(child)
+    except (TypeError, ValueError) as exc:
+        return LaunchResult(
+            outcome=LAUNCH_NOT_STARTED,
+            detail=f"the turn payload could not be encoded: {type(exc).__name__}: {exc}",
+        )
+    try:
+        read_fd, write_fd = os.pipe()
+    except OSError as exc:
+        return LaunchResult(
+            outcome=LAUNCH_NOT_STARTED,
+            detail=f"could not create the turn handover pipe: {exc}",
+        )
     argv = [
         sys.executable,
         "-m",
@@ -3319,48 +3666,88 @@ def _spawn_turn(
         return LaunchResult(
             outcome=LAUNCH_NOT_STARTED, detail=f"could not start a turn process: {exc}"
         )
-    # This process's copy, closed so the read below ends at end-of-file when
-    # the child exits rather than waiting out the handover deadline.
-    os.close(write_fd)
+    read_open = True
+    write_open = True
     try:
+        # This process's copy, closed so the read below ends at end-of-file
+        # when the child exits rather than waiting out the deadline.
+        os.close(write_fd)
+        write_open = False
         assert process.stdin is not None
         # Most underscore-prefixed keys are parent bookkeeping. Profiling is
         # the one intentional child handoff: stripping it makes the deployed
         # multi-process path silently measure nothing.
-        process.stdin.write(encode_turn(child))
+        process.stdin.write(encoded_child)
         process.stdin.close()
-    except OSError as exc:
-        os.close(read_fd)
-        _reap_unstarted(process)
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED, detail=f"the turn could not be delivered: {exc}"
-        )
-
-    answer = read_handover(read_fd)
-    if answer is None:
+        # read_handover owns and always closes this descriptor, including when
+        # it raises. Mark it transferred before entering the call so cleanup
+        # never closes a descriptor number that another thread could reuse.
+        read_open = False
+        answer = read_handover(read_fd)
+    except KeyboardInterrupt:
+        # Ctrl-C means immediate shutdown. This child is not in TurnPool until
+        # this function returns, so reap it here rather than orphaning it in
+        # the handover window.
+        if read_open:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+        if write_open:
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
+        if process.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                process.stdin.close()
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=10)
+        raise
+    except Exception as exc:
+        # The process exists and may already have accepted the turn. Losing
+        # the handover transport is not proof that it is safe to requeue or
+        # omit this child from graceful shutdown accounting.
+        if read_open:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+        if write_open:
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
+        if process.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                process.stdin.close()
         return LaunchResult(
             outcome=LAUNCH_UNCERTAIN,
             handle=process,
             detail=(
-                f"no answer within {HANDOVER_TIMEOUT_S:.0f}s; the turn stays claimed "
-                "because silence is not proof that it did not start"
+                f"handover failed ({type(exc).__name__}); the turn stays claimed "
+                "because the spawned child may already own it"
             ),
         )
-    if answer.split(" ", 1)[0] == HANDOVER_ACCEPTED:
+    prefix = answer.split(" ", 1)[0] if answer else ""
+    if prefix == HANDOVER_ACCEPTED:
         return LaunchResult(outcome=LAUNCH_STARTED, handle=process)
-    _reap_unstarted(process)
-    detail = answer or "the turn process exited without taking delivery"
-    if answer.split(" ", 1)[0] == HANDOVER_DECLINED:
-        detail = answer
-    return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=detail)
+    if prefix == HANDOVER_DECLINED:
+        _reap_unstarted(process)
+        return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=answer or HANDOVER_DECLINED)
+    if answer is None:
+        detail = f"no answer within {HANDOVER_TIMEOUT_S:.0f}s"
+    elif not answer:
+        detail = "the handover closed without a trustworthy answer"
+    else:
+        detail = f"the child returned an unexpected handover answer: {answer!r}"
+    return LaunchResult(
+        outcome=LAUNCH_UNCERTAIN,
+        handle=process,
+        detail=f"{detail}; the turn stays claimed because silence is not proof it did not start",
+    )
 
 
 def _reap_unstarted(process: subprocess.Popen[bytes]) -> None:
     """Collect a child that never took its turn, without waiting on it forever.
 
-    It has already answered — or closed its answer — so it is on its way out.
-    A child that somehow is not gets killed: it holds no turn, so there is
-    nothing for it to finish, and leaving it would leak a process per failure.
+    It explicitly declined, so it is on its way out. A child that somehow is
+    not gets killed: it holds no turn, so there is nothing for it to finish,
+    and leaving it would leak a process per failure.
     """
     try:
         process.wait(timeout=10)
@@ -3384,16 +3771,23 @@ def _serve_turn(
 
     The answer is sent **after everything that can still be declined and
     before anything that cannot**. That ordering is the whole contract in both
-    directions: the host treats a child that exits without answering as one
-    that never had the turn and requeues it unspent, so everything this
-    process could fail at without consequence belongs above the answer, and
-    everything a user or an operator could notice belongs below it.
+    directions: only a child that explicitly declines is requeued unspent, so
+    everything this process could fail at without consequence belongs above
+    the answer, and everything a user or an operator could notice belongs
+    below it. Exiting without a trustworthy answer remains ambiguous.
 
     Preflight is above it for exactly that reason. It checks Docker, the
     image and the network without running the turn, so failing it means the
     turn has not begun — and answering first would instead strand that turn behind
     a lease it will never use, having spent one of its attempts.
     """
+    # Install before reading the payload or probing the runtime. The parent
+    # does not signal children during a graceful drain, but this also protects
+    # a child from an out-of-band process-group signal while its handover is
+    # still ambiguous. Once a child exists, deployment waits for its natural
+    # exit rather than guessing whether it accepted the turn.
+    _drain_on_sigterm()
+
     # Drained first, and before anything slow, so the host is never left
     # blocked writing a long prompt into a pipe this process has not read yet.
     raw = sys.stdin.read()
@@ -3443,12 +3837,12 @@ def _serve_turn(
         write_handover(handover_fd, f"{HANDOVER_DECLINED} unusable turn ({type(exc).__name__})")
         return 0
 
-    # Installed before the answer, so there is no window in which this process
-    # owns a turn and SIGTERM would still kill it outright. From here the turn
-    # is this process's: SIGTERM means the container is being replaced, the
-    # turn still runs to its end, and the grace period bounds that exactly as
-    # it did when a replica ran one job at a time.
-    _drain_on_sigterm()
+    host_settings = _turn_host_settings(payload.get("_host_settings"))
+    storage_error = _new_sandbox_storage_error(job, host_settings)
+    if storage_error:
+        operation_profiling.discard(measurement)
+        write_handover(handover_fd, f"{HANDOVER_DECLINED} {storage_error}")
+        return 2
     write_handover(handover_fd, f"{HANDOVER_ACCEPTED} {job.job_id}")
     # Only an accepted turn can finish and deliver the inherited measurement,
     # now including the preflight the user waited through before this answer.
@@ -3456,7 +3850,6 @@ def _serve_turn(
     # admin's values over the host's own. Fixed for the turn from here, so a
     # change on the admin page applies to the next turn, never halfway
     # through this one.
-    host_settings = _turn_host_settings(payload.get("_host_settings"))
     return run_turn(
         job,
         base_url=base_url,
@@ -3596,6 +3989,9 @@ def run_forever(
         _runner_local_settings(agent_timeout_s),
         broker=None if settings_broker is None else settings_broker.apply_host_settings,
     )
+    archive_settings = SandboxArchiveRuntimeSettings(
+        None if settings_broker is None else settings_broker.apply_sandbox_archive_settings
+    )
 
     capacity = _start_host_capacity_collector(backend)
     # The policy sync is installed *before* the host starts taking work, so
@@ -3632,6 +4028,20 @@ def run_forever(
         logger.warning("agent_profiling_policy_unavailable", exc_info=True)
         policy_sync = None
 
+    retained_stop_worker = _RetainedSandboxStopWorker(_stop_retained_sandboxes)
+
+    def apply_archive_settings(settings: dict[str, Any] | None) -> None:
+        """Relay policy and immediately report loss or gain of confirmation."""
+        before = archive_settings.report()
+        try:
+            if settings is None:
+                archive_settings.invalidate()
+            else:
+                archive_settings.apply(settings)
+        finally:
+            if archive_settings.report() != before:
+                pool.wake()
+
     pool = HostHeartbeat(
         base_url=base_url,
         identity=identity,
@@ -3663,11 +4073,13 @@ def run_forever(
         # stale on the page, which is the truth.
         capacity_beats=None if capacity is None else lambda: capacity.latest()[0],
         settings_report=runtime_settings.report,
+        sandbox_archive_settings_report=archive_settings.report,
         # A changed report goes out now rather than an interval later, so the
         # admin page stops saying "applying" as soon as it is true.
         on_settings=lambda admin: pool.wake() if runtime_settings.apply(admin) else None,
+        on_sandbox_archive_settings=apply_archive_settings,
         on_residencies_lost=_handle_host_residencies_lost,
-        on_retained_sandboxes_stop=_stop_retained_sandboxes,
+        on_retained_sandboxes_stop=retained_stop_worker.submit,
     )
     if policy_sync is not None:
         # Its own loop as well as the beat's answer: the answer only arrives
@@ -3679,7 +4091,7 @@ def run_forever(
     _drain_on_sigterm()
 
     def stop_all() -> None:
-        """Stop heartbeating and sampling, in that order.
+        """Stop heartbeating, lifecycle work, and sampling, in that order.
 
         The sampler never joins a heartbeat in flight, so the pool is stopped
         first and the thread that fed it second; neither call can block on the
@@ -3687,6 +4099,7 @@ def run_forever(
         daemon it no longer needs.
         """
         pool.stop()
+        retained_stop_worker.close()
         if policy_sync is not None:
             policy_sync.stop()
         if capacity is not None:
@@ -3802,6 +4215,12 @@ def run_forever(
             if not runtime_settings.adopted and time.monotonic() < settings_deadline:
                 time.sleep(idle_wait)
                 continue
+            # Archive policy is a stop-safety boundary. The broker must
+            # explicitly confirm the complete DB revision, including an
+            # explicit disabled policy, before this process creates work.
+            if not archive_settings.ready:
+                time.sleep(idle_wait)
+                continue
 
             # A distinct lease owner per turn. Fencing never reads this
             # string, but "which turn is stuck" stops being answerable the
@@ -3825,7 +4244,10 @@ def run_forever(
                         host_credential=pool.credential,
                         worker_id=turn_worker_id,
                         lease_ttl=lease_ttl,
-                        attestation=_claim_attestation(backend),
+                        attestation=_claim_attestation(
+                            backend,
+                            sandbox_archive_settings_applied_revision=archive_settings.report(),
+                        ),
                     )
             except ClaimUnreachable as exc:
                 operation_profiling.discard(measurement)
@@ -4230,19 +4652,75 @@ def _chat_idle_timeout_s() -> float:
     return _env_float("AGENT_CHAT_IDLE_TIMEOUT_S", DEFAULT_CHAT_IDLE_TIMEOUT_S)
 
 
+def _sandbox_mcp_url() -> str:
+    """This host's MCP relay, as its sandboxes reach it; empty when it has none.
+
+    The host compose derives it from the host's own MCP tunnel, as it does the
+    gateway's address, and it is the relay the host rules admit for every
+    group (``egress.network_from_env``). The control plane used to hand one
+    over at claim time from a setting of its own. Nothing kept that copy in
+    step with the host, and left unset it failed every turn whose owner had
+    connected a tool.
+    """
+    return (os.environ.get("AGENT_SANDBOX_MCP_URL") or "").strip()
+
+
+def _new_sandbox_storage_error(job: ClaimedJob, settings: Mapping[str, float] | None) -> str | None:
+    if job.thread_sandbox:
+        return None
+    definition = HOST_SETTINGS_BY_KEY["storage_min_available_mib"]
+    minimum = (settings or {}).get("storage_min_available_mib")
+    if minimum is None:
+        minimum = _env_float(definition.env, float(definition.default))
+    return new_sandbox_storage_error(minimum_mib=minimum)
+
+
 def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
     """This host's own value for each setting the runner applies.
 
-    Read the way each one always was, from the environment or its default, so
-    a host with no admin value behaves exactly as before. ``agent_timeout_s``
-    is the runner's own, already read from ``AGENT_TIMEOUT_S`` or its flag.
+    Legacy bootstrap values, used only before the first settings heartbeat.
+    ``agent_timeout_s`` was already read from ``AGENT_TIMEOUT_S`` or its flag.
+    The admin settings replace every value, including defaults, once adopted.
     """
     return {
         "agent_timeout_s": agent_timeout_s,
         "chat_idle_timeout_s": _chat_idle_timeout_s(),
         "source_import_max_mib": source_import_max_bytes() // (1024 * 1024),
-        "shared_resident_capacity": int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8),
+        "storage_min_available_mib": _env_float(
+            "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+            float(HOST_SETTINGS_BY_KEY["storage_min_available_mib"].default),
+        ),
+        "shared_resident_capacity": int(
+            os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
+            or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
+        ),
+        **{
+            key: _sandbox_resource_setting(key, {})
+            for key in ("sandbox_cpu_millicores", "sandbox_memory_mib", "sandbox_disk_mib")
+        },
     }
+
+
+def _sandbox_resource_setting(key: str, settings: Mapping[str, float]) -> int:
+    """Read a bounded whole-number resource policy, preserving a zero disk quota."""
+    setting = HOST_SETTINGS_BY_KEY[key]
+    value = settings.get(key)
+    if value is None:
+        raw = os.environ.get(setting.env)
+        try:
+            value = int(raw) if raw else setting.default
+        except ValueError as exc:
+            raise ValueError(f"{setting.label} must be a whole number") from exc
+    try:
+        checked = int(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"{setting.label} must be a whole number") from exc
+    if isinstance(value, bool) or value != checked or not setting.accepts(checked):
+        raise ValueError(
+            f"{setting.label} must be a whole number from "
+            f"{setting.minimum} through {setting.maximum} {setting.unit}"
+        )
+    return checked
 
 
 def default_worker_id() -> str:

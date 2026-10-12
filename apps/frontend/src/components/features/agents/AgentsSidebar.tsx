@@ -3,17 +3,13 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
-import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
-import {
-  archiveAgentJob,
-  pinAgentJob,
-  unpinAgentJob,
-  getAgentJob,
-  getAgentJobThread,
-} from '@/lib/api/agents';
+import { GearIcon } from '@/components/features/settings/icons';
+import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import { useAgentReads } from './AgentReadProvider';
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
@@ -37,15 +33,21 @@ import {
   type RowActions,
   type SidebarReorderProps,
 } from './SidebarRows';
-export { groupJobsByConversation, groupJobsByProject } from './conversations';
 export const SIDEBAR_WIDTH_STORAGE_KEY = 'agents.sidebar.width';
-export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
+export function AgentsSidebar({
+  collapsed = false,
+  headerAction,
+}: {
+  collapsed?: boolean;
+  headerAction?: React.ReactNode;
+}) {
   const pathname = usePathname() ?? '';
   const params = useSearchParams();
   const router = useRouter();
   const t = useT();
   const { state } = useAuth();
   const userId = state.user?.id;
+  const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
   const { isUnread, markRead } = useConversationReadState(userId);
   const knownRows = useMemo(
@@ -185,8 +187,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     const generation = sessionGeneration.current;
     setSelected(null);
     const id = /^\/([^/]+)$/.exec(pathname)?.[1];
-    if (!id || ['archived', 'integrations', 'admin', 'login'].includes(id)) return;
-    Promise.all([getAgentJob(id), getAgentJobThread(id)])
+    if (!id || ['archived', 'integrations', 'approvals', 'admin', 'login'].includes(id)) return;
+    Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
       .then(([job, thread]) => {
         if (cancelled || generation !== sessionGeneration.current) return;
         const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
@@ -210,7 +212,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh]);
+  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh, reads]);
   const mountPath = useRef(pathname);
   useEffect(() => {
     if (mountPath.current === pathname) return;
@@ -218,14 +220,31 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     reload();
     reloadProjects();
   }, [pathname, reload, reloadProjects]);
+  // The owner's change stream says when a conversation or turn changed; the
+  // clock below is the backstop for when it is not flowing.
+  useEffect(
+    () =>
+      onAgentRecordsChanged((change) => {
+        // Tool approvals, usage, queues and publication hints belong to detail
+        // panes. Only changed records or a stream gap can affect these lists.
+        if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
+        reload();
+        reloadProjects();
+      }),
+    [reload, reloadProjects],
+  );
+  const pushLive = useAgentPushLive();
   useEffect(() => {
     if (!projects.some((project) => project.active_count > 0)) return;
-    const timer = setInterval(() => {
-      reload();
-      reloadProjects();
-    }, 10000);
+    const timer = setInterval(
+      () => {
+        reload();
+        reloadProjects();
+      },
+      pushLive ? PUSH_FALLBACK_POLL_MS : 10000,
+    );
     return () => clearInterval(timer);
-  }, [projects, reload, reloadProjects]);
+  }, [projects, pushLive, reload, reloadProjects]);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setQuery('');
@@ -238,6 +257,15 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     const keydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !collapsed) {
         event.preventDefault();
+        // Search must not pull focus out of a modal, including dialogs that
+        // render through a portal outside the sidebar.
+        if (
+          [...document.querySelectorAll('[aria-modal="true"], dialog[open]')].some(
+            (dialog) => !dialog.closest('[hidden], [aria-hidden="true"]'),
+          )
+        ) {
+          return;
+        }
         setSearchOpen(true);
         requestAnimationFrame(() => searchInput.current?.focus());
       }
@@ -547,42 +575,47 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       <aside
         id="agents-sidebar"
         style={{ width: pane.width }}
-        className="flex shrink-0 flex-col border-r border-gray-200/70 bg-gray-50/80 dark:border-white/10 dark:bg-gray-900/60"
+        className="ui-enter flex min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted"
       >
-        <div className="flex-1 overflow-y-auto px-3 py-3">
-          <Link
-            href="/"
-            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
-              pathname === '/'
-                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-700 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100'
-            }`}
-          >
-            <svg
-              className={`h-4 w-4 ${pathname === '/' ? 'text-crimson dark:text-crimson-light' : 'text-gray-500 dark:text-gray-400'}`}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+          <div className="flex items-center gap-1.5">
+            <Link
+              href="/"
+              aria-current={pathname === '/' ? 'page' : undefined}
+              className={`ui-focus-ring flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[13px] font-semibold transition-colors [@media(pointer:coarse)]:min-h-11 ${
+                pathname === '/'
+                  ? 'border-border bg-surface text-foreground shadow-subtle'
+                  : 'border-border/70 bg-surface text-foreground hover:border-border-strong/50 hover:bg-surface-hover'
+              }`}
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M16.86 4.49a1.5 1.5 0 0 1 2.12 0l.53.53a1.5 1.5 0 0 1 0 2.12L8.53 18.12 4 19.5l1.38-4.53L16.86 4.49Z"
-              />
-            </svg>
-            {t('sidebar.newTask')}
-          </Link>
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4 shrink-0 text-accent"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.86 4.49a1.5 1.5 0 0 1 2.12 0l.53.53a1.5 1.5 0 0 1 0 2.12L8.53 18.12 4 19.5l1.38-4.53L16.86 4.49Z"
+                />
+              </svg>
+              {t('sidebar.newTask')}
+            </Link>
+            {headerAction}
+          </div>
 
           {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
             <section aria-labelledby="sidebar-pinned-heading" className="mt-4">
               <h2
                 id="sidebar-pinned-heading"
-                className="mb-1 px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500"
+                className="mb-1 px-2 text-[11px] font-medium text-muted"
               >
                 {t('sidebar.pinned')}
               </h2>
-              <div className="space-y-0.5">
+              <div className="space-y-1">
                 {visiblePinned.map((row) => (
                   <TaskRow
                     key={row.key}
@@ -593,7 +626,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   />
                 ))}
                 <ListStatus
-                  loading={pinnedList.loading}
+                  loading={pinnedList.showLoading}
                   error={pinnedList.error}
                   empty={false}
                   more={pinnedRows.length > visiblePinned.length || Boolean(pinnedList.cursor)}
@@ -607,18 +640,16 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             </section>
           )}
 
-          <div className="mb-1 mt-4 flex items-center justify-between pl-2 pr-0.5">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500">
-              {t('sidebar.projects')}
-            </span>
-            <div className="flex items-center gap-0.5">
+          <div className="mb-1 mt-4 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pl-2 pr-0.5">
+            <span className="text-[11px] font-medium text-muted">{t('sidebar.projects')}</span>
+            <div className="ml-auto flex items-center gap-0.5">
               <button
                 ref={searchButton}
                 type="button"
                 aria-label={t('sidebar.search')}
                 title={`${t('sidebar.search')} (⌘K / Ctrl K)`}
                 aria-expanded={searchOpen}
-                className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-200/60 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
+                className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
                 onClick={() => {
                   if (searchOpen) closeSearch();
                   else {
@@ -707,12 +738,12 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             />
           )}
           {actionError && (
-            <p role="alert" className="px-2 text-[12px] text-red-500">
+            <p role="alert" className="px-2 text-[12px] text-status-error">
               {actionError}
             </p>
           )}
           {projectsError && (
-            <p role="alert" className="px-2 text-[12px] text-red-500">
+            <p role="alert" className="px-2 text-[12px] text-status-error">
               {projectsError}
               <button onClick={reloadProjects}>{t('sidebar.retry')}</button>
             </p>
@@ -722,6 +753,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               ref={resultList}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
                   closeSearch();
                   return;
                 }
@@ -745,7 +778,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   ),
                 )}
               <ListStatus
-                loading={search.loading || debounced !== query.trim()}
+                loading={search.showLoading || debounced !== query.trim()}
                 error={search.error}
                 empty={!search.rows.length}
                 more={Boolean(search.cursor)}
@@ -755,7 +788,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               />
             </div>
           ) : preferences.group === 'flat' ? (
-            <div className="space-y-0.5">
+            <div className="space-y-1">
               {flatRows.map((row) => (
                 <TaskRow
                   key={row.key}
@@ -766,7 +799,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 />
               ))}
               <ListStatus
-                loading={list.loading}
+                loading={list.showLoading}
                 error={list.error}
                 empty={!flatRows.length}
                 more={Boolean(list.cursor)}
@@ -811,7 +844,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               ))}
               {!folders.length && (
                 <ListStatus
-                  loading={list.loading || projectsLoading}
+                  loading={list.showLoading || projectsLoading}
                   error={list.error}
                   empty
                   more={false}
@@ -824,12 +857,18 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           <span role="status" className="sr-only">
             {announcement}
           </span>
+        </div>
+
+        <GettingStarted />
+
+        <div className="shrink-0 space-y-0.5 border-t border-border/70 px-2 py-2">
           <Link
             href="/archived"
-            className={`mt-4 flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
+            aria-current={pathname === '/archived' ? 'page' : undefined}
+            className={`ui-focus-ring flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
               pathname === '/archived'
-                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-surface-hover text-foreground'
+                : 'text-muted hover:bg-surface-hover hover:text-foreground'
             }`}
           >
             <svg
@@ -851,31 +890,17 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
 
           <Link
             href="/integrations"
-            className={`mt-0.5 flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
+            aria-current={pathname === '/integrations' ? 'page' : undefined}
+            className={`ui-focus-ring flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
               pathname === '/integrations'
-                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-surface-hover text-foreground'
+                : 'text-muted hover:bg-surface-hover hover:text-foreground'
             }`}
           >
-            <svg
-              className="h-4 w-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M8 5v3m8-3v3M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0V8ZM12 16v3"
-              />
-            </svg>
-            {t('sidebar.integrations')}
+            <GearIcon className="h-4 w-4" />
+            {t('settings.title')}
           </Link>
         </div>
-
-        <GettingStarted />
-        <SettingsLauncher />
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
     </>

@@ -19,7 +19,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
+from cloud_agent.storage.admin_database_queries import AdminDatabaseQueries
 from cloud_agent.storage.admin_queries import AdminRunQueries
+from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
     PostgresAttachmentRepository,
@@ -41,13 +43,17 @@ from cloud_agent.storage.repositories import (
     PostgresMcpConnectionRepository,
     PostgresOperationMeasurementRepository,
     PostgresPendingMessageRepository,
+    PostgresPrArchiveRepository,
     PostgresProfilingControlRepository,
     PostgresResidencyRepository,
     PostgresSandboxRepository,
     PostgresSessionForkRepository,
+    PostgresSettingsRepository,
     PostgresSkillRepository,
     PostgresSnapshotRepository,
     PostgresSourceControlRepository,
+    PostgresUserMemoryRepository,
+    PostgresWebSearchRepository,
 )
 
 if TYPE_CHECKING:
@@ -73,13 +79,17 @@ if TYPE_CHECKING:
         McpConnectionRepository,
         OperationMeasurements,
         PendingMessageRepository,
+        PrArchiveRepository,
         ProfilingControl,
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
+        SettingsRepository,
         SkillRepository,
         SnapshotRepository,
         SourceControlRepository,
+        UserMemoryRepository,
+        WebSearchRepository,
     )
 
 
@@ -93,7 +103,9 @@ class Storage:
         #: have no port yet. Named here so that the routes which need them
         #: stop reaching into another object's pool to build one.
         self.admin_conversations = AdminConversationQueries(pool)
+        self.admin_database = AdminDatabaseQueries(pool)
         self.admin_runs = AdminRunQueries(pool)
+        self.admin_sandboxes = AdminSandboxQueries(pool)
         self.admin_usage = AdminUsageQueries(pool)
 
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
@@ -116,11 +128,15 @@ class Storage:
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
         self.pending_messages: PendingMessageRepository = PostgresPendingMessageRepository(pool)
+        self.pr_archive: PrArchiveRepository = PostgresPrArchiveRepository(pool)
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
+        self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
         self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
+        self.user_memory: UserMemoryRepository = PostgresUserMemoryRepository(pool)
+        self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)

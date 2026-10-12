@@ -235,6 +235,31 @@ def test_pi_usage_event_shape_is_summed() -> None:
     assert stats.tokens_source == "runtime"
 
 
+def test_named_pi_responses_still_add() -> None:
+    """pi names each response once; naming them must not merge two of them."""
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    stats = summarize_thread(
+        job_ids=["job-1"],
+        attempts=[_attempt()],
+        events=[
+            _event(
+                seq=1, event_type="usage", payload={**usage, "usage_id": "chatcmpl-a"}, offset=2
+            ),
+            _event(
+                seq=2, event_type="usage", payload={**usage, "usage_id": "chatcmpl-b"}, offset=3
+            ),
+        ],
+    )
+
+    assert stats.input_tokens == 20
+    assert stats.output_tokens == 2
+
+
 def test_runtime_without_usage_reports_none_not_zero() -> None:
     """The distinction the whole module exists for: absent is not zero."""
     stats = summarize_thread(

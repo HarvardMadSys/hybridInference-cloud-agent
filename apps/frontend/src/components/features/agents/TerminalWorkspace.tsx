@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import {
   createAgentTerminal,
@@ -12,17 +12,20 @@ import {
 import { TerminalPane } from './TerminalPane';
 import { loadTerminalRuntime } from './terminalRuntime';
 
-const MAX_SESSIONS = 4;
+// Compatibility fallback for brokers that predate advertised limits.
+const DEFAULT_MAX_SESSIONS = 4;
 
 // xterm's cell box for this pane's font (13px monospace, 1.25 line height),
-// and the chrome around it. Both are first guesses: `fitAddon.fit()` measures
-// for real once the pane mounts and corrects the server. Guessing close is
-// still worth it — it is the difference between the first prompt painting at
-// the right width and painting at 80 columns and reflowing.
+// and the chrome around it: the pane's padding, borders and header, xterm's
+// scrollbar, and the note under the panes. Both are first guesses:
+// `fitAddon.fit()` measures for real once the pane mounts and corrects the
+// server. Guessing close is still worth it — it is the difference between the
+// first prompt painting at the right width and painting at 80 columns and
+// reflowing.
 const CELL_WIDTH_PX = 7.8;
 const CELL_HEIGHT_PX = 16.25;
-const PANE_CHROME_X_PX = 24;
-const PANE_CHROME_Y_PX = 72;
+const PANE_CHROME_X_PX = 40;
+const PANE_CHROME_Y_PX = 96;
 const DEFAULT_SIZE = { rows: 24, cols: 80 };
 
 function estimateSize(host: HTMLElement | null): { rows: number; cols: number } {
@@ -39,22 +42,54 @@ function estimateSize(host: HTMLElement | null): { rows: number; cols: number } 
   };
 }
 
+/**
+ * Whether a shell ended on its own. As on the broker, only that frees its slot:
+ * one still closing, or whose cleanup failed, may still be running something.
+ */
+function hasExited(session: AgentTerminalApi, exited: ReadonlySet<string>): boolean {
+  return session.state === 'exited' || exited.has(session.id);
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 interface TerminalWorkspaceProps {
   jobId: string;
+  /**
+   * The workspace the terminals belong to. Every turn of a chat is its own
+   * job, but the turns share one workspace and its terminals, so a new turn
+   * must not reset them. Defaults to the job.
+   */
+  workspaceKey?: string;
   active: boolean;
   ready?: boolean;
 }
 
-export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorkspaceProps) {
+export function TerminalWorkspace({
+  jobId,
+  workspaceKey = jobId,
+  active,
+  ready = true,
+}: TerminalWorkspaceProps) {
   const [sessions, setSessions] = useState<AgentTerminalApi[]>([]);
+  const [exitedIds, setExitedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [maxSessions, setMaxSessions] = useState(DEFAULT_MAX_SESSIONS);
+  const [maxInputBytes, setMaxInputBytes] = useState<number | undefined>();
   const [visibleIds, setVisibleIds] = useState<string[]>([]);
+  // The pane someone just opened or picked, which takes keyboard focus.
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const workspaceId = useId();
+  const focusTabRef = useRef<{ paneIndex: number; terminalId: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const loadedJobRef = useRef<string | null>(null);
-  const currentJobRef = useRef(jobId);
-  const jobGenerationRef = useRef(0);
+  const loadedWorkspaceRef = useRef<string | null>(null);
+  const currentWorkspaceRef = useRef(workspaceKey);
+  const workspaceGenerationRef = useRef(0);
+  const jobIdRef = useRef(jobId);
+  jobIdRef.current = jobId;
   const mountedRef = useRef(false);
   const sectionRef = useRef<HTMLElement | null>(null);
 
@@ -65,25 +100,30 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
     };
   }, []);
 
-  function requestIsCurrent(requestJobId: string, generation: number): boolean {
+  function requestIsCurrent(requestWorkspace: string, generation: number): boolean {
     return (
       mountedRef.current &&
-      currentJobRef.current === requestJobId &&
-      jobGenerationRef.current === generation
+      currentWorkspaceRef.current === requestWorkspace &&
+      workspaceGenerationRef.current === generation
     );
   }
 
   useEffect(() => {
-    currentJobRef.current = jobId;
-    jobGenerationRef.current += 1;
+    currentWorkspaceRef.current = workspaceKey;
+    workspaceGenerationRef.current += 1;
     setSessions([]);
+    setExitedIds(new Set());
+    setMaxSessions(DEFAULT_MAX_SESSIONS);
+    setMaxInputBytes(undefined);
     setVisibleIds([]);
+    setFocusId(null);
+    focusTabRef.current = null;
     setError(null);
     setLoadFailed(false);
     setLoading(false);
     setBusy(false);
-    loadedJobRef.current = null;
-  }, [jobId]);
+    loadedWorkspaceRef.current = null;
+  }, [workspaceKey]);
 
   useEffect(() => {
     // The click that needs these has not happened yet; the fetch belongs
@@ -91,14 +131,39 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
     if (active) void loadTerminalRuntime();
   }, [active]);
 
+  // Keep the panes pointing at terminals that still exist, and keep one open
+  // while any do.
   useEffect(() => {
-    if (!active || !ready || loadFailed || loadedJobRef.current === jobId) return;
-    const generation = jobGenerationRef.current;
-    loadedJobRef.current = jobId;
+    setVisibleIds((current) => {
+      const available = new Set(sessions.map((session) => session.id));
+      const next = current.filter((id) => available.has(id));
+      if (next.length === 0 && sessions.length > 0) next.push(sessions[0].id);
+      return sameIds(next, current) ? current : next;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!active || !ready || loadFailed || loadedWorkspaceRef.current === workspaceKey) return;
+    const requestWorkspace = workspaceKey;
+    const generation = workspaceGenerationRef.current;
+    loadedWorkspaceRef.current = requestWorkspace;
     setLoading(true);
-    void listAgentTerminals(jobId)
-      .then((items) => {
-        if (!requestIsCurrent(jobId, generation)) return;
+    void listAgentTerminals(jobId, { includeLimits: true })
+      .then((response) => {
+        if (!requestIsCurrent(requestWorkspace, generation)) return;
+        const items = Array.isArray(response) ? response : response.terminals;
+        const maximum = Array.isArray(response) ? undefined : response.max_sessions;
+        const inputMaximum = Array.isArray(response) ? undefined : response.max_input_bytes;
+        setMaxInputBytes(
+          typeof inputMaximum === 'number' && Number.isInteger(inputMaximum) && inputMaximum >= 4
+            ? inputMaximum
+            : undefined,
+        );
+        setMaxSessions(
+          typeof maximum === 'number' && Number.isInteger(maximum) && maximum > 0
+            ? maximum
+            : DEFAULT_MAX_SESSIONS,
+        );
         setSessions((current) => {
           const listed = new Set(items.map((item) => item.id));
           // Creating no longer waits for this request, so a terminal opened
@@ -108,25 +173,42 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
         setVisibleIds((current) =>
           current.length ? current : items.length ? [items[0].id] : current,
         );
+        // Opening the panel shows a terminal ready to type into, unless one
+        // opened meanwhile already has that claim.
+        if (items.length) setFocusId((focused) => focused ?? items[0].id);
       })
       .catch((cause: unknown) => {
-        if (requestIsCurrent(jobId, generation)) {
-          loadedJobRef.current = null;
+        if (requestIsCurrent(requestWorkspace, generation)) {
+          loadedWorkspaceRef.current = null;
           setLoadFailed(true);
           setError(cause instanceof Error ? cause.message : 'Could not load terminals');
         }
       })
       .finally(() => {
-        if (requestIsCurrent(jobId, generation)) setLoading(false);
+        if (requestIsCurrent(requestWorkspace, generation)) setLoading(false);
       });
-  }, [active, jobId, loadFailed, ready]);
+  }, [active, jobId, loadFailed, ready, workspaceKey]);
 
   const visible = useMemo(
     () => visibleIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean),
     [sessions, visibleIds],
   ) as AgentTerminalApi[];
 
-  const awaitingInitialLoad = active && !loadFailed && (!ready || loadedJobRef.current !== jobId);
+  useEffect(() => {
+    // Selecting another shell remounts its pane. Restore keyboard navigation
+    // to its tab after that commit, without moving focus into the shell.
+    const target = focusTabRef.current;
+    if (!target) return;
+    focusTabRef.current = null;
+    document
+      .getElementById(`${workspaceId}-pane-${target.paneIndex}-tab-${target.terminalId}`)
+      ?.focus();
+  }, [visibleIds, workspaceId]);
+
+  // A shell that has ended keeps its tab for its output, but not its slot.
+  const occupied = sessions.filter((session) => !hasExited(session, exitedIds)).length;
+  const awaitingInitialLoad =
+    active && !loadFailed && (!ready || loadedWorkspaceRef.current !== workspaceKey);
   // Two different waits, and only one of them is a precondition.
   //
   // The initial listing is not: it answers "which terminals already exist",
@@ -140,10 +222,10 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   // other one. The button stays visible and disabled rather than absent: the
   // wait is short and aiming at a control that is about to work beats hunting
   // for one that is not there yet.
-  const canCreate = ready && !loadFailed && sessions.length < MAX_SESSIONS;
+  const canCreate = ready && !loadFailed && occupied < maxSessions;
 
   function retryLoad() {
-    loadedJobRef.current = null;
+    loadedWorkspaceRef.current = null;
     setError(null);
     setLoadFailed(false);
   }
@@ -151,18 +233,28 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   async function create(mode: 'new' | 'split', paneIndex = 0) {
     if (!canCreate || busy) return;
     const requestJobId = jobId;
-    const generation = jobGenerationRef.current;
+    const requestWorkspace = workspaceKey;
+    const generation = workspaceGenerationRef.current;
     setBusy(true);
     setError(null);
     try {
       const session = await createAgentTerminal(requestJobId, estimateSize(sectionRef.current));
-      if (!requestIsCurrent(requestJobId, generation)) {
+      if (!requestIsCurrent(requestWorkspace, generation)) {
         void deleteAgentTerminal(requestJobId, session.id).catch(() => {
           // The old workspace may already have been reclaimed.
         });
         return;
       }
-      setSessions((current) => [...current, session]);
+      setSessions((current) => {
+        const next = [...current, session];
+        // The broker made room the same way: the oldest ended shells go first.
+        while (next.length > maxSessions) {
+          const index = next.findIndex((candidate) => hasExited(candidate, exitedIds));
+          if (index < 0) break;
+          next.splice(index, 1);
+        }
+        return next;
+      });
       setVisibleIds((current) => {
         if (mode === 'split') {
           return current.length > 0 ? [current[0], session.id] : [session.id];
@@ -174,41 +266,34 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
         }
         return [session.id];
       });
+      setFocusId(session.id);
     } catch (cause: unknown) {
-      if (requestIsCurrent(requestJobId, generation)) {
+      if (requestIsCurrent(requestWorkspace, generation)) {
         setError(cause instanceof Error ? cause.message : 'Could not create terminal');
       }
     } finally {
-      if (requestIsCurrent(requestJobId, generation)) setBusy(false);
+      if (requestIsCurrent(requestWorkspace, generation)) setBusy(false);
     }
   }
 
   async function kill(terminalId: string) {
     if (busy) return;
     const requestJobId = jobId;
-    const generation = jobGenerationRef.current;
-    const replaceSessions = (nextSessions: AgentTerminalApi[]) => {
-      const availableIds = new Set(nextSessions.map((session) => session.id));
-      const nextVisible = visibleIds.filter((id) => availableIds.has(id));
-      if (nextVisible.length === 0 && nextSessions.length > 0) {
-        nextVisible.push(nextSessions[0].id);
-      }
-      setSessions(nextSessions);
-      setVisibleIds(nextVisible);
-    };
+    const requestWorkspace = workspaceKey;
+    const generation = workspaceGenerationRef.current;
     setBusy(true);
     setError(null);
     try {
       await deleteAgentTerminal(requestJobId, terminalId);
-      if (!requestIsCurrent(requestJobId, generation)) return;
-      replaceSessions(sessions.filter((session) => session.id !== terminalId));
+      if (!requestIsCurrent(requestWorkspace, generation)) return;
+      setSessions((current) => current.filter((session) => session.id !== terminalId));
     } catch (cause: unknown) {
-      if (!requestIsCurrent(requestJobId, generation)) return;
+      if (!requestIsCurrent(requestWorkspace, generation)) return;
       try {
         const refreshed = await listAgentTerminals(requestJobId);
-        if (!requestIsCurrent(requestJobId, generation)) return;
+        if (!requestIsCurrent(requestWorkspace, generation)) return;
         if (!refreshed.some((session) => session.id === terminalId)) {
-          replaceSessions(refreshed);
+          setSessions(refreshed);
           return;
         }
       } catch {
@@ -216,11 +301,26 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
       }
       setError(cause instanceof Error ? cause.message : 'Could not kill terminal');
     } finally {
-      if (requestIsCurrent(requestJobId, generation)) setBusy(false);
+      if (requestIsCurrent(requestWorkspace, generation)) setBusy(false);
     }
   }
 
-  function select(paneIndex: number, terminalId: string) {
+  function exited(terminalId: string, exitCode: number) {
+    setExitedIds((current) =>
+      current.has(terminalId) ? current : new Set(current).add(terminalId),
+    );
+    if (exitCode !== 0) return;
+    // `exit` or Ctrl-D closes the terminal, as it would close a terminal
+    // window. A shell that failed or was stopped stays open so its last
+    // words can be read.
+    setSessions((current) => current.filter((session) => session.id !== terminalId));
+    void deleteAgentTerminal(jobIdRef.current, terminalId).catch(() => {
+      // It has already exited; the broker reaps what this cannot close.
+    });
+  }
+
+  function select(paneIndex: number, terminalId: string, focus: 'terminal' | 'tab') {
+    focusTabRef.current = focus === 'tab' ? { paneIndex, terminalId } : null;
     setVisibleIds((current) => {
       const next = [...current];
       const otherPane = paneIndex === 0 ? 1 : 0;
@@ -230,13 +330,14 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
       next[paneIndex] = terminalId;
       return next;
     });
+    setFocusId(focus === 'terminal' ? terminalId : null);
   }
 
   return (
     <section
       ref={sectionRef}
       aria-label="Workspace terminal"
-      className="flex h-full min-h-[28rem] flex-col"
+      className="flex h-full min-h-0 flex-col overflow-y-auto"
     >
       {error ? (
         <p
@@ -248,10 +349,10 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
       ) : null}
       {visible.length ? (
         <div
-          className={`grid min-h-0 flex-1 gap-2 ${
+          className={`grid min-h-0 flex-1 auto-rows-[minmax(16rem,1fr)] gap-2 overflow-y-auto ${
             visible.length === 2
-              ? 'grid-rows-2 lg:grid-cols-2 lg:grid-rows-1'
-              : 'grid-cols-1 grid-rows-1'
+              ? 'grid-cols-[repeat(auto-fit,minmax(min(100%,24rem),1fr))]'
+              : 'grid-cols-1'
           }`}
         >
           {visible.map((terminal, paneIndex) => (
@@ -260,15 +361,20 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
               jobId={jobId}
               terminal={terminal}
               sessions={sessions}
+              exitedIds={exitedIds}
               paneIndex={paneIndex}
+              idPrefix={`${workspaceId}-pane-${paneIndex}`}
               ready={ready}
+              autoFocus={terminal.id === focusId}
               canCreate={canCreate}
               canSplit={canCreate && visible.length < 2}
               busy={busy}
-              onSelect={(terminalId) => select(paneIndex, terminalId)}
+              maxInputBytes={maxInputBytes}
+              onSelect={(terminalId, focus) => select(paneIndex, terminalId, focus)}
               onNew={() => void create('new', paneIndex)}
               onSplit={() => void create('split')}
               onKill={() => void kill(terminal.id)}
+              onExit={exited}
             />
           ))}
         </div>

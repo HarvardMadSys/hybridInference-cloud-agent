@@ -6,13 +6,11 @@
 # dependencies and execute code from a repository nobody vetted. Two rules
 # follow from that and shape everything below.
 #
-# 1. **No credentials are baked in.** The only secret that ever reaches this
-#    image is the job's model-scoped token, injected as an environment variable
-#    at run time. It authorizes a fixed set of models and MCP tools and nothing
-#    else — spend is governed by the user's quota at the gateway, not by
-#    anything this container holds. There is no GitHub token here, because the
-#    agent never pushes — it emits a patch and the trusted publisher outside
-#    handles git.
+# 1. **No credentials are baked in.** Scoped inference and MCP credentials
+#    arrive at run time, along with a short-lived, single-repository GitHub App
+#    token with contents/PR write permissions in the owning member's
+#    environment. Account credentials and the App's private key stay outside.
+#    The trusted publisher separately validates the changes it publishes.
 # 2. **Nothing here is trusted at run time.** Every chat uses a retained Docker
 #    container; timeout stops it without removing its writable layer. The
 #    process runs as non-root and (under the kata backend) has its own kernel.
@@ -132,8 +130,17 @@ ARG OPENCODE_VERSIONS=${OPENCODE_VERSION}${OPENCODE_EXTRA_VERSIONS:+,${OPENCODE_
 ARG KILO_VERSIONS=${KILO_VERSION}${KILO_EXTRA_VERSIONS:+,${KILO_EXTRA_VERSIONS}}
 
 # Tools an agent legitimately needs to understand and change a repository.
+# Ship GitHub CLI so it is available as soon as a sandbox starts. Installing
+# the CLI does not provision GitHub credentials; the runner injects a scoped
+# token into each member's environment for pushes and pull requests.
 # Deliberately not installed: anything that would let it reach the host
 # (docker CLI) or persist beyond the job.
+#
+# The agent runs as non-root with no sudo, and a repository's setup script runs
+# as the same user, so nothing can `apt-get install` once a chat starts. What a
+# typical repository needs to build and test has to be in this image: everyday
+# CLI tools, and the Java and Ruby toolchains Debian ships. Go, Rust and uv
+# follow below as pinned upstream releases.
 ARG DEBIAN_MIRROR=http://deb.debian.org
 RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
@@ -141,6 +148,7 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
     && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         git \
+        gh \
         ca-certificates \
         curl \
         jq \
@@ -153,7 +161,99 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
         libelf1 \
         tini \
         util-linux \
+        bc \
+        bzip2 \
+        cmake \
+        fd-find \
+        file \
+        git-lfs \
+        less \
+        libssl-dev \
+        lsof \
+        maven \
+        nano \
+        openjdk-17-jdk-headless \
+        patch \
+        pkg-config \
+        procps \
+        psmisc \
+        python-is-python3 \
+        rsync \
+        ruby-bundler \
+        ruby-full \
+        sqlite3 \
+        tree \
+        unzip \
+        vim \
+        wget \
+        xz-utils \
+        zip \
+        zstd \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
+
+# Go, Rust and uv from their upstream releases: Debian's are years behind what
+# current repositories declare. Each download is pinned by version and checked
+# against its published SHA-256, so a build cannot quietly pick up another
+# release. The versions are shell variables rather than `ARG *_VERSION`, which
+# this file reserves for Agent CLI pins.
+#
+# Every binary is linked into /usr/local/bin. The runner launches the agent with
+# a fixed PATH (`SANDBOX_PATH` in cloud_agent_host/sandbox.py), and a login
+# shell resets PATH from /etc/profile, so an `ENV PATH` here would reach
+# neither. Go and uv stay root-owned; caches, modules and `cargo install` go
+# to each member's own home.
+RUN set -eu; \
+    go_version=1.27.2; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) arch=amd64; sum=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5 ;; \
+        arm64) arch=arm64; sum=94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8 ;; \
+        *) echo "no Go release checksum for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/go.tar.gz "https://go.dev/dl/go${go_version}.linux-${arch}.tar.gz"; \
+    echo "${sum}  /tmp/go.tar.gz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz; \
+    ln -s /usr/local/go/bin/go /usr/local/go/bin/gofmt /usr/local/bin/
+
+# rustup reads its toolchains from RUSTUP_HOME, which defaults to a directory
+# under HOME that no member has, so it is set image-wide. It is writable by the
+# agent group (gid 10001, created below): a repository's rust-toolchain.toml
+# makes rustup install the channel, components and targets it names on first
+# use, and a setup script that runs rustup-init itself installs into this same
+# RUSTUP_HOME. Read-only, both fail with "Permission denied" before the agent
+# starts. Members of a group already share a writable workspace, so sharing
+# installed toolchains adds no reach between them.
+ENV RUSTUP_HOME=/usr/local/rustup
+RUN set -eu; \
+    rustup_version=1.29.1; \
+    rust_version=1.99.0; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;; \
+        arm64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;; \
+        *) echo "no rustup release checksum for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/${rustup_version}/${triple}/rustup-init"; \
+    echo "${sum}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod 0755 /tmp/rustup-init; \
+    CARGO_HOME=/usr/local/cargo /tmp/rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain "${rust_version}" --component rustfmt,clippy; \
+    rm /tmp/rustup-init; \
+    chown -R root:10001 "${RUSTUP_HOME}"; \
+    chmod -R g+w "${RUSTUP_HOME}"; \
+    find "${RUSTUP_HOME}" -type d -exec chmod g+s {} +; \
+    ln -s /usr/local/cargo/bin/* /usr/local/bin/
+
+# uv in its own venv, as the Claude Agent SDK below is, and pnpm/yarn through
+# Node's corepack. Corepack fetches the package manager a repository's
+# `packageManager` field names on first use, into the member's own home.
+ARG PIP_DEFAULT_TIMEOUT=120
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN python3 -m venv /opt/uv \
+    && /opt/uv/bin/pip install --no-cache-dir "uv==0.12.19" \
+    && ln -s /opt/uv/bin/uv /opt/uv/bin/uvx /usr/local/bin/ \
+    && corepack enable
 
 # One prefix per version, the default symlinked onto PATH, and each version
 # checked against its own binary. See the script's header for why the layout is
@@ -179,7 +279,6 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=lock
 # The exact-version Python SDK supplies that native transcript mutation. Keep
 # it in a dedicated immutable venv so the runtime helper never depends on a
 # package from the repository or the host.
-ARG PIP_DEFAULT_TIMEOUT=120
 RUN python3 -m venv /opt/claude-agent-sdk \
     && /opt/claude-agent-sdk/bin/pip install --no-cache-dir \
         "claude-agent-sdk==0.2.148"
@@ -204,7 +303,7 @@ RUN python3 -m venv /opt/claude-agent-sdk \
 # comma-separated string it will happily stamp onto an attempt.
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
-      org.freeinference.helper.http-agent-live-bridge.version="2" \
+      org.freeinference.helper.http-agent-live-bridge.version="4" \
       org.freeinference.helper.guest-observer.version="2" \
       org.freeinference.helper.claude-session-fork.version="2" \
       org.freeinference.helper.member-window.version="1" \
@@ -220,19 +319,6 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.runtime.pi.versions="${PI_VERSIONS}" \
       org.freeinference.runtime.opencode.versions="${OPENCODE_VERSIONS}" \
       org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}"
-
-# What this image is, in the two places a deployment looks: OCI's own labels,
-# and one of ours naming the artifact's role. A resolver reads both out of the
-# platform image it is about to run and compares them with the release
-# manifest — the revision against the manifest's source commit, the role
-# against the artifact it stands in for — so a build matrix that swaps two
-# digests is caught where the release is consumed rather than where it is
-# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
-# built by hand says `unknown`, and a resolver refuses it.
-ARG SOURCE_COMMIT=unknown
-LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
-      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
-      io.hybridinference.artifact.role="sandbox"
 
 # pi, OpenCode, and Kilo all ignore OPENAI_BASE_URL; each one's supported
 # route to a custom gateway is a provider config file whose content (gateway
@@ -360,6 +446,50 @@ RUN set -eu; \
     check pi "${PI_VERSION}"; \
     check opencode "${OPENCODE_VERSION}"; \
     check kilo "${KILO_VERSION}"
+
+# The toolchains, run the way a job runs them: as the unprivileged user, under
+# the runner's fixed PATH rather than this image's. A tool that only an
+# `ENV PATH` could find fails here instead of in a user's chat.
+RUN set -eu; \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
+    go version; \
+    rustup --version 2>/dev/null; \
+    rustc --version; \
+    cargo --version; \
+    cargo clippy --version; \
+    cargo fmt --version; \
+    test -w "${RUSTUP_HOME}/tmp"; \
+    test -w "${RUSTUP_HOME}/toolchains"; \
+    java -version; \
+    javac -version; \
+    mvn --batch-mode --version; \
+    ruby --version; \
+    bundle --version; \
+    python --version; \
+    uv --version; \
+    corepack --version; \
+    command -v pnpm; \
+    command -v yarn; \
+    fd --version; \
+    git lfs version; \
+    gh --version
+
+# What this image is, in the two places a deployment looks: OCI's own labels,
+# and one of ours naming the artifact's role. A resolver reads both out of the
+# platform image it is about to run and compares them with the release
+# manifest — the revision against the manifest's source commit, the role
+# against the artifact it stands in for — so a build matrix that swaps two
+# digests is caught where the release is consumed rather than where it is
+# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
+# built by hand says `unknown`, and a resolver refuses it.
+#
+# Last, after every RUN: a RUN has each ARG declared above it in its
+# environment, so a commit-valued ARG declared earlier invalidated every layer
+# below it on every commit, in every builder and every layer cache.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.hybridinference.artifact.role="sandbox"
 
 # No ENTRYPOINT: the runner supplies the full argv from the runtime adapter,
 # so this image never decides what an agent run looks like.

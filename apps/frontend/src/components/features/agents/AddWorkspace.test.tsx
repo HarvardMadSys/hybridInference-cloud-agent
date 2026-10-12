@@ -2,9 +2,18 @@
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getAgentConfig, type AgentConfigApi } from '@/lib/api/agents';
+import {
+  createGitHubRepository,
+  getAgentConfig,
+  listRepoBranches,
+  type AgentConfigApi,
+} from '@/lib/api/agents';
 import { AddWorkspace } from './AddWorkspace';
-vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
+vi.mock('@/lib/api/agents', () => ({
+  createGitHubRepository: vi.fn(),
+  getAgentConfig: vi.fn(),
+  listRepoBranches: vi.fn(),
+}));
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
   return { useT: () => (key: Parameters<typeof translate>[1]) => translate('en', key) };
@@ -21,6 +30,36 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('add workspace picker', () => {
+  it('creates and adds a repository before any conversation, including when GitHub has no repositories', async () => {
+    vi.mocked(getAgentConfig)
+      .mockResolvedValueOnce(config([]))
+      .mockResolvedValue(config(['owner/new-repo']));
+    vi.mocked(createGitHubRepository).mockResolvedValue({
+      repo: 'owner/new-repo',
+      web_url: 'https://github.com/owner/new-repo',
+      default_branch: 'main',
+      accessible: true,
+    });
+    vi.mocked(listRepoBranches).mockResolvedValue({ default: 'main', branches: ['main'] });
+    const select = vi.fn();
+    render(<AddWorkspace userId="alice" existing={[]} onSelect={select} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Create repository' }));
+    const dialog = screen.getByRole('dialog', { name: 'Create repository' });
+    const name = screen.getByRole('textbox', { name: 'Repository name' });
+    expect(name).toHaveFocus();
+    fireEvent.change(name, { target: { value: 'new-repo' } });
+    fireEvent.submit(dialog.querySelector('form')!);
+    await waitFor(() => expect(select).toHaveBeenCalledExactlyOnceWith('owner/new-repo'));
+    expect(createGitHubRepository).toHaveBeenCalledExactlyOnceWith({
+      name: 'new-repo',
+      private: true,
+    });
+    expect(getAgentConfig).toHaveBeenLastCalledWith({ fresh: true });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add workspace' })).toHaveFocus();
+  });
+
   it('lazily searches accessible repositories, deduplicates them and returns focus on selection', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config(['owner/repo', 'owner/empty', 'owner/empty']),
@@ -73,6 +112,7 @@ describe('add workspace picker', () => {
       '/integrations',
     );
     expect(screen.queryByTitle('owner/repo')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create repository' })).not.toBeInTheDocument();
   });
   it("hides another owner's pending response and disables anonymous additions", async () => {
     let finish!: (value: AgentConfigApi) => void;

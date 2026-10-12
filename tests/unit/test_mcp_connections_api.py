@@ -16,8 +16,9 @@ dictionary that the model then spreads.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
@@ -31,8 +32,15 @@ from tests.support.storage import AllCapabilities, OneFake
 from cloud_agent.api import mcp_connections
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp.errors import (
+    McpConnectionCreateConflict,
+    McpCredentialWriteRejected,
+)
 from cloud_agent.mcp.models import CapabilityKind, ToolPolicy
 from cloud_agent.mcp.registry import mcp_cipher
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 _OWNER = "user-owner"
 _OTHER = "user-other"
@@ -55,6 +63,7 @@ class FakeStore(AllCapabilities):
         self.bindings: dict[str, list[dict[str, Any]]] = {}
         self.invocations: dict[int, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}
         self.created: list[dict[str, Any]] = []
         self.connectors: dict[int, dict[str, Any]] = {}
         self.connector_connections: dict[int, set[int]] = {}
@@ -62,6 +71,7 @@ class FakeStore(AllCapabilities):
         self.oauth_flow: dict[str, Any] | None = None
         self.oauth_state_hash: str | None = None
         self.credential_writes: list[dict[str, Any]] = []
+        self.reject_credential_writes = False
         self._next = 1
         self._next_connector = 1
 
@@ -87,6 +97,19 @@ class FakeStore(AllCapabilities):
         return self._row(connection_id)
 
     async def create_mcp_connection(self, **kwargs: Any) -> dict[str, Any]:
+        connector_id = kwargs.get("connector_id")
+        if connector_id is not None and kwargs["location"] != "user-connector":
+            raise McpConnectionCreateConflict(
+                "a connector can only serve a user-connector connection"
+            )
+        if connector_id is not None:
+            connector = self.connectors.get(connector_id)
+            if (
+                connector is None
+                or connector["user_id"] != kwargs["user_id"]
+                or connector["status"] == "revoked"
+            ):
+                raise McpConnectionCreateConflict("that connector is no longer available")
         connection_id = self._next
         self._next += 1
         row = {
@@ -128,13 +151,66 @@ class FakeStore(AllCapabilities):
         }
         self.connections[connection_id] = row
         self.created.append(dict(row))
+        if connector_id is not None:
+            self.connector_connections.setdefault(connector_id, set()).add(connection_id)
+        try:
+            if self.reject_credential_writes and kwargs.get("access_token_ciphertext") is not None:
+                raise RuntimeError("injected credential write rejection")
+            if kwargs.get("access_token_ciphertext") is not None:
+                written = await self.set_mcp_credential(
+                    connection_id=connection_id,
+                    expected_authorization_epoch=row["authorization_epoch"],
+                    access_token_ciphertext=kwargs["access_token_ciphertext"],
+                    auth_config_patch=kwargs.get("auth_config_patch"),
+                )
+                if not written:
+                    raise McpCredentialWriteRejected()
+            if kwargs.get("sealed_launch_spec") is not None:
+                written = await self.set_mcp_launch_spec(
+                    connection_id=connection_id,
+                    expected_authorization_epoch=row["authorization_epoch"],
+                    launch_spec=kwargs["sealed_launch_spec"],
+                )
+                if not written:
+                    raise McpCredentialWriteRejected()
+        except McpCredentialWriteRejected:
+            self.connections.pop(connection_id, None)
+            self.created.pop()
+            if connector_id is not None:
+                self.connector_connections.get(connector_id, set()).discard(connection_id)
+            raise
         return self._row(connection_id)
+
+    async def create_mcp_connections(
+        self, *, connections: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Insert every draft, rolling back the whole batch when one fails."""
+        before_connections = deepcopy(self.connections)
+        before_created = deepcopy(self.created)
+        before_connector_connections = deepcopy(self.connector_connections)
+        before_next = self._next
+        try:
+            return [await self.create_mcp_connection(**dict(draft)) for draft in connections]
+        except Exception:
+            self.connections = before_connections
+            self.created = before_created
+            self.connector_connections = before_connector_connections
+            self._next = before_next
+            raise
 
     async def update_mcp_connection(self, **kwargs: Any) -> dict[str, Any] | None:
         row = self.connections.get(kwargs["connection_id"])
         if row is None or row["config_revision"] != kwargs["expected_config_revision"]:
             return None
-        for key in ("label", "url", "auth_kind", "account_label", "request_timeout_s"):
+        for key in (
+            "label",
+            "transport",
+            "location",
+            "url",
+            "auth_kind",
+            "account_label",
+            "request_timeout_s",
+        ):
             if kwargs.get(key) is not None:
                 row[key] = kwargs[key]
         if kwargs.get("launch_spec") is not None:
@@ -151,6 +227,11 @@ class FakeStore(AllCapabilities):
                 kwargs["connection_id"]
             ):
                 self.oauth_flow = None
+        if row["location"] != "user-connector":
+            row["connector_id"] = None
+        for connector_id, connection_ids in self.connector_connections.items():
+            if connector_id != row["connector_id"]:
+                connection_ids.discard(kwargs["connection_id"])
         return self._row(kwargs["connection_id"])
 
     async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
@@ -161,6 +242,9 @@ class FakeStore(AllCapabilities):
         row["status"] = "disabled"
         row["access_token_ciphertext"] = None
         row["authorization_epoch"] += 1
+        row["connector_id"] = None
+        for connection_ids in self.connector_connections.values():
+            connection_ids.discard(connection_id)
         return True
 
     async def set_mcp_connection_status(self, **kwargs: Any) -> bool:
@@ -212,9 +296,13 @@ class FakeStore(AllCapabilities):
             row.update(status="draft", error_kind="none", error_detail=None, last_checked_at=None)
         return True
 
-    async def consume_mcp_oauth_flow(self, *, state_hash: str) -> dict[str, Any] | None:
-        """Hand back a flow once, for the state hash the caller presents."""
+    async def consume_mcp_oauth_flow(
+        self, *, state_hash: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """Hand back a flow once, for its state hash and the account that started it."""
         if self.oauth_flow is None or state_hash != self.oauth_state_hash:
+            return None
+        if self.oauth_flow.get("user_id") != user_id:
             return None
         flow, self.oauth_flow = self.oauth_flow, None
         return flow
@@ -315,16 +403,18 @@ class FakeStore(AllCapabilities):
         row["connector_id"] = connector_id
         row["config_revision"] += 1
         row["authorization_epoch"] += 1
+        for members in self.connector_connections.values():
+            members.discard(connection_id)
         self.connector_connections.setdefault(connector_id, set()).add(connection_id)
         return self._row(connection_id)
 
     async def unbind_mcp_connection_connector(
-        self, *, connection_id: int, user_id: str
+        self, *, connection_id: int, user_id: str, connector_id: int
     ) -> dict[str, Any] | None:
         row = self.connections.get(connection_id)
-        if row is None or row["user_id"] != user_id or row["connector_id"] is None:
+        if row is None or row["user_id"] != user_id or row.get("connector_id") != connector_id:
             return None
-        self.connector_connections.get(row["connector_id"], set()).discard(connection_id)
+        self.connector_connections.get(connector_id, set()).discard(connection_id)
         row["connector_id"] = None
         row["config_revision"] += 1
         row["authorization_epoch"] += 1
@@ -361,7 +451,28 @@ class FakeStore(AllCapabilities):
     async def delete_mcp_capabilities(self, *, connection_id: int) -> None:
         self.capabilities.pop(connection_id, None)
 
+    async def create_mcp_oauth_flow(self, **kwargs: Any) -> int | None:
+        """Allocate the next generation and keep a single pending flow."""
+        row = self.connections.get(kwargs["connection_id"])
+        if row is None or row["user_id"] != kwargs["user_id"] or row["deleted_at"] is not None:
+            return None
+        if row["config_revision"] != kwargs["config_revision"]:
+            return None
+        if row["authorization_epoch"] != kwargs["authorization_epoch"]:
+            return None
+        if row["oauth_generation"] != kwargs["expected_oauth_generation"]:
+            return None
+        row["oauth_generation"] += 1
+        generation = int(row["oauth_generation"])
+        self.oauth_flow = {**kwargs, "oauth_generation": generation}
+        self.oauth_state_hash = kwargs["state_hash"]
+        return generation
+
     async def delete_mcp_oauth_flows(self, *, connection_id: int) -> int:
+        if self.oauth_flow and str(self.oauth_flow.get("connection_id")) == str(connection_id):
+            self.oauth_flow = None
+            self.oauth_state_hash = None
+            return 1
         return 0
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
@@ -402,17 +513,37 @@ class FakeStore(AllCapabilities):
 
     async def list_mcp_invocations(self, **kwargs: Any) -> list[dict[str, Any]]:
         rows = list(self.invocations.values())
+        if kwargs.get("user_id") is not None:
+            owned = []
+            for row in rows:
+                job = await self.get_job(row["job_id"])
+                if (
+                    job is not None
+                    and job.get("user_id") == kwargs["user_id"]
+                    and job.get("deleted_at") is None
+                ):
+                    owned.append(row)
+            rows = owned
         if kwargs.get("job_id") is not None:
             rows = [row for row in rows if row["job_id"] == kwargs["job_id"]]
+        if kwargs.get("thread_id") is not None:
+            rows = [row for row in rows if row["thread_id"] == kwargs["thread_id"]]
         if kwargs.get("statuses"):
             rows = [row for row in rows if row["status"] in kwargs["statuses"]]
-        return rows
+            rows = [
+                row
+                for row in rows
+                if row["status"] != "pending" or row["expires_at"] > datetime.now(timezone.utc)
+            ]
+        if kwargs.get("before_id") is not None:
+            rows = [row for row in rows if row["id"] < kwargs["before_id"]]
+        return sorted(rows, key=lambda row: row["id"], reverse=True)[: kwargs.get("limit", 50)]
 
     async def get_mcp_invocation(self, *, invocation_id: int) -> dict[str, Any] | None:
         return self.invocations.get(invocation_id)
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
-        return {"id": job_id, "user_id": _OWNER, "thread_id": "thread-1"}
+        return self.jobs.get(job_id, {"id": job_id, "user_id": _OWNER, "thread_id": "thread-1"})
 
     async def decide_mcp_invocation(
         self, *, invocation_id: int, approve: bool, decided_by: str
@@ -426,13 +557,19 @@ class FakeStore(AllCapabilities):
 
 
 def _client(store: FakeStore, *, user_id: str = _OWNER) -> TestClient:
-    """Build a client whose owner guard is satisfied by ``user_id``."""
+    """Build a client whose owner guard is satisfied by ``user_id``.
+
+    The OAuth callback reads the session itself rather than through the owner
+    guard, so it is answered as ``user_id`` too: the browser returning from a
+    provider is the one that started the flow.
+    """
     app = FastAPI()
     # Management alone, as ``create_app`` mounts it: the relay's tool routes
     # are served by the MCP-only listener and nowhere else.
     app.include_router(mcp_connections.router)
     app.dependency_overrides[get_storage] = lambda: OneFake(store)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": user_id}
+    app.dependency_overrides[mcp_connections._callback_session_user] = lambda: user_id
     return TestClient(app)
 
 
@@ -580,11 +717,239 @@ class TestConnectionManagement:
         assert response.is_success
         assert create.await_args.kwargs["reuse_pending"] is False
 
+    def test_a_missing_encryption_key_leaves_no_connection(self, monkeypatch) -> None:
+        """The row used to commit before encryption, so a 503 still created it."""
+        monkeypatch.delenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", raising=False)
+        store = FakeStore()
+        with _client(store) as client:
+            first = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "GitHub",
+                    "url": "https://mcp.example.com/mcp",
+                    "auth_kind": "static",
+                    "secret": "github-test-token",
+                },
+            )
+            second = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "GitHub",
+                    "url": "https://mcp.example.com/mcp",
+                    "auth_kind": "static",
+                    "secret": "github-test-token",
+                },
+            )
+        assert first.status_code == 503
+        assert second.status_code == 503
+        assert store.connections == {}
+        assert store.created == []
+
+    def test_a_rejected_credential_write_leaves_no_connection(self, monkeypatch) -> None:
+        """Retrying a refused secret write must not pile up credential-less rows."""
+        store = FakeStore()
+        original = store.set_mcp_credential
+        fail = True
+
+        async def reject_once(**kwargs: Any) -> bool:
+            nonlocal fail
+            if fail:
+                return False
+            return await original(**kwargs)
+
+        monkeypatch.setattr(store, "set_mcp_credential", reject_once)
+        payload = {
+            "label": "GitHub",
+            "url": "https://mcp.example.com/mcp",
+            "auth_kind": "static",
+            "secret": "github-test-token",
+        }
+        with _client(store) as client:
+            rejected = client.post("/v1/agent/mcp/connections", json=payload)
+            assert rejected.status_code == 409
+            assert store.connections == {}
+            fail = False
+            created = client.post("/v1/agent/mcp/connections", json=payload)
+        assert created.status_code == 201
+        assert list(store.connections) == [created.json()["id"]]
+        stored = store.connections[created.json()["id"]]
+        assert mcp_cipher(_ENCRYPTION_KEY).decrypt(stored["access_token_ciphertext"]) == (
+            "github-test-token"
+        )
+
+    def test_a_rejected_env_secret_write_leaves_no_connection(self, monkeypatch) -> None:
+        """A stdio secret is part of the same insert as the connection."""
+        store = FakeStore()
+
+        async def reject(**kwargs: Any) -> bool:
+            del kwargs
+            return False
+
+        monkeypatch.setattr(store, "set_mcp_launch_spec", reject)
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Local",
+                    "transport": "stdio",
+                    "location": "user-connector",
+                    "auth_kind": "none",
+                    "launch": {
+                        "command": "npx",
+                        "args": ["server@1.0.0"],
+                        "env": {"API_KEY": "secret://API_KEY"},
+                    },
+                    "env_secrets": {"API_KEY": "literal"},
+                },
+            )
+        assert response.status_code == 409
+        assert store.connections == {}
+
+    def test_connector_revoked_after_preflight_returns_conflict_without_a_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The repository fence closes the create route's connector TOCTOU."""
+        store = FakeStore()
+        original_create = store.create_mcp_connection
+        with _client(store) as client:
+            connector = client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"}).json()[
+                "connector"
+            ]
+
+            async def revoke_then_create(**kwargs: Any) -> dict[str, Any]:
+                store.connectors[connector["id"]]["status"] = "revoked"
+                return await original_create(**kwargs)
+
+            monkeypatch.setattr(store, "create_mcp_connection", revoke_then_create)
+            response = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Local",
+                    "transport": "stdio",
+                    "location": "user-connector",
+                    "launch": {
+                        "command": "npx",
+                        "args": ["-y", "@scope/server@1.0.0"],
+                    },
+                    "connector_id": connector["id"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert store.connections == {}
+        assert store.created == []
+
+    def test_direct_connector_create_records_both_sides_of_the_route(self) -> None:
+        """Creation publishes the route and connector authority as one decision."""
+        store = FakeStore()
+        with _client(store) as client:
+            connector = client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"}).json()[
+                "connector"
+            ]
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Local",
+                    "transport": "stdio",
+                    "location": "user-connector",
+                    "launch": {
+                        "command": "npx",
+                        "args": ["-y", "@scope/server@1.0.0"],
+                    },
+                    "connector_id": connector["id"],
+                },
+            )
+
+        assert created.status_code == 201
+        connection_id = created.json()["id"]
+        assert store.connections[connection_id]["connector_id"] == connector["id"]
+        assert store.connector_connections[connector["id"]] == {connection_id}
+
+    def test_direct_connector_create_rejects_a_non_connector_location(self) -> None:
+        """A remote target cannot carry authority for a user-run connector."""
+        store = FakeStore()
+        with _client(store) as client:
+            connector = client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"}).json()[
+                "connector"
+            ]
+            response = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Remote",
+                    "url": "https://mcp.example.com/mcp",
+                    "connector_id": connector["id"],
+                },
+            )
+
+        assert response.status_code == 400
+        assert "only valid" in response.json()["detail"]["error"]["message"]
+        assert store.connections == {}
+        assert store.connector_connections == {}
+
     def test_templates_are_offered_but_decide_nothing(self) -> None:
         """A template prefills a form; it is not an eligibility list."""
         with _client(FakeStore()) as client:
             body = client.get("/v1/agent/mcp/templates").json()
         assert body and {"name", "url", "transport"} <= set(body[0])
+
+    @pytest.mark.parametrize(
+        "name,url,auth_kind,documentation_url",
+        [
+            (
+                "github",
+                "https://api.githubcopilot.com/mcp/",
+                "static",
+                "https://github.com/github/github-mcp-server",
+            ),
+            (
+                "slack",
+                "https://mcp.slack.com/mcp",
+                "oauth",
+                "https://docs.slack.dev/ai/slack-mcp-server/",
+            ),
+            (
+                "google-drive",
+                "https://drivemcp.googleapis.com/mcp/v1",
+                "oauth",
+                "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server",
+            ),
+        ],
+    )
+    def test_common_service_presets_can_be_added_without_the_registry(
+        self, name, url, auth_kind, documentation_url
+    ) -> None:
+        """Known services carry an actionable recipe even before a directory sync."""
+        store = FakeStore()
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/connections")
+            assert response.status_code == 200
+            templates = {item["name"]: item for item in response.json()["templates"]}
+            assert {"linear", "notion", "context7"} <= templates.keys()
+            template = templates[name]
+            assert template["url"] == url
+            assert template["auth_kind"] == auth_kind
+            assert template["documentation_url"] == documentation_url
+            assert template["notes"]
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": template["label"],
+                    "url": template["url"],
+                    "transport": template["transport"],
+                    "auth_kind": template["auth_kind"],
+                    "template": template["name"],
+                    **({"secret": "github-test-token"} if auth_kind == "static" else {}),
+                },
+            )
+        assert created.status_code == 201, created.text
+        assert created.json()["template"] == name
+        assert created.json()["auth_kind"] == auth_kind
+        assert "github-test-token" not in created.text
+        row = store.connections[created.json()["id"]]
+        if auth_kind == "static":
+            assert mcp_cipher(_ENCRYPTION_KEY).decrypt(row["access_token_ciphertext"]) == (
+                "github-test-token"
+            )
 
     def test_a_connection_can_be_added_without_a_template(self) -> None:
         """The whole point: a server nobody reviewed is still addable."""
@@ -736,6 +1101,82 @@ class TestConnectionManagement:
             )
         assert response.status_code == 409
 
+    @pytest.mark.parametrize(
+        "location,launch,reason",
+        [
+            ("managed-worker", {"command": "npx", "args": ["-y", "@scope/server"]}, "pin"),
+            ("user-connector", {"command": "sh", "args": ["-c", "server"]}, "shell"),
+            ("user-connector", {"args": ["server"]}, "command"),
+        ],
+    )
+    def test_an_edited_launch_is_checked_like_a_new_one(self, location, launch, reason) -> None:
+        """A PATCH is not a way around the launch policy creation enforces."""
+        store = FakeStore()
+        stored = {"command": "uvx", "args": ["server==1.0"], "env": {}, "cwd": None, "mounts": []}
+        connection_id = _seed(
+            store,
+            transport="stdio",
+            location=location,
+            url=None,
+            auth_kind="none",
+            launch_spec=dict(stored),
+        )
+        with _client(store) as client:
+            response = client.patch(
+                f"/v1/agent/mcp/connections/{connection_id}",
+                json={"expected_config_revision": 1, "launch": launch},
+            )
+        assert response.status_code == 400
+        assert reason in response.json()["detail"]["error"]["message"]
+        assert store.connections[connection_id]["launch_spec"] == stored
+        assert store.connections[connection_id]["config_revision"] == 1
+
+    def test_an_edited_launch_is_stored_as_validated_not_as_sent(self) -> None:
+        """Mounts and stored secrets are not the edit's to supply."""
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            transport="stdio",
+            location="user-connector",
+            url=None,
+            auth_kind="none",
+            launch_spec={"command": "uvx", "args": ["server==1.0"], "env": {}, "mounts": []},
+        )
+        with _client(store) as client:
+            response = client.patch(
+                f"/v1/agent/mcp/connections/{connection_id}",
+                json={
+                    "expected_config_revision": 1,
+                    "launch": {
+                        "command": "uvx",
+                        "args": ["server==2.0"],
+                        "env": {"TOKEN": "secret://TOKEN"},
+                        "mounts": [{"source": "/", "target": "host", "read_only": False}],
+                        "env_secrets": {"TOKEN": "supplied-ciphertext"},
+                    },
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert store.connections[connection_id]["launch_spec"] == {
+            "command": "uvx",
+            "args": ["server==2.0"],
+            "env": {"TOKEN": "secret://TOKEN"},
+            "cwd": None,
+            "mounts": [],
+        }
+
+    def test_a_remote_connection_cannot_be_given_a_launch(self) -> None:
+        """A process spec on a URL connection is refused, not stored beside it."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        with _client(store) as client:
+            response = client.patch(
+                f"/v1/agent/mcp/connections/{connection_id}",
+                json={"expected_config_revision": 1, "launch": {"command": "uvx"}},
+            )
+        assert response.status_code == 400
+        assert store.connections[connection_id]["launch_spec"] is None
+
     async def test_edit_cannot_erase_a_discovery_of_the_new_target(self, monkeypatch):
         """A second request can discover the edited target before PATCH returns."""
         store = FakeStore()
@@ -794,6 +1235,247 @@ class TestAuthorization:
     """Starting a browser flow, including the client a server expects us to bring."""
 
     @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "javascript:alert(document.domain)",
+            "data:text/html,<script>alert(1)</script>",
+            "/authorize",
+            "//login.example.com/authorize",
+            "https://user@login.example.com/authorize",
+        ],
+    )
+    async def test_unsafe_redirect_is_refused_before_the_flow_is_persisted(
+        self, monkeypatch: pytest.MonkeyPatch, endpoint: str
+    ) -> None:
+        """The API also guards metadata loaded without its discovery parser."""
+        from fastapi import HTTPException
+
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://api.example.com")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint=endpoint,
+            token_endpoint="https://auth.example.com/token",
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        store = FakeStore()
+        connection_id = _seed(
+            store, auth_kind="oauth", auth_config={"client_id": "registered-client"}
+        )
+        persist = AsyncMock()
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", persist, raising=False)
+        with pytest.raises(HTTPException) as raised:
+            await mcp_connections.authorize_connection(
+                connection_id=connection_id,
+                user={"user_id": _OWNER},
+                store=store,
+            )
+        assert raised.value.status_code == 400
+        assert "invalid authorization endpoint" in str(raised.value.detail)
+        persist.assert_not_called()
+
+    async def test_a_stale_start_returns_conflict_without_an_authorization_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The API exposes a lost version fence instead of returning a dead URL."""
+        from fastapi import HTTPException
+
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://api.example.com")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={"client_id": "registered-client"},
+        )
+        persist = AsyncMock(return_value=None)
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", persist, raising=False)
+
+        with pytest.raises(HTTPException) as raised:
+            await mcp_connections.authorize_connection(
+                connection_id=connection_id,
+                user={"user_id": _OWNER},
+                store=store,
+            )
+
+        assert raised.value.status_code == 409
+        assert "changed" in str(raised.value.detail)
+        assert persist.await_args.kwargs["config_revision"] == 1
+        assert persist.await_args.kwargs["authorization_epoch"] == 1
+        assert persist.await_args.kwargs["expected_oauth_generation"] == 0
+        assert "oauth_generation" not in persist.await_args.kwargs
+
+    @pytest.mark.parametrize(
+        "session_base,override,expected_base",
+        [
+            ("https://example.com/agents/api", "", "https://example.com/agents/api"),
+            (
+                "https://example.com/agents/api",
+                "https://mcp.example.com/api/",
+                "https://mcp.example.com/api",
+            ),
+        ],
+    )
+    def test_registration_required_response_names_the_callback_to_register(
+        self, monkeypatch, session_base, override, expected_base
+    ) -> None:
+        """A user bringing an OAuth app needs this deployment's precise callback."""
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
+        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://mcp.slack.com",
+            authorization_endpoint="https://mcp.slack.com/authorize",
+            token_endpoint="https://mcp.slack.com/token",
+            token_endpoint_auth_methods_supported=("client_secret_basic",),
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        store = FakeStore()
+        connection_id = _seed(store, url="https://mcp.slack.com/mcp", auth_kind="oauth")
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                headers={"Host": "untrusted.example", "X-Forwarded-Host": "untrusted.example"},
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["needs_client_id"] is True
+        assert body["authorization_url"] is None
+        assert body["redirect_uri"] == (
+            f"{expected_base}/v1/agent/mcp/oauth/callback/{connection_id}"
+        )
+        assert store.oauth_flow is None
+
+    @pytest.mark.parametrize(
+        "resource_url,metadata_resource,stored_resource,expected_resource",
+        [
+            ("https://mcp.slack.com/mcp", "https://mcp.slack.com", None, "https://mcp.slack.com"),
+            ("https://mcp.slack.com/mcp", None, "https://mcp.slack.com", "https://mcp.slack.com"),
+            (
+                "https://drivemcp.googleapis.com/mcp/v1",
+                None,
+                None,
+                "https://drivemcp.googleapis.com/mcp/v1",
+            ),
+            (
+                "https://mcp.example.com/tenant-b",
+                None,
+                "https://mcp.example.com/tenant-a",
+                "https://mcp.example.com/tenant-b",
+            ),
+        ],
+    )
+    def test_a_supplied_confidential_client_completes_authorization(
+        self, monkeypatch, resource_url, metadata_resource, stored_resource, expected_resource
+    ) -> None:
+        """Authorization, redemption and refresh preserve the verified OAuth resource."""
+        from cloud_agent.mcp import oauth, refresh
+        from cloud_agent.mcp.registry import oauth_cipher
+
+        base_url = "https://example.com/agents/api"
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", base_url)
+        monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://example.com/agents")
+        issuer = f"https://{urlsplit(resource_url).hostname}"
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer=issuer,
+            authorization_endpoint=f"{issuer}/authorize",
+            token_endpoint=f"{issuer}/token",
+            token_endpoint_auth_methods_supported=("client_secret_basic",),
+        )
+        resource_metadata = (
+            oauth.ProtectedResourceMetadata(
+                resource=metadata_resource, authorization_servers=(issuer,)
+            )
+            if metadata_resource
+            else None
+        )
+        discover = AsyncMock(return_value=(resource_metadata, metadata))
+        monkeypatch.setattr(oauth, "discover_authorization_server", discover)
+        exchange = AsyncMock(
+            return_value={
+                "access_token": "service-test-token",
+                "refresh_token": "test-refresh-token",
+            }
+        )
+        register = AsyncMock()
+        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        monkeypatch.setattr(mcp_connections, "_register_client", register)
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            url=resource_url,
+            auth_kind="oauth",
+            auth_config={},
+            resource=stored_resource,
+            issuer=issuer if stored_resource else None,
+        )
+
+        async def save_flow(**kwargs):
+            generation = int(kwargs["expected_oauth_generation"]) + 1
+            store.oauth_flow = {**kwargs, "oauth_generation": generation}
+            store.oauth_state_hash = kwargs["state_hash"]
+            store.connections[connection_id]["oauth_generation"] = generation
+            return generation
+
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                json={"client_id": "service-test-client", "client_secret": "service-test-secret"},
+            )
+            assert response.status_code == 200, response.text
+            assert "service-test-secret" not in response.text
+            query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+            assert query["client_id"] == ["service-test-client"]
+            assert query["resource"] == [expected_resource]
+            assert store.oauth_flow["resource"] == expected_resource
+            assert query["redirect_uri"] == [
+                f"{base_url}/v1/agent/mcp/oauth/callback/{connection_id}"
+            ]
+            callback = client.get(
+                f"/v1/agent/mcp/oauth/callback/{connection_id}",
+                params={"state": query["state"][0], "code": "service-test-code"},
+                follow_redirects=False,
+            )
+        assert callback.status_code == 302
+        assert parse_qs(urlsplit(callback.headers["location"]).query)["mcp_authorized"] == ["1"]
+        register.assert_not_awaited()
+        assert discover.call_args.kwargs["preregistered_issuer"] == (
+            issuer if stored_resource else None
+        )
+        request = exchange.call_args.args[0]
+        assert request.client.client_id == "service-test-client"
+        assert request.client.client_secret == "service-test-secret"
+        assert request.client.auth_method == "client_secret_basic"
+        assert request.form()["resource"] == expected_resource
+        row = store.connections[connection_id]
+        assert row["registration"] == "preregistered"
+        assert row["resource"] == expected_resource
+        assert oauth_cipher(_ENCRYPTION_KEY).decrypt(row["client_secret_ciphertext"]) == (
+            "service-test-secret"
+        )
+        assert mcp_cipher(_ENCRYPTION_KEY).decrypt(row["access_token_ciphertext"]) == (
+            "service-test-token"
+        )
+        refresh_request = refresh._build_request(row, cipher=mcp_cipher(_ENCRYPTION_KEY))
+        assert refresh_request.form()["resource"] == expected_resource
+
+    @pytest.mark.parametrize(
         "session_base,override,expected_base",
         [
             ("https://agents.example.com/api", "", "https://agents.example.com/api"),
@@ -843,9 +1525,11 @@ class TestAuthorization:
         )
 
         async def save_flow(**kwargs):
-            store.oauth_flow = kwargs
+            generation = int(kwargs["expected_oauth_generation"]) + 1
+            store.oauth_flow = {**kwargs, "oauth_generation": generation}
             store.oauth_state_hash = kwargs["state_hash"]
-            store.connections[connection_id]["oauth_generation"] = kwargs["oauth_generation"]
+            store.connections[connection_id]["oauth_generation"] = generation
+            return generation
 
         monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
         expected = f"{expected_base}/v1/agent/mcp/oauth/callback/{connection_id}"
@@ -924,6 +1608,90 @@ class TestAuthorization:
         assert "client_secret" not in config
         assert "shh" not in json.dumps(config)
 
+    def test_only_the_account_that_started_a_flow_can_finish_it(self, monkeypatch) -> None:
+        """A consent approved in somebody else's browser stores nothing anywhere.
+
+        The callback reads the real session cookie here rather than an
+        override. A browser signed in as another account, and one with no
+        usable session, are both refused before the code is exchanged, and the
+        flow is left for the account that started it, which can still finish.
+        """
+        from cloud_agent import identity
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv(identity.ENV_SESSION_SECRET, "mcp-callback-session-secret-for-tests")
+        monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://example.com/agents/api")
+        monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://example.com/agents")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        exchange = AsyncMock(return_value={"access_token": "owner-token"})
+        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        store = FakeStore()
+        connection_id = _seed(
+            store, auth_kind="oauth", auth_config={"client_id": "registered-client"}
+        )
+
+        async def save_flow(**kwargs):
+            generation = int(kwargs["expected_oauth_generation"]) + 1
+            store.oauth_flow = {**kwargs, "oauth_generation": generation}
+            store.oauth_state_hash = kwargs["state_hash"]
+            store.connections[connection_id]["oauth_generation"] = generation
+            return generation
+
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
+        with _client(store) as client:
+            # Started as the owner; finished by whatever session the browser has.
+            del client.app.dependency_overrides[mcp_connections._callback_session_user]
+            started = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
+            assert started.status_code == 200, started.text
+            state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+
+            def finish(session: str | None) -> httpx.Response:
+                client.cookies.clear()
+                if session is not None:
+                    client.cookies.set(identity.SESSION_COOKIE, session)
+                return client.get(
+                    f"/v1/agent/mcp/oauth/callback/{connection_id}",
+                    params={"state": state, "code": "consented-code"},
+                    follow_redirects=False,
+                )
+
+            for session, reason in (
+                (identity.mint_session(user_id=_OTHER), "started by another account"),
+                (None, "sign in to the account that started this authorization"),
+                ("not-a-session", "sign in to the account that started this authorization"),
+            ):
+                refused = finish(session)
+                assert refused.status_code == 302
+                assert refused.headers["location"].startswith(
+                    "https://example.com/agents/integrations?"
+                )
+                result = parse_qs(urlsplit(refused.headers["location"]).query)
+                assert result["mcp_authorized"] == ["0"]
+                assert result["mcp_connection"] == [str(connection_id)]
+                assert reason in result["mcp_message"][0]
+                exchange.assert_not_awaited()
+                assert store.credential_writes == []
+                assert store.oauth_flow is not None
+
+            completed = finish(identity.mint_session(user_id=_OWNER))
+        assert parse_qs(urlsplit(completed.headers["location"]).query)["mcp_authorized"] == ["1"]
+        exchange.assert_awaited_once()
+        assert store.oauth_flow is None
+        assert (
+            mcp_cipher(_ENCRYPTION_KEY).decrypt(
+                store.connections[connection_id]["access_token_ciphertext"]
+            )
+            == "owner-token"
+        )
+
 
 class TestTheDynamicClientIdentity:
     """What the callback does with the client the flow authorized as.
@@ -966,6 +1734,7 @@ class TestTheDynamicClientIdentity:
         from cloud_agent.mcp.registry import oauth_cipher
 
         return {
+            "user_id": _OWNER,
             "connection_id": str(connection_id),
             "config_revision": 1,
             "authorization_epoch": 1,
@@ -1008,6 +1777,7 @@ class TestTheDynamicClientIdentity:
             code="the-code",
             error="",
             store=store,
+            session_user=_OWNER,
         )
         return str(response.headers["location"])
 
@@ -1163,6 +1933,39 @@ class TestImport:
         assert stored["launch_spec"]["env"]["API_KEY"] == "secret://API_KEY"
         assert "literal" not in json.dumps(stored["launch_spec"])
 
+    def test_later_credential_rejection_rolls_back_the_whole_import(self) -> None:
+        """An import reports no success while an earlier draft remains committed."""
+        store = FakeStore()
+        store.reject_credential_writes = True
+        request = {
+            "text": json.dumps(
+                {
+                    "mcpServers": {
+                        "public": {"url": "https://public.example.com/mcp"},
+                        "private": {
+                            "url": "https://private.example.com/mcp",
+                            "headers": {"Authorization": "Bearer private-token"},
+                        },
+                    }
+                }
+            ),
+            "save": True,
+        }
+        with (
+            _client(store) as client,
+            pytest.raises(RuntimeError, match="credential write rejection"),
+        ):
+            client.post("/v1/agent/mcp/connections/import", json=request)
+        assert store.connections == {}
+        assert store.created == []
+
+        store.reject_credential_writes = False
+        with _client(store) as client:
+            retried = client.post("/v1/agent/mcp/connections/import", json=request)
+        assert retried.status_code == 200
+        assert [row["id"] for row in retried.json()["saved"]] == [1, 2]
+        assert sorted(store.connections) == [1, 2]
+
     def test_an_unreadable_paste_is_a_named_error(self) -> None:
         """Not a stack trace, and not a silent empty import."""
         with _client(FakeStore()) as client:
@@ -1230,6 +2033,69 @@ class TestImport:
             assert stored["auth_config"]["scheme"] == "Bearer"
             assert token not in response.text
         assert store.connections[3]["access_token_ciphertext"] is None
+
+    def test_a_later_draft_failing_to_store_a_secret_saves_nothing(self, monkeypatch) -> None:
+        """Import reports one error, so it must not keep the drafts that fitted."""
+        store = FakeStore()
+        original = store.set_mcp_credential
+        calls = 0
+
+        async def reject_the_second(**kwargs: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                return False
+            return await original(**kwargs)
+
+        monkeypatch.setattr(store, "set_mcp_credential", reject_the_second)
+        servers = {
+            name: {
+                "url": f"https://{name}.example.com/mcp",
+                "headers": {"Authorization": "Bearer ${env:API_KEY}"},
+            }
+            for name in ("wiki", "tracker")
+        }
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={
+                    "text": json.dumps({"mcpServers": servers}),
+                    "save": True,
+                    "server_secrets": {
+                        "wiki": {"Authorization": "wiki-token"},
+                        "tracker": {"Authorization": "tracker-token"},
+                    },
+                },
+            )
+        assert response.status_code == 409
+        assert store.connections == {}
+        assert store.created == []
+
+    def test_a_missing_key_does_not_keep_an_earlier_imported_draft(self, monkeypatch) -> None:
+        """Encryption of a later secret happens before any draft is inserted."""
+        monkeypatch.delenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", raising=False)
+        store = FakeStore()
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={
+                    "text": json.dumps(
+                        {
+                            "mcpServers": {
+                                "public": {"url": "https://public.example.com/mcp"},
+                                "wiki": {
+                                    "url": "https://wiki.example.com/mcp",
+                                    "headers": {"Authorization": "Bearer literal"},
+                                },
+                            }
+                        }
+                    ),
+                    "save": True,
+                },
+            )
+        assert response.status_code == 503
+        assert store.connections == {}
+        assert store.created == []
 
 
 class TestBindings:
@@ -1403,6 +2269,32 @@ class TestInvocationDecisions:
         }
         return invocation_id
 
+    @pytest.mark.parametrize("attempt_id", [41, None])
+    def test_lists_and_decisions_report_the_attempt_that_raised_the_call(
+        self, attempt_id: int | None
+    ) -> None:
+        """A retried job cannot make an earlier approval appear to belong to its new attempt."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        if attempt_id is not None:
+            store.invocations[invocation_id]["attempt_id"] = attempt_id
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "current_attempt_id": 42,
+        }
+        with _client(store) as client:
+            listed = client.get(
+                "/v1/agent/mcp/invocations", params={"job_id": "job-1", "pending_only": True}
+            )
+            decided = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision", json={"approve": True}
+            )
+        assert listed.status_code == decided.status_code == 200
+        assert listed.json()["invocations"][0]["attempt_id"] == attempt_id
+        assert decided.json()["attempt_id"] == attempt_id
+
     def test_an_approval_records_who_made_it(self) -> None:
         """A write's audit trail names the person, not the session."""
         store = FakeStore()
@@ -1442,10 +2334,253 @@ class TestInvocationDecisions:
         assert response.status_code == 404
         assert store.invocations[invocation_id]["status"] == "pending"
 
+    def test_deleted_conversation_history_is_not_accessible_by_job(self) -> None:
+        """A retained ledger row does not make a deleted conversation visible."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        self._pending(store, connection_id)
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "deleted_at": datetime.now(timezone.utc),
+        }
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("approve", [True, False])
+    def test_deleted_conversation_calls_cannot_be_decided(self, approve: bool) -> None:
+        """Neither an approval nor a denial may edit a deleted conversation."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "deleted_at": datetime.now(timezone.utc),
+        }
+        store.decide_mcp_invocation = AsyncMock(  # type: ignore[method-assign]
+            wraps=store.decide_mcp_invocation
+        )
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision", json={"approve": approve}
+            )
+        assert response.status_code == 404
+        store.decide_mcp_invocation.assert_not_awaited()
+        assert store.invocations[invocation_id]["status"] == "pending"
+
+    @pytest.mark.parametrize("scoped", [False, True])
+    def test_deleted_conversation_calls_are_omitted_from_inboxes(self, scoped: bool) -> None:
+        """Both the owner-wide and conversation inbox hide tombstoned calls."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.jobs["job-1"] = {
+            "id": "job-1",
+            "user_id": _OWNER,
+            "deleted_at": datetime.now(timezone.utc),
+        }
+        with _client(store) as client:
+            params: dict[str, Any] = {"pending_only": True}
+            if scoped:
+                params["thread_id"] = "thread-1"
+            response = client.get("/v1/agent/mcp/invocations", params=params)
+        assert response.status_code == 200
+        assert response.json()["invocations"] == []
+        assert response.json()["has_more"] is False
+        assert store.invocations[invocation_id]["status"] == "pending"
+
     def test_listing_requires_a_job_or_a_conversation(self) -> None:
-        """An unscoped list would be a way to enumerate other people's calls."""
+        """History remains scoped even though the pending inbox is account-wide."""
         with _client(FakeStore()) as client:
             assert client.get("/v1/agent/mcp/invocations").status_code == 400
+
+    def test_the_global_pending_inbox_is_scoped_to_the_owner(self) -> None:
+        """Foreign calls and their decrypted arguments never enter the inbox."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        mine = self._pending(store, connection_id)
+        store.threads["thread-1"] = {
+            "id": "thread-1",
+            "user_id": _OWNER,
+            "title": "Repair the integration",
+        }
+        store.invocations[2] = dict(
+            store.invocations[mine],
+            id=2,
+            job_id="other-job",
+            thread_id="other-thread",
+            arguments_ciphertext=mcp_connections.mcp_invocation_cipher().encrypt(
+                json.dumps({"private": "another owner's document"})
+            ),
+        )
+        store.jobs["other-job"] = {"id": "other-job", "user_id": _OTHER}
+        store.invocations[3] = dict(store.invocations[mine], id=3, status="completed")
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"pending_only": True})
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["invocations"]] == [mine]
+        assert response.json()["invocations"][0]["thread_title"] == "Repair the integration"
+        assert "another owner's document" not in response.text
+        assert response.json()["has_more"] is False
+        assert response.json()["next_before_id"] is None
+
+    def test_inbox_pagination_does_not_skip_calls_when_new_calls_arrive(self) -> None:
+        """A later insert must not shift the continuation page or repeat a call."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        first_id = self._pending(store, connection_id)
+        for invocation_id in (2, 3, 4):
+            store.invocations[invocation_id] = dict(store.invocations[first_id], id=invocation_id)
+        with _client(store) as client:
+            first = client.get(
+                "/v1/agent/mcp/invocations", params={"pending_only": True, "limit": 2}
+            ).json()
+            store.invocations[5] = dict(store.invocations[first_id], id=5)
+            second = client.get(
+                "/v1/agent/mcp/invocations",
+                params={"pending_only": True, "limit": 2, "before_id": first["next_before_id"]},
+            ).json()
+        assert [row["id"] for row in first["invocations"]] == [4, 3]
+        assert first["has_more"] is True
+        assert first["next_before_id"] == 3
+        assert [row["id"] for row in second["invocations"]] == [2, 1]
+        assert second["has_more"] is False
+        assert second["next_before_id"] is None
+
+    def test_history_pages_include_calls_older_than_the_default_window(self) -> None:
+        """Older history remains reachable past the previous fifty-call cutoff."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        first_id = self._pending(store, connection_id)
+        for invocation_id in range(2, 56):
+            store.invocations[invocation_id] = dict(
+                store.invocations[first_id], id=invocation_id, status="completed"
+            )
+        with _client(store) as client:
+            first = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"}).json()
+            second = client.get(
+                "/v1/agent/mcp/invocations",
+                params={"job_id": "job-1", "before_id": first["next_before_id"]},
+            ).json()
+        assert len(first["invocations"]) == 50
+        assert first["next_before_id"] == 6
+        assert [row["id"] for row in second["invocations"]] == [5, 4, 3, 2, 1]
+        assert second["has_more"] is False
+
+    @pytest.mark.parametrize(
+        "params", [{"limit": 0}, {"limit": 101}, {"before_id": 0}, {"before_id": 2**63}]
+    )
+    def test_invocation_pages_reject_invalid_bounds(self, params: dict[str, int]) -> None:
+        """Clients cannot request unbounded pages or an invalid continuation."""
+        with _client(FakeStore()) as client:
+            response = client.get(
+                "/v1/agent/mcp/invocations", params={"pending_only": True, **params}
+            )
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("status", ["pending", "approved"])
+    def test_history_displays_elapsed_deadlines_without_mutating_a_call(self, status: str) -> None:
+        """A lagging expiry worker must not leave an actionable-looking card."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(
+            status=status, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+        )
+        with _client(store) as client:
+            history = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"}).json()
+            inbox = client.get("/v1/agent/mcp/invocations", params={"pending_only": True}).json()
+        assert history["invocations"][0]["status"] == "expired"
+        assert "expired" in history["invocations"][0]["guidance"]
+        assert inbox["invocations"] == []
+        assert store.invocations[invocation_id]["status"] == status
+
+    def test_thread_titles_are_owned_and_cached_per_page(self) -> None:
+        """Metadata cannot leak a foreign title or require one query per call."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[2] = dict(store.invocations[invocation_id], id=2)
+        store.invocations[3] = dict(
+            store.invocations[invocation_id], id=3, thread_id="foreign-thread"
+        )
+        store.threads["thread-1"] = {"user_id": _OWNER, "title": "Owned conversation"}
+        store.threads["foreign-thread"] = {"user_id": _OTHER, "title": "Private title"}
+        store.get_thread = AsyncMock(wraps=store.get_thread)  # type: ignore[method-assign]
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"pending_only": True})
+        views = response.json()["invocations"]
+        assert views[0]["thread_title"] is None
+        assert [view["thread_title"] for view in views[1:]] == [
+            "Owned conversation",
+            "Owned conversation",
+        ]
+        assert store.get_thread.await_count == 2
+
+    def _catalogue(self, store: FakeStore, connection_id: int, revision: int) -> None:
+        """Store a discovered catalogue under ``revision``."""
+        store.capabilities[connection_id] = {
+            "connection_id": connection_id,
+            "capability_revision": revision,
+            "tools": [
+                {
+                    "name": "create_issue",
+                    "description": "Open an issue in a repository.",
+                    "input_schema": {"type": "object"},
+                    "annotations": {"title": "Create issue", "destructiveHint": False},
+                }
+            ],
+            "resources": [],
+            "resource_templates": [],
+            "prompts": [
+                {"name": "create_issue", "description": "A prompt of the same name."},
+            ],
+        }
+
+    def test_a_held_call_carries_what_the_server_says_it_does(self) -> None:
+        """The owner decides on the tool's own description, not only its name."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(capability_kind="tool", capability_revision=3)
+        self._catalogue(store, connection_id, revision=3)
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
+        assert response.status_code == 200
+        view = response.json()["invocations"][0]
+        assert view["capability_kind"] == "tool"
+        assert view["capability_description"] == "Open an issue in a repository."
+        assert view["capability_annotations"] == {"title": "Create issue", "destructiveHint": False}
+
+    def test_a_replaced_catalogue_does_not_describe_an_older_call(self) -> None:
+        """A newer discovery may describe a different tool under the same name."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(capability_kind="tool", capability_revision=2)
+        self._catalogue(store, connection_id, revision=3)
+        with _client(store) as client:
+            response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
+        view = response.json()["invocations"][0]
+        assert view["capability_description"] is None
+        assert view["capability_annotations"] == {}
+
+    def test_a_held_call_is_described_from_its_own_surface(self) -> None:
+        """A prompt and a tool may share a name; the call's kind picks which."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id].update(capability_kind="prompt", capability_revision=3)
+        self._catalogue(store, connection_id, revision=3)
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision", json={"approve": True}
+            )
+        view = response.json()
+        assert view["capability_kind"] == "prompt"
+        assert view["capability_description"] == "A prompt of the same name."
 
 
 class TestConnectors:
@@ -1539,6 +2674,33 @@ class TestConnectors:
         assert body[0]["connection_ids"] == []
         assert store.connections[connection]["connector_id"] is None
 
+    def test_disconnect_removes_the_connector_route_and_authority(self) -> None:
+        """A tombstone cannot remain in a connector's authorized set."""
+        store = FakeStore()
+        with _client(store) as client:
+            connector = client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"}).json()[
+                "connector"
+            ]
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Local",
+                    "transport": "stdio",
+                    "location": "user-connector",
+                    "launch": {
+                        "command": "npx",
+                        "args": ["-y", "@scope/server@1.0.0"],
+                    },
+                    "connector_id": connector["id"],
+                },
+            )
+            connection_id = created.json()["id"]
+            removed = client.delete(f"/v1/agent/mcp/connections/{connection_id}")
+
+        assert removed.status_code == 204
+        assert store.connections[connection_id]["connector_id"] is None
+        assert store.connector_connections[connector["id"]] == set()
+
     def test_a_revoked_connector_cannot_be_bound_to_again(self) -> None:
         """Revocation is not a status the caller can route around."""
         store = FakeStore()
@@ -1574,6 +2736,38 @@ class TestConnectors:
                 == 404
             )
 
+    def test_a_new_connection_cannot_name_another_users_connector(self) -> None:
+        """Creation reads the connector under the caller's ownership, as binding does."""
+        store = FakeStore()
+        store.connectors[9] = {
+            "id": 9,
+            "user_id": _OTHER,
+            "name": "Theirs",
+            "status": "pending",
+            "mounts": [],
+            "created_at": None,
+            "last_seen_at": None,
+            "revoked_at": None,
+        }
+        launch = {"command": "uvx", "args": ["server==1.0"]}
+        body = {
+            "label": "Local",
+            "transport": "stdio",
+            "location": "user-connector",
+            "launch": launch,
+        }
+        with _client(store) as client:
+            refused = client.post("/v1/agent/mcp/connections", json={**body, "connector_id": 9})
+            assert refused.status_code == 404
+            assert store.connections == {}
+            own = client.post("/v1/agent/mcp/connectors", json={"name": "Mine"}).json()
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={**body, "connector_id": own["connector"]["id"]},
+            )
+        assert created.status_code == 201, created.text
+        assert created.json()["connector_id"] == own["connector"]["id"]
+
     def test_unbinding_a_connection_that_is_not_routed_here_is_not_found(self) -> None:
         """Silence would let a caller believe it had stopped something."""
         store = FakeStore()
@@ -1582,6 +2776,31 @@ class TestConnectors:
             client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"})
             response = client.delete(f"/v1/agent/mcp/connectors/1/connections/{connection}")
         assert response.status_code == 404
+
+    def test_unbinding_through_another_connector_leaves_the_real_binding(self) -> None:
+        """The path's connector is the fence, not a lookup that happens first.
+
+        Verifying that connector A exists and then clearing connection C is how
+        a stale tab detaches C from B. The binding, its versions, and B's
+        authorized set have to be the ones the request found.
+        """
+        store = FakeStore()
+        connection = self._stdio(store)
+        with _client(store) as client:
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop A"})
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop B"})
+            bound = client.post(
+                "/v1/agent/mcp/connectors/2/connections", json={"connection_id": connection}
+            )
+            assert bound.status_code == 200
+            before = dict(store.connections[connection])
+            response = client.delete(f"/v1/agent/mcp/connectors/1/connections/{connection}")
+        assert response.status_code == 404
+        assert store.connections[connection]["connector_id"] == 2
+        assert store.connections[connection]["config_revision"] == before["config_revision"]
+        assert store.connections[connection]["authorization_epoch"] == before["authorization_epoch"]
+        assert store.connector_connections.get(1, set()) == set()
+        assert connection in store.connector_connections[2]
 
 
 class TestMcpAvailableOnDeployment:

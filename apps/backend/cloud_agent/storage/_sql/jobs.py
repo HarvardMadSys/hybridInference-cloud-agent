@@ -27,7 +27,7 @@ JOB_OWN_COLUMNS = (
     "turn_source, goal_round, goal_round_kind, goal_revision, goal_id, "
     "goal_report_parse, goal_report_outcome, goal_report_reason, goal_report_detail, "
     "goal_repair_round, "
-    "input_seq_at_create, created_at, updated_at"
+    "input_seq_at_create, created_at, updated_at, revision"
 )
 
 # What a conversation shares with every one of its turns: where it runs, and —
@@ -40,14 +40,17 @@ JOB_OWN_COLUMNS = (
 # same name keeps only the later one, which would quietly make every job read
 # report the conversation's revision as its own snapshot.
 THREAD_CONFIG_COLUMNS = (
-    "t.repo, t.setup_script, t.execution_profile, "
+    "t.repo, t.setup_script, t.execution_profile, t.plugins, "
     "t.goal_id, t.goal_objective, t.goal_state, t.goal_pause_reason, "
     "t.goal_pause_detail, t.goal_revision AS thread_goal_revision, "
     "t.goal_max_rounds, t.goal_completion_basis, t.goal_completed_by_job_id, "
     "t.goal_created_at, t.goal_updated_at, "
     # The conversation's input counter, carried on every turn so that "has the
     # owner spoken since this turn was created?" is answerable from one read.
-    "t.user_input_seq AS thread_user_input_seq"
+    "t.user_input_seq AS thread_user_input_seq, "
+    # Aliased for the same reason as the goal revision: the job has its own.
+    # Owners' tabs order pushed titles against the thread's counter.
+    "t.revision AS thread_revision"
 )
 
 # Probe the unfinished-turn index before the latest-turn index: a cancelled
@@ -116,7 +119,7 @@ CASE
         SELECT 1 FROM agent_attempts a
         JOIN agent_jobs busy_job ON busy_job.id = a.job_id
         WHERE busy_job.thread_id = t.session_id
-          AND a.status = 'running' AND a.lease_expires_at > NOW()
+          AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
     ) OR EXISTS (
         SELECT 1 FROM agent_thread_sandbox_memberships m
         WHERE m.thread_id = t.session_id
