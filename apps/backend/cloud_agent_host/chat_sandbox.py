@@ -657,6 +657,12 @@ class ChatSandboxManager:
         # broker-wide critical section per manager.
         self._guest_observer_lock = threading.RLock()
         self._guest_observer_active: dict[str, dict[int, int]] = {}
+        # Containers this manager ran ``docker start`` on that have not since
+        # passed the in-guest network check. A start that fails in between
+        # stops its guest; if even that fails, the next activation finds the
+        # guest running and must prove it before reusing it.
+        self._unproven_guests: set[str] = set()
+        self._unproven_guests_lock = threading.Lock()
 
     # ── the group network ──────────────────────────────────────────────
     #
@@ -2359,7 +2365,9 @@ class ChatSandboxManager:
 
         A cold start is also where the network is proved from inside: nothing
         from the repository runs in a guest that has not passed
-        :meth:`_verify_guest_network`.
+        :meth:`_verify_guest_network`. A start that fails after ``docker
+        start`` stops its guest again; a running guest whose proof never
+        finished is proved before it is reused.
         """
         current = self._require(spec)
         exact_container_id = expected_container_id or current.container_id
@@ -2373,6 +2381,19 @@ class ChatSandboxManager:
         if current.running:
             if facts is not None:
                 facts.note("reuse")
+            with self._unproven_guests_lock:
+                unproven = exact_container_id in self._unproven_guests
+            if unproven:
+                # A start of this exact container failed before its in-guest
+                # check and could not stop it either. Nothing has run in it
+                # since; prove it now, or stop it.
+                return self._prove_started_guest(
+                    spec,
+                    exact_container_id,
+                    observer=observer,
+                    defer_network_release=defer_network_release_on_fail_stop,
+                    addresses=network_snapshot.addresses,
+                )
             with substage(observer, "guest_network_sync"):
                 self._sync_kata_guest_network(spec, current, network_snapshot.addresses)
             return current
@@ -2385,6 +2406,11 @@ class ChatSandboxManager:
             # after the exact object has been re-inspected and proven stopped,
             # immediately before this method performs the Docker transition.
             before_stopped_start(current)
+        # Recorded before the Docker transition, and cleared only by a passed
+        # check: a start Docker completes after its client gave up is
+        # unproven too.
+        with self._unproven_guests_lock:
+            self._unproven_guests.add(exact_container_id)
         with substage(observer, "container_start"):
             result = self._run(
                 [self.backend.docker_binary, "start", current.container_id], timeout=120
@@ -2393,23 +2419,76 @@ class ChatSandboxManager:
             facts.note("start")
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be started: " + result.stderr.strip()[:300])
-        started = self._require(spec)
-        if started.container_id != exact_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during start")
-        if not started.running or started.status is not ChatSandboxStatus.RUNNING:
-            raise SandboxError(
-                f"chat sandbox started into unexpected state {started.status.value!r}"
-            )
-        with substage(observer, "guest_network_sync"):
-            self._sync_kata_guest_network(spec, started)
-        with substage(observer, "guest_network_check"):
-            self._verify_guest_network(
-                spec,
-                expected_container_id=exact_container_id,
-                defer_network_release=defer_network_release_on_fail_stop,
-            )
+        return self._prove_started_guest(
+            spec,
+            exact_container_id,
+            observer=observer,
+            defer_network_release=defer_network_release_on_fail_stop,
+        )
+
+    def _prove_started_guest(
+        self,
+        spec: ChatSandboxSpec,
+        container_id: str,
+        *,
+        observer: StageObserver | None,
+        defer_network_release: bool,
+        addresses: dict[str, str] | None = None,
+    ) -> ChatSandboxInspection:
+        """Sync and prove a guest Docker has started, or stop it trying.
+
+        Any failure on the way -- a relay rollout, a guest helper timing out,
+        the check itself not answering -- stops the exact container, keeping
+        its bridge when ``defer_network_release``, and raises
+        :class:`RetainedChatFailStopped`, as a failed check does. If the stop
+        fails too, the original error is raised and the guest stays recorded
+        as unproven, so :meth:`start` proves it before any reuse.
+        """
+        try:
+            started = self._require(spec)
+            if started.container_id != container_id:
+                raise RetainedChatLost("chat sandbox container identity changed during start")
+            if not started.running or started.status is not ChatSandboxStatus.RUNNING:
+                raise SandboxError(
+                    f"chat sandbox started into unexpected state {started.status.value!r}"
+                )
+            with substage(observer, "guest_network_sync"):
+                self._sync_kata_guest_network(spec, started, addresses)
+            with substage(observer, "guest_network_check"):
+                self._verify_guest_network(
+                    spec,
+                    expected_container_id=container_id,
+                    defer_network_release=defer_network_release,
+                )
+        except RetainedChatFailStopped:
+            raise
+        except Exception as exc:
+            stopped: ChatSandboxInspection | None = None
+            try:
+                stopped = self.stop(
+                    spec,
+                    expected_container_id=container_id,
+                    release_networks=not defer_network_release,
+                )
+            except Exception as stop_exc:
+                logger.warning(
+                    "chat_unproven_guest_left_running",
+                    extra={
+                        "sandbox_id": spec.sandbox_id,
+                        "detail": str(exc)[:300],
+                        "stop_detail": str(stop_exc)[:300],
+                    },
+                )
+            if stopped is None:
+                raise
+            raise RetainedChatFailStopped(
+                f"chat sandbox stopped before its network check passed: {exc}",
+                stopped,
+            ) from exc
+        with self._unproven_guests_lock:
+            self._unproven_guests.discard(container_id)
         verified = self._require(spec)
-        if verified.container_id != exact_container_id:
+        if verified.container_id != container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
         return verified
 
@@ -2493,6 +2572,8 @@ class ChatSandboxManager:
         turn's commands once its last proof is a minute old, so it is cheap: the
         guard's last verification is reused for a minute, and the relays and
         their host exceptions are reconciled against what Docker reports now.
+        A guest whose in-guest check never passed is refused until
+        :meth:`start` proves it.
         """
         snapshot = _GroupNetworkSnapshot()
         with substage(observer, "network_ensure"):
@@ -2502,6 +2583,13 @@ class ChatSandboxManager:
             raise SandboxError(
                 f"retained chat network is {list(current.networks)!r}, not its group "
                 f"bridge {expected!r}"
+            )
+        with self._unproven_guests_lock:
+            unproven = current.container_id in self._unproven_guests
+        if unproven:
+            raise SandboxError(
+                "retained chat started without passing its network check; it must be "
+                "activated again before anything runs in it"
             )
         with substage(observer, "guest_network_sync"):
             self._sync_kata_guest_network(spec, current, snapshot.addresses)
