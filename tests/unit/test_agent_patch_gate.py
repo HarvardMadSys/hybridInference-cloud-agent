@@ -182,6 +182,13 @@ def test_staged_blob_scanner_uses_project_key_patterns(secret, pattern_name):
     assert scan_blob_secrets(b"\x00" + secret + b"\xff") == [pattern_name]
 
 
+@pytest.mark.parametrize("separator", [b"_", b"-"])
+def test_staged_blob_scanner_detects_url_safe_openai_project_key_characters(separator):
+    secret = b"sk-proj-" + b"a" * 20 + separator + b"b" * 20
+
+    assert scan_blob_secrets(secret) == ["openai_project_key"]
+
+
 def test_size_limit_is_enforced():
     """An oversized patch is refused rather than pushed."""
     big = _CLEAN_PATCH + ("+" + "x" * 200 + "\n") * 100

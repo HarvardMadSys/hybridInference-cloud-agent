@@ -124,7 +124,7 @@ def _published_blob(clone_url: str, branch: str, path: str = "asset.bin") -> byt
 @pytest.mark.parametrize(
     ("pattern_name", "token"),
     [
-        ("openai_project_key", "sk-proj-" + "c" * 40),
+        ("openai_project_key", "sk-proj-" + "c" * 20 + "_" + "c" * 20),
         ("openrouter_key", "sk-or-v1-" + "d" * 32),
     ],
 )
