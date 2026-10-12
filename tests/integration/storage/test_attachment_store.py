@@ -20,6 +20,7 @@ from cloud_agent.attachments.models import (
     AttachmentLeaseLost,
 )
 from cloud_agent.attachments.selection import resolve_attachments
+from cloud_agent_shared.git.source_archive import build_upload_archive
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -132,6 +133,88 @@ async def test_a_follow_ups_uploads_join_the_same_conversation(store):
     )
     rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
     assert [row["path"] for row in rows] == ["one.md", "two.md"]
+
+
+async def manifest(store, *uploads):
+    """The manifest a submission naming ``uploads`` resolves to."""
+    return await resolve_attachments(
+        store.attachments, user_id="user-1", attachment_ids=[upload["id"] for upload in uploads]
+    )
+
+
+async def attach(store, job, *uploads):
+    """A follow-up in ``job``'s conversation that attaches ``uploads``."""
+    return await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"],
+        user_id="user-1",
+        prompt="and now these",
+        attachments=await manifest(store, *uploads),
+    )
+
+
+async def test_a_file_attached_again_replaces_the_earlier_one_in_the_sandbox(store):
+    """An edited ``report.csv`` sent again: the host gets one file, the newer one.
+
+    The host rebuilds ``/uploads`` from exactly the worker listing and refuses
+    an archive that names a path twice, so listing both failed that turn's
+    import, and every later turn on a fresh container failed the same way.
+    """
+    first = await stage(store, "report.csv", content=b"v1")
+    job = await _create_job(store, attachments=await manifest(store, first))
+    second = await stage(store, "report.csv", content=b"v2")
+    assert await attach(store, job, second) is not None
+
+    rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
+    assert [(row["id"], row["path"]) for row in rows] == [(second["id"], "report.csv")]
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    files = []
+    for row in await store.attachments.list_worker_attachments(**fence):
+        found = await store.attachments.read_worker_attachment(**fence, attachment_id=row["id"])
+        assert found is not None
+        files.append(found[:2])
+    assert files == [("report.csv", b"v2")]
+    build_upload_archive(files)
+
+
+async def test_the_turn_that_attached_a_file_last_wins_not_the_newest_upload(store):
+    """A file staged early can still be the one the newest turn attaches."""
+    attached_last = await stage(store, "report.csv", content=b"attached by turn two")
+    attached_first = await stage(store, "report.csv", content=b"attached by turn one")
+    job = await _create_job(store, attachments=await manifest(store, attached_first))
+    await attach(store, job, attached_last)
+
+    rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
+    assert [row["id"] for row in rows] == [attached_last["id"]]
+
+
+@pytest.mark.parametrize(("earlier", "later"), [("docs", "docs/a.md"), ("docs/a.md", "docs")])
+async def test_a_later_turn_cannot_turn_a_file_into_a_folder_or_back(store, pool, earlier, later):
+    """A retained sandbox cannot swap one for the other, so the turn is refused.
+
+    Refused by the claim, inside the transaction that would create the turn:
+    no turn is written, and the upload stays staged for the owner to rename.
+    """
+    first = await stage(store, earlier)
+    job = await _create_job(store, attachments=await manifest(store, first))
+    second = await stage(store, later)
+    with pytest.raises(AttachmentError, match="docs cannot be both a file and a folder"):
+        await attach(store, job, second)
+
+    async with pool.acquire() as conn:
+        turns = await conn.fetchval(
+            "SELECT count(*) FROM agent_jobs WHERE thread_id = $1", job["thread_id"]
+        )
+    assert turns == 1
+    staged = await store.attachments.select_attachments(
+        user_id="user-1", attachment_ids=[second["id"]]
+    )
+    assert [row["id"] for row in staged] == [second["id"]]
 
 
 async def test_deleting_the_conversation_takes_its_uploads_with_it(store, pool):

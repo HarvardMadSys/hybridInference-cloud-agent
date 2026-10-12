@@ -4,7 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from cloud_agent.attachments.models import AttachmentError
+from cloud_agent.attachments.models import AttachmentError, check_paths, current_uploads
+
+#: A conversation's uploads in the order its turns attached them, without the
+#: bytes: the order :func:`current_uploads` reads as "later replaces earlier".
+#: Upload ids alone are not that order — a file staged long ago can be attached
+#: by the newest turn.
+THREAD_UPLOADS_SQL = """
+    SELECT u.id, u.user_id, u.job_id, u.thread_id, u.path, u.content_type,
+           octet_length(u.content) AS size_bytes, u.created_at
+    FROM agent_job_attachments u
+    JOIN agent_jobs turn ON turn.id = u.job_id
+    WHERE u.thread_id = $1
+    ORDER BY turn.turn_no, u.id
+"""
 
 
 async def claim_attachments(
@@ -28,6 +41,11 @@ async def claim_attachments(
     it becomes (``pending_message_id``) may claim it, the same rule pinning
     applies. Anything else — a new task, an idle-only turn — would leave the
     message naming a file its own turn can no longer have.
+
+    The host rebuilds ``/uploads`` from the whole conversation, so the paths
+    are checked against it here, under the lock that orders the conversation's
+    turns: a path an earlier turn attached is replaced, but one that would be a
+    file and a folder at once is refused (see :func:`check_paths`).
     """
     ids = [int(item["id"]) for item in attachments or []]
     if not ids:
@@ -51,3 +69,12 @@ async def claim_attachments(
     )
     if int(claimed or 0) != len(ids):
         raise AttachmentError("One or more uploads are no longer available. Attach them again.")
+    thread = [dict(row) for row in await conn.fetch(THREAD_UPLOADS_SQL, thread_id)]
+    adding = set(ids)
+    check_paths(
+        [str(row["path"]) for row in thread if row["id"] in adding],
+        held=[
+            str(row["path"])
+            for row in current_uploads([row for row in thread if row["id"] not in adding])
+        ],
+    )

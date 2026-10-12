@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.settings import integer_setting
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 #: Deliberately small. Bytes live in the control plane's own database rather
 #: than an object store this service does not have, so the ceiling is what
@@ -104,3 +108,65 @@ def safe_attachment_path(path: str) -> str:
         if not part or part in {".", ".."} or part.casefold() == ".git" or "\x00" in part:
             raise AttachmentError(f"Unusable upload path: {path!r}")
     return cleaned
+
+
+def _folders(path: str) -> list[str]:
+    """The folders a path sits in under ``/uploads``, outermost first."""
+    parts = path.split("/")
+    return ["/".join(parts[:depth]) for depth in range(1, len(parts))]
+
+
+def check_paths(paths: list[str], *, held: Iterable[str] = ()) -> None:
+    """Refuse a turn's paths when ``/uploads`` cannot hold them all at once.
+
+    A turn names each path once, and no path may be both a file and a folder:
+    not within the turn, and not against what the conversation's ``/uploads``
+    already ``held``. A path already held is fine on its own — the newer upload
+    replaces the older, as saving a file under an existing name does. A file
+    cannot replace a folder, nor a folder a file, in a retained sandbox (the
+    import refuses to), so that is refused here, before the turn exists.
+    """
+    adding: set[str] = set()
+    for path in paths:
+        if path in adding:
+            raise AttachmentError(f"Two attached files have the same path: {path}")
+        adding.add(path)
+    files = adding | set(held)
+    folders = {folder for path in files for folder in _folders(path)}
+    for path in paths:
+        clash = (
+            path
+            if path in folders
+            else next((folder for folder in _folders(path) if folder in files), None)
+        )
+        if clash is not None:
+            raise AttachmentError(
+                f"{clash} cannot be both a file and a folder under {SANDBOX_UPLOAD_DIR}."
+            )
+
+
+def current_uploads(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What a conversation's ``/uploads`` holds: the newest upload at each path.
+
+    ``rows`` are the conversation's uploads in the order its turns attached
+    them. A later upload at a path replaces an earlier one there, exactly as
+    the import into a retained sandbox overwrites it. A conversation from
+    before file/folder clashes were refused can also hold a later upload that
+    needs an earlier file's path as a folder, or the reverse; the later one
+    replaces the earlier there too, as it would on disk. What is left never
+    names a path twice or as both a file and a folder, which is what the
+    host's upload archive requires. Returned in the order given.
+    """
+    later_files: set[str] = set()
+    later_folders: set[str] = set()
+    kept: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        path = str(row["path"])
+        above = _folders(path)
+        if path not in later_files and path not in later_folders and later_files.isdisjoint(above):
+            kept.append(row)
+        # Replaced or not, it was written after everything older than it.
+        later_files.add(path)
+        later_folders.update(above)
+    kept.reverse()
+    return kept

@@ -11,7 +11,9 @@ from cloud_agent.attachments.models import (
     attachment_max_files,
     attachment_max_total_bytes,
     attachment_size_label,
+    current_uploads,
 )
+from cloud_agent.storage._sql.attachments import THREAD_UPLOADS_SQL
 
 if TYPE_CHECKING:
     import asyncpg
@@ -143,13 +145,10 @@ class PostgresAttachmentRepository:
         return int(total or 0)
 
     async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Every upload in a conversation, so a fresh sandbox can be rebuilt."""
+        """What a conversation's ``/uploads`` holds: the newest upload at each path."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT {_META} FROM agent_job_attachments WHERE thread_id = $1 ORDER BY id",
-                thread_id,
-            )
-        return [dict(row) for row in rows]
+            rows = await conn.fetch(THREAD_UPLOADS_SQL, thread_id)
+        return current_uploads([dict(row) for row in rows])
 
     async def read_attachment_content(
         self, *, thread_id: str, attachment_id: int
@@ -171,21 +170,25 @@ class PostgresAttachmentRepository:
 
         Raise ``AttachmentLeaseLost`` if the fence is no longer authorized.
         Authorization and the upload read must share one database snapshot.
+        The host builds ``/uploads`` from exactly this list, so it is what that
+        directory holds — the newest upload at each path — and never two
+        uploads at one path, which its archive refuses.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT u.id, u.user_id, u.job_id, u.thread_id, u.path, u.content_type, "
                 "octet_length(u.content) AS size_bytes, u.created_at "
                 + _WORKER_FENCE
+                + " LEFT JOIN agent_jobs turn ON turn.id = u.job_id "
                 + _WORKER_AUTHORIZATION
-                + " ORDER BY u.id",
+                + " ORDER BY turn.turn_no, u.id",
                 job_id,
                 attempt_id,
                 lease_generation,
             )
         if not rows:
             raise AttachmentLeaseLost
-        return [dict(row) for row in rows if row["id"] is not None]
+        return current_uploads([dict(row) for row in rows if row["id"] is not None])
 
     async def read_worker_attachment(
         self, *, job_id: str, attempt_id: int, lease_generation: int, attachment_id: int

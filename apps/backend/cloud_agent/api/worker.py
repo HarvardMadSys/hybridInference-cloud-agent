@@ -977,11 +977,12 @@ async def worker_list_attachments(
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
 ) -> WorkerAttachmentListResponse:
-    """List every upload in this conversation, so /uploads can be rebuilt.
+    """List what this conversation's /uploads holds, so it can be rebuilt.
 
     Scoped to the thread rather than the claimed turn: a retry on a fresh
     container has to restore all of them, and re-importing into a retained one
-    simply overwrites the same paths.
+    simply overwrites the same paths. A file attached again by a later turn is
+    listed once, as its newest upload.
     """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)

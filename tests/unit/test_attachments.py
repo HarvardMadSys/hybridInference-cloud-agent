@@ -12,6 +12,8 @@ from cloud_agent.attachments.models import (
     MAX_ATTACHMENT_FILES,
     SANDBOX_UPLOAD_DIR,
     AttachmentError,
+    check_paths,
+    current_uploads,
     safe_attachment_path,
 )
 from cloud_agent.attachments.selection import (
@@ -111,6 +113,63 @@ async def test_the_same_upload_cannot_be_attached_twice() -> None:
     store = _Store([_row(1, "a.txt")])
     with pytest.raises(AttachmentError):
         await resolve_attachments(store, user_id="u", attachment_ids=[1, 1])
+
+
+async def test_one_turn_cannot_attach_two_files_at_the_same_path() -> None:
+    """Two picks named ``report.csv``: one would silently replace the other."""
+    store = _Store([_row(1, "report.csv"), _row(2, "report.csv")])
+    with pytest.raises(AttachmentError, match=r"same path: report\.csv"):
+        await resolve_attachments(store, user_id="u", attachment_ids=[1, 2])
+
+
+@pytest.mark.parametrize("paths", [["docs", "docs/a.md"], ["docs/a.md", "docs"]])
+async def test_one_turn_cannot_make_a_path_both_a_file_and_a_folder(paths: list[str]) -> None:
+    """``/uploads/docs`` can be a file or a folder, never both."""
+    store = _Store([_row(index, path) for index, path in enumerate(paths, start=1)])
+    with pytest.raises(AttachmentError, match="docs cannot be both a file and a folder"):
+        await resolve_attachments(store, user_id="u", attachment_ids=[1, 2])
+
+
+def test_a_later_turn_replaces_a_held_path_but_cannot_change_its_kind() -> None:
+    """Saving over a file is ordinary; turning it into a folder is not.
+
+    A retained sandbox already holds the earlier turns' files, and its import
+    overwrites a file with a file but will not swap a file for a folder.
+    """
+    check_paths(["report.csv"], held=["report.csv", "notes.md"])
+    check_paths(["docs/b.md"], held=["docs/a.md"])
+    with pytest.raises(AttachmentError, match="docs cannot be both"):
+        check_paths(["docs/a.md"], held=["docs"])
+    with pytest.raises(AttachmentError, match="docs cannot be both"):
+        check_paths(["docs"], held=["docs/a.md"])
+
+
+def test_the_sandbox_holds_the_newest_upload_at_each_path() -> None:
+    """What the host imports: one member per path, the one attached last."""
+    rows = [_row(1, "report.csv"), _row(2, "notes.md"), _row(3, "report.csv")]
+    assert [row["id"] for row in current_uploads(rows)] == [2, 3]
+    # The archive the host builds refuses a repeated path; this list never has one.
+    build_upload_archive([(row["path"], b"x") for row in current_uploads(rows)])
+
+
+@pytest.mark.parametrize(
+    ("paths", "kept"),
+    [
+        (["docs", "docs/a.md"], [2]),
+        (["docs/a.md", "docs/b.md", "docs"], [3]),
+        # The file ``docs`` removed ``docs/a.md`` before ``docs/b.md`` replaced it.
+        (["docs/a.md", "docs", "docs/b.md"], [3]),
+        (["docs/a.md", "docs/b.md"], [1, 2]),
+    ],
+)
+def test_an_older_file_and_folder_clash_keeps_whatever_came_later(
+    paths: list[str], kept: list[int]
+) -> None:
+    """Conversations from before the clash was refused still rebuild cleanly."""
+    rows = [_row(index, path) for index, path in enumerate(paths, start=1)]
+    current = current_uploads(rows)
+    assert [row["id"] for row in current] == kept
+    build_upload_archive([(row["path"], b"x") for row in current])
 
 
 def test_the_server_bounds_the_selection_as_well_as_the_browser() -> None:

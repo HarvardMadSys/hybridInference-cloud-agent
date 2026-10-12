@@ -28544,7 +28544,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/attachments": {
       "get": {
-        "description": "List every upload in this conversation, so /uploads can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths.",
+        "description": "List what this conversation's /uploads holds, so it can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths. A file attached again by a later turn is\nlisted once, as its newest upload.",
         "operationId": "worker_list_attachments_v1_agent_worker_jobs__job_id__attachments_get",
         "parameters": [
           {

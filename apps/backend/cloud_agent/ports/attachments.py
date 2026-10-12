@@ -35,7 +35,7 @@ class AttachmentRepository(Protocol):
         ...
 
     async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Every upload in a conversation, so a fresh sandbox can be rebuilt."""
+        """What a conversation's ``/uploads`` holds: the newest upload at each path."""
         ...
 
     async def read_attachment_content(
@@ -51,6 +51,9 @@ class AttachmentRepository(Protocol):
 
         Raise ``AttachmentLeaseLost`` if the fence is no longer authorized.
         Authorization and the upload read must share one database snapshot.
+        The host builds ``/uploads`` from exactly this list, so it is what that
+        directory holds — the newest upload at each path — and never two
+        uploads at one path, which its archive refuses.
         """
         ...
 

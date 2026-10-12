@@ -1846,6 +1846,74 @@ async def test_a_waiting_message_carries_its_uploads_into_its_turn(api: Api):
     }
 
 
+async def _stage(api: Api, path: str, content: bytes = b"x") -> dict[str, Any]:
+    return await api.store.attachments.create_attachment(
+        user_id=_OWNER, path=path, content=content, content_type="text/plain"
+    )
+
+
+async def test_a_message_attaching_a_file_again_is_sent_and_replaces_it(api: Api):
+    """An edited file under the same name is an ordinary follow-up, not a stuck turn."""
+    first = await _stage(api, "report.csv", b"v1")
+    job = await api.create(attachment_ids=[first["id"]])
+    thread_id = job["thread_id"]
+    running = await api.start(job)
+    second = await _stage(api, "report.csv", b"v2")
+    sent = await api.send(thread_id, "use the new report", attachment_ids=[second["id"]])
+    assert sent.status_code == 201, sent.text
+
+    await api.finish(running)
+
+    turns = await api.turns(thread_id)
+    assert [turn["task_prompt"] for turn in turns] == ["fix it", "use the new report"]
+    rows = await api.store.attachments.list_thread_attachments(thread_id=thread_id)
+    assert [row["id"] for row in rows] == [second["id"]]
+
+
+async def test_a_message_that_would_turn_a_file_into_a_folder_is_held_with_the_reason(api: Api):
+    """Refused by the claim under the thread's lock; the owner can rename and resend."""
+    first = await _stage(api, "docs")
+    job = await api.create(attachment_ids=[first["id"]])
+    thread_id = job["thread_id"]
+    running = await api.start(job)
+    later = await _stage(api, "docs/a.md")
+    sent = await api.send(thread_id, "read docs/a.md", attachment_ids=[later["id"]])
+    assert sent.status_code == 201, sent.text
+
+    await api.finish(running)
+
+    queue = await api.queue(thread_id)
+    assert [(row["state"], row["last_error"]) for row in queue["messages"]] == [
+        ("held", "docs cannot be both a file and a folder under /uploads.")
+    ]
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
+
+
+async def test_an_idle_only_message_says_why_its_upload_was_refused(api: Api):
+    """Its turn is created in the request, so the claim's own reason is the answer."""
+    first = await _stage(api, "docs")
+    job = await api.create(attachment_ids=[first["id"]])
+    thread_id = job["thread_id"]
+    await api.run(job)
+    await _publish_workspace(api, thread_id)
+    later = await _stage(api, "docs/a.md")
+
+    refused = await api.send(
+        thread_id,
+        "read docs/a.md",
+        attachment_ids=[later["id"]],
+        require_idle=True,
+        expected_latest_job_id=job["id"],
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"]["error"] == {
+        "type": "invalid_attachment_selection",
+        "message": "docs cannot be both a file and a folder under /uploads.",
+    }
+    assert len(await api.turns(thread_id)) == 1
+
+
 # -- 10.1: each message keeps its own model and effort -----------------------------
 
 

@@ -175,7 +175,8 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
             detail={
                 "error": {
                     "type": "invalid_attachment_selection",
-                    "message": "One or more uploads are no longer available. Attach them again.",
+                    "message": result.get("message")
+                    or "One or more uploads are no longer available. Attach them again.",
                 }
             },
         )
