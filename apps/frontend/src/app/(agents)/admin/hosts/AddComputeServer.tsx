@@ -441,7 +441,14 @@ export default function AddComputeServer({
         )}
         {!observeOnly && provider && (!cloud || needsSshKey || accessFields.length > 0) && (
           <Section title="SSH access">
-            <div className={accessFields.length === 2 ? 'grid gap-4 sm:grid-cols-2' : 'space-y-4'}>
+            <div
+              className={
+                accessFields.length === 2 &&
+                accessFields.every((field) => field.type !== 'textarea' && field.type !== 'json')
+                  ? 'grid gap-4 sm:grid-cols-2'
+                  : 'space-y-4'
+              }
+            >
               <ProviderFields
                 fields={accessFields}
                 values={values}

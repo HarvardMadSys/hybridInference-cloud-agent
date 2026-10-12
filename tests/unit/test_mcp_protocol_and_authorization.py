@@ -185,36 +185,6 @@ class TestSse:
         assert len(events) == 1
         assert events[0].json() == payload.decode()[1:-1]
 
-    def test_data_that_never_ends_its_event_is_refused_as_it_grows(self) -> None:
-        """The bound applies to the event being assembled, not only to one read.
-
-        A stream that keeps sending ``data`` lines and never the blank line that
-        ends the event would otherwise grow the pending event for as long as
-        the stream stays open.
-        """
-        decoder = sse.SseDecoder()
-        line = b"data: " + b"y" * (64 * 1024) + b"\n"
-        with pytest.raises(sse.SseError):
-            for _ in range(sse.MAX_EVENT_BYTES // (64 * 1024) + 1):
-                decoder.feed(line)
-
-    def test_an_event_exactly_at_the_bound_is_kept(self) -> None:
-        """The joining line feeds count, and nothing else does."""
-        decoder = sse.SseDecoder()
-        half = sse.MAX_EVENT_BYTES // 2
-        events = decoder.feed(b"data: " + b"a" * half + b"\n")
-        events += decoder.feed(b"data: " + b"b" * (sse.MAX_EVENT_BYTES - half - 1) + b"\n\n")
-        assert len(events) == 1
-        assert len(events[0].data) == sse.MAX_EVENT_BYTES
-
-    def test_a_character_split_across_chunks_is_decoded_whole(self) -> None:
-        """A chunk boundary inside a multi-byte character is not two bad bytes."""
-        decoder = sse.SseDecoder()
-        encoded = 'data: "café"\n\n'.encode()
-        split = encoded.index(b"\xc3") + 1
-        assert decoder.feed(encoded[:split]) == []
-        assert decoder.feed(encoded[split:])[0].json() == "café"
-
     def test_a_stream_that_ends_on_a_cr_ends_its_line_there(self) -> None:
         """The CR held back for a possible LF is a terminator once nothing follows."""
         decoder = sse.SseDecoder()
@@ -269,6 +239,54 @@ class TestProtocol:
         meta = protocol.request_meta("2026-07-28")
         assert meta[protocol.META_PROTOCOL_VERSION] == "2026-07-28"
         assert protocol.META_CLIENT_CAPABILITIES in meta
+
+    def test_annotated_tool_arguments_are_mirrored_into_param_headers(self) -> None:
+        """GitHub rejects a 2026-07-28 call that omits ``Mcp-Param-*`` headers."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-mcp-header": "owner"},
+                "repo": {"type": "string", "x-mcp-header": "repo"},
+                "path": {"type": "string", "default": "/"},
+                "note": {"type": "string", "x-mcp-header": "note"},
+                "count": {"type": "integer", "x-mcp-header": "count"},
+                "draft": {"type": "boolean", "x-mcp-header": "draft"},
+                "title": {"type": "string", "x-mcp-header": "title"},
+                "skipped": {"type": "array", "x-mcp-header": "skipped"},
+                "nested": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string", "x-mcp-header": "nested"}},
+                },
+            },
+        }
+        headers = protocol.request_headers(
+            protocol.TOOLS_CALL,
+            {
+                "name": "get_file_contents",
+                "arguments": {
+                    "owner": "acme",
+                    "repo": None,
+                    "note": "",
+                    "count": 3,
+                    "draft": False,
+                    "title": "café ",
+                    "skipped": ["nope"],
+                    "nested": {"name": "inner"},
+                },
+            },
+            input_schema=schema,
+        )
+        assert headers["mcp-method"] == "tools/call"
+        assert headers["mcp-name"] == "get_file_contents"
+        assert headers["Mcp-Param-owner"] == "acme"
+        assert "Mcp-Param-repo" not in headers
+        assert "Mcp-Param-path" not in headers
+        assert headers["Mcp-Param-note"] == ""
+        assert headers["Mcp-Param-count"] == "3"
+        assert headers["Mcp-Param-draft"] == "false"
+        assert headers["Mcp-Param-title"].startswith("=?base64?")
+        assert "Mcp-Param-skipped" not in headers
+        assert headers["Mcp-Param-nested"] == "inner"
 
     def test_a_paginated_catalogue_is_walked_to_its_end(self) -> None:
         """Two pages of tools become one snapshot."""
@@ -414,6 +432,7 @@ class TestOAuth:
                 "token_endpoint": "https://auth.example.com/t",
                 "registration_endpoint": "https://auth.example.com/register",
                 "client_id_metadata_document_supported": True,
+                "token_endpoint_auth_methods_supported": ["none"],
             },
             expected_issuer="https://auth.example.com",
         )

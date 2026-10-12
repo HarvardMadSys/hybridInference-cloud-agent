@@ -37,10 +37,14 @@ SSH_PORT="${TUNNEL_SSH_PORT:-22}"
 # control plane's machine cannot resolve or reach it at all. So the reverse
 # forward rides the connection that already goes the other way.
 #
-# Binding a non-loopback address on the far host needs `GatewayPorts yes` or
-# `clientspecified` in its sshd. Bind the far host's *docker bridge gateway*
-# rather than 0.0.0.0: the audience is containers on that bridge, and 0.0.0.0
-# would publish the broker to the whole LAN behind one shared token.
+# Binding a non-loopback address on the far host needs `GatewayPorts
+# clientspecified` for this key's account in its sshd, with that account's
+# PermitListen and the key's permitlisten naming this one address and port
+# (deploy/host/sshd-tunnels.conf.example). Never `yes`: that silently moves
+# every remote forward to the wildcard address. Bind the far host's *docker
+# bridge gateway* rather than 0.0.0.0: the audience is containers on that
+# bridge, and 0.0.0.0 would publish the broker to the whole LAN behind one
+# shared token.
 #
 # The far-side pair is what turns it on, because that is the deployment-
 # specific half; the target defaults to this stack's own broker.
@@ -87,9 +91,11 @@ printf '[agent-gateway-tunnel] %s -> %s:%s via %s\n' \
 # ExitOnForwardFailure: without it ssh stays up having bound nothing, and every
 # sandbox gets connection-refused against a container that looks healthy.
 # Dying instead lets the restart policy be the supervisor. It covers the
-# reverse forward too, so a far host whose sshd refuses the non-loopback bind
-# (no GatewayPorts) fails visibly here instead of leaving the control plane
-# with an address nothing answers on.
+# reverse forward too, so a far host whose sshd refuses the bind (a port in
+# use, or one PermitListen/permitlisten does not allow) fails visibly here
+# instead of leaving the control plane with an address nothing answers on. It
+# cannot see a wrong GatewayPorts: sshd then binds loopback or the wildcard
+# address instead and reports success.
 set -- -N \
     -i /tmp/tunnel-key \
     -p "$SSH_PORT" \

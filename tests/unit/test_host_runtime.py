@@ -163,7 +163,7 @@ def test_a_finished_turn_gives_its_slot_back(pool) -> None:
 
 
 def test_a_shutting_down_host_claims_nothing_more(pool) -> None:
-    """Shutdown stops claiming first; the turn in flight is still waited for."""
+    """Shutdown stops claiming first and waits without signalling the turn."""
     turns, _scripted, _launched, _clock = pool
     turns.launch(_job())
     handle = turns.turns()[0].handle
@@ -174,7 +174,7 @@ def test_a_shutting_down_host_claims_nothing_more(pool) -> None:
 
     turns.shutdown(wait=wait)
 
-    assert handle.terminated and not handle.killed
+    assert not handle.terminated and not handle.killed
     assert turns.may_claim(10) is False
 
 
@@ -272,10 +272,28 @@ def test_shutdown_lets_every_turn_finish(pool) -> None:
 
     finished = turns.shutdown(wait=wait)
 
-    assert all(handle.terminated for handle in handles)
+    assert not any(handle.terminated for handle in handles)
     assert not any(handle.killed for handle in handles)
     assert len(finished) == 3
     assert turns.running() == 0
+
+
+def test_graceful_shutdown_never_signals_an_uncertain_handover(pool) -> None:
+    """Silence is not permission to kill a child that may already own the turn."""
+    turns, scripted, _launched, _clock = pool
+    handle = FakeHandle()
+    scripted.append(LaunchResult(LAUNCH_UNCERTAIN, handle, "no answer yet"))
+    turns.launch(_job())
+
+    def wait(_seconds: float) -> None:
+        assert not handle.terminated
+        assert not handle.killed
+        handle.exit_code = 0
+
+    finished = turns.shutdown(wait=wait)
+
+    assert [turn.exit_code for turn in finished] == [0]
+    assert not handle.terminated and not handle.killed
 
 
 def test_an_immediate_shutdown_kills(pool) -> None:
@@ -315,8 +333,8 @@ def test_an_answer_is_read_back_whole() -> None:
     assert read_handover(read_fd) == f"{HANDOVER_ACCEPTED} ajob_1"
 
 
-def test_a_closed_descriptor_with_no_answer_reads_as_nothing_happened() -> None:
-    """Which is what a child exiting does, and how "it never began" arrives."""
+def test_a_closed_descriptor_is_eof_not_acceptance() -> None:
+    """The parser reports EOF; its ownership caller must treat that as ambiguous."""
     read_fd, write_fd = os.pipe()
     os.close(write_fd)
 

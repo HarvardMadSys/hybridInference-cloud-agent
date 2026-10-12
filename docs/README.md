@@ -1,8 +1,9 @@
 # Documentation
 
-Start with the [project README](../README.md) for a product overview and local
-quickstart. This index groups the maintained guides by task. Commands in linked
-guides run from the repository root unless the guide says otherwise.
+Use this index to find the maintained guide for your task. If you are new to
+Cloud Agent, start with the [project README](../README.md) for a product overview
+and local quickstart. Run commands from the repository root unless a guide says
+otherwise.
 
 ## Develop and test
 
@@ -19,14 +20,17 @@ guides run from the repository root unless the guide says otherwise.
 
 | Guide | Use it to |
 |---|---|
-| [Environment inventory](../ENVIRONMENT.md) | Find configuration names, defaults, ownership, and provisioning requirements |
-| [Admin Settings](operations.md#admin-settings) | Manage saved application settings, integrations, appearance and runtime limits; initialize settings and preserve encryption keys |
+| [Environment inventory](../ENVIRONMENT.md) | Look up configuration names, defaults, owning components, and provisioning requirements |
+| [Admin Settings](operations.md#admin-settings) | Manage saved settings, integrations, appearance, and runtime limits; initialize settings and preserve encryption keys |
 | [Operations runbook](operations.md) | Configure credentials, enroll hosts, qualify Kata, deploy, migrate databases, and manage storage and networking |
 | [Release guide](../deploy/release/README.md) | Build immutable release artifacts and deploy their recipes in the required order |
 | [Compute resources](operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |
 | [Deployment reliability](deployment-reliability.md) | Drain runners safely, check schema compatibility, and detect stalled queues |
+| [Backup and recovery](disaster-recovery.md) | Define retention and recovery targets, preserve keys and coherent host state, and recover a previous artifact release |
 | [Automatic PR archiving](automatic-pr-archiving.md) | Configure merge detection, understand session mapping, and verify or recover automatic archival |
 | [Runner lease troubleshooting](runner-lease-troubleshooting.md) | Diagnose expired attempts and repeated lease failures |
+| [Host runtime settings](runtime-settings.md) | Configure host defaults, server overrides, and the storage reserve |
+| [Host execution limits](host-execution-limits.md) | Understand command cleanup, output bounds, checkpoints, and storage admission |
 | [Single-host smoke](smoke.md) | Verify a deployment against a gateway and review the original smoke evidence |
 | [Security](../SECURITY.md) | Review deployment trust assumptions and report vulnerabilities privately |
 
@@ -37,6 +41,7 @@ guides run from the repository root unless the guide says otherwise.
 | [Agent admission policy](agent-access-policy.md) | Understand permissions, gateway checks, refusals, and compatible rollout |
 | [Minimal Agent identity](minimal-identity.md) | Configure the gateway issuer and safely bind an existing database to it |
 | [Native conversation recall](context-recall.md) | Understand retained sessions, runtime-specific behavior, and recall verification |
+| [Avatars and personal memory](user-memory.md) | View automatic avatars, manage saved preferences, and improve future requests |
 | [Native agent questions](operations.md#native-agent-questions) | Answer a waiting agent request and understand reload, skip, and stale-answer handling |
 | [Tool approvals](mcp-approvals.md) | Review pending calls across conversations and browse older request history |
 | [Conversation navigation](conversation-navigation.md) | Understand the turn rail, previews, jumps, and reading position |
@@ -68,8 +73,8 @@ evidence behind them.
 
 ## Keep documentation current
 
-Update a maintained guide in the same change that alters its behavior,
-configuration, or commands. Verify examples against the owning script or source,
-keep relative links and section anchors working, and distinguish a proposed
-design from implemented behavior. Preserve dated design and acceptance records
-as evidence of their original baseline.
+When a change affects behavior, configuration, or commands, update the maintained
+guide in the same change. Check examples against the owning script or source,
+keep relative links and section anchors working, and distinguish proposed designs
+from implemented behavior. Preserve dated design and acceptance records as
+evidence of their original baseline.

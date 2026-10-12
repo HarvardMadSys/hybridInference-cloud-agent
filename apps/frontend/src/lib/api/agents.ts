@@ -649,6 +649,8 @@ export interface AgentConfigApi {
   mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
+  /** Runtimes that install task-selected plugins when a sandbox is initialized. */
+  plugin_runtimes?: string[];
   /**
    * Effort levels each runtime can express, in its own vocabulary. A runtime
    * absent here cannot express one at all.
@@ -855,7 +857,16 @@ export interface McpBindingInputApi {
   prompts?: Record<string, 'deny' | 'confirm' | 'allow'>;
 }
 
+export interface AgentPluginInputApi {
+  /** Native name@marketplace (Claude/Codex), or an npm package (pi/OpenCode/Kilo). */
+  plugin: string;
+  /** GitHub owner/repo or a credential-free HTTPS Git URL for native plugins. */
+  marketplace?: string;
+}
+
 export interface CreateAgentJobRequest {
+  /** Installed before the first agent turn in this conversation's sandbox. */
+  plugins?: AgentPluginInputApi[];
   /** Omitted uses personal defaults; an empty list selects none. */
   skill_ids?: number[];
   /** Staged uploads to place under /uploads. Omitted attaches nothing. */

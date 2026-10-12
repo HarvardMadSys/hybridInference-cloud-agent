@@ -17,27 +17,26 @@ history.
 
 ## Licence and provenance
 
-This repository is **MIT**, carrying the source repository's licence text and its
+This repository uses the source repository's **MIT** licence and keeps its
 copyright line — `Copyright (c) 2026 Harvard SEAS` — unchanged.
 
-It was briefly created as Apache-2.0. That was wrong twice over. Apache-2.0 can
-*contain* MIT code, but only while retaining the MIT notice, which a bare licence
-swap drops. More importantly the copyright holder is Harvard SEAS, so
-relicensing is not a decision this project can make on its own. Keeping MIT
-avoids the question entirely and is the least surprising outcome for anyone who
-already holds a copy of the original.
+The repository was briefly created under Apache-2.0. That was incorrect:
+Apache-2.0 code can include MIT-licensed code only when it retains the MIT
+notice, which a bare licence swap would remove. More importantly, Harvard SEAS
+is the copyright holder, so this project cannot relicense the code on its own.
+Keeping the original MIT licence preserves the terms under which existing
+copies were distributed.
 
-If a future relicence is genuinely wanted, it needs the copyright holder's
-agreement first, not a change to this file.
+Any future relicensing requires the copyright holder's agreement; changing this
+file is not enough.
 
 ## Why the history was not carried over
 
-The source repository is private and its history is not a publication artifact —
-it contains deployment details, internal hostnames, and credential-rotation
-churn from a live service. Filtering that history well enough to publish is
-strictly harder than starting clean, and a filter that is only *mostly* correct
-publishes exactly the commits it failed to catch. Provenance is preserved in
-this file and in commit messages instead.
+We did not copy the private source repository's Git history because it contains
+deployment details, internal hostnames, and credential-rotation records from a
+live service. A partial history rewrite could expose the very commits it was
+meant to remove, so this file and the migration commit messages preserve
+provenance instead.
 
 ## Source
 
@@ -812,16 +811,17 @@ blank: **the publishing path** (a job that opens a pull request — verified onl
 against a local bare repository), **a mid-run cancel**, and **the fail-closed
 cases** in smoke.md § 6. `docs/cutover.md`'s log records the same three.
 
-Update this table as tasks land. It is the answer to "what is actually done" —
-the plan describes intent, this describes reality.
+This table is frozen as the final migration record. It shows what actually
+landed, while the plan describes the original intent. Track current work in
+this repository's issues and pull requests.
 
 ## Schema baseline rewrite (2026-09-10)
 
 The Alembic chain this record describes — `0001_baseline` through
 `0029_identity_namespace` — was replaced by a rewritten baseline plus three
 additive revisions: `0001_schema_baseline`, `0002_request_keys_and_actors`,
-`0003_thread_level_config` and `0004_residency_on_membership`, which is `head`.
-The rewrite landed before the
+`0003_thread_level_config` and `0004_residency_on_membership`, which was `head`
+on 2026-09-10. The rewrite landed before the
 service took real traffic. The pre-launch schema review found the database
 enforcing almost none of the store's invariants (a job whose thread does not
 exist, a `current_attempt_id` from another job, a membership across tenants,

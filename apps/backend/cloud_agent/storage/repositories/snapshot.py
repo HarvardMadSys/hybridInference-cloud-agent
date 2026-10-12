@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 CAPTURE_RETRY_S = 5.0
 #: How long a published base whose import failed waits before it is retried.
 BASE_IMPORT_RETRY_S = 15.0
+#: A publication whose entitlement preflight failed waits before retrying.
+PUBLISH_RETRY_S = 30.0
+#: How many transient failures may return a publication to the durable queue.
+#: The next failure exhausts it and preserves the lineage block for review.
+PUBLISH_MAX_ATTEMPTS = 5
 
 
 class PostgresSnapshotRepository:
@@ -218,7 +223,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = g.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.generation = $2 AND g.container_id = $3
@@ -291,7 +296,7 @@ class PostgresSnapshotRepository:
                 UPDATE agent_sandbox_snapshots
                 SET state = $2, last_error = $3, updated_at = NOW(),
                     retry_at = CASE WHEN $2 = 'pending'
-                                    THEN NOW() + make_interval(secs => $4) END
+                                    THEN clock_timestamp() + make_interval(secs => $4) END
                 WHERE id = $1 AND state = 'capturing'
                 """,
                 snapshot_id,
@@ -309,7 +314,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = agent_sandboxes.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
                         ELSE NULL END,
                     last_error = CASE WHEN $2 = 'dirty' THEN $3 ELSE last_error END,
                     updated_at = NOW()
@@ -353,7 +358,7 @@ class PostgresSnapshotRepository:
                                 WHERE active.sandbox_id = agent_sandboxes.id
                                   AND active.active_attempt_id IS NOT NULL
                              )
-                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
                             ELSE NULL END,
                         updated_at = NOW()
                     WHERE id = ANY($1::text[]) AND snapshot_state = 'snapshotting'
@@ -370,11 +375,13 @@ class PostgresSnapshotRepository:
         preparation: a group snapshot may capture a succeeded boundary or a
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
+        Deferred publications are eligible only after their ``retry_at``.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             snapshot = await conn.fetchrow(
                 """
                 SELECT s.id AS snapshot_id, s.sandbox_id, s.workspace_epoch,
+                       s.publish_attempt_count,
                        s.anchor_job_id AS id, s.base_sha, s.patch_content AS patch,
                        (
                            SELECT COALESCE(
@@ -472,6 +479,7 @@ class PostgresSnapshotRepository:
                     LIMIT 1
                 ) prior ON TRUE
                 WHERE s.state = 'captured'
+                  AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND s.patch_content IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_sandbox_snapshots earlier
@@ -488,7 +496,8 @@ class PostgresSnapshotRepository:
                 claimed = await conn.fetchval(
                     """
                     UPDATE agent_sandbox_snapshots
-                    SET state = 'publishing', last_error = NULL, updated_at = NOW()
+                    SET state = 'publishing', last_error = NULL, retry_at = NULL,
+                        updated_at = NOW()
                     WHERE id = $1 AND state = 'captured'
                     RETURNING id
                     """,
@@ -515,6 +524,7 @@ class PostgresSnapshotRepository:
                 return {
                     "publication_kind": "shared_snapshot",
                     "snapshot_id": int(snapshot["snapshot_id"]),
+                    "publish_attempt_count": int(snapshot["publish_attempt_count"]),
                     "sandbox_id": snapshot["sandbox_id"],
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
                     "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
@@ -548,10 +558,141 @@ class PostgresSnapshotRepository:
                 }
             return None
 
+    async def renew_snapshot_publish_claim(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int
+    ) -> bool:
+        """Heartbeat this exact publishing claim using database wall time."""
+        async with self._pool.acquire() as conn:
+            renewed = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET updated_at = clock_timestamp()
+                WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $2
+                RETURNING id
+                """,
+                snapshot_id,
+                expected_publish_attempt_count,
+            )
+        return renewed is not None
+
+    async def defer_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> bool:
+        """Retry a transient publication under this exact fenced claim."""
+        return await self._defer_snapshot_publish(
+            snapshot_id=snapshot_id,
+            expected_publish_attempt_count=expected_publish_attempt_count,
+            detail=detail,
+            stall_seconds=None,
+        )
+
+    async def _defer_snapshot_publish(
+        self,
+        *,
+        snapshot_id: int,
+        expected_publish_attempt_count: int,
+        detail: str,
+        stall_seconds: float | None,
+    ) -> bool:
+        """Retry a transient publication, or stop after the durable budget.
+
+        Deterministic branch and PR reconciliation makes replay safe even when
+        the process died after a remote effect. The counter survives restarts;
+        exhaustion marks the artifact and group dirty for manual review rather
+        than skipping it and publishing a later workspace epoch out of order.
+        The expected counter rejects a publisher whose stalled claim was
+        reclaimed. Returns ``False`` unless this exact claim is still
+        ``publishing``.
+        """
+        retry_detail = detail[:2000]
+        exhausted_detail = (
+            f"{detail[:1800]} Publication retry limit ({PUBLISH_MAX_ATTEMPTS}) exhausted; "
+            "manual review is required."
+        )[:2000]
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = CASE
+                        WHEN publish_attempt_count >= $5 THEN 'failed'
+                        ELSE 'captured'
+                    END,
+                    publish_attempt_count = CASE
+                        WHEN publish_attempt_count >= $5 THEN publish_attempt_count
+                        ELSE publish_attempt_count + 1
+                    END,
+                    last_error = CASE
+                        WHEN publish_attempt_count >= $5 THEN $6
+                        ELSE $3
+                    END,
+                    retry_at = CASE
+                        WHEN publish_attempt_count >= $5 THEN NULL
+                        ELSE clock_timestamp() + make_interval(secs => $4)
+                    END,
+                    updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $2
+                  AND (
+                      $7::double precision IS NULL
+                      OR updated_at < clock_timestamp() - make_interval(secs => $7)
+                  )
+                RETURNING id, sandbox_id, anchor_job_id, state, last_error
+                """,
+                snapshot_id,
+                expected_publish_attempt_count,
+                retry_detail,
+                PUBLISH_RETRY_S,
+                PUBLISH_MAX_ATTEMPTS,
+                exhausted_detail,
+                stall_seconds,
+            )
+            if row is None:
+                return False
+            if row["state"] != "failed":
+                return True
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET snapshot_state = 'dirty', last_error = $2,
+                    idle_deadline = CASE
+                        WHEN active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = agent_sandboxes.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
+                        ELSE NULL END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                row["sandbox_id"],
+                row["last_error"],
+            )
+            attempt_id = await conn.fetchval(
+                "SELECT current_attempt_id FROM agent_jobs WHERE id = $1",
+                row["anchor_job_id"],
+            )
+            if attempt_id is not None:
+                await insert_event(
+                    conn,
+                    job_id=row["anchor_job_id"],
+                    attempt_id=attempt_id,
+                    event_type="error",
+                    payload={
+                        "phase": "shared_snapshot_publish_retry_exhausted",
+                        "snapshot_id": snapshot_id,
+                        "detail": row["last_error"],
+                    },
+                )
+        return True
+
     async def record_snapshot_publish(
         self,
         *,
         snapshot_id: int,
+        expected_publish_attempt_count: int,
         pr_url: str,
         commit_sha: str,
     ) -> bool:
@@ -567,13 +708,15 @@ class PostgresSnapshotRepository:
                 UPDATE agent_sandbox_snapshots
                 SET state = 'published', published_pr_url = $2,
                     published_commit_sha = $3, published_at = NOW(),
-                    last_error = NULL, updated_at = NOW()
+                    last_error = NULL, retry_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $4
                 RETURNING sandbox_id, anchor_job_id
                 """,
                 snapshot_id,
                 pr_url,
                 commit_sha,
+                expected_publish_attempt_count,
             )
             if row is None:
                 return False
@@ -628,18 +771,23 @@ class PostgresSnapshotRepository:
                 )
         return True
 
-    async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
+    async def fail_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> None:
         """Retain a rejected group artifact without failing included turns."""
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET state = 'failed', last_error = $2, updated_at = NOW()
+                SET state = 'failed', last_error = $2, retry_at = NULL,
+                    updated_at = NOW()
                 WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $3
                 RETURNING sandbox_id, anchor_job_id
                 """,
                 snapshot_id,
                 detail[:2000],
+                expected_publish_attempt_count,
             )
             if row is None:
                 return
@@ -654,7 +802,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = agent_sandboxes.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
                 WHERE id = $1
@@ -766,7 +914,7 @@ class PostgresSnapshotRepository:
                             WHERE active.sandbox_id = g.id
                               AND active.active_attempt_id IS NOT NULL
                          )
-                        THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
+                        THEN clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.snapshot_state = 'importing'
@@ -794,7 +942,7 @@ class PostgresSnapshotRepository:
                 """
                 UPDATE agent_sandbox_snapshots
                 SET last_error = $2, updated_at = NOW(),
-                    retry_at = NOW() + make_interval(secs => $3)
+                    retry_at = clock_timestamp() + make_interval(secs => $3)
                 WHERE id = $1 AND state = 'published'
                 """,
                 snapshot_id,
@@ -812,6 +960,19 @@ class PostgresSnapshotRepository:
             due: datetime | None = await conn.fetchval(
                 "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
                 "WHERE state = 'pending' AND retry_at > NOW()"
+            )
+        return due
+
+    async def next_snapshot_publish_retry_due(self) -> datetime | None:
+        """When the earliest deferred publication may be claimed again.
+
+        ``None`` when no captured snapshot waits for a future retry. Capture
+        completion announces other publication work through a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
+                "WHERE state = 'captured' AND retry_at > NOW()"
             )
         return due
 
@@ -835,39 +996,27 @@ class PostgresSnapshotRepository:
         return due
 
     async def reap_stalled_snapshot_publishes(self, *, stall_seconds: float = 900.0) -> list[int]:
-        """Fail ambiguous shared publishes without changing Agent turn state."""
-        detail = "the publisher stopped before finishing; manual review required"
-        async with self._pool.acquire() as conn, conn.transaction():
+        """Reclaim a crashed publisher through deterministic remote reconciliation."""
+        detail = "the publisher stopped before finishing; deterministic publication will retry"
+        async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                UPDATE agent_sandbox_snapshots
-                SET state = 'failed', last_error = $2, updated_at = NOW()
+                SELECT id, publish_attempt_count FROM agent_sandbox_snapshots
                 WHERE state = 'publishing'
                   AND published_pr_url IS NULL
-                  AND updated_at < NOW() - make_interval(secs => $1)
-                RETURNING id, sandbox_id
+                  AND updated_at < clock_timestamp() - make_interval(secs => $1)
+                ORDER BY id
                 """,
                 stall_seconds,
-                detail,
             )
-            if rows:
-                await conn.execute(
-                    """
-                    UPDATE agent_sandboxes
-                    SET snapshot_state = 'dirty', last_error = $2,
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 0
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships active
-                                WHERE active.sandbox_id = agent_sandboxes.id
-                                  AND active.active_attempt_id IS NOT NULL
-                             )
-                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL END,
-                        updated_at = NOW()
-                    WHERE id = ANY($1::text[])
-                    """,
-                    [row["sandbox_id"] for row in rows],
-                    detail,
-                )
-        return [int(row["id"]) for row in rows]
+        reclaimed: list[int] = []
+        for row in rows:
+            snapshot_id = int(row["id"])
+            if await self._defer_snapshot_publish(
+                snapshot_id=snapshot_id,
+                expected_publish_attempt_count=int(row["publish_attempt_count"]),
+                detail=detail,
+                stall_seconds=stall_seconds,
+            ):
+                reclaimed.append(snapshot_id)
+        return reclaimed

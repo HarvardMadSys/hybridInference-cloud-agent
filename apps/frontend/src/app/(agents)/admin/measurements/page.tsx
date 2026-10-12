@@ -206,10 +206,10 @@ function MeasurementsView() {
         />
         <AdminNavigation current="measurements" />
 
-        <div className="mt-8 flex flex-wrap items-end justify-between gap-4">
+        <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Measurements</h2>
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            <h2 className="sr-only">Measurements</h2>
+            <p className="max-w-2xl text-sm leading-6 text-muted">
               How long sandbox startup, terminal opening and file access take,{' '}
               <span
                 className="cursor-help underline decoration-dotted underline-offset-2"

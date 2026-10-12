@@ -200,9 +200,9 @@ describe('conversation work details', () => {
     expect(activity.getByText('Checks passed')).not.toBeVisible();
 
     fireEvent.change(details, { target: { value: 'compact' } });
-    expect(activity.getByText('update_plan: Review work')).toBeVisible();
-    expect(activity.getByText('Read: src/main.ts')).not.toBeVisible();
-    expect(activity.getByText('Bash: npm test')).not.toBeVisible();
+    expect(activity.getByText('update_plan')).toBeVisible();
+    expect(activity.getByText('Read')).not.toBeVisible();
+    expect(activity.getByText('Bash')).not.toBeVisible();
     expect(activity.getByRole('button', { name: 'Show process (2)' })).toBeVisible();
     expect(activity.getByText('The change is ready.')).toBeVisible();
 

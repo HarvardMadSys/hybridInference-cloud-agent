@@ -27,12 +27,15 @@ class SandboxRepository(Protocol):
         last_activity_at: datetime,
         actor_id: str,
         admin_ip: str,
+        broker_confirmed_stopped: bool = False,
     ) -> str:
         """Fence an idle stopped sandbox for verified S3 archival and deletion.
 
         A durable request closes admission before host export. No native state
         or ledger row is removed; only a verified host receipt may finalize
-        physical container deletion and mark its native context lost.
+        physical container deletion and mark its native context lost. An admin
+        recovery may also repair a stale RUNNING row, but only after the API
+        independently proves the exact host container is stopped and idle.
         """
         ...
 
@@ -109,12 +112,15 @@ class SandboxRepository(Protocol):
         archived: bool,
         actor_id: str,
         admin_ip: str,
+        allow_stale_host: bool = False,
     ) -> str:
         """Audit a reviewed inventory removal or restore without deleting state.
 
-        Only stopped, quiescent groups may be hidden. A new turn or running
-        host observation makes a removed group visible again automatically.
-        Native sessions, container writable layers and ledger rows survive.
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
         """
         ...
 
@@ -223,9 +229,10 @@ class SandboxRepository(Protocol):
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         process_generation: int,
     ) -> bool:
-        """Record the supervisor's diagnostic CLI process generation."""
+        """Record an equal or newer supervisor CLI process generation."""
         ...
 
     async def record_shared_thread_residency(
@@ -249,6 +256,7 @@ class SandboxRepository(Protocol):
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
     ) -> bool:
         """Reserve one prompt delivery durably before Agent CLI stdin.
 
@@ -267,6 +275,7 @@ class SandboxRepository(Protocol):
         lease_generation: int,
         sandbox_generation: int,
         activation_generation: int,
+        residency_generation: int,
         job_id: str,
         context_status: str,
         native_session_id: str | None,

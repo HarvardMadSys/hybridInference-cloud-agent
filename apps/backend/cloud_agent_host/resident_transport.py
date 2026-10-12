@@ -12,7 +12,7 @@ import contextlib
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from cloud_agent_host.chat_sandbox import (
@@ -25,6 +25,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     claude_member_config_dir,
 )
+from cloud_agent_host.codex_plugins import install_codex_plugins
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -36,8 +37,11 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
+from cloud_agent_host.other_plugins import install_other_runtime_plugins
+from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
+from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -62,6 +66,22 @@ PRIVATE_MEMBER_STATE_ROOTS = {
     "opencode": f"{CHAT_STATE_DIR}/opencode-members",
     "kilo": f"{CHAT_STATE_DIR}/kilo-members",
 }
+
+# Each home is private to its member UID, not only distinct: its config and
+# plugins run at every process start as that member, with that member's grant
+# and MCP token. A collection stays group-writable so every member can add its
+# own home, but the home itself is created mode 0700 and an older release's
+# setgid, group-writable home is narrowed to that on the member's next start.
+# A home that is a symlink or belongs to another UID was planted by someone
+# else and is refused rather than adopted. Shell prologue; expects ``$target``.
+_PRIVATE_MEMBER_HOME_PROLOGUE = (
+    'collection=${target%/*}; (umask 0007; mkdir -p -- "$collection"); '
+    'umask 0077; mkdir -p -- "$target"; '
+    'if test -L "$target" || test ! -d "$target" '
+    '|| test "$(stat -c %u -- "$target")" != "$(id -u)"; then '
+    'echo "member provider home is not owned by this member" >&2; exit 1; fi; '
+    'chmod u=rwx,go=,g-s -- "$target"; '
+)
 
 # Host-owned exactly-once receipts must not live inside a provider home. Some
 # CLIs enumerate their whole state root, and the deliberately unreadable
@@ -88,6 +108,11 @@ class ResidentLaunch:
     mcp_credential: str = ""
     slot_id: int = 0
     residency_generation: int = 0
+    plugins: tuple[dict[str, str], ...] = ()
+    # Short-lived, single-repository, contents/PR write GitHub App token. Kept in
+    # this member's environment, never in shared workspace or image config.
+    github_token: str | None = field(default=None, repr=False)
+    github_repo: str = ""
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
@@ -98,6 +123,11 @@ class ResidentLaunch:
             raise ValueError("resident slot id cannot be negative")
         if self.residency_generation < 0:
             raise ValueError("residency generation cannot be negative")
+        object.__setattr__(
+            self,
+            "plugins",
+            tuple(validate_sandbox_plugins(self.runtime_id, self.plugins)),
+        )
 
 
 class ResidentTurn(Generic[_RuntimeT_co]):
@@ -210,9 +240,10 @@ class ResidentTransport(Generic[_RuntimeT_co]):
 
         The caller normally carries a fresh attempt credential, while the
         resident process intentionally keeps its renewable residency grant.
-        Credentials therefore cannot participate in equality. Everything the
-        CLI fixes at process start still does, including model, effort and MCP
-        configuration.
+        The inference grant therefore does not participate in equality.
+        Everything the CLI fixes at process start still does, including model,
+        effort, MCP configuration and the non-renewable GitHub token. A fresh
+        GitHub token requires native resume in a replacement process.
         """
         same_mcp = self.launch.mcp_server_ids == launch.mcp_server_ids and (
             not launch.mcp_server_ids
@@ -227,8 +258,11 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             and self.launch.runtime_version == launch.runtime_version
             and self.launch.model == launch.model
             and self.launch.reasoning_effort == launch.reasoning_effort
+            and self.launch.plugins == launch.plugins
             and self.launch.gateway_base_url == launch.gateway_base_url
             and same_mcp
+            and self.launch.github_token == launch.github_token
+            and self.launch.github_repo == launch.github_repo
             and self.launch.slot_id == launch.slot_id
         )
 
@@ -272,7 +306,8 @@ class ResidentTransportFactory:
         runtime_id = launch.runtime_id
         driver = get_driver(runtime_id)
         state_dir = self._member_state_dir(launch)
-        if runtime_id == "claude-code":
+        member_processes_reaped = runtime_id == "claude-code" or bool(launch.plugins)
+        if member_processes_reaped:
             # A failed Fork can release a reserved slot. Reap that slot before
             # preparing its next member's launch state, so an old same-UID
             # process cannot race creation of the new private settings.
@@ -282,6 +317,7 @@ class ResidentTransportFactory:
                 user_uid=MEMBER_UID_BASE + launch.slot_id,
                 user_gid=self._manager.backend.gid,
             )
+        if runtime_id == "claude-code":
             self._prepare_claude_member_state(spec, launch)
         elif runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
             self._prepare_member_state(spec, launch, state_dir)
@@ -290,8 +326,37 @@ class ResidentTransportFactory:
             launch,
             credential=launch.credential,
             state_dir=state_dir,
-            member_processes_reaped=runtime_id == "claude-code",
+            member_processes_reaped=member_processes_reaped,
         )
+        if runtime_id == "claude-code" and launch.plugins:
+            install_claude_plugins(
+                self._manager,
+                spec,
+                launch.plugins,
+                config_dir=claude_member_config_dir(launch.slot_id, launch.thread_id),
+                env=context.base_env,
+                slot_id=launch.slot_id,
+            )
+        elif runtime_id == "codex" and launch.plugins:
+            install_codex_plugins(
+                self._manager,
+                spec,
+                launch.plugins,
+                state_dir=state_dir,
+                env=context.base_env,
+                slot_id=launch.slot_id,
+            )
+        elif runtime_id in {"pi", "opencode", "kilo"} and launch.plugins:
+            context.base_env.update(
+                install_other_runtime_plugins(
+                    self._manager,
+                    spec,
+                    runtime_id=runtime_id,
+                    plugins=launch.plugins,
+                    env=context.base_env,
+                    slot_id=launch.slot_id,
+                )
+            )
         if launch.native_session_id:
             opener = getattr(driver, "launch_resident_live", None)
             if opener is None:
@@ -410,9 +475,9 @@ class ResidentTransportFactory:
         uid = MEMBER_UID_BASE + launch.slot_id
         script = (
             'set -eu; target="$1"; runtime="$2"; '
-            'marker="$target/.freeinference-member-state-v1"; umask 0007; '
-            'mkdir -p -- "$target"; '
-            'if test ! -e "$marker"; then '
+            'marker="$target/.freeinference-member-state-v1"; '
+            + _PRIVATE_MEMBER_HOME_PROLOGUE
+            + 'if test ! -e "$marker"; then '
             '  rm -rf -- "$target/$runtime/state/$runtime/locks"; '
             '  : > "$marker"; '
             "fi"
@@ -448,9 +513,9 @@ class ResidentTransportFactory:
         uid = MEMBER_UID_BASE + launch.slot_id
         script = (
             'set -eu; source="$1"; target="$2"; '
-            'marker="$target/.freeinference-member-state-v1"; umask 0007; '
-            'mkdir -p -- "$target"; '
-            'if test ! -e "$marker"; then '
+            'marker="$target/.freeinference-member-state-v1"; '
+            + _PRIVATE_MEMBER_HOME_PROLOGUE
+            + 'if test ! -e "$marker"; then '
             '  if test -f "$source/config.toml"; then '
             '    cp -- "$source/config.toml" "$target/config.toml"; '
             "  fi; "
@@ -492,35 +557,46 @@ class ResidentTransportFactory:
         runtime_id = source_launch.runtime_id
         if runtime_id != target_launch.runtime_id or runtime_id not in PRIVATE_MEMBER_STATE_ROOTS:
             raise DriverError("native fork cannot clone incompatible provider homes")
-        target_uid = MEMBER_UID_BASE + target_launch.slot_id
-        script = (
-            'set -eu; source="$1"; target="$2"; runtime="$3"; umask 0007; '
-            'test -d "$source"; mkdir -p -- "$target"; '
-            'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
-            'for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do '
-            '  test -e "$entry" || continue; name=${entry##*/}; '
-            '  case "$name" in tmp|.tmp) continue;; esac; '
-            '  cp -R -- "$entry" "$target/"; '
+        # Neither UID can open the other's home. The source archives its own
+        # flushed home, scratch excluded, and the child unpacks that stream
+        # into a home only it can open; the copy crosses this host's pipe and
+        # is never staged inside the container where a sibling could read it.
+        archive = (
+            'set -eu; cd -- "$1"; set --; '
+            "for entry in * .[!.]* ..?*; do "
+            '  test -e "$entry" || continue; '
+            '  case "$entry" in tmp|.tmp) continue;; esac; '
+            '  set -- "$@" "./$entry"; '
             "done; "
+            'exec tar --create --file=- --files-from=/dev/null "$@"'
+        )
+        unpack = (
+            'set -eu; target="$1"; runtime="$2"; '
+            + _PRIVATE_MEMBER_HOME_PROLOGUE
+            + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
+            'tar --extract --file=- --directory="$target" --no-same-owner '
+            "--no-same-permissions; "
             'mkdir -p -- "$target/tmp" "$target/.tmp"; '
             'case "$runtime" in '
             '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
             "esac; "
             ': > "$target/.freeinference-member-state-v1"'
         )
-        result = self._manager.exec_capture(
+        source, target = self._manager.pipe_member_exec(
             spec,
-            ["/bin/sh", "-c", script, "sh", source_dir, target_dir, runtime_id],
-            workdir="/",
-            timeout_s=120,
-            user_uid=target_uid,
+            source_argv=["/bin/sh", "-c", archive, "sh", source_dir],
+            source_uid=MEMBER_UID_BASE + source_launch.slot_id,
+            target_argv=["/bin/sh", "-c", unpack, "sh", target_dir, runtime_id],
+            target_uid=MEMBER_UID_BASE + target_launch.slot_id,
             user_gid=self._manager.backend.gid,
+            timeout_s=120,
         )
-        if result.returncode != 0:
-            raise DriverError(
-                f"{runtime_id} fork state could not be materialized for the child: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
+        for result in (target, source):
+            if result.returncode != 0:
+                raise DriverError(
+                    f"{runtime_id} fork state could not be materialized for the child: "
+                    + result.stderr.decode("utf-8", "replace")[-300:]
+                )
 
     def _clear_http_member_locks(
         self,
@@ -585,6 +661,29 @@ class ResidentTransportFactory:
                 "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
             }
         )
+        # Only the claim's repository-scoped token may authenticate gh. Do not
+        # fall back to a credential inherited from a custom host backend.
+        base_env.pop("GH_TOKEN", None)
+        base_env.pop("GITHUB_TOKEN", None)
+        if launch.github_token:
+            base_env.update(
+                {
+                    "GH_TOKEN": launch.github_token,
+                    "GH_HOST": "github.com",
+                    "GH_PROMPT_DISABLED": "1",
+                    "GIT_TERMINAL_PROMPT": "0",
+                    # Reset inherited helpers before selecting gh. These
+                    # invocation-only settings never write credentials or
+                    # helper configuration into the shared .git directory.
+                    "GIT_CONFIG_COUNT": "3",
+                    "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
+                    "GIT_CONFIG_VALUE_1": "",
+                    "GIT_CONFIG_KEY_2": "credential.https://github.com.helper",
+                    "GIT_CONFIG_VALUE_2": "!gh auth git-credential",
+                }
+            )
+            if launch.github_repo:
+                base_env["GH_REPO"] = launch.github_repo
         if launch.runtime_version:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
@@ -674,6 +773,8 @@ class ResidentTransportFactory:
             raise DriverError("native fork cannot change runtime")
         if source.launch.runtime_version != target_launch.runtime_version:
             raise DriverError("native fork cannot change runtime version")
+        if source.launch.plugins != target_launch.plugins:
+            raise DriverError("native fork cannot change plugins")
         if not target_launch.credential:
             raise DriverError("native fork target needs a residency credential")
 
@@ -773,9 +874,9 @@ class ResidentTransportFactory:
 
         if runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
             # These providers use owner-only files, SQLite, or project locks.
-            # Stop the quiescent source so its state is flushed, expose its
-            # credential-free files to the target UID, and copy that stable
-            # post-fork state into the child's private home. The supervisor
+            # Stop the quiescent source so its state is flushed, publish its
+            # shared workspace writes, and copy that stable post-fork state
+            # from its private home into the child's. The supervisor
             # resumes the exact source immediately after this method returns;
             # PID continuity is not required. For Codex this materialization
             # is also the recovery path when the original RPC response is lost.

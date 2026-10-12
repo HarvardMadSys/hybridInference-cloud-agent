@@ -6,7 +6,7 @@ import { getErrorMessage } from '@/lib/utils/errors';
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { useT } from '@/components/providers';
+import { useLocale, useT } from '@/components/providers';
 import { listSkills, type SelectedSkillApi, type SkillSummaryApi } from '@/lib/api/skills';
 import {
   SkillDialog,
@@ -33,7 +33,7 @@ export function SkillSelectionDialog({
   onApply: (skills: SelectedSkillApi[]) => void;
   onClose: () => void;
 }) {
-  const t = useT();
+  const { t, locale } = useLocale();
   const [skills, setSkills] = useState<SkillSummaryApi[]>([]);
   const [checked, setChecked] = useState(() => new Set(selected.map((skill) => skill.id)));
   const [loading, setLoading] = useState(true);
@@ -71,6 +71,7 @@ export function SkillSelectionDialog({
       description={t('skills.forThisConversation')}
       onClose={onClose}
       dismissLabel={t('skills.dismiss')}
+      lang={locale}
       footer={
         <>
           <Link

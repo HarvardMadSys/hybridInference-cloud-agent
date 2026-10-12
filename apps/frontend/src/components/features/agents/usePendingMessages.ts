@@ -59,6 +59,8 @@ export interface PendingQueue {
   pausedReason: QueuePausedReason | null;
   /** True once the first read has answered. */
   loaded: boolean;
+  /** A read failed; the last successfully read queue remains visible. */
+  refreshError?: string | null;
   /** The conversation's newest turn from the last successful queue read. */
   latestJobId: string | null;
   latestJobState: string | null;
@@ -130,6 +132,7 @@ export function usePendingMessages({
   const [messages, setMessages] = useState<PendingMessageApi[]>([]);
   const [pausedReason, setPausedReason] = useState<QueuePausedReason | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [latestJobId, setLatestJobId] = useState<string | null>(null);
   const [latestJobState, setLatestJobState] = useState<string | null>(null);
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set<string>());
@@ -180,6 +183,7 @@ export function usePendingMessages({
           (queue.latest_job_state === 'running' || queue.latest_job_state === 'queued'),
       );
       setLoaded(true);
+      setRefreshError(null);
       if (
         previous &&
         queue.latest_job_id &&
@@ -194,13 +198,15 @@ export function usePendingMessages({
 
   const refresh = useCallback(async () => {
     const target = threadRef.current;
-    if (!target) return;
+    if (!target || document.visibilityState === 'hidden') return;
     const seq = ++readSeq.current;
     try {
       const queue = await getThreadQueue(target);
       if (mounted.current) applyRead(queue, seq);
-    } catch {
+    } catch (cause) {
       // A failed read keeps what is on screen; the next one tries again.
+      if (mounted.current && target === threadRef.current && seq >= appliedSeq.current)
+        setRefreshError(getErrorMessage(cause));
     }
   }, [applyRead]);
 
@@ -216,6 +222,7 @@ export function usePendingMessages({
     setPausedReason(null);
     setCanSendNow(false);
     setLoaded(false);
+    setRefreshError(null);
     setLatestJobId(null);
     setLatestJobState(null);
     setBusyIds(new Set<string>());
@@ -450,6 +457,7 @@ export function usePendingMessages({
     messages,
     pausedReason,
     loaded,
+    refreshError,
     latestJobId,
     latestJobState,
     busyIds,

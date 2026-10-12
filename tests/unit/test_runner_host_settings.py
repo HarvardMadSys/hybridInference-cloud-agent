@@ -156,6 +156,28 @@ def _stamp() -> dict[str, Any]:
     }
 
 
+def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch):
+    claim = ClaimedJob.from_response(
+        {
+            **_PAYLOAD,
+            "clone_token": "host-clone-token",
+            "github_token": "sandbox-write-token",
+            "runtime_version": _JOB.runtime_version,
+        }
+    )
+    run = _run_new_chat(monkeypatch, None, job=claim)
+
+    assert run.result == 0
+    assert run.launches
+    assert all(launch.github_token == "sandbox-write-token" for launch in run.launches)
+    assert all(launch.github_repo == claim.repo for launch in run.launches)
+    assert "sandbox-write-token" not in repr(claim)
+    assert (
+        ClaimedJob.from_response({**_PAYLOAD, "clone_token": "host-clone-token"}).github_token
+        is None
+    )
+
+
 def _run_new_chat(
     monkeypatch,
     host_settings: dict[str, float] | None,

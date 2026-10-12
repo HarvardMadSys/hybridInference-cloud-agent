@@ -11,11 +11,11 @@ into.
 from __future__ import annotations
 
 import queue
-import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.sandbox import SandboxSpec
 
 
@@ -50,40 +50,34 @@ def run_setup(
             env={},
         )
     )
-    output: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for line in process.lines():
-                output.put(line)
-        finally:
-            output.put(None)
-
-    threading.Thread(target=pump, daemon=True, name="retained-setup-output").start()
+    output = OutputPump(getattr(process, "chunks", process.lines)(), name="retained-setup-output")
     deadline = time.monotonic() + timeout_s
-    tail: list[str] = []
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            process.kill()
-            process.wait()
-            return SetupResult(
-                ran=True,
-                exit_code=124,
-                detail=f"setup exceeded {timeout_s:.0f}s",
-            )
-        try:
-            line = output.get(timeout=min(0.25, remaining))
-        except queue.Empty:
-            continue
-        if line is None:
-            break
-        tail.append(line)
-        del tail[:-100]
+    tail = TextTail()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                return SetupResult(
+                    ran=True,
+                    exit_code=124,
+                    detail=f"setup exceeded {timeout_s:.0f}s",
+                )
+            try:
+                chunk = output.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            tail.append(chunk)
+    finally:
+        output.close()
 
     exit_code = process.wait()
     if exit_code != 0:
-        return SetupResult(ran=True, exit_code=exit_code, detail="".join(tail)[-500:])
+        return SetupResult(ran=True, exit_code=exit_code, detail=tail.text()[-500:])
     return SetupResult(ran=True, detail="setup completed")
 
 

@@ -1,10 +1,10 @@
 """Validation gate for agent-produced patches.
 
-The patch-out model puts *no* credential inside the sandbox: the agent emits a
-patch, and a trusted publisher outside the sandbox applies it, pushes an
-``agent/<thread-id>`` branch and opens or updates a draft PR. That makes this
-module the security boundary — everything an untrusted agent can influence
-passes through here before it becomes a git object.
+The trusted publisher validates the agent's patch before applying it, pushing
+an ``agent/<thread-id>`` branch and opening or updating a draft PR. This module
+is the security boundary for that publication path. A sandbox's separate,
+repository-scoped GitHub token also permits direct pushes and pull requests;
+those writes do not pass through this gate.
 
 Four gates, in the order they matter:
 

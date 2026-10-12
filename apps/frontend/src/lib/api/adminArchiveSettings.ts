@@ -14,6 +14,8 @@ export interface SandboxArchiveSettings {
   region: string;
   kms_key_arn: string;
   expected_bucket_owner: string;
+  aws_access_key_id: string;
+  aws_secret_access_key_configured: boolean;
   max_archive_bytes: number;
   multipart_threshold_bytes: number;
   multipart_part_bytes: number;
@@ -31,6 +33,8 @@ export interface SandboxArchiveSettingsUpdate {
   region: string;
   kms_key_arn: string;
   expected_bucket_owner: string;
+  aws_access_key_id: string;
+  aws_secret_access_key: string;
   max_archive_bytes: number;
   multipart_threshold_bytes: number;
   multipart_part_bytes: number;

@@ -14,9 +14,22 @@ import { toDisplayState } from './adapt';
 import { projectLabel } from './conversations';
 import { CONVERSATION_STATE_KEYS, toConversationState } from './conversationState';
 import { ARCHIVE_FOCUS, ArchiveIcon, ArchiveProjectMenu } from './ArchiveControls';
+import { SessionReviewBadge } from './SessionReviewBadge';
+import { useSessionReview } from './useSessionReview';
 
 const ROWS_PER_PAGE = 5;
 const TEXT_BUTTON = `rounded px-1 py-1 text-xs font-medium text-crimson hover:underline disabled:opacity-50 dark:text-rose-300 ${ARCHIVE_FOCUS}`;
+
+function ArchiveSessionReviewBadge({ session }: { session: AgentSessionApi }) {
+  const review = useSessionReview({
+    id: session.job.id,
+    state: toDisplayState(session.job),
+    threadId: session.thread_id,
+    currentAttemptId: session.job.current_attempt_id,
+    cancelRequested: session.job.cancel_requested,
+  });
+  return <SessionReviewBadge review={review} />;
+}
 
 export function ArchiveProjectSection({
   project,
@@ -232,6 +245,7 @@ export function ArchiveProjectSection({
                   ) : (
                     <span className="sr-only">{t(CONVERSATION_STATE_KEYS[displayState])}</span>
                   )}
+                  <ArchiveSessionReviewBadge session={session} />
                 </div>
               </Link>
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
