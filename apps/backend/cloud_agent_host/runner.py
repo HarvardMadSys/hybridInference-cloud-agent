@@ -214,6 +214,20 @@ def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
     )
 
 
+def _owner_visible_error(exc: Exception) -> str:
+    """Describe a failure for the chat's owner without the control plane's address.
+
+    The owner reads a failed turn's detail, and httpx names the URL it called
+    in every status error, which put this deployment's internal control-plane
+    address in front of them. A status error says what the control plane
+    answered instead; the log line written beside the detail keeps its type
+    and status for an operator. Other failures read as they always have.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"the control plane answered HTTP {exc.response.status_code}"
+    return str(exc)
+
+
 def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any]) -> Any:
     """Retry only idempotent lifecycle receipts, never prompt delivery."""
     for attempt in range(3):
@@ -2395,7 +2409,9 @@ def _run_shared_live_attempt(
     except LeaseLost:
         return 3
     except Exception as exc:
-        finish_attempt("failed", f"could not reserve shared chat sandbox: {exc}")
+        finish_attempt(
+            "failed", f"could not reserve shared chat sandbox: {_owner_visible_error(exc)}"
+        )
         return 2
 
     if (
@@ -3084,7 +3100,7 @@ def _run_shared_live_attempt(
         report_failure()
         return 2
     except Exception as exc:
-        failure_detail = f"shared live chat failed unexpectedly: {exc}"
+        failure_detail = f"shared live chat failed unexpectedly: {_owner_visible_error(exc)}"
         _log_control_failure(stage, job.job_id, exc)
         abandon_before_finish(lost=turn_admitted, detail=failure_detail)
         report_failure()

@@ -1058,6 +1058,54 @@ def test_a_stopped_turn_is_never_reported_failed_because_its_finish_was(
         assert call.args[0].event_type != "error"
 
 
+def test_a_control_plane_error_reaches_the_owner_without_its_address(monkeypatch):
+    """httpx names the URL it called; the owner's failure detail must not."""
+
+    def configure(control, _supervisor, _finish):
+        control.suspend_terminals.side_effect = _status_error(503)
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        {"kind": "result", "status": "completed"},
+        "claude-code",
+        configure=configure,
+    )
+
+    assert result == 2
+    finish.assert_called_once()
+    state, detail = finish.call_args.args[:2]
+    assert state == "failed"
+    assert detail == "shared live chat failed unexpectedly: the control plane answered HTTP 503"
+    reported = [call.args[0].payload for call in control.append_event.call_args_list]
+    assert {"text": detail} in reported
+    assert "control.internal" not in str(finish.call_args_list) + str(reported)
+
+
+@pytest.mark.parametrize(
+    ("error", "described"),
+    [
+        (_status_error(503), "the control plane answered HTTP 503"),
+        # A transport error names no address, and its text is what it always was.
+        (httpx.ConnectError("[Errno 111] Connection refused"), "[Errno 111] Connection refused"),
+    ],
+)
+def test_a_refused_reservation_reaches_the_owner_without_the_address(monkeypatch, error, described):
+    def configure(control, _supervisor, _finish):
+        control.reserve_chat_sandbox.side_effect = error
+
+    result, _control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 2
+    finish.assert_called_once()
+    state, detail = finish.call_args.args[:2]
+    assert state == "failed"
+    assert detail == f"could not reserve shared chat sandbox: {described}"
+    assert "control.internal" not in detail
+
+
 @pytest.mark.parametrize("stage", ["admission", "supervisor_settle", "control_settle"])
 def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatch, stage):
     from cloud_agent_host import runner as runner_mod
