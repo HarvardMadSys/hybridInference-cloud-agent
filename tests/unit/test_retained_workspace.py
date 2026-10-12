@@ -222,6 +222,63 @@ def test_retained_writer_leaves_the_file_unchanged_when_the_new_content_has_no_r
     )
 
 
+#: One system call made to fail as a full disk does, where a real one cannot be
+#: arranged: creating a file, or copying it up out of an image layer, can run
+#: out of room at its open; overwriting blocks that are shared (copy-on-write,
+#: reflinked copies) can run out after the reservation succeeded.
+_NO_ROOM_AT = {
+    "open": (
+        "import errno, os\n"
+        "_open = os.open\n"
+        "def _no_room_to_open(path, flags, *args, **kwargs):\n"
+        "    if flags & os.O_WRONLY:\n"
+        "        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))\n"
+        "    return _open(path, flags, *args, **kwargs)\n"
+        "os.open = _no_room_to_open\n"
+    ),
+    "write": (
+        "import errno, os\n"
+        "def _no_room_to_write(*_args):\n"
+        "    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))\n"
+        "os.pwrite = _no_room_to_write\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("stage", "returncode", "message"),
+    [
+        ("open", 47, "workspace has no room for this file; it was not changed"),
+        ("write", 48, "workspace ran out of room while writing this file; it may be incomplete"),
+    ],
+)
+def test_retained_writer_names_a_full_workspace_wherever_room_runs_out(
+    tmp_path, stage, returncode, message
+):
+    target = tmp_path / "note.txt"
+    target.write_text("original content\n")
+
+    refused = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _NO_ROOM_AT[stage] + _WRITE_PROGRAM,
+            str(tmp_path),
+            "note.txt",
+            "1000",
+        ],
+        input=b"replacement\n",
+        capture_output=True,
+        check=False,
+    )
+
+    assert refused.returncode == returncode, refused.stderr
+    error = _error_from_result(refused.returncode, refused.stdout, refused.stderr)
+    assert (error.status_code, error.message) == (507, message)
+    if stage == "open":
+        assert target.read_text() == "original content\n"
+
+
 def test_retained_writer_replaces_in_place_and_keeps_the_files_inode_and_mode(tmp_path):
     target = tmp_path / "run.sh"
     target.write_text("#!/bin/sh\necho a much longer original script\n")
