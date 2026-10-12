@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   getAgentJobUsage,
@@ -18,6 +18,7 @@ import {
 } from './agentPush';
 
 const POLL_INTERVAL_MS = 15_000;
+const SCHEDULE_POLL_FLOOR_MS = 1_000;
 const MAX_RETRY_INTERVAL_MS = 60_000;
 const PERMANENT_REASONS = new Set([
   'attribution_unavailable',
@@ -156,6 +157,7 @@ function UsageSummary({
 // Owned by the job view, independently of which message holds the summary.
 export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
   const [loaded, setLoaded] = useState<LoadedUsage | null>(null);
+  const latestUsage = useRef<Pick<LoadedUsage, 'jobId' | 'data'> | null>(null);
   // While the owner's change stream flows, the control plane reads usage when
   // a model call finishes and pushes what it read: no refresh request and no
   // read from here, and the clock below is only a backstop.
@@ -178,6 +180,27 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
       timer = setTimeout(() => void load(), delay);
     }
 
+    function nextPollDelay(data: AgentJobUsageApi): number {
+      // A turn that just ended can be waiting for its closing snapshot. Keep
+      // that wait short even if the stream misses the accounting update.
+      let delay =
+        !active && (data.ledger.status === 'pending' || data.ledger.refreshing)
+          ? POLL_INTERVAL_MS
+          : pollMs;
+      if (!active && data.ledger.next_refresh_at) {
+        const due = Date.parse(data.ledger.next_refresh_at);
+        if (Number.isFinite(due)) {
+          // A late worker gets the normal terminal backstop, rather than a
+          // one-second read loop for a schedule it cannot clear yet.
+          delay =
+            due > Date.now()
+              ? Math.min(delay, Math.max(SCHEDULE_POLL_FLOOR_MS, due - Date.now()))
+              : POLL_INTERVAL_MS;
+        }
+      }
+      return delay;
+    }
+
     async function load(refresh = false) {
       const requestGeneration = ++generation;
       controller?.abort();
@@ -198,12 +221,12 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
       }));
 
       try {
-        const data = await (refresh
+        const response = await (refresh
           ? refreshAgentJobUsage(job.id, signal)
           : getAgentJobUsage(job.id, signal));
         if (disposed || signal.aborted || requestGeneration !== generation) return;
         readFailures = 0;
-        show(data);
+        const data = show(response);
         // A 404 means this API is unsupported or the job is no longer visible.
         if (!data) return;
 
@@ -226,10 +249,17 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
           void load(true);
           return;
         }
-        if (refresh || active || scheduled || (eligible && needsSourceRefresh)) {
+        if (
+          refresh ||
+          active ||
+          scheduled ||
+          data.ledger.status === 'pending' ||
+          (eligible && needsSourceRefresh)
+        ) {
           const remainingBackoff = retryInterval(sourceFailures) - (Date.now() - lastRefreshAt);
+          const delay = nextPollDelay(data);
           schedule(
-            sourceHasFailed && !scheduled && !refresh ? Math.max(pollMs, remainingBackoff) : pollMs,
+            sourceHasFailed && !scheduled && !refresh ? Math.max(delay, remainingBackoff) : delay,
           );
         }
       } catch {
@@ -249,38 +279,52 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
       }
     }
 
-    function show(data: AgentJobUsageApi | null) {
-      setLoaded((previous) => {
-        const cached = previous?.jobId === job.id ? previous.data : null;
-        // Read or pushed, whichever arrives last: an older one than what is
-        // shown only ends the wait for it.
-        if (previous && cached && data && isOlderUsage(data, cached))
-          return { ...previous, loading: false, requesting: false, failed: false };
-        return {
-          jobId: job.id,
-          data: data ? preserveKnownUsage(cached, data) : cached,
-          loading: false,
-          requesting: false,
-          failed: false,
-          unsupported: data === null,
-        };
+    function show(data: AgentJobUsageApi | null): AgentJobUsageApi | null {
+      const cached = latestUsage.current?.jobId === job.id ? latestUsage.current.data : null;
+      // Display and scheduling both use the newer snapshot. A late read must
+      // not cancel pending work or restart polling for usage already settled.
+      const kept =
+        data && cached && isOlderUsage(data, cached)
+          ? cached
+          : data
+            ? preserveKnownUsage(cached, data)
+            : cached;
+      latestUsage.current = { jobId: job.id, data: kept };
+      setLoaded({
+        jobId: job.id,
+        data: kept,
+        loading: false,
+        requesting: false,
+        failed: false,
+        unsupported: data === null,
       });
+      return data === null ? null : kept;
     }
 
     // What the stream sent is shown unless something newer already is; a read
     // still on its way is shown after it only if it is newer. The clock goes on
     // as a backstop.
     function receive(data: AgentJobUsageApi) {
+      const cached = latestUsage.current?.jobId === job.id ? latestUsage.current.data : null;
+      // An older push must leave the newer snapshot's timer in place.
+      if (cached && isOlderUsage(data, cached)) return;
       if (!data.version) {
         // Nothing orders the two: take the push as the newer.
         ++generation;
         controller?.abort();
       }
       readFailures = 0;
-      sourceHasFailed = hasTransientError(data);
+      const shown = show(data);
+      if (!shown) return;
+      sourceHasFailed = hasTransientError(shown);
       if (!sourceHasFailed) sourceFailures = 0;
-      show(data);
-      if (active || data.ledger.refreshing || data.ledger.next_refresh_at) schedule();
+      if (
+        active ||
+        shown.ledger.status === 'pending' ||
+        shown.ledger.refreshing ||
+        shown.ledger.next_refresh_at
+      )
+        schedule(nextPollDelay(shown));
       else clearTimeout(timer);
     }
 
