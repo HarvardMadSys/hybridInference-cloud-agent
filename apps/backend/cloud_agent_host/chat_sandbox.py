@@ -1218,14 +1218,21 @@ class ChatSandboxManager:
         return set(owners)
 
     def _sync_relay_exceptions(self, network: str, addresses: dict[str, str] | None = None) -> None:
-        """Make the host's relay exceptions for one bridge match its relays."""
+        """Make the host's relay exceptions for one bridge match its relays.
+
+        One exception per configured endpoint, not per relay name: a single
+        relay may serve both the gateway and the MCP port.
+        """
         config = self._network()
-        ports = {relay.host: relay.port for relay in config.relays}
         if addresses is None:
             addresses = self.relay_addresses(network)
         self.backend.network_guard().sync_relays(
             config.bridge_name(network),
-            {(address, ports[alias]) for alias, address in addresses.items()},
+            {
+                (addresses[relay.host], relay.port)
+                for relay in config.relays
+                if relay.host in addresses
+            },
         )
 
     def _drop_relay_exceptions(self, network_name: str) -> None:

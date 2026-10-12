@@ -569,6 +569,40 @@ def test_a_relay_rollout_swaps_the_endpoint_and_the_host_exception(monkeypatch):
     assert (old_ip, 8080) not in guard.relays[bridge] or old_ip == new_ip
 
 
+def test_one_relay_serving_both_services_gets_an_exception_for_each_port(monkeypatch):
+    """The configuration accepts one relay name for both services; so must the rules.
+
+    Keyed by name, the second port replaced the first, the in-guest check then
+    found the gateway port refused, and every wake of every group failed.
+    """
+    config = network_from_env(
+        {
+            "AGENT_SANDBOX_NAMESPACE": _NAMESPACE,
+            "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
+            "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
+            "AGENT_RELAY_NETWORK": "agent-relays",
+            "AGENT_GATEWAY_URL": "http://agent-relay:8080",
+            "AGENT_SANDBOX_MCP_URL": "http://agent-relay:8001",
+        }
+    )
+    backend = ContainerBackend(image="img", sandbox_network=config, sandbox_namespace=_NAMESPACE)
+    guard = FakeGuard()
+    backend._network_guard = guard  # type: ignore[assignment]
+    manager = ChatSandboxManager(backend)
+    docker = FakeDocker(config)
+    monkeypatch.setattr(manager, "_run", docker)
+    docker.add_container("relay-both", running=True)
+    docker.connect(docker.network("agent-relays")["Id"], "relay-both", ["agent-relay"])
+
+    name = manager._ensure_group_network(_spec())
+
+    address = docker.network(name)["endpoints"]["relay-both"]["ip"]
+    assert guard.relays[manager._network().bridge_name(name)] == {
+        (address, 8080),
+        (address, 8001),
+    }
+
+
 def test_relay_owners_are_read_in_one_inspect_and_must_be_unambiguous(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     assert manager._relay_owners() == {
