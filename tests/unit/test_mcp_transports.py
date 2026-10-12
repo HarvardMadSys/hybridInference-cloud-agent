@@ -364,9 +364,58 @@ class TestEraDetection:
 
         client = self._with_discovery(handler)
         transport, handshake = await connect_streamable(_config(), client=client)
-        assert methods == ["server/discover", "initialize"]
+        assert methods == ["server/discover", "initialize", "notifications/initialized"]
         assert handshake.protocol_version == "2025-11-25"
         assert transport.era == "handshake"
+        await client.aclose()
+
+    async def test_the_handshake_is_confirmed_before_any_other_request(self) -> None:
+        """``initialize`` alone does not finish the handshake era's lifecycle.
+
+        A server that enforces it -- the Python SDK in stateful mode -- refuses
+        every request but ``ping`` until ``notifications/initialized`` arrives,
+        so a client that never sends it can discover nothing and call nothing.
+        The notification carries the agreed revision and the session, like
+        every request after initialization.
+        """
+        confirmed: list[httpx.Request] = []
+
+        def refusal(body: dict[str, Any], code: int, message: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {"code": code, "message": message},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = _json_body(request)
+            method = body.get("method")
+            if method == "server/discover":
+                return refusal(body, -32601, "method not found")
+            if method == "initialize":
+                return _reply(
+                    request,
+                    {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}},
+                    **{"mcp-session-id": "sess-7"},
+                )
+            if method == "notifications/initialized":
+                confirmed.append(request)
+                return httpx.Response(202)
+            if not confirmed:
+                return refusal(body, -32602, "Received request before initialization was complete")
+            return _reply(request, {"tools": []})
+
+        client = _client(handler)
+        transport, _handshake = await connect_streamable(_config(), client=client)
+        assert await transport.request("tools/list") == {"tools": []}
+        assert len(confirmed) == 1
+        assert "id" not in _json_body(confirmed[0])
+        assert confirmed[0].headers["mcp-protocol-version"] == "2025-06-18"
+        assert confirmed[0].headers["mcp-session-id"] == "sess-7"
         await client.aclose()
 
     async def test_an_unsupported_version_is_retried_once_with_one_it_offers(self) -> None:

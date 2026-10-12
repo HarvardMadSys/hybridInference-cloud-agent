@@ -68,6 +68,7 @@ from cloud_agent.mcp.net_policy import (
 )
 from cloud_agent.mcp.oauth import MetadataFetcher
 from cloud_agent.mcp.protocol import (
+    INITIALIZED,
     ROOTS_LIST,
     Handshake,
     discover_server,
@@ -1221,14 +1222,29 @@ async def connect_streamable(
     transport.set_era("handshake")
     transport.set_protocol_version("")
     try:
-        handshake = await initialize(transport)
+        handshake = await _handshake(transport)
     except BaseException:
         if owned:
             await http.aclose()
         raise
-    transport.set_protocol_version(handshake.protocol_version)
     del modern_error
     return transport, handshake
+
+
+async def _handshake(transport: StreamableHttpTransport | LegacySseTransport) -> Handshake:
+    """Agree a revision through ``initialize``, then tell the server we are ready.
+
+    The handshake is not finished until ``notifications/initialized`` is sent:
+    the lifecycle requires it before any other request, and a server that
+    enforces that -- the Python SDK in stateful mode, which covers every
+    legacy SSE server built on it -- refuses the catalogue and every call until
+    it arrives. It is sent after the agreed revision is recorded, so it carries
+    the version header every request after initialization must.
+    """
+    handshake = await initialize(transport)
+    transport.set_protocol_version(handshake.protocol_version)
+    await transport.notify(INITIALIZED)
+    return handshake
 
 
 async def connect_legacy_sse(
@@ -1277,14 +1293,13 @@ async def connect_legacy_sse(
             ) from exc
         # The reader validates announcements before resolving the future. Its
         # refusal stays inside this cleanup boundary, including later events.
-        handshake = await initialize(transport)
+        handshake = await _handshake(transport)
     except httpx.HTTPError as exc:
         await transport.aclose()
         raise TransportError(f"the server could not be reached: {exc}") from exc
     except BaseException:
         await transport.aclose()
         raise
-    transport.set_protocol_version(handshake.protocol_version)
     return transport, handshake, stream_task
 
 

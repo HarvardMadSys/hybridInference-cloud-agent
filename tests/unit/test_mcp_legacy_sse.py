@@ -99,13 +99,19 @@ def _frame(event: str, data: Any) -> bytes:
 class _LegacyServer:
     """A stand-in 2024-11-05 server: one stream, one message endpoint."""
 
-    def __init__(self, *, announce: bool = True, announce_relative: bool = False) -> None:
-        """Configure what the announcement looks like, if there is one."""
+    def __init__(
+        self, *, announce: bool = True, announce_relative: bool = False, strict: bool = False
+    ) -> None:
+        """Configure the announcement, and whether the lifecycle is enforced."""
         self.stream = _Stream()
         self.posts: list[dict[str, Any]] = []
         self.announce = announce
         self.announce_relative = announce_relative
         self._announced = False
+        #: Refuse everything but the handshake until the client confirms it, as
+        #: the Python SDK does in stateful mode.
+        self.strict = strict
+        self.initialized = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         """Serve the GET stream and the POST message endpoint."""
@@ -132,8 +138,27 @@ class _LegacyServer:
         self.stream.push(f"event: endpoint\ndata: {target}\n\n".encode())
 
     def _answer(self, body: dict[str, Any]) -> None:
-        """Push the reply for one POSTed request."""
+        """Push the reply for one POSTed request; a notification gets none."""
         method = body.get("method")
+        if "id" not in body:
+            if method == "notifications/initialized":
+                self.initialized = True
+            return
+        if self.strict and not self.initialized and method not in ("initialize", "ping"):
+            self.stream.push(
+                _frame(
+                    "message",
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body.get("id"),
+                        "error": {
+                            "code": -32602,
+                            "message": "Received request before initialization was complete",
+                        },
+                    },
+                )
+            )
+            return
         if method == "initialize":
             result: Any = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}}
         elif method == "tools/list":
@@ -196,8 +221,30 @@ class TestTheFlow:
         (transport, _handshake, _task), client = await _connect(server)
         listed = await transport.request("tools/list")
         assert listed == {"tools": [{"name": "get_issue"}]}
-        # Both requests went to the announced endpoint, not to the stream's URL.
-        assert [post["method"] for post in server.posts] == ["initialize", "tools/list"]
+        # Every message went to the announced endpoint, not to the stream's URL,
+        # and the handshake was confirmed before anything else was asked.
+        assert [post["method"] for post in server.posts] == [
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+        ]
+        await transport.aclose()
+        await client.aclose()
+
+    async def test_a_server_that_enforces_the_lifecycle_answers_after_the_handshake(
+        self,
+    ) -> None:
+        """``initialize`` alone does not finish the handshake.
+
+        A server that enforces the lifecycle -- every legacy SSE server built on
+        the Python SDK, in stateful mode -- refuses everything but ``ping``
+        until ``notifications/initialized`` arrives, so a client that never
+        sends it can discover nothing and call nothing.
+        """
+        server = _LegacyServer(strict=True)
+        (transport, _handshake, _task), client = await _connect(server)
+        assert await transport.request("tools/list") == {"tools": [{"name": "get_issue"}]}
+        assert server.initialized
         await transport.aclose()
         await client.aclose()
 
