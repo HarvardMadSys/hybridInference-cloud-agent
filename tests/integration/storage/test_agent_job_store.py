@@ -895,36 +895,6 @@ async def _settle_shared_turn(store: Storage, job: dict, claim: dict, reservatio
     )
 
 
-async def _follow_up_turn(store: Storage, parent: dict, sandbox: dict) -> tuple[dict, dict, dict]:
-    """Create, claim and reserve the next turn of a shared chat."""
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and the docs too"
-    )
-    assert child is not None
-    claim = await _claim(
-        store,
-        worker_id=f"worker-{child['id']}",
-        lease_ttl_seconds=60,
-        host="shared-runner",
-        host_credential_hash="test-credential-hash",
-    )
-    assert claim is not None and claim["id"] == child["id"]
-    reservation = await store.sandbox.reserve_thread_sandbox(
-        thread_id=child["thread_id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        host="shared-runner",
-        sandbox_id=sandbox["sandbox_id"],
-        container_name="freeinference-shared-test",
-        runtime_id="claude-code",
-        runtime_version=claim.get("runtime_version"),
-        sandbox_image_digest=claim.get("sandbox_image_digest"),
-        execution_profile=child["execution_profile"],
-    )
-    assert reservation is not None
-    return child, claim, reservation
-
-
 async def _captured_snapshot(store: Storage, patch: str) -> dict | None:
     """Capture the group's due snapshot with ``patch``, or ``None`` if none is due."""
     capture = await store.snapshot.claim_due_sandbox_snapshot()
