@@ -153,6 +153,74 @@ class TestSse:
         with pytest.raises(sse.SseError):
             decoder.feed(b"x" * (sse.MAX_EVENT_BYTES + 1))
 
+    def test_a_long_line_dripped_in_small_chunks_is_scanned_once(self) -> None:
+        """The server chooses both the line and the size of the pieces.
+
+        Rescanning the line still being assembled on every chunk made a
+        megabyte delivered a kilobyte at a time cost tens of seconds of CPU on
+        the event loop every relay request shares.
+        """
+        import time
+
+        decoder = sse.SseDecoder()
+        started = time.perf_counter()
+        assert decoder.feed(b"data: ") == []
+        for _ in range(1000):
+            assert decoder.feed(b"x" * 1024) == []
+        events = decoder.feed(b"\n\n")
+        elapsed = time.perf_counter() - started
+        assert len(events) == 1
+        assert len(events[0].data) == 1000 * 1024
+        assert elapsed < 1.0, f"feeding one 1000 KiB line took {elapsed:.2f}s"
+
+    def test_one_line_may_carry_a_whole_event(self) -> None:
+        """Servers write a JSON-RPC message as one ``data`` line, so a line bound
+        below the event bound refuses results the event bound allows."""
+        decoder = sse.SseDecoder()
+        payload = b'"' + b"x" * (2 * 1024 * 1024) + b'"'
+        events = decoder.feed(b"data: " + payload[:1024])
+        for offset in range(1024, len(payload), 64 * 1024):
+            events += decoder.feed(payload[offset : offset + 64 * 1024])
+        events += decoder.feed(b"\n\n")
+        assert len(events) == 1
+        assert events[0].json() == payload.decode()[1:-1]
+
+    def test_data_that_never_ends_its_event_is_refused_as_it_grows(self) -> None:
+        """The bound applies to the event being assembled, not only to one read.
+
+        A stream that keeps sending ``data`` lines and never the blank line that
+        ends the event would otherwise grow the pending event for as long as
+        the stream stays open.
+        """
+        decoder = sse.SseDecoder()
+        line = b"data: " + b"y" * (64 * 1024) + b"\n"
+        with pytest.raises(sse.SseError):
+            for _ in range(sse.MAX_EVENT_BYTES // (64 * 1024) + 1):
+                decoder.feed(line)
+
+    def test_an_event_exactly_at_the_bound_is_kept(self) -> None:
+        """The joining line feeds count, and nothing else does."""
+        decoder = sse.SseDecoder()
+        half = sse.MAX_EVENT_BYTES // 2
+        events = decoder.feed(b"data: " + b"a" * half + b"\n")
+        events += decoder.feed(b"data: " + b"b" * (sse.MAX_EVENT_BYTES - half - 1) + b"\n\n")
+        assert len(events) == 1
+        assert len(events[0].data) == sse.MAX_EVENT_BYTES
+
+    def test_a_character_split_across_chunks_is_decoded_whole(self) -> None:
+        """A chunk boundary inside a multi-byte character is not two bad bytes."""
+        decoder = sse.SseDecoder()
+        encoded = 'data: "café"\n\n'.encode()
+        split = encoded.index(b"\xc3") + 1
+        assert decoder.feed(encoded[:split]) == []
+        assert decoder.feed(encoded[split:])[0].json() == "café"
+
+    def test_a_stream_that_ends_on_a_cr_ends_its_line_there(self) -> None:
+        """The CR held back for a possible LF is a terminator once nothing follows."""
+        decoder = sse.SseDecoder()
+        assert decoder.feed(b"data: x\r") == []
+        assert [event.data for event in decoder.close()] == ["x"]
+
 
 class _FakeTransport:
     """A protocol transport backed by a table, for discovery tests."""

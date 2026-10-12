@@ -23,6 +23,7 @@ The rules that a naive ``split(b"\\n\\n")`` gets wrong:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -35,7 +36,14 @@ if TYPE_CHECKING:
 MAX_EVENT_BYTES = 4 * 1024 * 1024
 
 #: Kept between reads: the tail of a chunk that did not end in a complete line.
-_MAX_LINE_BYTES = 1024 * 1024
+#: As long as an event may be, because servers write each JSON-RPC message as a
+#: single ``data`` line: a shorter bound here would refuse events the event
+#: bound allows.
+_MAX_LINE_BYTES = MAX_EVENT_BYTES
+
+#: Any of the three line terminators. CRLF comes first so that it is taken as
+#: one terminator rather than as a CR followed by an empty line.
+_LINE_END = re.compile(rb"\r\n|\r|\n")
 
 
 class SseError(ValueError):
@@ -71,10 +79,23 @@ class SseDecoder:
     that split anywhere -- mid-line, mid-CRLF, mid-JSON -- and buffering "until
     the next newline" on a stream that sends progress events is how a relay
     starts adding latency to somebody's tool call.
+
+    **Every byte is examined once.** The search for a line's end resumes where
+    the previous chunk's search stopped, rather than at the start of the line
+    still being assembled: rescanning that line on every chunk made one long
+    line delivered in small pieces quadratic, and the server chooses both the
+    line and the pieces. Lines are split as bytes and decoded whole, so a
+    character whose bytes straddle two chunks is not torn in half either.
     """
 
-    _buffer: str = field(default="", init=False)
-    _data: list[str] = field(default_factory=list, init=False)
+    _buffer: bytearray = field(default_factory=bytearray, init=False)
+    #: Where the search for the next line terminator resumes in ``_buffer``.
+    _scanned: int = field(default=0, init=False)
+    _data: list[bytes] = field(default_factory=list, init=False)
+    #: The size of the data the pending event will carry, kept as it grows: a
+    #: stream that never sends the blank line ending an event would otherwise
+    #: grow it for as long as the stream stays open.
+    _data_bytes: int = field(default=0, init=False)
     _event: str = field(default="", init=False)
     _id: str = field(default="", init=False)
     _retry: int | None = field(default=None, init=False)
@@ -87,20 +108,28 @@ class SseDecoder:
         """Consume bytes, returning every event that completed."""
         if len(chunk) > MAX_EVENT_BYTES:
             raise SseError("an SSE chunk is larger than this relay will buffer")
-        # ``errors="replace"`` rather than strict: a malformed byte in a
-        # comment should not take down a stream that is otherwise working, and
-        # the JSON events still fail loudly on their own.
-        self._buffer += chunk.decode("utf-8", errors="replace")
+        buffer = self._buffer
+        buffer += chunk
         events: list[SseEvent] = []
+        start = 0
         while True:
-            line, separator, remainder = _take_line(self._buffer)
-            if not separator:
+            terminator = _LINE_END.search(buffer, self._scanned)
+            if terminator is None:
+                self._scanned = len(buffer)
                 break
-            self._buffer = remainder
-            event = self._consume_line(line)
+            if terminator.group() == b"\r" and terminator.end() == len(buffer):
+                # A CR at the very end may be the first half of a CRLF that has
+                # not arrived yet; wait for the next chunk rather than guessing.
+                self._scanned = terminator.start()
+                break
+            event = self._consume_line(bytes(buffer[start : terminator.start()]))
+            start = self._scanned = terminator.end()
             if event is not None:
                 events.append(event)
-        if len(self._buffer) > _MAX_LINE_BYTES:
+        if start:
+            del buffer[:start]
+            self._scanned -= start
+        if len(buffer) > _MAX_LINE_BYTES:
             raise SseError("this stream has a line longer than the relay will buffer")
         return events
 
@@ -113,34 +142,42 @@ class SseDecoder:
         """
         events: list[SseEvent] = []
         if self._buffer:
-            event = self._consume_line(self._buffer)
+            # A CR held back in case an LF followed is a terminator after all:
+            # nothing can follow it now.
+            line = bytes(self._buffer).removesuffix(b"\r")
+            self._buffer.clear()
+            self._scanned = 0
+            event = self._consume_line(line)
             if event is not None:
                 events.append(event)
-            self._buffer = ""
         if self._data:
             events.append(self._dispatch())
         return events
 
-    def _consume_line(self, line: str) -> SseEvent | None:
+    def _consume_line(self, line: bytes) -> SseEvent | None:
         """Apply one line, returning an event when the line completes one."""
-        if line == "":
+        if not line:
             return self._dispatch() if self._data or self._event or self._id else None
-        if line.startswith(":"):
+        if line.startswith(b":"):
             return None
-        name, _, value = line.partition(":")
-        if value.startswith(" "):
+        name, _, value = line.partition(b":")
+        if value.startswith(b" "):
             value = value[1:]
         match name:
-            case "data":
+            case b"data":
+                # Joined with an LF to the data before it, which counts too.
+                self._data_bytes += len(value) + (1 if self._data else 0)
+                if self._data_bytes > MAX_EVENT_BYTES:
+                    raise SseError("an SSE event is larger than this relay will buffer")
                 self._data.append(value)
-            case "event":
-                self._event = value
-            case "id":
+            case b"event":
+                self._event = _text(value)
+            case b"id":
                 # A NUL in an id is defined to be ignored, which is how a
                 # server resets the id without ending the stream.
-                if "\x00" not in value:
-                    self._id = value
-            case "retry":
+                if b"\x00" not in value:
+                    self._id = _text(value)
+            case b"retry":
                 if value.isdigit():
                     self._retry = int(value)
             case _:
@@ -151,7 +188,7 @@ class SseDecoder:
     def _dispatch(self) -> SseEvent:
         """Build the event the accumulated fields describe, and reset."""
         event = SseEvent(
-            data="\n".join(self._data),
+            data=_text(b"\n".join(self._data)),
             event=self._event,
             id=self._id,
             retry=self._retry,
@@ -159,26 +196,20 @@ class SseDecoder:
         if event.id:
             self.last_event_id = event.id
         self._data = []
+        self._data_bytes = 0
         self._event = ""
         self._retry = None
         return event
 
 
-def _take_line(buffer: str) -> tuple[str, str, str]:
-    """Split off the first complete line, whatever terminator it used."""
-    for index, character in enumerate(buffer):
-        if character == "\n":
-            return buffer[:index], "\n", buffer[index + 1 :]
-        if character == "\r":
-            # CRLF: the LF belongs to the terminator, not the next line.
-            if index + 1 < len(buffer):
-                if buffer[index + 1] == "\n":
-                    return buffer[:index], "\r\n", buffer[index + 2 :]
-                return buffer[:index], "\r", buffer[index + 1 :]
-            # A CR at the very end may be the first half of a CRLF that has not
-            # arrived yet; wait for the next chunk rather than guessing.
-            return "", "", buffer
-    return "", "", buffer
+def _text(value: bytes) -> str:
+    """Decode one field's value.
+
+    ``errors="replace"`` rather than strict: a malformed byte in a comment or an
+    event name should not take down a stream that is otherwise working, and the
+    JSON events still fail loudly on their own.
+    """
+    return value.decode("utf-8", errors="replace")
 
 
 def iter_events(chunks: Iterator[bytes]) -> Iterator[SseEvent]:
