@@ -587,8 +587,9 @@ async def _publish_claimed(
         )
     finally:
         heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        # Not `suppress(CancelledError)`: that would also swallow a shutdown
+        # cancelling this task while it waits for the heartbeat to stop.
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 async def _publish_held(

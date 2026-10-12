@@ -609,6 +609,43 @@ async def test_a_slow_publish_keeps_renewing_its_claim(monkeypatch):
     assert len(store.touched) == renewed, "the heartbeat must stop with the publish"
 
 
+async def test_cancelling_a_publish_while_its_heartbeat_stops_is_not_swallowed(monkeypatch):
+    """A shutdown that lands while the heartbeat winds down must still stop the publisher."""
+    import asyncio
+
+    beating = asyncio.Event()
+    stopping = asyncio.Event()
+    release = asyncio.Event()
+
+    async def heartbeat(_store: Any, _snapshot_id: int) -> None:
+        beating.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopping.set()
+            await release.wait()
+            raise
+
+    async def open_pr(**_kwargs: Any) -> str:
+        # Finish only once the heartbeat runs, as it does under any real push.
+        await beating.wait()
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "_keep_publish_claim", heartbeat)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", open_pr)
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    )
+    task = asyncio.create_task(publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t")))
+    await stopping.wait()
+
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_publishing_asks_for_a_token_that_outlives_the_publish(monkeypatch):
     """A cached token is served until five minutes before expiry; a publish can take longer."""
     store = FakeStore(dict(_JOB))
