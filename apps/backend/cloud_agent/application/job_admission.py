@@ -382,6 +382,14 @@ async def _resolve_skill_selection(
         ) from exc
 
 
+def _attachment_selection_error(exc: AttachmentError) -> HTTPException:
+    """The owner-facing refusal for uploads a submission cannot carry."""
+    return HTTPException(
+        status_code=400,
+        detail={"error": {"type": "invalid_attachment_selection", "message": str(exc)}},
+    )
+
+
 async def _resolve_attachment_selection(
     store: AttachmentRepository, *, user_id: str, attachment_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
@@ -389,10 +397,7 @@ async def _resolve_attachment_selection(
     try:
         return await resolve_attachments(store, user_id=user_id, attachment_ids=attachment_ids)
     except AttachmentError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_attachment_selection", "message": str(exc)}},
-        ) from exc
+        raise _attachment_selection_error(exc) from exc
 
 
 async def _create_job_as(
@@ -520,33 +525,40 @@ async def _create_job_as(
     attachments = await _resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
-    job = await job_store.conversation_commands.create_job(
-        user_id=user["user_id"],
-        repo=body.repo,
-        task_prompt=body.task_prompt,
-        runtime=body.runtime,
-        model=model,
-        execution_profile=execution_profile,
-        reasoning_effort=reasoning_effort,
-        base_sha=base_sha,
-        setup_script=body.setup_script,
-        metadata=metadata or None,
-        mcp_bindings=mcp_bindings,
-        # Named rather than splatted: see the note on the same call in
-        # ``turns.py`` — an unpacked dict defeats the argument types.
-        skills=skills,
-        attachments=attachments,
-        # Set in the same transaction that creates the conversation, so the
-        # first turn is already working toward the objective rather than
-        # learning about it one turn later.
-        goal=body.goal,
-        client_request_id=client_request_id,
-        # Over the request as sent, not as resolved: a branch that moved
-        # between two sends of one submission is still one submission. The
-        # same value the replay lookup above used, so the pre-check and the
-        # unique index cannot disagree about what was sent.
-        client_request_fingerprint=fingerprint,
-    )
+    try:
+        job = await job_store.conversation_commands.create_job(
+            user_id=user["user_id"],
+            repo=body.repo,
+            task_prompt=body.task_prompt,
+            runtime=body.runtime,
+            model=model,
+            execution_profile=execution_profile,
+            reasoning_effort=reasoning_effort,
+            base_sha=base_sha,
+            setup_script=body.setup_script,
+            metadata=metadata or None,
+            mcp_bindings=mcp_bindings,
+            # Named rather than splatted: see the note on the same call in
+            # ``turns.py`` — an unpacked dict defeats the argument types.
+            skills=skills,
+            attachments=attachments,
+            # Set in the same transaction that creates the conversation, so the
+            # first turn is already working toward the objective rather than
+            # learning about it one turn later.
+            goal=body.goal,
+            client_request_id=client_request_id,
+            # Over the request as sent, not as resolved: a branch that moved
+            # between two sends of one submission is still one submission. The
+            # same value the replay lookup above used, so the pre-check and the
+            # unique index cannot disagree about what was sent.
+            client_request_fingerprint=fingerprint,
+        )
+    except AttachmentError as exc:
+        # The claim inside the store's transaction is the authoritative check:
+        # another submission, the stale-upload sweep or a waiting message can
+        # hold an upload the resolution above still saw as free. Nothing was
+        # written, and the owner can attach the file again.
+        raise _attachment_selection_error(exc) from exc
     if job.get("error") == "client_request_conflict":
         raise _idempotency_conflict()
     logger.info(

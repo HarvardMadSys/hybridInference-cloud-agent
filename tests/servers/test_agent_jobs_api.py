@@ -44,6 +44,7 @@ from cloud_agent.api import routes as agent_jobs_router, worker, workspace as ag
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
@@ -2815,6 +2816,40 @@ async def test_a_first_turn_is_bounded_like_every_later_message(
     )
     assert response.status_code == 422, response.text
     assert store.jobs == {}
+
+
+async def test_an_upload_lost_between_resolving_and_claiming_is_a_400(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """The claim inside the create's transaction is the boundary, and says why.
+
+    Another submission, the stale-upload sweep or a waiting message can take a
+    file after the selection resolved. The store then refuses the claim and
+    writes nothing; the owner gets the same refusal a vanished upload always
+    gets, not a bare ``500 Internal Server Error``.
+    """
+    upload = {"id": 7, "path": "notes.md", "size_bytes": 5, "content_type": "text/plain"}
+    monkeypatch.setattr(
+        store, "select_attachments", AsyncMock(return_value=[upload]), raising=False
+    )
+    lost = AttachmentError("One or more uploads are no longer available. Attach them again.")
+    monkeypatch.setattr(store, "create_job", AsyncMock(side_effect=lost))
+
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "read the notes",
+            "model": "glm-5.1",
+            "attachment_ids": [7],
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error"] == {
+        "type": "invalid_attachment_selection",
+        "message": "One or more uploads are no longer available. Attach them again.",
+    }
 
 
 async def test_a_first_turn_keeps_the_trimmed_task(client: AsyncClient, store: FakeStorage):

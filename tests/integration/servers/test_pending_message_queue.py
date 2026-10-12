@@ -1784,6 +1784,43 @@ async def test_uploads_a_waiting_message_holds_survive_the_sweep_until_it_is_del
     assert await api.store.attachments.purge_stale_staged(older_than_hours=24) == 1
 
 
+async def test_a_new_task_cannot_take_an_upload_a_waiting_message_holds(api: Api):
+    """The pin is the message's claim; a create naming the file is refused, not a 500."""
+    job = await api.create()
+    thread_id = job["thread_id"]
+    running = await api.start(job)
+    upload = await api.store.attachments.create_attachment(
+        user_id=_OWNER, path="spec.md", content=b"# spec", content_type="text/markdown"
+    )
+    sent = await api.send(thread_id, "follow the spec", attachment_ids=[upload["id"]])
+    assert sent.status_code == 201, sent.text
+
+    taken = await api.client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": _REPO,
+            "task_prompt": "take the spec",
+            "model": "glm-5.1",
+            "base_sha": "a" * 40,
+            "attachment_ids": [upload["id"]],
+        },
+    )
+
+    assert taken.status_code == 400, taken.text
+    assert taken.json()["detail"]["error"]["type"] == "invalid_attachment_selection"
+    async with api.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_threads") == 1
+    # The message still sends with its file when the running turn ends.
+    await api.finish(running)
+    turns = await api.turns(thread_id)
+    assert [turn["task_prompt"] for turn in turns] == ["fix it", "follow the spec"]
+    async with api.pool.acquire() as conn:
+        claimed = await conn.fetchval(
+            "SELECT job_id FROM agent_job_attachments WHERE id = $1", upload["id"]
+        )
+    assert claimed == turns[1]["id"]
+
+
 async def test_a_waiting_message_carries_its_uploads_into_its_turn(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]

@@ -755,6 +755,9 @@ class PostgresPendingMessageRepository:
                         yield_to_queued=True,
                         client_request_id=client_request_id,
                         client_request_fingerprint=fingerprint,
+                        # The uploads this message pinned are its turn's to
+                        # claim, and no other turn's.
+                        pending_message_id=str(head["id"]),
                     )
             except AttachmentError as exc:
                 await self._hold(conn, message_id=str(head["id"]), error=str(exc))
