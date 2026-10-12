@@ -72,11 +72,14 @@ FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
 FORBIDDEN_HEADER_PREFIXES: tuple[str, ...] = ("x-forwarded-", "x-real-ip", "forwarded")
 
 #: Addresses that are always refused, whatever the deployment policy says.
-#: Link-local covers IPv4 cloud metadata services; AWS's IPv6 metadata address
-#: (``fd00:ec2::254``) is blocked explicitly. The rest is the platform's own plumbing.
+#: Link-local covers IPv4 cloud metadata services. The IPv6 ones sit in
+#: unique-local space, which a deployment may open for its connectors, so each
+#: is named: AWS's (``fd00:ec2::254``) and Google Cloud's (``fd20:ce::254``).
+#: The rest is the platform's own plumbing.
 ALWAYS_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("fd00:ec2::254/128"),
+    ipaddress.ip_network("fd20:ce::254/128"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("::/128"),
     ipaddress.ip_network("ff00::/8"),
@@ -114,6 +117,11 @@ PRIVATE_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
 #: The well-known NAT64 prefix. A translator delivers an address in it to the
 #: IPv4 address in its last 32 bits, which is the address that is checked.
 _NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
+
+#: The deprecated IPv4-compatible form, ``::a.b.c.d``, which a tunnelling stack
+#: delivers to the IPv4 address in its last 32 bits. ``::`` and ``::1`` share
+#: the prefix but are the unspecified and loopback addresses, checked as such.
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
 
 #: Redirects are followed only to these schemes, and only this many times. A
 #: redirect chain is a way to spend our credential on somebody else's host, so
@@ -252,16 +260,19 @@ def _delivered_to(
     """Every address a packet to ``address`` can end up at, itself included.
 
     IPv6 has several forms that carry an IPv4 address for a translator or a
-    tunnel to deliver to: IPv4-mapped, NAT64, 6to4 and Teredo. Checking only
-    the IPv6 form would let ``64:ff9b::7f00:1`` reach loopback through a
-    translator, so the IPv4 addresses inside are checked as well. Teredo
-    carries two -- the relay server and the client -- and both are checked.
+    tunnel to deliver to: IPv4-mapped, IPv4-compatible, NAT64, 6to4 and Teredo.
+    Checking only the IPv6 form would let ``64:ff9b::7f00:1`` reach loopback
+    through a translator, so the IPv4 addresses inside are checked as well.
+    Teredo carries two -- the relay server and the client -- and both are
+    checked.
     """
     if not isinstance(address, ipaddress.IPv6Address):
         return (address,)
     embedded: list[ipaddress.IPv4Address] = []
     if address.ipv4_mapped is not None:
         embedded.append(address.ipv4_mapped)
+    if address in _IPV4_COMPATIBLE and int(address) > 1:
+        embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address in _NAT64_WELL_KNOWN:
         embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address.sixtofour is not None:

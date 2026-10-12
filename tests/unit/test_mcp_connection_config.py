@@ -185,6 +185,8 @@ class TestNetPolicy:
         [
             "64:ff9b::7f00:1",  # NAT64, delivering to 127.0.0.1
             "64:ff9b::a01:203",  # NAT64, delivering to 10.1.2.3
+            "::7f00:1",  # IPv4-compatible, delivering to 127.0.0.1
+            "::a01:203",  # IPv4-compatible, delivering to 10.1.2.3
             "64:ff9b:1::a01:203",  # local-use NAT64, whose layout is the operator's
             "2002:7f00:1::1",  # 6to4 through 127.0.0.1
             "2002:c0a8:10a::1",  # 6to4 through 192.168.1.10
@@ -206,7 +208,9 @@ class TestNetPolicy:
         with pytest.raises(net_policy.EndpointRejected):
             net_policy.check_addresses("example.com", [address], net_policy.EgressPolicy())
 
-    @pytest.mark.parametrize("address", ["64:ff9b::5db8:d822", "2002:5db8:d822::1", "2606:4700::1"])
+    @pytest.mark.parametrize(
+        "address", ["64:ff9b::5db8:d822", "2002:5db8:d822::1", "::5db8:d822", "2606:4700::1"]
+    )
     def test_a_translated_public_address_is_still_public(self, address: str) -> None:
         """A DNS64 deployment reaches public IPv4 servers only through NAT64."""
         assert net_policy.check_addresses("example.com", [address], net_policy.EgressPolicy()) == (
@@ -218,7 +222,9 @@ class TestNetPolicy:
         [
             "169.254.169.254",
             "fd00:ec2::254",
+            "fd20:ce::254",  # Google Cloud's IPv6 metadata server
             "::ffff:169.254.169.254",
+            "::a9fe:a9fe",
             "64:ff9b::a9fe:a9fe",
             "2002:a9fe:a9fe::1",
         ],
@@ -243,6 +249,7 @@ class TestNetPolicy:
         with pytest.raises(net_policy.EndpointRejected, match="never dials"):
             net_policy.check_addresses("bridge.internal", ["93.184.216.34", address], policy)
 
+    @pytest.mark.parametrize("address", ["fd00:ec2::1", "fd20:ce::1"])
     @pytest.mark.parametrize(
         "policy",
         [
@@ -250,11 +257,11 @@ class TestNetPolicy:
             net_policy.EgressPolicy(allowed_hosts=frozenset({"bridge.internal"})),
         ],
     )
-    def test_private_ipv6_connectors_remain_allowed(self, policy: net_policy.EgressPolicy) -> None:
+    def test_private_ipv6_connectors_remain_allowed(
+        self, address: str, policy: net_policy.EgressPolicy
+    ) -> None:
         """Blocking the metadata endpoint does not block trusted private connectors."""
-        assert net_policy.check_addresses("bridge.internal", ["fd00:ec2::1"], policy) == (
-            "fd00:ec2::1",
-        )
+        assert net_policy.check_addresses("bridge.internal", [address], policy) == (address,)
 
     def test_refuses_when_one_of_several_addresses_is_private(self) -> None:
         """A name answering with both is a rebinding attempt, not a lucky one."""
