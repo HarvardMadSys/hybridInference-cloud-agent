@@ -111,6 +111,33 @@ class TestJsonRpc:
         assert isinstance(error, jsonrpc.UnsupportedProtocolVersion)
         assert error.supported == ["2025-11-25"]
 
+    @pytest.mark.parametrize(
+        "error",
+        ["boom", [1], 7, {"code": "nope", "message": "bad"}, {"code": None}],
+        ids=["string", "list", "number", "text-code", "null-code"],
+    )
+    def test_a_malformed_error_member_is_still_a_failed_call(self, error: object) -> None:
+        """A built-in exception in place of the reply's error skips every
+        caller's handling of a failed call, which is how an approved call was
+        left dispatched with no outcome."""
+        reply = jsonrpc.decode(json.dumps({"jsonrpc": "2.0", "id": 1, "error": error}))[0]
+        with pytest.raises(jsonrpc.JsonRpcError) as raised:
+            reply.result()
+        assert raised.value.code == jsonrpc.INTERNAL_ERROR
+
+    def test_a_payload_that_is_not_utf8_is_a_parse_error(self) -> None:
+        """Not the codec's own exception, which nothing reading a reply handles."""
+        with pytest.raises(jsonrpc.JsonRpcError) as raised:
+            jsonrpc.decode(b'{"jsonrpc":"2.0","id":1,"result":"\xff"}')
+        assert raised.value.code == jsonrpc.PARSE_ERROR
+
+    def test_nesting_deeper_than_the_parser_recurses_is_a_parse_error(self) -> None:
+        """A server chooses how deep its reply nests; the recursion limit is ours."""
+        deep = b'{"jsonrpc":"2.0","id":1,"result":' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+        with pytest.raises(jsonrpc.JsonRpcError) as raised:
+            jsonrpc.decode(deep)
+        assert raised.value.code == jsonrpc.PARSE_ERROR
+
 
 class TestSse:
     """Framing rules a naive split gets wrong."""
@@ -190,6 +217,11 @@ class TestSse:
         decoder = sse.SseDecoder()
         assert decoder.feed(b"data: x\r") == []
         assert [event.data for event in decoder.close()] == ["x"]
+
+    def test_data_nested_deeper_than_the_parser_recurses_is_not_json(self) -> None:
+        """Skipped like any other event that is not JSON, not raised as a crash."""
+        with pytest.raises(sse.SseError):
+            sse.SseEvent(data="[" * 100_000 + "]" * 100_000).json()
 
 
 class _FakeTransport:

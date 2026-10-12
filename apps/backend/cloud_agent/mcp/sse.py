@@ -73,6 +73,10 @@ class SseEvent:
             return json.loads(self.data)
         except (json.JSONDecodeError, ValueError) as exc:
             raise SseError(f"this event's data is not JSON: {exc}") from exc
+        except RecursionError as exc:
+            # Deep enough nesting exhausts the parser's recursion, which is a
+            # malformed event like any other rather than a crash of the reader.
+            raise SseError("this event's data nests deeper than this platform parses") from exc
 
 
 @dataclass
