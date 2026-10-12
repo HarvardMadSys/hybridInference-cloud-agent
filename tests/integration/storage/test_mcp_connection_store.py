@@ -823,7 +823,9 @@ async def test_concurrent_oauth_starts_leave_one_flow_at_the_allocated_generatio
     flows = await _pending_flows(pool, row["id"])
     assert len(flows) == 1
     assert int(flows[0]["oauth_generation"]) == int(current["oauth_generation"])
-    consumed = await store.mcp.consume_mcp_oauth_flow(state_hash=str(flows[0]["state_hash"]))
+    consumed = await store.mcp.consume_mcp_oauth_flow(
+        state_hash=str(flows[0]["state_hash"]), user_id=_OWNER
+    )
     assert consumed is not None
     assert int(consumed["oauth_generation"]) == int(current["oauth_generation"])
 
