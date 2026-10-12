@@ -506,7 +506,7 @@ describe('archive before physical sandbox deletion', () => {
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining('exact retained container'),
     );
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('stopped and idle'));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('stopped or dead'));
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining('does not stop a running container'),
     );

@@ -22273,7 +22273,7 @@
     },
     "/admin/agent/sandboxes/{sandbox_id}/delete": {
       "post": {
-        "description": "Queue verified deletion, with fail-closed recovery for stale running state.",
+        "description": "Queue verified deletion, with fail-closed recovery for a stale running or dead container.",
         "operationId": "delete_admin_sandbox_admin_agent_sandboxes__sandbox_id__delete_post",
         "parameters": [
           {

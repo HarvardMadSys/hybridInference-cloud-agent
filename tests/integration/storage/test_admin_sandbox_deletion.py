@@ -145,7 +145,15 @@ async def test_broker_confirmed_force_delete_atomically_repairs_stale_running_st
             """
         )
 
-    assert await request_delete(store, "asbx_force", broker_confirmed_stopped=True) == "accepted"
+    assert (
+        await request_delete(
+            store,
+            "asbx_force",
+            broker_confirmed_stopped=True,
+            confirmed_docker_status="stopped",
+        )
+        == "accepted"
+    )
     async with db.acquire() as conn:
         group = await conn.fetchrow(
             """
@@ -186,13 +194,49 @@ async def test_broker_confirmed_force_delete_atomically_repairs_stale_running_st
     assert claim is not None and claim["id"] == "asbx_force"
 
 
+@pytest.mark.parametrize("docker_status", ["dead", "paused", None])
+async def test_force_delete_repair_accepts_only_stopped_or_dead_host_status(
+    db, store, docker_status
+):
+    sandbox_id = f"asbx_force_{docker_status or 'missing'}"
+    await seed(db, store, sandbox_id, state="running")
+    result = await request_delete(
+        store,
+        sandbox_id,
+        broker_confirmed_stopped=True,
+        confirmed_docker_status=docker_status,
+    )
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None
+    if docker_status == "dead":
+        assert result == "accepted"
+        assert detail.sandbox.state == "stopped" and detail.sandbox.deletion_state == "pending"
+        async with db.acquire() as conn:
+            recorded = await conn.fetchval(
+                "SELECT details->>'docker_status' FROM agent_admin_audit_log "
+                "WHERE action='agent.sandbox.delete.requested'"
+            )
+        assert recorded == "dead"
+    else:
+        assert result == "not_stopped"
+        assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"
+
+
 async def test_broker_confirmed_force_delete_keeps_all_busy_fences(db, store):
     await seed(db, store, "asbx_force_busy", state="running")
     async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_sandboxes SET active_operation_count=1 WHERE id='asbx_force_busy'"
         )
-    assert await request_delete(store, "asbx_force_busy", broker_confirmed_stopped=True) == "busy"
+    assert (
+        await request_delete(
+            store,
+            "asbx_force_busy",
+            broker_confirmed_stopped=True,
+            confirmed_docker_status="dead",
+        )
+        == "busy"
+    )
     detail = await store.admin_sandboxes.detail("asbx_force_busy")
     assert detail is not None
     assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"
@@ -208,7 +252,12 @@ async def test_force_delete_audit_failure_rolls_back_repair_and_deletion_fence(d
         )
     try:
         with pytest.raises(asyncpg.CheckViolationError):
-            await request_delete(store, "asbx_force_audit", broker_confirmed_stopped=True)
+            await request_delete(
+                store,
+                "asbx_force_audit",
+                broker_confirmed_stopped=True,
+                confirmed_docker_status="stopped",
+            )
         detail = await store.admin_sandboxes.detail("asbx_force_audit")
         assert detail is not None
         assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"

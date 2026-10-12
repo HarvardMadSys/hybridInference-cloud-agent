@@ -233,13 +233,21 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
           ? 'Wait for the workspace snapshot to finish.'
           : null
     : null;
+  const forceDelete = Boolean(
+    sandbox &&
+    sandbox.state === 'running' &&
+    !deletionPending &&
+    !deletionComplete &&
+    sandbox.generation != null &&
+    sandbox.container_id,
+  );
   const deleteBlocked = !sandbox
     ? 'Load the current sandbox before deleting it.'
     : deletionPending
       ? 'Wait for the S3 archive and container deletion to finish.'
       : deletionComplete
         ? 'This sandbox has already been deleted.'
-        : sandbox.state !== 'stopped'
+        : sandbox.state !== 'stopped' && sandbox.state !== 'running'
           ? 'Wait for the host to confirm a clean stop before deleting this sandbox.'
           : (idleBlocked ??
             (sandbox.generation == null || !sandbox.container_id
@@ -248,15 +256,17 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
 
   async function requestDeletion() {
     if (!sandbox || deleteBlocked || actionRequest.current) return;
-    if (
-      !window.confirm(
-        `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${memberCount} ${
-          memberCount === 1 ? 'session' : 'sessions'
-        }? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. ` +
-          'Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.',
-      )
-    )
-      return;
+    const sessions = memberCount === 1 ? 'session' : 'sessions';
+    const confirmation =
+      sandbox.state === 'running'
+        ? `Verify the exact retained container shared by ${memberCount} ${sessions} is stopped or dead, and idle, then permanently delete it? ` +
+          'The server refuses if that exact container is still running or has activity; this action does not stop a running container. ' +
+          'Workspace files and native session history are still uploaded to S3 and verified before deletion. ' +
+          'Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.'
+        : `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${memberCount} ${sessions}? ` +
+          'Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. ' +
+          'Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.';
+    if (!window.confirm(confirmation)) return;
 
     const controller = new AbortController();
     actionRequest.current = controller;
@@ -274,6 +284,7 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
           last_activity_at: sandbox.last_activity_at,
         },
         controller.signal,
+        sandbox.state === 'running',
       );
       if (controller.signal.aborted) return;
       setTrajectory((current) => {
@@ -435,7 +446,8 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                   <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
                     Uploads and verifies workspace files and native session history in S3 before
                     deleting the retained container. Live native resume will no longer be available.
-                    Only a fully stopped, idle sandbox can be deleted.
+                    A sandbox still recorded as running is deleted only after the host proves that
+                    exact container is already stopped or dead, and idle.
                   </p>
                 </div>
                 <button
@@ -445,7 +457,9 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                   className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
                 >
                   {deleting
-                    ? 'Requesting deletion…'
+                    ? forceDelete
+                      ? 'Verifying stopped state…'
+                      : 'Requesting deletion…'
                     : deletionComplete
                       ? 'Sandbox deleted'
                       : deletionState === 'pending'
@@ -454,7 +468,9 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                           ? 'Deleting archived sandbox…'
                           : deletionState === 'failed'
                             ? 'Retry archive and delete'
-                            : 'Archive to S3 and delete'}
+                            : forceDelete
+                              ? 'Verify stopped and force delete'
+                              : 'Archive to S3 and delete'}
                 </button>
               </div>
               {deleteBlocked && (

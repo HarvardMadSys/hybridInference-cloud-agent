@@ -2083,12 +2083,21 @@ class ChatSandboxManager:
     def require_stopped_archive(
         self, spec: ChatSandboxSpec, *, container_id: str
     ) -> ChatSandboxInspection:
-        """Fence archival and removal to an exact, stopped, owned container."""
+        """Fence archival and removal to an exact owned container that is stopped or dead.
+
+        Docker's dead state is terminal and not running: the container cannot be
+        resumed, but its writable layer can still be exported. Removal stays
+        ``docker rm`` without ``--force``, so a start between these fences is
+        left in place.
+        """
         current = self.require_existing(spec, container_id=container_id)
         if not self._belongs_to_namespace(current):
             raise SandboxError("sandbox archive requires this deployment's ownership label")
-        if current.running or current.status is not ChatSandboxStatus.STOPPED:
-            raise SandboxError("sandbox archive requires a stopped container")
+        if current.running or current.status not in {
+            ChatSandboxStatus.STOPPED,
+            ChatSandboxStatus.DEAD,
+        }:
+            raise SandboxError("sandbox archive requires a stopped or dead container")
         return current
 
     def export_stopped_archive(
@@ -2445,6 +2454,7 @@ class ChatSandboxManager:
         if stopped.running or stopped.status not in {
             ChatSandboxStatus.STOPPED,
             ChatSandboxStatus.CREATED,
+            ChatSandboxStatus.DEAD,
         }:
             raise SandboxError(
                 f"chat sandbox stopped into unexpected state {stopped.status.value!r}"

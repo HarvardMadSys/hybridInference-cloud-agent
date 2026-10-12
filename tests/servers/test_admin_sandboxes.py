@@ -1010,6 +1010,7 @@ async def test_reviewed_delete_queues_authenticated_atomic_request(setup, result
         actor_id="admin-token",
         admin_ip="127.0.0.1",
         broker_confirmed_stopped=False,
+        confirmed_docker_status=None,
     )
     if result == "accepted":
         assert response.headers["cache-control"] == "no-store"
@@ -1062,6 +1063,51 @@ async def test_force_delete_repairs_only_an_exact_host_confirmed_stopped_contain
         actor_id="admin-token",
         admin_ip="127.0.0.1",
         broker_confirmed_stopped=True,
+        confirmed_docker_status="stopped",
+    )
+
+
+async def test_force_delete_accepts_an_exact_idle_dead_container(terminal_probe):
+    app, queries, commands, host_pool, broker, broker_factory = terminal_probe
+    broker.shared_chat_sandbox_status.return_value.update(
+        {
+            "running": False,
+            "docker_status": "dead",
+            "group_busy": False,
+            "terminal_count": 0,
+            "operation_count": 0,
+            "snapshotting": False,
+        }
+    )
+    queries.detail.side_effect = [
+        sandbox_detail(),
+        sandbox_detail(state="stopped", deletion_state="pending"),
+    ]
+    app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: True
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{PREFIX}/asbx_other/delete?force=true",
+            headers=ADMIN,
+            json={
+                "generation": 1,
+                "container_id": "container-one",
+                "last_activity_at": END.isoformat(),
+            },
+        )
+
+    assert response.status_code == 202
+    host_pool.get_host.assert_awaited_once_with(host="runner-one")
+    broker_factory.assert_called_once_with(host_pool.get_host.return_value)
+    broker.shared_chat_sandbox_status.assert_awaited_once_with("athr_other", timeout=5)
+    commands.request_admin_delete.assert_awaited_once_with(
+        sandbox_id="asbx_other",
+        generation=1,
+        container_id="container-one",
+        last_activity_at=END,
+        actor_id="admin-token",
+        admin_ip="127.0.0.1",
+        broker_confirmed_stopped=True,
+        confirmed_docker_status="dead",
     )
 
 
@@ -1074,7 +1120,9 @@ async def test_force_delete_repairs_only_an_exact_host_confirmed_stopped_contain
         {"generation": 2},
         {"origin_thread_id": "athr_replaced"},
         {"running": True, "docker_status": "running"},
+        {"running": True, "docker_status": "dead"},
         {"docker_status": "created"},
+        {"docker_status": "paused"},
         {"busy": True},
         {"group_busy": True},
         {"terminal_count": 1},

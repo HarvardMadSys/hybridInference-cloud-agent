@@ -190,9 +190,88 @@ def test_archived_removal_rejects_start_at_second_identity_fence(monkeypatch):
         )
 
     monkeypatch.setattr(manager, "_run", run)
-    with pytest.raises(SandboxError, match="stopped container"):
+    with pytest.raises(SandboxError, match="stopped or dead container"):
         manager.remove_stopped_archived(spec, container_id="sha256:container-one")
     assert len(calls) == 2
+
+
+def test_dead_container_exports_and_removes_without_force(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+    removed = False
+
+    def run(argv, *, timeout):
+        nonlocal removed
+        calls.append(argv)
+        if argv[1:3] == ["container", "inspect"]:
+            if removed:
+                return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_inspect_payload(spec, status="dead", labels=labels, networks=()),
+                stderr="",
+            )
+        assert argv == [manager.backend.docker_binary, "container", "rm", "sha256:container-one"]
+        removed = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class ExportProcess:
+        returncode = 0
+
+        def __init__(self, argv, *, stdout, stderr):
+            calls.append(argv)
+            stdout.write(b"dead container filesystem")
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            raise AssertionError("export must finish")
+
+        def wait(self, timeout):
+            return 0
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
+    with (tmp_path / "rootfs.tar").open("wb") as output:
+        metadata = manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1024
+        )
+    assert metadata["Id"] == "sha256:container-one"
+    manager.remove_stopped_archived(spec, container_id="sha256:container-one")
+    assert [manager.backend.docker_binary, "container", "export", "sha256:container-one"] in calls
+    assert [manager.backend.docker_binary, "container", "rm", "sha256:container-one"] in calls
+    assert not any("--force" in argv or "stop" in argv for argv in calls)
+
+
+def test_stop_accepts_a_running_container_that_lands_dead(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+    inspections = {"count": 0}
+
+    def run(argv, *, timeout):
+        calls.append(list(argv))
+        if argv[1:3] == ["container", "inspect"]:
+            inspections["count"] += 1
+            running = inspections["count"] == 1
+            status = "running" if running else "dead"
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_inspect_payload(spec, status=status, running=running, labels=labels),
+                stderr="",
+            )
+        assert argv[1] == "stop"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(manager, "_run", run)
+    stopped = manager.stop(spec, release_networks=False)
+    assert stopped.status is ChatSandboxStatus.DEAD
+    assert stopped.running is False
+    assert not any("--force" in argv or argv[1:3] == ["container", "rm"] for argv in calls)
 
 
 def test_archive_export_rejects_oversize_and_changed_identity_after_export(monkeypatch, tmp_path):

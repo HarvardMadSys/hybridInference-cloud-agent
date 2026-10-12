@@ -177,6 +177,7 @@ class PostgresSandboxRepository:
         actor_id: str,
         admin_ip: str,
         broker_confirmed_stopped: bool = False,
+        confirmed_docker_status: str | None = None,
     ) -> str:
         """Fence an idle stopped sandbox for verified S3 archival and deletion.
 
@@ -184,7 +185,7 @@ class PostgresSandboxRepository:
         or ledger row is removed; only a verified host receipt may finalize
         physical container deletion and mark its native context lost. A stale
         RUNNING row may be repaired only after the API proves the exact host
-        container is stopped and idle.
+        container is stopped or dead, and idle.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
@@ -206,7 +207,11 @@ class PostgresSandboxRepository:
                 return "stale"
             if group["deletion_state"] in {"pending", "archived", "deleted"}:
                 return "accepted"
-            forced_stopped_recovery = group["state"] == "running" and broker_confirmed_stopped
+            forced_stopped_recovery = (
+                group["state"] == "running"
+                and broker_confirmed_stopped
+                and confirmed_docker_status in {"stopped", "dead"}
+            )
             if group["state"] != "stopped" and not forced_stopped_recovery:
                 return "not_stopped"
             busy = await conn.fetchval(
@@ -290,6 +295,7 @@ class PostgresSandboxRepository:
                 actor_id=actor_id,
                 admin_ip=admin_ip,
                 broker_confirmed_stopped=forced_stopped_recovery,
+                confirmed_docker_status=confirmed_docker_status,
             )
         return "accepted"
 
@@ -649,6 +655,7 @@ class PostgresSandboxRepository:
         size_bytes: int | None = None,
         archive_version_id: str | None = None,
         broker_confirmed_stopped: bool = False,
+        confirmed_docker_status: str | None = None,
     ) -> None:
         """Keep each deletion transition and content-free audit atomic."""
         await conn.execute(
@@ -675,7 +682,7 @@ class PostgresSandboxRepository:
                     {
                         "force": True,
                         "broker_confirmed_stopped": True,
-                        "docker_status": "stopped",
+                        "docker_status": confirmed_docker_status,
                     }
                     if broker_confirmed_stopped
                     else {}
