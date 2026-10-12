@@ -1581,10 +1581,6 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     assert provider["options"]["baseURL"] == "http://backend:8080/v1"
     assert provider["options"]["apiKey"] == "ajt.attempt.key"
     assert provider["models"] == {"glm-5.1": {"name": "glm-5.1"}}
-    # Off in the reviewed config, the only place the setting can live: with
-    # snapshots on, a slow first index blocks the turn on a question for up
-    # to 120s, and the answer is saved to the project config Kilo ignores.
-    assert config["snapshot"] is False
     # Credential-bearing config follows the runtime's activation-only path.
     assert seen["env"]["KILO_CONFIG"].startswith(str(activation))
 

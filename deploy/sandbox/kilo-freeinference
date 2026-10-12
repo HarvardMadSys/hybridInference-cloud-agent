@@ -154,14 +154,6 @@ def main() -> None:
     if effort:
         model_entry["options"] = {"reasoningEffort": effort}
     config = {
-        # Kilo's snapshots are its own undo/redo store, a shadow Git index of
-        # the workspace that nothing on this platform reads. When the first
-        # `git add` into it takes longer than 10s, the pinned CLI stops the
-        # turn on a blocking "Snapshot is slow" question and waits up to 120s
-        # for an answer. Answering "disable" cannot help either: it is saved
-        # to project config, which KILO_DISABLE_PROJECT_CONFIG below ignores.
-        # On 4-vCPU CI VMs this stalled about 40% of Kilo's MCP cases by 110s.
-        "snapshot": False,
         # Explicit local modules are supported by the pinned native loader.
         "plugin": plugin_sources(),
         # The image build disables every project config source, including legacy MCP.
