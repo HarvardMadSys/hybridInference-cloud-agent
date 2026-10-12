@@ -18,7 +18,7 @@ import asyncio
 import base64
 import contextlib
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
@@ -1182,6 +1182,29 @@ async def worker_append_event(
     return WorkerEventResponse(event_id=event_id)
 
 
+#: How long after its attempt ends a startup measurement is still accepted.
+#: The runner sends the record from a background thread as soon as the startup
+#: window closes, retrying for seconds; a short turn can end before it lands,
+#: which is why no live lease is asked for. An hour is far past any delivery,
+#: and still a bound: a worker token carries no expiry of its own.
+MEASUREMENT_GRACE_S = 3600.0
+
+
+def _measurement_window_open(attempt: dict[str, Any], *, now: datetime) -> bool:
+    """Whether a measurement may still be filed against this attempt.
+
+    While it runs, always. Once it has ended, only within
+    :data:`MEASUREMENT_GRACE_S` of the end the store recorded — an ended
+    attempt without one says nothing about when it ended, so it is closed.
+    """
+    if attempt.get("status") == "running":
+        return True
+    finished_at = attempt.get("finished_at")
+    return isinstance(finished_at, datetime) and now - finished_at <= timedelta(
+        seconds=MEASUREMENT_GRACE_S
+    )
+
+
 @router.post(
     "/worker/jobs/{job_id}/measurements",
     response_model=WorkerMeasurementResponse,
@@ -1219,6 +1242,9 @@ async def worker_record_measurement(
         job_id=job_id, attempt_id=int(attempt_id)
     )
     if attempt is None or int(attempt["lease_generation"]) != int(generation):
+        raise _lease_lost()
+    now = datetime.now(UTC)
+    if not _measurement_window_open(attempt, now=now):
         raise _lease_lost()
     job = await job_store.conversation_queries.get_job(job_id)
     if job is None:
@@ -1258,7 +1284,7 @@ async def worker_record_measurement(
         record=body.record,
         owner=owner,
         run=body.run,
-        now=datetime.now(UTC),
+        now=now,
     )
     if result in {"conflict", "run_conflict"}:
         return WorkerMeasurementResponse(
