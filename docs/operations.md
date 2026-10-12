@@ -83,10 +83,11 @@ A release can narrow what a setting accepts. A value saved earlier that it
 refuses does not stop the listeners: each logs
 `saved setting not applied as stored: …`, naming the key but never the value,
 once per settings revision, and uses the built-in default in its place. The
-exception is a signing or encryption key shorter than a newly required
-minimum, which stays in use until it is replaced. The editor shows the value in
-effect; save a valid value or **Reset** to clear the warning. Undecryptable or
-unencrypted stored credentials still stop the listener.
+exception is a signing key, encryption key or service token shorter than a
+newly required minimum, which stays in use until it is replaced. The editor
+shows the value in effect; save a valid value or **Reset** to clear the
+warning. Undecryptable or unencrypted stored credentials still stop the
+listener.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by
 default. Configure it under **Publication**; see
