@@ -1205,8 +1205,8 @@ jobs:
     # PROBE (do not merge): phase timestamps, four samples per case.
     env:
       MCP_TEST_TRACE_DIR: /tmp/mcp-trace
-      # PROBE: every attempt clears what `debug config` left behind.
-      MCP_TEST_CLEAR_LOCKS: "1"
+      # PROBE: same listing delay as the clearing run, but nothing cleared.
+      MCP_TEST_CLEAR_LOCKS: "0"
     needs: changes
     if: github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || matrix.artifact.runner) }}

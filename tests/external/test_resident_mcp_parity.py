@@ -447,6 +447,7 @@ for directory in (".kilo", ".kilocode"):
                     'age=-; [ -e "$hb" ] && age=$((now - $(stat -c %Y "$hb"))); '
                     'echo "$(basename "$d") age=${age}s meta=$(cat "${d}meta.json" 2>/dev/null)"; '
                     'done; ls -la "$root" 2>&1 | head -3; '
+                    'echo "procs:"; ps -u 11001 -o pid=,ppid=,etimes=,args= 2>&1 | cut -c1-160; '
                     '[ "$1" = 1 ] && rm -rf -- "$root" && echo cleared; true',
                     "sh",
                     "1" if clear else "0",
