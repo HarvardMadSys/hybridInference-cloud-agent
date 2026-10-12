@@ -10,6 +10,7 @@ from cloud_agent.attachments.models import (
     attachment_max_file_bytes,
     attachment_max_files,
     attachment_max_total_bytes,
+    attachment_max_user_bytes,
     attachment_size_label,
     current_uploads,
 )
@@ -68,26 +69,37 @@ class PostgresAttachmentRepository:
         max_file_bytes = attachment_max_file_bytes()
         max_files = attachment_max_files()
         max_total_bytes = attachment_max_total_bytes()
+        max_user_bytes = attachment_max_user_bytes()
         if len(content) > max_file_bytes:
             raise AttachmentError(
                 f"Each file must be {attachment_size_label(max_file_bytes)} or smaller."
             )
         async with self._pool.acquire() as conn, conn.transaction():
             await self._lock_uploads(conn, user_id)
-            # The quota counts what is staged, not what is attached: a claimed
-            # upload belongs to a turn that already exists and is bounded by
-            # that turn's own selection check.
-            staged = await conn.fetchrow(
-                "SELECT count(*) AS files, COALESCE(sum(octet_length(content)), 0) AS bytes "
-                "FROM agent_job_attachments WHERE user_id = $1 AND job_id IS NULL",
+            # The staging quota counts what is staged, not what is attached: a
+            # claimed upload belongs to a turn that already exists and is
+            # bounded by that turn's own selection check. What the owner keeps
+            # altogether is bounded too, because attached bytes stay until the
+            # conversation is deleted — every row starts here, under this lock.
+            stored = await conn.fetchrow(
+                "SELECT count(*) FILTER (WHERE job_id IS NULL) AS files, "
+                "COALESCE(sum(octet_length(content)) FILTER (WHERE job_id IS NULL), 0) "
+                "AS bytes, COALESCE(sum(octet_length(content)), 0) AS kept "
+                "FROM agent_job_attachments WHERE user_id = $1",
                 user_id,
             )
-            if int(staged["files"]) >= max_files:
+            if int(stored["files"]) >= max_files:
                 raise AttachmentError(f"Attach at most {max_files} files.")
-            if int(staged["bytes"]) + len(content) > max_total_bytes:
+            if int(stored["bytes"]) + len(content) > max_total_bytes:
                 raise AttachmentError(
                     "Attached files must total no more than "
                     f"{attachment_size_label(max_total_bytes)}."
+                )
+            if int(stored["kept"]) + len(content) > max_user_bytes:
+                raise AttachmentError(
+                    "The files kept in your conversations must total no more than "
+                    f"{attachment_size_label(max_user_bytes)}. Delete conversations you "
+                    "no longer need to attach more."
                 )
             row = await conn.fetchrow(
                 f"""

@@ -31,6 +31,12 @@ MAX_CONTENT_TYPE_LENGTH = 255
 MAX_THREAD_ATTACHMENT_BYTES = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES - 4 * 1024 * 1024
 MAX_THREAD_ATTACHMENT_FILES = 200
 
+#: Everything one owner's uploads keep in the database, staged or attached to a
+#: conversation that still exists. Attached bytes stay until the conversation
+#: is deleted, so the per-turn bounds alone would let one account grow the
+#: shared database without end.
+MAX_USER_ATTACHMENT_BYTES = 1024 * 1024 * 1024
+
 #: Where the sandbox sees them. Outside the worktree on purpose: the publish
 #: path stages the workspace with ``git add -A -N``, so an upload written into
 #: it would be committed and appear in the draft pull request.
@@ -77,6 +83,11 @@ def attachment_max_file_bytes() -> int:
 def attachment_max_total_bytes() -> int:
     """Read the combined staging and turn byte quota."""
     return integer_setting("attachments.max_total_bytes", MAX_ATTACHMENT_TOTAL_BYTES)
+
+
+def attachment_max_user_bytes() -> int:
+    """Read the ceiling on everything one owner's uploads keep stored."""
+    return integer_setting("attachments.max_user_bytes", MAX_USER_ATTACHMENT_BYTES)
 
 
 def attachment_size_label(size: int) -> str:

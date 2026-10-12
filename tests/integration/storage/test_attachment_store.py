@@ -21,6 +21,7 @@ from cloud_agent.attachments.models import (
     AttachmentLeaseLost,
 )
 from cloud_agent.attachments.selection import resolve_attachments
+from cloud_agent.storage.repositories import attachments as attachment_repository
 from cloud_agent_shared.git.source_archive import build_upload_archive
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -62,6 +63,24 @@ async def test_the_staging_quota_counts_bytes_not_only_files(store):
         await stage(store, f"{index}.bin", content=b"x" * MAX_ATTACHMENT_FILE_BYTES)
     with pytest.raises(AttachmentError):
         await stage(store, "5.bin", content=b"x" * MAX_ATTACHMENT_FILE_BYTES)
+
+
+async def test_attached_uploads_still_count_toward_what_an_owner_may_keep(store, monkeypatch):
+    """Staging, then attaching, then staging again must not grow storage without end.
+
+    The staging quota only sees unclaimed rows, and attached bytes stay until
+    the conversation is deleted, so a loop of upload-and-submit (cancelling
+    each task straight away costs nothing) was otherwise unbounded.
+    """
+    monkeypatch.setattr(attachment_repository, "attachment_max_user_bytes", lambda: 10)
+    kept = await stage(store, "first.bin", content=b"x" * 6)
+    await _create_job(store, attachments=await manifest(store, kept))
+
+    with pytest.raises(AttachmentError, match="Delete conversations you no longer need"):
+        await stage(store, "second.bin", content=b"y" * 5)
+    # Up to the ceiling is still fine, and another owner is not affected.
+    await stage(store, "second.bin", content=b"y" * 4)
+    await stage(store, "theirs.bin", user_id="user-2", content=b"z" * 10)
 
 
 async def test_creating_a_job_binds_its_uploads_and_frees_the_staging_quota(store):
