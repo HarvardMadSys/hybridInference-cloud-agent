@@ -132,6 +132,11 @@ async def _settle(task: asyncio.Task | None) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def _first_try_only(write: str, transaction):
+    """Run a write once: the lock order alone has to keep it out of a cycle."""
+    return await transaction()
+
+
 async def _snapshots(pool, sandbox_id: str) -> list[dict]:
     """Every snapshot of a group, oldest first, with the turns it includes."""
     async with pool.acquire() as conn:
@@ -604,6 +609,8 @@ async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
         return thread_id
 
     monkeypatch.setattr(attempt_module, "lock_conversation_by_job", hold_the_conversation)
+    # A deadlock the append lost would otherwise be retried out of sight.
+    monkeypatch.setattr(attempt_module, "retry_deadlock_victim", _first_try_only)
     cancel = append = None
     try:
         cancel = asyncio.create_task(store.attempt_commands.request_cancel(job_id=job["id"]))
@@ -649,6 +656,8 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
         return await original(conn, **fields)
 
     monkeypatch.setattr(attempt_module, "insert_event", hold_the_attempt)
+    # A deadlock the append lost would otherwise be retried out of sight.
+    monkeypatch.setattr(attempt_module, "retry_deadlock_victim", _first_try_only)
     append = title = None
     try:
         append = asyncio.create_task(
