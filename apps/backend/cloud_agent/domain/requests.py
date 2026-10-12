@@ -16,6 +16,9 @@ from typing import Any
 #: message is for. Fingerprints already stored against live keys hash these, so
 #: they stay exactly as they are. Frozen on purpose — a field added to either
 #: request later is not listed here, and is therefore left out while unset.
+#: Top-level only: a field added inside a nested value (``goal``, an
+#: ``mcp_bindings`` entry) still changes the hash of a request carrying one,
+#: and dropping nested nulls instead would change every hash stored with them.
 _HISTORICAL_FIELDS = frozenset(
     {
         "attachment_ids",
