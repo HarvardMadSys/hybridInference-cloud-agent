@@ -203,6 +203,12 @@ async def continue_after_finish(
     looks finished would stop it polling, so the round the user is waiting to
     see would be the one round nobody ever fetched.
 
+    **It drains the deployment's queue, not only this conversation's.** The
+    claim takes the oldest due wakeups wherever they are, so while others are
+    waiting this request decides up to eight of theirs first, and this turn's
+    own may be left for the reaper's next pass. The page keeps polling an
+    active goal, so that round still appears, later.
+
     ``job_id`` names the turn for the log line; the wakeups themselves carry
     their own identity, which is what makes a replayed finish harmless.
     """
