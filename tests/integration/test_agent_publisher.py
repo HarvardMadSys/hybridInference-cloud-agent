@@ -422,6 +422,51 @@ def test_the_push_credential_stays_out_of_argv_and_git_config(origin, monkeypatc
     assert _branches(clone_url) == ["agent/ajob_credential", "main"]
 
 
+def test_a_retry_that_adopts_its_pushed_commit_still_authenticates_by_environment(
+    origin, monkeypatch
+):
+    """The reconciling fetch and compare-and-set push reach the remote too."""
+    from cloud_agent import publisher
+
+    clone_url, base_sha = origin
+    secret = "publish-token-" + "r" * 24
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {secret}",
+    }
+    commands: list[tuple[list[str], bool]] = []
+    real_run = subprocess.run
+
+    def recording_run(args, **kwargs):
+        env = kwargs.get("env") or {}
+        commands.append((list(args), secret in env.get("GIT_CONFIG_VALUE_0", "")))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(publisher.subprocess, "run", recording_run)
+    published = [
+        publish_patch(
+            job_id="ajob_credential_retry",
+            branch_id="athr_credential_retry",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message=f"agent: attempt {attempt}",
+            auth_env=auth_env,
+        )
+        for attempt in (1, 2)
+    ]
+
+    assert published[1].commit_sha == published[0].commit_sha
+    remote = [
+        (args, carried) for args, carried in commands if "origin" in args and args[1] != "remote"
+    ]
+    assert remote and all(carried for _, carried in remote)
+    assert all(secret not in " ".join(args) for args, _ in commands)
+    reconciled = {args[1] for args, _ in remote if any(a.startswith("refs/heads/") for a in args)}
+    assert reconciled == {"ls-remote", "fetch", "push"}
+
+
 def test_workflow_patch_is_refused_and_remote_untouched(origin):
     """A .github/ patch never reaches the remote."""
     clone_url, base_sha = origin
