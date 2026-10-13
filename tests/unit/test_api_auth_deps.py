@@ -237,6 +237,17 @@ async def test_a_wrong_admin_token_is_refused(client: AsyncClient, monkeypatch) 
     assert response.status_code == 401
 
 
+async def test_a_non_ascii_admin_token_is_an_ordinary_refusal(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """Not a 500: comparing it must not raise for anybody's input."""
+    monkeypatch.setenv(deps.ENV_ADMIN_TOKEN, "the-admin-token")
+
+    response = await client.get("/admin", headers={"Authorization": b"Bearer caf\xe9"})
+
+    assert response.status_code == 401
+
+
 async def test_an_admin_session_opens_the_admin_door(client: AsyncClient) -> None:
     """The dashboard uses a session and the Gateway's current agent.admin grant."""
     client.cookies.set(identity.SESSION_COOKIE, _session(role="admin"))
@@ -306,9 +317,43 @@ async def test_the_forwarded_header_is_ignored_by_default(client: AsyncClient) -
 async def test_the_forwarded_header_is_read_when_trusted(client: AsyncClient, monkeypatch) -> None:
     monkeypatch.setenv(deps.ENV_TRUST_PROXY_HEADERS, "true")
 
-    response = await client.get("/ip", headers={"X-Forwarded-For": "198.51.100.7, 203.0.113.9"})
+    response = await client.get("/ip", headers={"X-Forwarded-For": "198.51.100.7"})
 
     assert response.json()["ip"] == "198.51.100.7"
+
+
+async def test_a_trusted_header_records_the_hop_the_nearest_proxy_wrote(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """An appending proxy passes the caller's own entries through untouched.
+
+    nginx's ``$proxy_add_x_forwarded_for`` adds the peer it saw to the right of
+    whatever the caller sent, so everything to the left of the last entry is
+    the caller's to choose — and an audit row must not record that.
+    """
+    monkeypatch.setenv(deps.ENV_TRUST_PROXY_HEADERS, "true")
+
+    response = await client.get("/ip", headers={"X-Forwarded-For": "10.9.9.9, 192.0.2.44"})
+
+    assert response.json()["ip"] == "192.0.2.44"
+
+
+async def test_a_proxy_that_appends_its_own_header_line_is_the_one_recorded(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """HAProxy adds a second line instead of editing the caller's.
+
+    Reading only the first line would take its last entry from a header the
+    caller wrote in full.
+    """
+    monkeypatch.setenv(deps.ENV_TRUST_PROXY_HEADERS, "true")
+
+    response = await client.get(
+        "/ip",
+        headers=[("X-Forwarded-For", "10.9.9.9, 10.8.8.8"), ("X-Forwarded-For", "192.0.2.44")],
+    )
+
+    assert response.json()["ip"] == "192.0.2.44"
 
 
 async def test_a_trusted_deployment_falls_back_to_the_socket(

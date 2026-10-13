@@ -62,6 +62,15 @@ field is missing or an optional integration is only partly configured, the
 **Administrator setup required** prompt links to the fields that still need
 attention.
 
+Admin Settings is operator access, and `agent.admin` should be granted only to
+people trusted to operate the deployment. It edits the session and host
+signing keys and the Gateway public-key URL, so an administrator can sign in as
+any user, and the GitHub API URL that the App's, the publication token's and
+users' own GitHub credentials are sent to. Saved credentials stay write-only,
+and the Gateway dispatch token is bound to the Gateway API URL's origin: moving
+that URL to another origin is refused while the token is kept. Reset the token,
+save the URL, then enter the token again.
+
 For the first deployment of this release, run `alembic upgrade head` through
 `0051_host_drain_fence_epoch`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
@@ -77,6 +86,29 @@ Later deployments keep the saved admin values, and resetting a field never
 restores an old `.env` value. Listeners synchronize saved changes every five
 seconds. The web server reads saved public appearance fields on every request.
 Apply changes to subsequent operations as described beside each setting.
+
+The import of registered environment settings refuses a
+`GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`,
+`AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` shorter
+than 32 bytes: the listener stops with an error naming the variable before
+anything is written, so rolling back is safe. Check their lengths before the
+first deployment of this release. Replacing one has its usual cost: the
+dispatch token changes on both sides, a new control key needs hosts
+re-enrolled, and a new encryption key orphans saved user connections. Values
+already saved in Admin Settings keep working. The same import refuses an
+`AGENT_GITHUB_APP_INSTALL_URL` that is not an `https://github.com` URL and an
+`AGENT_GITLAB_OAUTH_REDIRECT_URI` that is not HTTPS (or HTTP on localhost),
+which their connect flows could never use.
+
+A release can narrow what a setting accepts. A value saved earlier that it
+refuses does not stop the listeners: each logs
+`saved setting not applied as stored: …`, naming the key but never the value,
+once per settings revision, and uses the built-in default in its place. The
+exception is a signing key, encryption key or service token shorter than a
+newly required minimum, which stays in use until it is replaced. The editor
+shows the value in effect; save a valid value or **Reset** to clear the
+warning. Undecryptable or unencrypted stored credentials still stop the
+listener.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by
 default. Configure it under **Publication**; see
@@ -448,7 +480,10 @@ OAuth. **Configure repositories** in Integrations and **Configure repository
 access** in the composer open the same page.
 
 **Deployment allowlist.** `AGENT_REPO_ALLOWLIST` supports single-tenant use
-against the operator's repositories. When the App's OAuth credentials and
+against the operator's repositories. It is not per user: every user admitted to
+Cloud Agent may have the platform clone and publish to every listed repository
+with the deployment's GitHub credentials, so list only repositories all of them
+may work on. When the App's OAuth credentials and
 `AGENT_GITHUB_APP_INSTALL_URL` are configured, the composer still requires a
 connection before repository selection, including allowlisted repositories.
 The create endpoint independently honors the allowlist.
@@ -1239,7 +1274,7 @@ with no leader and no sharding.
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
 | `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
-| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
+| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Every admitted user may have the platform clone and publish to the listed repositories. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
 | `AGENT_GITHUB_APP_INSTALL_URL` | — | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Offered after connecting whenever the App is not on the user's own account, and behind _Configure repositories_. The control plane adds a short-lived, user-bound `state`; set the App's Callback URL to the agent web's own origin, `<origin>/connected?provider=github` (see _2. Credentials_) |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | — | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes |

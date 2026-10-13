@@ -98,11 +98,15 @@ async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
         assert not client.configured
         with pytest.raises(GatewayError):
             await client._post("/internal/agent-grants", {})
-        encoded = settings.encode_changes({"gateway_dispatch_token": "saved-credential"})
+        encoded = settings.encode_changes(
+            {"gateway_dispatch_token": "saved-gateway-dispatch-credential-32b"}
+        )
         settings.apply_settings(2, {"gateway_base_url": "https://gateway.example", **encoded})
         assert client.configured
         assert "GATEWAY_GRANT_DISPATCH_TOKEN" not in os.environ
-        assert "saved-credential" not in str(settings.settings_response(2, encoded))
+        assert "saved-gateway-dispatch-credential-32b" not in str(
+            settings.settings_response(2, encoded)
+        )
     finally:
         settings.reset_settings()
 

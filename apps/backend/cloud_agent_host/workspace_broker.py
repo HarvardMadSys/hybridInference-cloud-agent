@@ -1989,10 +1989,12 @@ def create_app(
     broker_profiling_policy.install_policy_provider()
 
     def authenticate(x_agent_workspace_token: str | None = Header(None)) -> None:
+        # Bytes, not str: compare_digest raises TypeError for a non-ASCII str,
+        # so any caller could turn this refusal into a 500.
         if (
             not expected_token
             or not x_agent_workspace_token
-            or not secrets.compare_digest(expected_token, x_agent_workspace_token)
+            or not secrets.compare_digest(expected_token.encode(), x_agent_workspace_token.encode())
         ):
             raise HTTPException(status_code=401, detail="invalid workspace broker credential")
 

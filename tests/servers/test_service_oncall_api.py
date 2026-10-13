@@ -213,6 +213,16 @@ async def test_wrong_token_is_refused(client):
     assert response.status_code == 401
 
 
+async def test_a_non_ascii_token_is_refused_rather_than_failing(client):
+    """Comparing a caller's token must not raise, whatever characters it holds."""
+    response = await client.post(
+        "/v1/agent/service/oncall/jobs",
+        json=_create_body(),
+        headers={"Authorization": b"Bearer caf\xe9"},
+    )
+    assert response.status_code == 401
+
+
 async def test_unset_dispatch_token_opens_nothing(client, monkeypatch):
     """An unset token never matches, even an empty presented one."""
     monkeypatch.delenv("AGENT_ONCALL_DISPATCH_TOKEN")

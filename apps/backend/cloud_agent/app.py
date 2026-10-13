@@ -57,20 +57,13 @@ def install_repository_access_errors(app: FastAPI) -> None:
     app.add_exception_handler(RepoAccessUnavailable, unavailable)
 
 
-#: The admin observation reads. Their bodies are time-varying and describe
-#: other users' runs, so no intermediary may store one.
-ADMIN_READ_PREFIXES = (
-    "/admin/agent/database",
-    "/admin/agent/database-tools",
-    "/admin/agent/pgadmin",
-    "/admin/agent/audit-log",
-    "/admin/agent/runs",
-    "/admin/agent/steps",
-    "/admin/agent/measurements",
-    "/admin/agent/measurement-writer",
-    "/admin/agent/profiling-runs",
-    "/admin/agent/settings",
-)
+#: Every admin surface. Their bodies are time-varying and describe other
+#: users' runs, hosts and settings, so no intermediary may store one.
+#:
+#: The whole prefix rather than a list of routers: a list drifted, and the
+#: refusals of the admin routers added after it — conversations, sandboxes,
+#: usage, runner hosts, compute — went out without ``no-store``.
+ADMIN_READ_PREFIXES = ("/admin",)
 
 
 def install_admin_no_store(

@@ -623,6 +623,16 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
 
 @pytest.mark.asyncio
+async def test_a_non_ascii_broker_credential_is_refused_rather_than_failing():
+    """Comparing a caller's header must not raise, whatever characters it holds."""
+    app = _app(_SharedSupervisor())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get("/sandboxes", headers={"X-Agent-Workspace-Token": b"caf\xe9"})
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_targeted_inventory_is_authenticated_and_isolated_from_full_inventory_failure():
     supervisor = _SharedSupervisor()
     calls = []

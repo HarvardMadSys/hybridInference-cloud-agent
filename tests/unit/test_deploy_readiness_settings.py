@@ -90,7 +90,7 @@ async def _run_readiness(
 
 async def test_preactivation_bootstraps_settings_before_the_new_api_starts(monkeypatch):
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "legacy-broker-token")
-    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "legacy-gateway-token")
+    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "legacy-gateway-dispatch-token-of-32-bytes")
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "legacy-branch")
     repository = _SettingsRepository()
 
@@ -99,7 +99,10 @@ async def test_preactivation_bootstraps_settings_before_the_new_api_starts(monke
     assert len(repository.seeds) == 1
     assert repository.revision == 1
     assert all(definition.key in repository.values for definition in settings.MIGRATED_SETTINGS)
-    assert settings.setting_env("GATEWAY_GRANT_DISPATCH_TOKEN") == "legacy-gateway-token"
+    assert (
+        settings.setting_env("GATEWAY_GRANT_DISPATCH_TOKEN")
+        == "legacy-gateway-dispatch-token-of-32-bytes"
+    )
     assert settings.text_setting("publish_base_branch") == "legacy-branch"
     assert repository.values["workspace_broker_token"] != "legacy-broker-token"
 
@@ -134,7 +137,7 @@ async def test_preactivation_imports_missing_fields_without_replacing_saved_valu
     repository = _SettingsRepository(revision=7, values={**legacy, **saved})
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "stale-broker-token")
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-branch")
-    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "newly-imported-control-token")
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "newly-imported-control-token-of-32-bytes")
 
     await _run_readiness(monkeypatch, repository, expected_token="saved-broker-token")
 
@@ -144,4 +147,7 @@ async def test_preactivation_imports_missing_fields_without_replacing_saved_valu
     assert repository.values.items() >= saved.items()
     assert all(definition.key in repository.values for definition in settings.MIGRATED_SETTINGS)
     assert settings.text_setting("publish_base_branch") == "saved-branch"
-    assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "newly-imported-control-token"
+    assert (
+        settings.setting_env("AGENT_CONTROL_TOKEN_SECRET")
+        == "newly-imported-control-token-of-32-bytes"
+    )

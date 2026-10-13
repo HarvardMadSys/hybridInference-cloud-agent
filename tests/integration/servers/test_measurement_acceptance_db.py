@@ -466,7 +466,7 @@ async def _running_chain(
     # lifespan, and its schema is Alembic's, so the address has to name the
     # same test database this module arranged its rows in.
     monkeypatch.setenv("AGENT_DATABASE_URL", _dsn(config))
-    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "acceptance-control-secret")
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "acceptance-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "acceptance-admin-token")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "acceptance-session-secret-32-bytes!")
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")

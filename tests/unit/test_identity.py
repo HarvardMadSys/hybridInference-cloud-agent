@@ -9,7 +9,9 @@ replayed after expiry.
 from __future__ import annotations
 
 import time
+from email.message import Message
 from typing import Any
+from urllib.error import HTTPError
 
 import httpx
 import jwt
@@ -26,6 +28,7 @@ from cloud_agent.identity import (
     ENV_SESSION_SECRET,
     IdentityError,
     IdentityNotConfigured,
+    IdentityUnavailable,
     mint_session,
     verify_identity_token,
     verify_session,
@@ -122,10 +125,27 @@ def test_a_token_for_another_audience_is_refused(monkeypatch, keypair) -> None:
 
 
 def test_an_expired_token_is_refused(monkeypatch, keypair) -> None:
+    """Expired past the clock-skew allowance, which is all the leeway forgives."""
     key, _ = keypair
     _serve_key(monkeypatch, key)
     with pytest.raises(IdentityError):
-        verify_identity_token(_token(key, exp_delta=-1))
+        verify_identity_token(_token(key, exp_delta=-(identity.IDENTITY_TOKEN_LEEWAY_S + 1)))
+
+
+def test_a_gateway_clock_slightly_ahead_still_verifies(monkeypatch, keypair) -> None:
+    """A token minted a moment ago by a clock a second ahead is not "from the future"."""
+    key, _ = keypair
+    _serve_key(monkeypatch, key)
+    assert verify_identity_token(_token(key, iat=int(time.time()) + 2))["sub"] == "user_1"
+
+
+def test_a_token_issued_beyond_the_allowance_is_refused(monkeypatch, keypair) -> None:
+    key, _ = keypair
+    _serve_key(monkeypatch, key)
+    issued = int(time.time()) + identity.IDENTITY_TOKEN_LEEWAY_S + 60
+    with pytest.raises(IdentityError) as refused:
+        verify_identity_token(_token(key, iat=issued))
+    assert isinstance(refused.value.__cause__, jwt.ImmatureSignatureError)
 
 
 def test_a_token_signed_by_another_key_is_refused(monkeypatch, keypair) -> None:
@@ -215,6 +235,31 @@ def test_a_jwks_fetch_has_a_bounded_network_timeout(monkeypatch, keypair) -> Non
         verify_identity_token(_token(key))
 
     assert requested_timeouts == [10.0]
+
+
+def test_a_key_fetch_the_cdn_refuses_is_unavailable_not_an_invalid_token(
+    monkeypatch, keypair
+) -> None:
+    """Sign-in can only offer a retry if an outage is told apart from a bad token."""
+    key, _ = keypair
+    monkeypatch.setenv(ENV_JWKS_URL, "https://gateway.example/v1/identity/jwks")
+
+    def _forbidden(request, *, timeout, context):
+        raise HTTPError(request.full_url, 403, "Forbidden", Message(), None)
+
+    monkeypatch.setattr("jwt.jwks_client.urllib.request.urlopen", _forbidden)
+
+    with pytest.raises(IdentityUnavailable):
+        verify_identity_token(_token(key))
+
+
+def test_a_token_with_an_unreadable_header_is_invalid_not_unavailable(monkeypatch) -> None:
+    """Nothing was fetched for it, so nothing was unavailable."""
+    monkeypatch.setenv(ENV_JWKS_URL, "https://gateway.example/v1/identity/jwks")
+
+    with pytest.raises(IdentityError) as refused:
+        verify_identity_token("not-a-jwt")
+    assert not isinstance(refused.value, IdentityUnavailable)
 
 
 def test_a_withdrawn_jwks_key_stops_verifying_after_the_set_refreshes(monkeypatch) -> None:

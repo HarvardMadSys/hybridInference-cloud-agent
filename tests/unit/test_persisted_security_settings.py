@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from starlette.datastructures import Headers
 
 from cloud_agent import identity, settings, tokens
 from cloud_agent.api.deps import get_client_ip
@@ -33,7 +34,7 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
         {
             "gateway_issuer": "https://identity.example",
             "session_signing_secret": "test-session-key-longer-than-thirty-two-bytes",
-            "control_signing_secret": "test-control-signing-key",
+            "control_signing_secret": "test-control-signing-key-of-32-bytes",
         }
     )
     settings.apply_settings(1, encoded)
@@ -47,7 +48,9 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
         2,
         {
             **encoded,
-            **settings.encode_changes({"control_signing_secret": "new-control-signing-key"}),
+            **settings.encode_changes(
+                {"control_signing_secret": "new-control-signing-key-of-32-bytes"}
+            ),
         },
     )
     assert tokens._signing_key() != old_key
@@ -60,7 +63,7 @@ def test_saved_encryption_keys_work_for_clients_constructed_before_admin_setup()
         1,
         settings.encode_changes(
             {
-                "source_control_encryption_key": "test-user-credential-key",
+                "source_control_encryption_key": "test-user-credential-key-of-32-bytes",
                 "compute_encryption_key": "test-compute-key-longer-than-thirty-two-bytes",
             }
         ),
@@ -86,7 +89,7 @@ def test_saved_cookie_proxy_broker_and_execution_policies_are_applied():
     )
     assert _cookie_is_secure() is False
     assert (
-        get_client_ip(SimpleNamespace(headers={"x-forwarded-for": "198.51.100.1"}))
+        get_client_ip(SimpleNamespace(headers=Headers({"x-forwarded-for": "198.51.100.1"})))
         == "198.51.100.1"
     )
     assert validate_broker_url("https://broker.example") == "https://broker.example"

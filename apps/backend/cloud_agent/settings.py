@@ -21,12 +21,16 @@ from urllib.parse import urlsplit
 from pydantic import AnyHttpUrl, ValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from cloud_agent.ports.settings import SettingsRepository
 
 SettingValue = str | int | float | bool
 SettingKind = Literal["string", "boolean", "integer", "number"]
+
+
+class SettingTooShort(ValueError):
+    """A value shorter than its setting's minimum length; otherwise acceptable."""
 
 
 @dataclass(frozen=True)
@@ -70,8 +74,6 @@ class Setting:
             valid = isinstance(value, str) and "\x00" not in value
             if valid:
                 valid = len(value) <= (131072 if self.secret else 4096)
-            if valid and value and self.minimum_bytes:
-                valid = len(value.encode()) >= self.minimum_bytes
             if valid and self.key == "gateway_issuer" and value:
                 valid = value == value.strip() and not any(ord(char) < 32 for char in value)
             if valid and self.choices:
@@ -127,6 +129,16 @@ class Setting:
                         "sandbox_archive.endpoint",
                     }:
                         valid = valid and parsed.scheme == "https" and not parsed.query
+                    # The code that uses these refuses anything else, so the
+                    # editor asks it rather than keeping a second copy of the rule.
+                    if self.key == "github_app_install_url":
+                        from cloud_agent.source_control import github_install_url_is_usable
+
+                        valid = valid and github_install_url_is_usable(value)
+                    elif self.key == "gitlab_redirect_uri":
+                        from cloud_agent.source_control import gitlab_redirect_uri_is_usable
+
+                        valid = valid and gitlab_redirect_uri_is_usable(value)
                 except (ValueError, ValidationError):
                     valid = False
         if not valid:
@@ -137,6 +149,13 @@ class Setting:
                     "in Sandbox archive S3 prefix."
                 )
             raise ValueError(f"Invalid value for {self.label} ({self.key})")
+        # Last, and its own error: a stored key saved before its minimum
+        # existed is still the key everything was signed or encrypted with.
+        if isinstance(value, str) and value and len(value.encode()) < self.minimum_bytes:
+            raise SettingTooShort(
+                f"Invalid value for {self.label} ({self.key}): "
+                f"use at least {self.minimum_bytes} bytes"
+            )
         return value
 
     def definition(self) -> dict[str, Any]:
@@ -476,6 +495,8 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="GATEWAY_GRANT_DISPATCH_TOKEN",
         secret=True,
+        minimum_bytes=32,
+        description="A random credential of at least 32 bytes, the same value the Gateway holds. Sent only to the Gateway API URL's origin: to move that URL elsewhere, reset this first and enter it again afterwards.",
     ),
     Setting(
         "gateway_grant_base_path",
@@ -514,7 +535,7 @@ SETTINGS: tuple[Setting, ...] = (
         "Source control",
         "",
         env="AGENT_REPO_ALLOWLIST",
-        description="Comma-separated owner/repository entries. Applies to new repository access decisions.",
+        description="Comma-separated owner/repository entries or owner/* rules. Every admitted user may have the platform clone and publish to these with this deployment's GitHub credentials, without connecting GitHub. Applies to new repository access decisions.",
     ),
     Setting("github_app_id", "GitHub App ID", "Source control", "", env="AGENT_GITHUB_APP_ID"),
     Setting(
@@ -548,6 +569,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITHUB_APP_INSTALL_URL",
         url=True,
+        description="An https://github.com URL, normally https://github.com/apps/<app-slug>/installations/new.",
     ),
     Setting(
         "github_api_url",
@@ -579,6 +601,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITLAB_OAUTH_REDIRECT_URI",
         url=True,
+        description="The exact callback registered with GitLab. HTTPS, except http://localhost for development.",
     ),
     Setting(
         "github_publish_token",
@@ -653,6 +676,8 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_ONCALL_DISPATCH_TOKEN",
         secret=True,
+        minimum_bytes=32,
+        description="A random credential of at least 32 bytes, the same value the alert relay sends. Empty opens nothing.",
     ),
     _numeric(
         "residency_ttl_s",
@@ -857,7 +882,8 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CONTROL_TOKEN_SECRET",
         secret=True,
-        description="Use a random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
+        minimum_bytes=32,
+        description="A random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
     ),
     Setting(
         "source_control_encryption_key",
@@ -866,7 +892,8 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
         secret=True,
-        description="Use a random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
+        minimum_bytes=32,
+        description="A random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
     ),
     Setting(
         "compute_encryption_key",
@@ -920,7 +947,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         False,
         kind="boolean",
         env="AGENT_TRUST_PROXY_HEADERS",
-        description="Enable only when a trusted reverse proxy overwrites forwarded address headers.",
+        description="Enable only when a reverse proxy you control sits directly in front of the control plane and sets or appends X-Forwarded-For. Only its rightmost entry is recorded.",
     ),
     Setting(
         "mcp_allow_private_targets",
@@ -1009,20 +1036,62 @@ def _encode(setting: Setting, value: SettingValue) -> Any:
     return value
 
 
-def _decode(encoded: Mapping[str, Any]) -> dict[str, SettingValue]:
+def _decode(
+    encoded: Mapping[str, Any],
+    problems: list[str] | None = None,
+    *,
+    changed: Collection[str] = (),
+) -> dict[str, SettingValue]:
+    """Decrypt and check a snapshot, strictly unless ``problems`` collects.
+
+    With ``problems``, the snapshot is a stored row, read the way the release
+    after the one that saved it must be able to: a value this registry no
+    longer accepts (a narrower bound, a stricter URL rule) falls back to its
+    default, and an ordering a stored pair breaks falls back to both defaults,
+    each described in ``problems`` rather than refusing every setting at once.
+    A stored value short of a newer minimum length is kept: it is the key
+    everything was signed or encrypted with, and the default is no key at all.
+    ``changed`` keys stay strict, so an update cannot save what this refuses.
+    Decryption failures and unencrypted secrets always raise.
+    """
+    from cloud_agent.source_control import SourceControlError
+
     values: dict[str, SettingValue] = {}
     for setting in SETTINGS:
         value = encoded.get(setting.key, setting.default)
         if setting.secret and isinstance(value, dict) and set(value) == {"ciphertext"}:
-            value = _cipher(setting.key).decrypt(value["ciphertext"])
+            cipher = _cipher(setting.key)
+            try:
+                value = cipher.decrypt(value["ciphertext"])
+            except SourceControlError:
+                # Name the setting, never the value: the cipher's own message
+                # cannot say which of the stored secrets failed.
+                raise SourceControlError(
+                    f"Stored secret for {setting.label} could not be decrypted"
+                ) from None
         elif setting.secret and value:
             raise ValueError(f"Unencrypted stored secret for {setting.label}")
-        values[setting.key] = setting.validate(value)
-    _validate_relations(values)
+        try:
+            values[setting.key] = setting.validate(value)
+        except ValueError as exc:
+            if problems is None or setting.key in changed:
+                raise
+            if isinstance(exc, SettingTooShort):
+                problems.append(f"{exc}; the saved value stays in use until it is replaced")
+                values[setting.key] = value
+            else:
+                problems.append(f"{exc}; using the default instead")
+                values[setting.key] = setting.default
+    _validate_relations(values, problems, changed=changed)
     return values
 
 
-def _validate_relations(values: Mapping[str, Any]) -> None:
+def _validate_relations(
+    values: dict[str, Any],
+    problems: list[str] | None = None,
+    *,
+    changed: Collection[str] = (),
+) -> None:
     for smaller, larger in (
         ("goals.arm_after_seconds", "goals.stalled_after_seconds"),
         ("attachments.max_file_bytes", "attachments.max_total_bytes"),
@@ -1031,9 +1100,15 @@ def _validate_relations(values: Mapping[str, Any]) -> None:
         ("task_titles.timeout_seconds", "task_titles.total_timeout_seconds"),
     ):
         if values[smaller] > values[larger]:
-            raise ValueError(
+            message = (
                 f"{SETTINGS_BY_KEY[smaller].label} cannot exceed {SETTINGS_BY_KEY[larger].label}"
             )
+            if problems is None or smaller in changed or larger in changed:
+                raise ValueError(message)
+            # The pairs share no key, and every default pair is ordered.
+            problems.append(f"{message}; using the defaults for both instead")
+            values[smaller] = SETTINGS_BY_KEY[smaller].default
+            values[larger] = SETTINGS_BY_KEY[larger].default
 
 
 def encode_changes(changes: Mapping[str, Any]) -> dict[str, Any]:
@@ -1054,13 +1129,48 @@ def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
     _decode(encoded)
 
 
+#: A saved credential and the setting naming where it is sent. Saved
+#: credentials are write-only, so moving their destination to another origin
+#: while keeping them would deliver a value the editor cannot read to a host
+#: the editor chose: the Gateway dispatch token mints grants for any user.
+_CREDENTIAL_DESTINATIONS = (("gateway_dispatch_token", "gateway_base_url"),)
+
+
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    return scheme, parsed.hostname, parsed.port or {"http": 80, "https": 443}.get(scheme)
+
+
 def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, Any]) -> None:
-    """Keep stored credential encryption keys stable while validating an atomic update."""
-    before, after = _decode(previous), _decode(encoded)
+    """Keep stored credential encryption keys stable while validating an atomic update.
+
+    Only the changed keys are held to this registry. A value an earlier release
+    saved and this one refuses must never block the update that repairs it,
+    and the editor saves one key at a time. A saved credential stays with the
+    origin it is sent to: pointing that destination elsewhere requires
+    resetting the credential or replacing it in the same update.
+    """
+    changed = {key for key, value in encoded.items() if previous.get(key) != value}
+    before, after = _decode(previous, []), _decode(encoded, [], changed=changed)
     for key in ("source_control_encryption_key", "compute_encryption_key"):
         if before[key] and before[key] != after[key]:
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
+            )
+    for credential, destination in _CREDENTIAL_DESTINATIONS:
+        # Compared with whatever the destination was, unset included, so
+        # clearing the URL and then naming a new host is the same move.
+        if (
+            before[credential]
+            and credential not in changed
+            and after[destination]
+            and _origin(str(after[destination])) != _origin(str(before[destination]))
+        ):
+            raise ValueError(
+                f"{SETTINGS_BY_KEY[destination].label} cannot point at another origin while the "
+                f"saved {SETTINGS_BY_KEY[credential].label} is kept: reset the token first, "
+                "then enter it again after saving the URL"
             )
 
 
@@ -1101,6 +1211,11 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
                     normalized = raw.strip().lower()
                     value = normalized if normalized in {"text", "json"} else "text"
                 value = setting.validate(value)
+            except SettingTooShort:
+                raise ValueError(
+                    f"Invalid initial configuration for {setting.label} ({setting.env}): "
+                    f"use at least {setting.minimum_bytes} bytes"
+                ) from None
             except (ValueError, OverflowError):
                 raise ValueError(f"Invalid initial configuration for {setting.label}") from None
         values[setting.key] = value
@@ -1110,11 +1225,18 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
 
 
 def apply_settings(revision: int, encoded: Mapping[str, Any]) -> None:
-    """Atomically adopt a committed snapshot, ignoring stale reads."""
+    """Atomically adopt a committed snapshot, ignoring stale reads.
+
+    A stored value this registry refuses is reported once per adopted revision,
+    by key and never by value; :func:`_decode` says what applies instead.
+    """
     global _values, _revision
-    values = _decode(encoded)
+    problems: list[str] = []
+    values = _decode(encoded, problems)
+    adopted = False
     with _lock:
         if revision >= _revision:
+            adopted = revision != _revision
             logging_changed = _values is None or any(
                 values[key] != _values[key] for key in ("log_level", "log_format")
             )
@@ -1123,11 +1245,17 @@ def apply_settings(revision: int, encoded: Mapping[str, Any]) -> None:
                 from cloud_agent.logging_utils import apply_logging_settings
 
                 apply_logging_settings(str(values["log_level"]), str(values["log_format"]))
+    if adopted and problems:
+        from cloud_agent.logging_utils import get_logger
+
+        logger = get_logger(__name__)
+        for problem in problems:
+            logger.warning("saved setting not applied as stored: %s", problem)
 
 
 def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, Any]:
     """Build the editor response with write-only secret status."""
-    values = _decode(encoded)
+    values = _decode(encoded, [])
     locked = {
         key
         for key in ("gateway_issuer", "source_control_encryption_key", "compute_encryption_key")
@@ -1334,6 +1462,7 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
 async def synchronize_settings(repository: SettingsRepository) -> None:
     """Refresh every listener's snapshot; failed reads retain the last committed values."""
     from cloud_agent.logging_utils import get_logger
+    from cloud_agent.source_control import SourceControlError
 
     logger = get_logger(__name__)
     while True:
@@ -1341,6 +1470,10 @@ async def synchronize_settings(repository: SettingsRepository) -> None:
         try:
             revision, encoded = await repository.read_settings()
             apply_settings(revision, encoded)
+        except (ValueError, SourceControlError) as exc:
+            # Raised by decoding the snapshot, and worded to name a setting
+            # without its value; the type alone left nothing to act on.
+            logger.warning("settings synchronization failed (%s: %s)", type(exc).__name__, exc)
         except Exception as exc:
             logger.warning("settings synchronization failed (%s)", type(exc).__name__)
 

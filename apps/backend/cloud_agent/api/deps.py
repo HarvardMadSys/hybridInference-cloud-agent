@@ -358,8 +358,9 @@ HOST_TOKEN_PREFIX = "aht."
 ENV_ADMIN_TOKEN = "ADMIN_TOKEN"
 
 #: Off by default. An ``X-Forwarded-For`` header is caller-controlled input
-#: unless a proxy this deployment trusts overwrote it, so believing it without
-#: being told to would let anyone write any address into the audit trail.
+#: except for the entry a proxy this deployment trusts wrote into it, so
+#: believing it without being told to would let anyone write any address into
+#: the audit trail.
 ENV_TRUST_PROXY_HEADERS = "AGENT_TRUST_PROXY_HEADERS"
 
 
@@ -457,7 +458,9 @@ async def verify_admin_access(
     """
     presented = bearer_token(authorization)
     configured = (os.environ.get(ENV_ADMIN_TOKEN) or "").strip()
-    if configured and presented and hmac.compare_digest(presented, configured):
+    # Bytes, not str: compare_digest raises TypeError for a non-ASCII str, so
+    # any caller could turn this refusal into a 500.
+    if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
 
     token = session_token(request, authorization)
@@ -492,12 +495,20 @@ def get_client_ip(request: Request) -> str:
     rewrites ``X-Forwarded-For`` — see ``AGENT_TRUST_PROXY_HEADERS``. Believing
     the header unconditionally would let any caller write any address into the
     audit trail, which is worse than recording the proxy's address honestly.
+
+    Even then only the **rightmost** entry is believed: it is the one the
+    nearest proxy wrote, whether that proxy overwrites the header or appends
+    to it. Everything to its left arrived from the caller, and an appending
+    proxy such as nginx's ``$proxy_add_x_forwarded_for`` passes it through
+    verbatim, so the leftmost entry is whatever the caller typed. Repeated
+    header lines count as one list in order: HAProxy appends a line of its own
+    rather than editing the caller's, and the first line is then all theirs.
     """
     if (setting_env(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
-        forwarded = request.headers.get("x-forwarded-for") or ""
-        first_hop = forwarded.split(",")[0].strip()
-        if first_hop:
-            return first_hop
+        forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
+        nearest_hop = forwarded.split(",")[-1].strip()
+        if nearest_hop:
+            return nearest_hop
         real_ip = (request.headers.get("x-real-ip") or "").strip()
         if real_ip:
             return real_ip

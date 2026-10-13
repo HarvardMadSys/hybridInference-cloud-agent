@@ -426,6 +426,20 @@ async def test_a_callback_with_a_mismatched_state_is_refused_before_the_exchange
     assert not client.cookies.get(identity.SESSION_COOKIE)
 
 
+async def test_a_non_ascii_state_is_a_mismatch_not_a_server_error(client_and_gateway):
+    """The callback's query is anybody's input; comparing it must not raise."""
+    client, gateway = client_and_gateway
+    await _begin(client)
+
+    response = await client.get(
+        "/v1/session/callback", params={"code": "the-code", "state": "café"}
+    )
+
+    assert response.status_code == 303
+    assert "sign_in_error=expired" in response.headers["location"]
+    assert gateway.exchanged == []
+
+
 async def test_a_callback_with_no_parked_flow_is_refused(client_and_gateway):
     """A response to a request this service never made buys nothing."""
     client, gateway = client_and_gateway
@@ -631,6 +645,82 @@ async def test_a_token_for_another_audience_is_refused(key):
 
     assert response.status_code == 401
     assert gateway.asked == [], "a token that did not verify must not reach the gateway"
+
+
+async def test_a_jwks_outage_offers_a_retry_and_logs_its_cause(
+    client_and_gateway, monkeypatch, caplog
+):
+    """A key fetch the CDN refused says nothing about the token.
+
+    It used to answer as one: a raw ``Invalid identity token`` 401 to the
+    browser, and only ``invalid_identity`` in the log.
+    """
+    client, gateway = client_and_gateway
+
+    class _Refused:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def get_signing_key_from_jwt(self, token: str):
+            raise jwt.PyJWKClientConnectionError(
+                'Fail to fetch data from the url, err: "HTTP Error 403: Forbidden"'
+            )
+
+    monkeypatch.setattr(identity, "PyJWKClient", _Refused)
+    caplog.set_level(logging.WARNING, logger=session_router.__name__)
+
+    response = await _sign_in(client)
+
+    assert response.status_code == 303
+    assert "sign_in_error=temporary" in response.headers["location"]
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert gateway.access_asked == []
+    causes = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_identity_token_unverified"
+    ]
+    assert [record.cause for record in causes] == ["PyJWKClientConnectionError"]
+    assert gateway.identity_token not in str(causes[0].__dict__)
+
+
+async def test_a_gateway_clock_a_moment_ahead_still_signs_in(key):
+    """``iat`` a second or two in the future is clock skew, not a forged token."""
+    gateway = _FakeGateway(
+        {"exists": True, "active": True},
+        identity_token=_identity_token(key, iat=int(time.time()) + 2),
+    )
+    transport = ASGITransport(app=_app(gateway))
+    async with AsyncClient(
+        transport=transport, base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"{_WEB_BASE_URL}/"
+    assert identity.verify_session(client.cookies[identity.SESSION_COOKIE])["sub"] == _USER
+
+
+async def test_an_unverified_identity_token_logs_why_without_the_token(key, caplog):
+    """The refusal stays a bare 401; the operator still learns which check failed."""
+    token = _identity_token(key, aud="some-other-service")
+    gateway = _FakeGateway({"exists": True, "active": True}, identity_token=token)
+    caplog.set_level(logging.WARNING, logger=session_router.__name__)
+    transport = ASGITransport(app=_app(gateway))
+    async with AsyncClient(
+        transport=transport, base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid identity token."}
+    causes = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_identity_token_unverified"
+    ]
+    assert [record.cause for record in causes] == ["InvalidAudienceError"]
+    assert token not in str(causes[0].__dict__)
 
 
 async def test_a_garbage_identity_token_is_a_401(key):
