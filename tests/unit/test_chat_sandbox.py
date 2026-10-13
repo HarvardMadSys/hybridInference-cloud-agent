@@ -2543,6 +2543,49 @@ def _git_probe() -> SandboxSpec:
     return SandboxSpec(argv=["git", "cat-file", "-e", "HEAD"], workdir=CHAT_WORKDIR)
 
 
+def test_killing_a_bounded_command_signals_only_its_own_process_group(monkeypatch):
+    """A setup script, patch build or owner command shares the group's container.
+
+    Killing it on a timeout or an oversized output must end that command's own
+    process group, found through its receipt: ``docker stop`` would end every
+    sibling member's turn in the same container.
+    """
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    docker: list[list[str]] = []
+    clients: list[SimpleNamespace] = []
+
+    def fake_run(argv, **_kwargs):
+        docker.append(list(argv))
+        if argv[1:3] == ["container", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=payload, stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def fake_popen(argv, **_kwargs):
+        docker.append(list(argv))
+        client = SimpleNamespace(
+            stdin=None, stdout=None, stderr=None, killed=False, poll=lambda: None
+        )
+        client.kill = lambda: setattr(client, "killed", True)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(manager, "require_network", lambda *_args, **_kwargs: None)
+    backend = RetainedChatBackend(manager, spec)
+
+    process = backend.spawn(SandboxSpec(argv=["/bin/sh", "-c", "sleep 30"], workdir=CHAT_WORKDIR))
+    process.kill()
+
+    receipt = next(part for part in docker[1] if part.startswith(f"{ACTIVATION_TMPFS}/command-"))
+    cleanup = docker[-1]
+    assert cleanup[:2] == ["docker", "exec"] and cleanup[-1] == receipt
+    assert not any(argv[1] in {"stop", "kill", "rm", "pause", "restart"} for argv in docker)
+    assert clients[0].killed is True
+
+
 def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkeypatch):
     """The broker's own backends, and a turn whose broker did not say it checked."""
     backend, checks = _proving_backend(monkeypatch, proved_at=None)
