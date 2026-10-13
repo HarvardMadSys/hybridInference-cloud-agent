@@ -1074,17 +1074,21 @@ class ComputeReconciler:
                     )
             except WorkspaceBrokerError:
                 continue  # Never infer emptiness; require the full-node scan below.
+        # This control plane reaches a registering node only through the key
+        # its registration supplied, and binds a Host only after pinning it.
+        # A node that never registered, with no key and no Host, never ran
+        # anything of ours, and without a trusted key it cannot be scanned.
+        never_registered = False
+        if self._registers_host_keys(allocation):
+            registration = await self.repository.node_registration(allocation_id=allocation["id"])
+            never_registered = registration is None or not registration.get("registered_at")
         bound = {host.get("compute_node_id") for host in allocation.get("hosts", [])}
         for node in allocation["nodes"]:
             if (
-                self._registers_host_keys(allocation)
+                never_registered
                 and not (node.get("connection") or {}).get("host_key")
                 and node["id"] not in bound
             ):
-                # This control plane reaches a registering node only through
-                # the key it pinned, and binds a Host only after that. With
-                # neither, nothing of ours ever ran there, and without a
-                # trusted key there is no way to scan it.
                 continue
             proof = await self.bootstrap.inventory(
                 self._node(node), profile, self._bootstrap_intent(operation, allocation, node)

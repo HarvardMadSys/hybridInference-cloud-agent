@@ -1025,6 +1025,9 @@ async def test_a_node_that_never_registered_is_released_without_an_ssh_scan(monk
     h.allocation["configuration"] = ref.config
     h.provider.inspect.return_value = observed().model_copy(update={"ref": ref})
     h.allocation["hosts"] = []
+    h.repository.node_registration = AsyncMock(
+        return_value={"registered_at": None, "expired": True, "host_keys": []}
+    )
     await h.reconciler.execute(h.operation)
     assert (h.operation["state"], h.operation["step"]) == ("succeeded", "released")
     h.bootstrap.inventory.assert_not_awaited()
@@ -1035,13 +1038,24 @@ async def test_a_node_that_never_registered_is_released_without_an_ssh_scan(monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reached", ["pinned_key", "bound_host"])
+@pytest.mark.parametrize("reached", ["pinned_key", "bound_host", "registered"])
 async def test_a_registering_node_this_control_plane_reached_is_still_scanned(monkeypatch, reached):
     h = harness(monkeypatch, kind="retire", identified=True)
     ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
     h.allocation["configuration"] = ref.config
     h.provider.inspect.return_value = observed().model_copy(update={"ref": ref})
-    if reached == "pinned_key":
+    h.repository.node_registration = AsyncMock(
+        return_value={"registered_at": None, "expired": True, "host_keys": []}
+    )
+    if reached == "registered":
+        # A key an earlier observation cleared does not make the node unreached.
+        h.allocation["hosts"] = []
+        h.repository.node_registration.return_value = {
+            "registered_at": NOW,
+            "expired": False,
+            "host_keys": [REGISTERED_KEY],
+        }
+    elif reached == "pinned_key":
         h.allocation["hosts"] = []
         pinned = SshConnection(
             address="node.example.org",
