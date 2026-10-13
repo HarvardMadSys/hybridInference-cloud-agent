@@ -462,9 +462,12 @@ export function useAgentJob(
       if (!touched) return;
       setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
       const read = ++latestRead;
+      // A reload that starts while this read is out reads the row again, and
+      // may already have ended the turn: this older answer must not reopen it.
+      const version = generation.current;
       void getAgentJob(jobId)
         .then((latest) => {
-          if (cancelled || read !== latestRead) return;
+          if (cancelled || read !== latestRead || generation.current !== version) return;
           if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
             reload();
             return;

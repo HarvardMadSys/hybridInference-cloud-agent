@@ -804,6 +804,58 @@ describe('useAgentJob with the owner change stream', () => {
     expect(result.current.job?.state).not.toBe('running');
   });
 
+  it('keeps a turn its stream ended over a pushed read that left while it ran', async () => {
+    vi.useFakeTimers();
+    const running = { ...settled, state: 'running', conversation_state: 'running' } as AgentJobApi;
+    serve(running);
+    let stream!: Parameters<typeof streamAgentJob>[1];
+    vi.mocked(streamAgentJob).mockImplementation((_id, options) => {
+      stream = options;
+      return new Promise(() => undefined);
+    });
+    const { result } = renderHook(() => useAgentJob(settled.id));
+    await act(async () => {});
+    expect(streamAgentJob).toHaveBeenCalledTimes(1);
+
+    // A change prompts a read of the row while the turn runs. It is slow.
+    let answerStale!: () => void;
+    vi.mocked(getAgentJob).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerStale = () => resolve(running);
+        }),
+    );
+    await act(async () => {
+      receiveJobChange({
+        id: settled.id,
+        thread_id: 'live-thread',
+        revision: 3,
+        state: 'running',
+        conversation_state: 'running',
+      });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    expect(getAgentJob).toHaveBeenCalledTimes(2);
+
+    // Meanwhile the turn's stream ends it, and the reload reads it settled.
+    const ended = { ...running, state: 'succeeded', conversation_state: 'idle', revision: 5 };
+    vi.mocked(getAgentJob).mockResolvedValue(ended as AgentJobApi);
+    await act(async () => {
+      stream.onFinished?.({ state: 'succeeded', published_pr_url: null });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.job?.state).not.toBe('running');
+
+    // The read from before the end answers last, and is not applied over it.
+    await act(async () => {
+      answerStale();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.job?.state).not.toBe('running');
+    expect(result.current.threadJobs[0].state).toBe('succeeded');
+    expect(streamAgentJob).toHaveBeenCalledTimes(1);
+  });
+
   describe('when its stream cannot connect', () => {
     const running = { ...settled, state: 'running', conversation_state: 'running' } as AgentJobApi;
     const ended = { ...running, state: 'succeeded', conversation_state: 'idle', revision: 5 };
