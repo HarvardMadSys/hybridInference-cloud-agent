@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import pytest
 
 from cloud_agent import logging_utils, settings
+from cloud_agent_shared.logging_utils import UVICORN_LOGGERS
 
 
 @contextmanager
@@ -18,7 +19,7 @@ def _isolated_logging():
     handlers, level = root.handlers[:], root.level
     owned = logging_utils._process_handler
     owns_uvicorn = logging_utils._process_owns_uvicorn
-    server_loggers = [logging.getLogger(name) for name in logging_utils._UVICORN_LOGGERS]
+    server_loggers = [logging.getLogger(name) for name in UVICORN_LOGGERS]
     server_states = [(logger.handlers[:], logger.propagate) for logger in server_loggers]
     root.handlers.clear()
     root.setLevel(logging.WARNING)
