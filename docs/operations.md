@@ -1765,6 +1765,19 @@ successful. Archives are an export/forensics boundary only: this release does
 not list, download, replay, or restore a sandbox from S3. The retained Docker
 writable layer remains authoritative for normal stop/start continuity.
 
+A stop the broker did not perform cleanly has no final archive. This covers a
+host crash or reboot, a broker that exited while sandboxes kept running, a
+`docker stop` issued behind the broker, and a native transport that failed to
+close. Native history cannot be proven flushed in those cases, so the broker
+records a `skipped` final marker (event `sandbox_final_archive_skipped`)
+instead of uploading, releases the bridge, and lets the chat continue: the next
+turn resumes through the ordinary native-resume checks, exactly as with
+archives disabled. The next clean stop archives normally, so S3 then holds no
+final for the skipped stop. Groups that an older broker marked `blocked` are
+treated the same way after the upgrade. Only a group whose skip cannot be
+written durably, or one found before any policy has been delivered, stays
+fenced with its bridge until reconciliation succeeds.
+
 #### Launch failures and queue order
 
 If a turn process cannot start or exits before taking delivery, the host

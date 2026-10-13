@@ -16,7 +16,6 @@ from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
 from cloud_agent_host.sandbox_archives import SandboxInitialArchiveMarker
-from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
@@ -558,7 +557,7 @@ def test_safe_start_clears_a_stale_uploaded_marker_and_releases_its_pin() -> Non
     controller.close()
 
 
-def test_native_flush_block_marker_cannot_be_overwritten_or_uploaded() -> None:
+def test_native_flush_skip_finishes_without_upload_and_the_next_stop_archives() -> None:
     manager = _MarkerManager()
     controller, services = _controller(manager)
     controller.start()
@@ -569,18 +568,79 @@ def test_native_flush_block_marker_cannot_be_overwritten_or_uploaded() -> None:
     controller.invalidate_final(spec, inspection)
 
     assert manager.marker is not None
-    assert b'"state":"blocked"' in manager.marker
-    with pytest.raises(SandboxArchiveBlocked, match="native flush failure"):
-        controller.prepare_final(spec, inspection)
-    with pytest.raises(SandboxArchiveBlocked, match="native flush failure"):
-        controller.prepare_start(spec, inspection)
-    with pytest.raises(SandboxArchiveBlocked, match="native flush failure"):
-        controller.queue_final(spec, inspection, ())
+    assert b'"state":"skipped"' in manager.marker
+    # A running prepare cannot overwrite the skip, and its stop never uploads.
+    controller.prepare_final(spec, inspection)
+    assert b'"state":"skipped"' in manager.marker
+    controller.queue_final(spec, inspection, ())
+    assert services[0].final_calls == 0
+    # Starting again replaces the completed skip with a fresh fence, so the
+    # next clean stop of the continued sandbox archives as usual.
+    controller.prepare_start(spec, inspection)
+    assert b'"state":"pending"' in manager.marker
+    controller.complete_start(spec, inspection)
+    controller.prepare_final(spec, inspection)
+    controller.queue_final(spec, inspection, ())
+    assert services[0].final_calls == 1
+    assert b'"state":"uploaded"' in manager.marker
+    controller.close()
+
+
+def test_legacy_blocked_marker_is_read_as_a_skip() -> None:
+    manager = _MarkerManager()
+    controller, services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    inspection = SimpleNamespace(container_id="container", running=False)
+    controller.invalidate_final(spec, inspection)
+    assert manager.marker is not None
+    # An older broker wrote the same record with state "blocked".
+    manager.marker = manager.marker.replace(b'"state":"skipped"', b'"state":"blocked"')
+
+    controller.queue_final(spec, inspection, ())
+    assert services[0].final_calls == 0
+    controller.prepare_start(spec, inspection)
+    assert b'"state":"pending"' in manager.marker
+    controller.close()
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_markerless_lifecycle_under_enabled_policy_is_skipped_not_quarantined(
+    running: bool,
+) -> None:
+    manager = _MarkerManager()
+    controller, services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    inspection = SimpleNamespace(container_id="container", running=running)
+
+    assert controller.prepare_markerless_final(spec, inspection) is True
+
+    assert manager.marker is not None and b'"state":"skipped"' in manager.marker
+    controller.queue_final(spec, inspection, ())
     assert services[0].final_calls == 0
     controller.close()
 
 
-def test_native_flush_block_uses_the_stopped_marker_writer_after_exact_stop() -> None:
+def test_markerless_lifecycle_stays_fenced_until_a_policy_arrives() -> None:
+    manager = _MarkerManager()
+    controller, _services = _controller(manager)
+    controller.start()
+
+    assert (
+        controller.prepare_markerless_final(
+            SimpleNamespace(sandbox_id="asbx", generation=3),
+            SimpleNamespace(container_id="container", running=True),
+        )
+        is False
+    )
+    assert manager.marker is None
+    controller.close()
+
+
+def test_native_flush_skip_uses_the_stopped_marker_writer_after_exact_stop() -> None:
     class MarkerManager(_MarkerManager):
         def __init__(self) -> None:
             super().__init__()
@@ -607,7 +667,7 @@ def test_native_flush_block_uses_the_stopped_marker_writer_after_exact_stop() ->
 
     assert manager.running_writes == 0
     assert manager.stopped_writes == 1
-    assert manager.marker is not None and b'"state":"blocked"' in manager.marker
+    assert manager.marker is not None and b'"state":"skipped"' in manager.marker
     controller.close()
 
 
