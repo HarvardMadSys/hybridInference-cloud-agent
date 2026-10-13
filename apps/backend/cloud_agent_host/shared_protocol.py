@@ -1,29 +1,17 @@
 """Re-export of :mod:`cloud_agent_shared.shared_protocol`.
 
 The constants and helpers moved to the ``cloud_agent_shared`` package, which
-the runner image ships on its own. This module stays so existing host-side
-importers keep working: ``from cloud_agent_host.shared_protocol import ...``
-resolves to the very same objects, not copies.
+the runner image ships on its own. This module stays so existing importers
+keep working: ``from cloud_agent_host.shared_protocol import ...`` resolves to
+the very same objects, not copies.
 
-**When this module goes away.** Delete it when no ``cloud_agent_host`` module
-and no test imports it. That is exactly the set a scan of
-``cloud_agent_host/**`` and ``tests/**`` for
-``cloud_agent_host.shared_protocol`` returns today: the host modules
-``runner.py``, ``host_runtime.py``, ``resources.py`` and
-``candidate_check.py``, plus the eight test files
-``tests/unit/test_candidate_check.py``,
-``tests/unit/test_cross_artifact_contracts.py``,
-``tests/unit/test_deploy_readiness.py``,
-``tests/unit/test_execution_profiles.py``,
-``tests/unit/test_runtime_version_selection.py``,
-``tests/integration/servers/test_agent_jobs_lifecycle.py``,
-``tests/integration/storage/test_agent_grant_store.py`` and
-``tests/integration/storage/test_agent_job_store.py``. The control plane is
-not in that set: it already imports
+**When this module goes away.** Delete it when nothing imports it. No
+``cloud_agent_host`` module does any more. The tests and scripts that still do
+are ``SHIM_IMPORT_ALLOWLIST`` in ``tests/unit/test_import_boundary.py``, which
+fails on a new importer and on an entry whose importer has moved on, so the
+list can only shrink. The control plane is not on it: it imports
 ``cloud_agent_shared.shared_protocol`` directly, which is the path every
-one of these callers is meant to end up on. The boundary test's
-contracts-isolation test is what keeps the new path honest while the old one
-still has callers.
+caller is meant to end up on.
 """
 
 from cloud_agent_shared.shared_protocol import (
@@ -44,7 +32,9 @@ from cloud_agent_shared.shared_protocol import (
     shared_deployment_capability,
 )
 
-#: The whole surface of the moved module, so the re-export reads as one.
+#: The surface this re-export was frozen with. A name the shared module gained
+#: since is imported from ``cloud_agent_shared.shared_protocol`` directly and is
+#: never added here: this module only ever shrinks.
 __all__ = [
     "ENV_DEPLOYMENT_SHA",
     "GOAL_REPORT_CAPABILITY",

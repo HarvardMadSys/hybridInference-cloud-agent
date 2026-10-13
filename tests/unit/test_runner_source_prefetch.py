@@ -29,6 +29,7 @@ from cloud_agent_host.runner import WorktreeError
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.setup import SetupResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -74,6 +75,8 @@ def _run_turn(
     *,
     has_context: bool = False,
     before_acquire: Callable[[], None] | None = None,
+    setup_script: str | None = None,
+    heart: Any = None,
 ) -> SimpleNamespace:
     """Drive one shared turn with the clone scripted and everything else mocked."""
     monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
@@ -146,9 +149,9 @@ def _run_turn(
     finish = Mock()
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB),
+        job=replace(_JOB, setup_script=setup_script),
         control=control,
-        heart=SimpleNamespace(),
+        heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
         gateway_base_url="http://gateway",
@@ -156,7 +159,9 @@ def _run_turn(
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},
     )
-    return SimpleNamespace(result=result, finish=finish, imported=imported, supervisor=supervisor)
+    return SimpleNamespace(
+        result=result, finish=finish, imported=imported, supervisor=supervisor, control=control
+    )
 
 
 def test_a_new_chat_clones_while_its_container_starts(monkeypatch):
@@ -264,3 +269,74 @@ def test_the_real_clone_and_archive_run_on_the_prefetch_thread(monkeypatch, remo
         names = archive.getnames()
     assert any(name.endswith("hello.py") for name in names)
     assert not any(name.endswith("second.txt") for name in names), "the pinned base, not the tip"
+
+
+def test_the_prefetch_clone_is_stopped_at_the_turns_import_limit(monkeypatch, remote):
+    """The limit is enforced while git writes the clone, not on the finished checkout.
+
+    It was checked only once the archive was built, after the whole repository
+    had been fetched and checked out onto the host's shared Docker data root.
+    """
+    base, repo, first, _head = remote
+    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_kwargs: base)
+    archived = Mock()
+    monkeypatch.setattr(runner_mod, "build_source_archive", archived)
+    prefetch = runner_mod._prefetch_retained_source(
+        job=replace(_JOB, repo=repo, base_sha=first), uid=1000, gid=1000, max_bytes=1
+    )
+    manager = Mock()
+
+    with pytest.raises(WorktreeError, match="retained import size limit"):
+        prefetch.import_into(manager, Mock())
+
+    archived.assert_not_called()
+    manager.import_archive.assert_not_called()
+
+
+def test_a_stop_during_setup_stops_it_and_cancels_before_the_baseline(monkeypatch):
+    """A setup script can run for many minutes; a Stop must not wait for it to end.
+
+    The heartbeat now keeps renewing after a Stop, so a first turn that looked
+    for it only right before admission ran the owner's whole setup script,
+    and captured its baseline, before releasing the chat.
+    """
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+    stopped: list[bool | None] = []
+
+    def setup(*, stop=None, **_kwargs: Any) -> SetupResult:
+        heart.cancel_requested = True  # the Stop arrives while the script runs
+        stopped.append(stop() if stop is not None else None)
+        return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
+
+    monkeypatch.setattr(runner_mod, "run_setup", setup)
+
+    turn = _run_turn(monkeypatch, Source(), setup_script="npm ci", heart=heart)
+
+    assert stopped == [True], "the setup was not told to stop"
+    assert turn.result == 0
+    assert turn.finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+    turn.supervisor.capture_initial_archive.assert_not_called()
+    turn.control.admit_chat_turn.assert_not_called()
+    assert turn.control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+
+
+def test_discarding_stops_a_clone_that_is_still_running(monkeypatch):
+    """A turn that gives up does not wait at exit for a clone it will never import."""
+    started = threading.Event()
+    stopped_in_time: list[bool] = []
+
+    def clone(*, stop: threading.Event | None = None, **_kwargs: Any) -> str:
+        started.set()
+        stopped_in_time.append(stop is not None and stop.wait(5))
+        raise WorktreeError("the clone was abandoned before it finished")
+
+    monkeypatch.setattr(runner_mod, "prepare_worktree", clone)
+    prefetch = runner_mod._prefetch_retained_source(job=_JOB, uid=1000, gid=1000, max_bytes=1)
+    assert started.wait(5)
+
+    prefetch.discard()
+    for thread in _prefetch_threads():
+        thread.join(10)
+
+    assert stopped_in_time == [True]
+    assert _prefetch_threads() == []

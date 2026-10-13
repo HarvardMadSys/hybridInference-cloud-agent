@@ -13,10 +13,13 @@ from __future__ import annotations
 import queue
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.sandbox import SandboxSpec
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass(frozen=True)
@@ -34,11 +37,16 @@ def run_setup(
     workdir: str,
     backend: Any,
     timeout_s: float = 900.0,
+    stop: Callable[[], bool] | None = None,
 ) -> SetupResult:
     """Run one bounded setup command in the retained container.
 
     Output is retained only as a bounded diagnostic tail; the durable result is
     already in the container layer.
+
+    ``stop`` is polled while the script runs. Once it answers true -- the
+    owner pressed Stop, or the attempt's lease is gone -- the script is killed
+    rather than left to run out its timeout for a turn that will not use it.
     """
     if not script.strip():
         return SetupResult(ran=False)
@@ -65,6 +73,11 @@ def run_setup(
                     exit_code=124,
                     detail=f"setup exceeded {timeout_s:.0f}s",
                 )
+            if stop is not None and stop():
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
             try:
                 chunk = output.get(timeout=min(0.25, remaining))
             except queue.Empty:

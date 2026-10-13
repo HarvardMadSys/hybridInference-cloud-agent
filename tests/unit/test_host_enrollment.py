@@ -111,6 +111,32 @@ def test_the_credential_is_stored_unreadable_to_others(credential_file, monkeypa
     assert credential_file.stat().st_mode & 0o077 == 0, "the credential is readable by others"
 
 
+def test_a_leftover_temporary_file_cannot_widen_the_credential_mode(credential_file) -> None:
+    """A temporary name that already exists is never reopened and kept.
+
+    Opening a fixed ``.tmp`` without ``O_EXCL`` keeps the mode of whatever is
+    already there, so one left at 0644 made the credential world-readable; a
+    symlink in its place would have been followed.
+    """
+    leftover = credential_file.with_suffix(".tmp")
+    leftover.write_text("stale")
+    leftover.chmod(0o644)
+    elsewhere = credential_file.parent / "elsewhere"
+    elsewhere.write_text("untouched")
+    planted = credential_file.parent / f".{credential_file.name}.tmp"
+    planted.symlink_to(elsewhere)
+
+    enrollment.store_credential("hc_secret")
+
+    assert credential_file.read_text() == "hc_secret"
+    assert credential_file.stat().st_mode & 0o777 == 0o600
+    assert not credential_file.is_symlink()
+    assert elsewhere.read_text() == "untouched"
+    assert leftover.read_text() == "stale"
+    leftovers = {item.name for item in credential_file.parent.iterdir()}
+    assert leftovers == {"credential", "credential.tmp", "elsewhere", ".credential.tmp"}
+
+
 def test_a_stored_credential_is_not_spent_again(credential_file, monkeypatch) -> None:
     """Restarting must not consume a second enrollment token."""
     credential_file.write_text("hc_existing")

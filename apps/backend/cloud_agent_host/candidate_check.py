@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError, build_backend_from_env
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
 )
