@@ -793,3 +793,48 @@ async def test_primary_error_survives_owner_cancellation_during_cleanup() -> Non
     assert len(cancellation_notes) == 1
     assert child.cancelled()
     assert events[-2:] == ["pool", "reset_settings"]
+
+
+@pytest.mark.parametrize(
+    ("background", "attribute", "target"),
+    [
+        (True, "publish_task", "cloud_agent.publish_worker.publish_loop"),
+        (False, "mcp_maintenance_task", "cloud_agent.api.mcp_relay.maintain_host_sessions"),
+    ],
+    ids=["publisher", "mcp-maintenance"],
+)
+async def test_a_background_task_that_dies_is_reported_when_it_dies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    background: bool,
+    attribute: str,
+    target: str,
+) -> None:
+    """A loop that stops with an error says so then, not first at shutdown.
+
+    Until shutdown re-raises it, nothing else would: the process goes on
+    serving with no publisher, or no reaper, and nothing in its log says why.
+    """
+    caplog.set_level("INFO", logger="cloud_agent.app")
+    prepared = _prepare(monkeypatch)
+
+    async def crash(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"{attribute} crashed")
+
+    monkeypatch.setattr(target, crash)
+
+    with pytest.raises(RuntimeError, match=f"{attribute} crashed"):
+        async with lifespan(prepared.app, background=background):
+            await asyncio.wait([getattr(prepared.app.state, attribute)])
+            await asyncio.sleep(0)
+            died = [
+                record
+                for record in caplog.records
+                if getattr(record, "event", "") == "agent_background_task_failed"
+            ]
+            assert len(died) == 1, "a background task died without a word"
+            assert died[0].levelname == "ERROR"
+            assert died[0].exc_info is not None
+            assert f"{attribute} crashed" in str(died[0].exc_info[1])
+
+    assert prepared.pool.closes == 1
