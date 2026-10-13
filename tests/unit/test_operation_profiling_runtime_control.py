@@ -670,6 +670,50 @@ def test_a_restarted_broker_is_given_the_configuration_again(monkeypatch):
     assert broker.delivered["run"]["run_id"] == RUN_A
 
 
+def test_a_refused_lower_revision_is_neither_reported_nor_forwarded(monkeypatch, caplog):
+    """What the runner reports and hands on is what its store applied.
+
+    A control plane that starts reading another control row -- a changed
+    deployment name, a rebuilt database -- answers below the applied revision,
+    and the store keeps the applied run, as the anti-rollback rule requires.
+    Regression: the runner built its diagnostics, its poll interval and the
+    broker's message from the refused answer, so it reported "stopped" and
+    polled at the idle rate while the old run kept selecting, and it pushed the
+    broker the applied revision with no run -- a torn configuration that a
+    restarted broker would accept, dropping its stages of the running
+    experiment. Nothing said the answers were being refused.
+    """
+    broker = _FlakyBroker()
+    sync = _sync_with_broker(monkeypatch, broker)
+    control = sync._client
+    control.answer = {**control.answer, "revision": 57}
+    assert sync._sync_once() == 5.0
+    assert broker.delivered is not None and broker.delivered["revision"] == 57
+
+    caplog.set_level(logging.WARNING, logger="cloud_agent_host.profiling_policy")
+    control.answer = {**control.answer, "revision": 2, "run": None}
+    for _ in range(3):
+        # Still the applied run, so still polled at the active rate.
+        assert sync._sync_once() == 5.0
+
+    live = profiling.active_run()
+    assert live is not None and live.run_id == RUN_A
+    state = sync.state()
+    assert state["applied_revision"] == 57
+    assert state["run_id"] == RUN_A
+    assert broker.delivered["revision"] == 57
+    assert broker.delivered["run"] is not None
+    assert broker.delivered["run"]["run_id"] == RUN_A
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if "agent_profiling_policy_revision_behind" in record.getMessage()
+    ]
+    # Said once for the refused revision, not on every poll, naming both.
+    assert len(refusals) == 1
+    assert "revision 2" in refusals[0] and "57" in refusals[0]
+
+
 # ---------------------------------------------------------------------------
 # A selected operation keeps collecting its later stages
 # ---------------------------------------------------------------------------
