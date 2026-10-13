@@ -378,11 +378,9 @@ export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage 
   );
   const status = failed
     ? 'Update temporarily unavailable.'
-    : counting
-      ? 'Counting usage…'
-      : ledger?.next_refresh_at
-        ? 'Usage may change.'
-        : null;
+    : !counting && ledger?.next_refresh_at
+      ? 'Usage may change.'
+      : null;
 
   // Nothing was called, so there is nothing to show: every attempt ended
   // before its agent could reach a model, or the turn never ran at all.
@@ -393,7 +391,7 @@ export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage 
     Boolean(
       ledger && (ledger.status === 'available' || (terminal && ledger.attempts.length === 0)),
     );
-  if (nothingCalled) return null;
+  if (nothingCalled || (!loading && !hasValues && counting)) return null;
 
   return (
     <section
@@ -419,7 +417,7 @@ export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage 
           {gatewayTotals && status ? <span>{status}</span> : null}
         </>
       ) : (
-        <span role="status">{counting ? 'Counting usage…' : 'Usage temporarily unavailable.'}</span>
+        <span role="status">Usage temporarily unavailable.</span>
       )}
     </section>
   );

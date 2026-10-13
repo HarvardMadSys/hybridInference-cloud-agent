@@ -296,11 +296,13 @@ describe('LedgerUsage', () => {
   it('requests fresh source usage throughout active runs, including after five minutes', async () => {
     const view = await mount({ ...job, state: 'running' });
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Counting usage…')).toBeVisible();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
     await advance(360_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(25);
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(25);
-    expect(screen.getByText('Counting usage…')).toBeVisible();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
     expect(refreshAgentJobUsage).toHaveBeenLastCalledWith('ajob_1', expect.any(AbortSignal));
     view.unmount();
     await advance(60_000);
@@ -540,19 +542,24 @@ describe('LedgerUsage with the owner change stream', () => {
       const unsettled = usage();
       if (state === 'pending') unsettled.ledger.status = 'pending';
       else unsettled.ledger.refreshing = true;
+      const updated = usage();
+      updated.ledger.totals!.calls = 4;
       vi.mocked(getAgentJobUsage)
         .mockResolvedValueOnce(usage())
         .mockResolvedValueOnce(unsettled)
-        .mockResolvedValue(usage());
+        .mockResolvedValue(updated);
       const view = await mount({ ...job, state: 'running' });
       await act(async () => view.rerender(<LedgerUsage job={job} />));
-      expect(screen.getByText('Counting usage…')).toBeVisible();
+      expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+      expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
       expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
 
       await advance(14_999);
       expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
       await advance(1);
       expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+      expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
       expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
       await advance(60_000);
       expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
@@ -560,16 +567,47 @@ describe('LedgerUsage with the owner change stream', () => {
     },
   );
 
+  it('hides pending usage without totals until the next read provides them', async () => {
+    act(() => setAgentPushLive(true));
+    const pending = usage();
+    pending.ledger.status = 'pending';
+    pending.ledger.totals = null;
+    pending.runtime = {
+      source: 'runtime',
+      input_tokens: null,
+      normalized_input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+    };
+    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(pending).mockResolvedValue(usage());
+    await mount();
+    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    await advance(14_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
   it('keeps reading pending usage pushed for a finished turn until it becomes available', async () => {
     act(() => setAgentPushLive(true));
+    const updated = usage();
+    updated.ledger.totals!.calls = 5;
+    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(usage()).mockResolvedValue(updated);
     await mount();
     const pending = usage();
     pending.ledger.status = 'pending';
+    pending.ledger.totals!.calls = 4;
     act(() => receiveHint('usage', job.id, pending));
     await advance(PUSH_BATCH_MS);
-    expect(screen.getByText('Counting usage…')).toBeVisible();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
     await advance(15_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('5 model calls');
     expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
   });
@@ -636,7 +674,8 @@ describe('LedgerUsage with the owner change stream', () => {
     await advance(PUSH_BATCH_MS);
     act(() => receiveHint('usage', job.id, versioned('0001', 3)));
     await advance(PUSH_BATCH_MS);
-    expect(screen.getByText('Counting usage…')).toBeVisible();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
 
     await advance(15_000 - PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
