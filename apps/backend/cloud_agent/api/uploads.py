@@ -44,7 +44,10 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/v1/agent/uploads", tags=["agent-uploads"])
 
 #: Base64 expands by 4/3, plus padding. Bounded in the schema so an oversized
-#: body is refused before it is decoded into memory.
+#: upload is refused before its base64 is decoded. That does not bound what is
+#: read: FastAPI reads and parses the whole JSON body before validation or the
+#: owner check runs, so the request's own size is limited in front of this
+#: service — the shipped nginx configs allow this route 8 MiB.
 _MAX_ENCODED = (MAX_ATTACHMENT_FILE_BYTES // 3 + 1) * 4 + 16
 
 

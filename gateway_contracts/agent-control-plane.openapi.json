@@ -4271,11 +4271,12 @@
                 "type": "null"
               }
             ],
-            "description": "Opaque caller metadata.",
+            "description": "Opaque caller metadata: at most 64 keys and 16 KiB as JSON.",
             "title": "Metadata"
           },
           "model": {
             "description": "Gateway model id the runtime should use.",
+            "maxLength": 255,
             "title": "Model",
             "type": "string"
           },
@@ -4318,6 +4319,7 @@
           "runtime": {
             "default": "claude-code",
             "description": "Agent runtime id.",
+            "maxLength": 64,
             "title": "Runtime",
             "type": "string"
           },
@@ -4353,6 +4355,8 @@
           },
           "task_prompt": {
             "description": "What the agent should do.",
+            "maxLength": 100000,
+            "minLength": 1,
             "title": "Task Prompt",
             "type": "string"
           }
@@ -7411,6 +7415,18 @@
           "max_path_length": {
             "default": 512,
             "title": "Max Path Length",
+            "type": "integer"
+          },
+          "max_thread_bytes": {
+            "default": 62914560,
+            "description": "Bytes one conversation's turns may hold together.",
+            "title": "Max Thread Bytes",
+            "type": "integer"
+          },
+          "max_thread_files": {
+            "default": 200,
+            "description": "Files one conversation's turns may hold together.",
+            "title": "Max Thread Files",
             "type": "integer"
           },
           "max_total_bytes": {
@@ -30818,7 +30834,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/attachments": {
       "get": {
-        "description": "List every upload in this conversation, so /uploads can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths.",
+        "description": "List what this conversation's /uploads holds, so it can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths. A file attached again by a later turn is\nlisted once, as its newest upload.",
         "operationId": "worker_list_attachments_v1_agent_worker_jobs__job_id__attachments_get",
         "parameters": [
           {

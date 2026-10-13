@@ -11,6 +11,7 @@ from cloud_agent.attachments.models import (
     attachment_max_files,
     attachment_max_total_bytes,
     attachment_size_label,
+    check_paths,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ async def resolve_attachments(
         raise AttachmentError("One or more uploads are no longer available. Attach them again.")
     ordered = [found[value] for value in attachment_ids]
     check_selection(ordered)
+    check_paths([str(row["path"]) for row in ordered])
     return [AttachmentRef.model_validate(row).model_dump() for row in ordered]
 
 

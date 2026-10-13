@@ -29,8 +29,10 @@ if TYPE_CHECKING:
 #: largest checkout that fits is well under this. A host may raise it.
 DEFAULT_MAX_SOURCE_ARCHIVE_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_BASE_BUNDLE_BYTES = 1024 * 1024 * 1024
-#: Uploads are bounded far below the checkout: the control plane caps one task
-#: at 20 MB, and this is the host's own refusal if that ever stops holding.
+#: Uploads are bounded far below the checkout: the control plane caps what one
+#: conversation's uploads may total below this (``MAX_THREAD_ATTACHMENT_BYTES``),
+#: because every turn's files are imported together, and this is the host's own
+#: refusal if that ever stops holding.
 DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES = 64 * 1024 * 1024
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _GIT_ENV = {

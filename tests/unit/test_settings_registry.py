@@ -100,6 +100,16 @@ def test_invalid_numeric_values_are_refused_without_echo(value):
         settings.encode_changes({"max_attempts": value})
 
 
+def test_what_an_owner_may_keep_cannot_be_less_than_one_turn():
+    values = settings.initial_settings()
+    values.update(settings.encode_changes({"attachments.max_user_bytes": 1024}))
+    with pytest.raises(ValueError, match="cannot exceed"):
+        settings.validate_stored_settings(values)
+    values.update(settings.encode_changes({"attachments.max_total_bytes": 1024}))
+    values.update(settings.encode_changes({"attachments.max_file_bytes": 1024}))
+    settings.validate_stored_settings(values)
+
+
 def test_merged_validation_refuses_inconsistent_limits():
     values = settings.initial_settings()
     values.update(settings.encode_changes({"attachments.max_total_bytes": 100}))

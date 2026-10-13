@@ -747,6 +747,18 @@ SETTINGS: tuple[Setting, ...] = (
         8760,
         description="Remove uploads this old only when no job or pending message holds them. Changes apply on the next maintenance pass.",
     ),
+    _numeric(
+        "attachments.max_user_bytes",
+        "Maximum stored upload bytes per user",
+        "Attachments",
+        1073741824,
+        1,
+        68719476736,
+        description=(
+            "Everything one user's uploads keep, staged or in conversations not yet "
+            "deleted. Applies to subsequent uploads after settings synchronize."
+        ),
+    ),
     _numeric("skills.max_skill_bytes", "Maximum skill size (bytes)", "Skills", 65536, 1, 65536),
     _numeric(
         "skills.max_selection_bytes",
@@ -1095,6 +1107,7 @@ def _validate_relations(
     for smaller, larger in (
         ("goals.arm_after_seconds", "goals.stalled_after_seconds"),
         ("attachments.max_file_bytes", "attachments.max_total_bytes"),
+        ("attachments.max_total_bytes", "attachments.max_user_bytes"),
         ("skills.max_skill_bytes", "skills.max_selection_bytes"),
         ("goals.wakeup_backoff_seconds", "goals.wakeup_backoff_max_seconds"),
         ("task_titles.timeout_seconds", "task_titles.total_timeout_seconds"),

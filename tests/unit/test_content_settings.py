@@ -68,6 +68,9 @@ def test_upload_advertisement_and_selections_follow_saved_limits(saved_settings)
         "max_total_bytes": 8,
         "max_file_bytes": 4,
         "max_path_length": 512,
+        # A conversation's own bounds follow the host's import limit, not a setting.
+        "max_thread_files": 200,
+        "max_thread_bytes": 60 * 1024 * 1024,
     }
     check_attachments([{"size_bytes": 4}, {"size_bytes": 4}])
     with pytest.raises(AttachmentError, match="8 bytes"):

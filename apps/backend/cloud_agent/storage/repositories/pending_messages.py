@@ -372,8 +372,12 @@ class PostgresPendingMessageRepository:
                 message = await read_pending_message(conn, message_id)
         except GuardedSubmissionRefused as exc:
             return exc.result
-        except (PendingAttachmentsUnavailable, AttachmentError):
+        except PendingAttachmentsUnavailable:
             return {"error": "attachments_unavailable"}
+        except AttachmentError as exc:
+            # The idle-only turn's own claim, which says why: a file was taken,
+            # or the conversation's /uploads cannot hold it.
+            return {"error": "attachments_unavailable", "message": str(exc)}
         except asyncpg.UniqueViolationError as exc:
             # The same key sent to two conversations at once: the loser reads
             # back whatever the winner made.
@@ -1120,6 +1124,9 @@ class PostgresPendingMessageRepository:
                         yield_to_queued=True,
                         client_request_id=client_request_id,
                         client_request_fingerprint=fingerprint,
+                        # The uploads this message pinned are its turn's to
+                        # claim, and no other turn's.
+                        pending_message_id=str(head["id"]),
                     )
             except AttachmentError as exc:
                 await self._hold(conn, message_id=str(head["id"]), error=str(exc))
