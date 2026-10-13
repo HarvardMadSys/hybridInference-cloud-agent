@@ -87,7 +87,8 @@ restores an old `.env` value. Listeners synchronize saved changes every five
 seconds. The web server reads saved public appearance fields on every request.
 Apply changes to subsequent operations as described beside each setting.
 
-That import refuses a `GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`,
+The import of registered environment settings refuses a
+`GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`,
 `AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` shorter
 than 32 bytes: the listener stops with an error naming the variable before
 anything is written, so rolling back is safe. Check their lengths before the
