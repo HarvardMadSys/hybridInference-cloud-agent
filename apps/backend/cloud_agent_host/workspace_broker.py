@@ -1712,10 +1712,13 @@ def create_app(
         terminals_started = False
         resource_collector: SandboxResourceCollector | None = None
         try:
-            # Reconcile/reap retained Docker execs before this process starts
-            # accepting new terminal sessions. Keep startup inside the cleanup
-            # guard: a failed Docker reconciliation must not leak the terminal
-            # manager's background thread from a failed ASGI lifespan.
+            # A replacement broker cannot reattach a previous one's Docker
+            # execs. Reconciliation stops each running group it discovers for
+            # the first time, so those resident CLIs and terminal PTYs end
+            # with their container; nothing reaps them one by one. Keep
+            # startup inside the cleanup guard: a failed Docker reconciliation
+            # must not leak the terminal manager's background thread from a
+            # failed ASGI lifespan.
             if archive_boundary is not None:
                 archive_boundary.start()
                 archive_boundary_started = True

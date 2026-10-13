@@ -486,11 +486,6 @@ class McpHost:
             return False
         return recorded == SessionFingerprint.of(connection, secret=secret)
 
-    async def reap_superseded(self, key: SessionKey) -> int:
-        """Close older owners after any concurrent connection attempt settles."""
-        async with self._session_lock(key):
-            return await self._reap_superseded(key)
-
     async def _reap_superseded(self, key: SessionKey) -> int:
         """Close what this member held under an older owner, and forget it.
 
