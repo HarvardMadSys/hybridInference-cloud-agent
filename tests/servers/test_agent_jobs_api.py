@@ -139,7 +139,9 @@ class FakeGoalWakeups:
         self.rows.append(row)
         return row["id"]
 
-    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
+    async def claim_wakeups(
+        self, *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Nothing is consumed here; the decision's own tests own that path."""
         return []
 
@@ -6794,9 +6796,11 @@ async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
     claimed_wakeups: list[int] = []
     original_claim = store.goal_wakeups.claim_wakeups
 
-    async def counting_claim(*, limit: int = 1) -> list[dict[str, Any]]:
+    async def counting_claim(
+        *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
         claimed_wakeups.append(limit)
-        return await original_claim(limit=limit)
+        return await original_claim(limit=limit, thread_id=thread_id)
 
     store.goal_wakeups.claim_wakeups = counting_claim
     minter = _FakeGitHubApp(installations=[], repos_by_installation={})
@@ -6812,6 +6816,35 @@ async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
     assert finish.status_code == 200
     assert store.jobs[job_id]["state"] == "succeeded"
     assert claimed_wakeups == [], "no wakeup may be claimed while the App is unloaded"
+
+
+async def test_a_finish_drains_only_its_own_conversations_goal_wakeups(
+    client: AsyncClient, store: FakeStorage
+):
+    """The goal drain a finish runs names the finished turn's conversation.
+
+    Unnamed, the claim took the deployment's oldest due wakeups, and this
+    runner's request decided other owners' goals before it was acknowledged.
+    """
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    claims: list[tuple[int, str | None]] = []
+    original_claim = store.goal_wakeups.claim_wakeups
+
+    async def recording_claim(
+        *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        claims.append((limit, thread_id))
+        return await original_claim(limit=limit, thread_id=thread_id)
+
+    store.goal_wakeups.claim_wakeups = recording_claim
+    finish = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/finish", json={"state": "succeeded"}, headers=auth
+    )
+
+    assert finish.status_code == 200
+    assert claims == [(8, store.jobs[job_id]["thread_id"])]
 
 
 async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeStorage, monkeypatch):

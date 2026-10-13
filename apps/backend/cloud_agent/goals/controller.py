@@ -122,12 +122,15 @@ async def run_goal_wakeups(
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
     limit: int = 8,
+    thread_id: str | None = None,
 ) -> int:
     """Consume what is due, and return how many wakeups were handled.
 
     One pass is bounded, because it runs both inside the finish request and on
     the reaper's loop: a deployment with hundreds of pending obligations must
-    not hold a request open, and the next tick takes the rest.
+    not hold a request open, and the next tick takes the rest. ``thread_id``
+    confines the pass to one conversation, which is how the finish request
+    runs it; the reaper's pass, without one, takes every conversation's.
 
     **A GitHub App this process cannot load stops the pass before it claims
     anything** (issue #47). Claiming spends one of a wakeup's five attempts, and
@@ -147,7 +150,7 @@ async def run_goal_wakeups(
     except SourceControlUnavailable:
         return 0
     handled = 0
-    for wakeup in await store.goal_wakeups.claim_wakeups(limit=limit):
+    for wakeup in await store.goal_wakeups.claim_wakeups(limit=limit, thread_id=thread_id):
         try:
             await consume_wakeup(
                 store=store, wakeup=wakeup, app_credentials=app_credentials, gateway=gateway
@@ -196,6 +199,7 @@ async def continue_after_finish(
     *,
     store: _GoalStore,
     job_id: str,
+    thread_id: str | None,
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
 ) -> int:
@@ -208,20 +212,26 @@ async def continue_after_finish(
     looks finished would stop it polling, so the round the user is waiting to
     see would be the one round nobody ever fetched.
 
-    **It drains the deployment's queue, not only this conversation's.** The
-    claim takes the oldest due wakeups wherever they are, so while others are
-    waiting this request decides up to eight of theirs first, and this turn's
-    own may be left for the reaper's next pass. The page keeps polling an
-    active goal, so that round still appears, later.
+    **It drains this conversation's wakeups and nobody else's.** Everything a
+    finish makes due belongs to the turn's own conversation, ``thread_id``: the
+    wakeups parked behind the turn and the one a finished round arms. Other
+    conversations' wait for the reaper's pass. Deciding them here held the
+    runner's request on their GitHub and Gateway calls, oldest first, and could
+    leave this turn's own wakeup behind them. A turn without a conversation has
+    no goal, and drains nothing.
 
     ``job_id`` names the turn for the log line; the wakeups themselves carry
     their own identity, which is what makes a replayed finish harmless.
     """
+    if thread_id is None:
+        return 0
     logger.info(
         "agent_goal_finish_drain",
-        extra={"event": "agent_goal_finish_drain", "job_id": job_id},
+        extra={"event": "agent_goal_finish_drain", "job_id": job_id, "thread_id": thread_id},
     )
-    return await run_goal_wakeups(store=store, github_app=github_app, gateway=gateway, limit=8)
+    return await run_goal_wakeups(
+        store=store, github_app=github_app, gateway=gateway, limit=8, thread_id=thread_id
+    )
 
 
 async def consume_wakeup(

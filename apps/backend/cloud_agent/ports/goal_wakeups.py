@@ -65,11 +65,17 @@ class GoalWakeupRepository(Protocol):
         """
         ...
 
-    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
-        """Lease up to ``limit`` due wakeups and return them.
+    async def claim_wakeups(
+        self, *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Lease up to ``limit`` due wakeups, oldest first, and return them.
 
-        A lease is short and the work under it is one decision against the
-        database, never a network call. Each claim spends one attempt, which
+        ``thread_id`` takes only that conversation's, which is what a finished
+        turn drains; ``None`` takes the deployment's, which is the reaper's
+        pass. The lease lasts two minutes. The decision under it commits in one
+        transaction, but its consumer may first ask the Gateway and GitHub
+        whether the owner and the repository still allow the work, so a lease
+        can be held across network calls. Each claim spends one attempt, which
         stays spent only if the consumer backs off or its lease expires.
         """
         ...
