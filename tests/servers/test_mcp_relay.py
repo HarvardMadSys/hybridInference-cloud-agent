@@ -30,6 +30,7 @@ from tests.support.storage import OneFake
 
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.mcp_proxy import canonical_request
 from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, SCOPE_MODEL, mint_worker_token
@@ -547,6 +548,33 @@ async def test_disabled_binding_never_opens_or_closes_an_upstream_stream(
     assert upstream.requests == []
 
 
+async def test_a_relay_refresh_runs_under_the_deployment_egress_policy(
+    monkeypatch, store, upstream
+):
+    """The relay refreshes under the same policy authorization and Test use.
+
+    The fixture admits private plain-HTTP targets, as a deployment with a
+    connector bridge on its own network does. A refresh that fell back to the
+    default policy would refuse that token endpoint only when a job asked, and
+    the connection would read as needing reconnection mid-job while Test, which
+    refreshes under the deployment's policy, kept succeeding.
+    """
+    seen = []
+
+    async def refresh(repository, *, row, policy=None):
+        seen.append(policy)
+        return row
+
+    monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}", json=_rpc("initialize"), headers=_auth()
+        )
+
+    assert response.status_code == 200
+    assert seen == [EgressPolicy(allow_private=True, allow_plain_http=True)]
+
+
 async def test_a_dead_fence_stops_reaching_tools(store, client, upstream):
     """Cancelling a job revokes its tools exactly as it revokes inference."""
     store.live = False
@@ -909,6 +937,39 @@ async def test_a_denied_tool_is_never_advertised(monkeypatch, store, upstream):
         )
 
     assert [tool["name"] for tool in response.json()["result"]["tools"]] == ["get_issue"]
+
+
+async def test_a_crlf_event_stream_is_filtered_event_by_event(monkeypatch, store, upstream):
+    """A server that ends SSE lines with CRLF has each event filtered, not one blob.
+
+    ``sse-starlette``, under the MCP Python SDK, frames that way. Split on LF-LF
+    alone, the stream's events never separated: they left as one frame no JSON
+    reader could parse, and so with the denied tool still advertised.
+    """
+    upstream.content_type = "text/event-stream"
+    upstream.body = b"".join(
+        b"event: message\r\ndata: " + _catalogue(*names) + b"\r\n\r\n"
+        for names in (("get_issue", "create_issue"), ("create_issue",))
+    )
+    store.snapshot = _snapshot("get_issue", "create_issue")
+    store.bindings = [
+        _binding(
+            rules={
+                "get_issue": {"policy": "allow", "fingerprint": ""},
+                "create_issue": {"policy": "deny", "fingerprint": ""},
+            }
+        )
+    ]
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth())
+
+    assert response.status_code == 200
+    events = response.content.split(b"\n\n")
+    assert events[2:] == [b""]
+    assert [
+        [tool["name"] for tool in json.loads(event.split(b"data: ", 1)[1])["result"]["tools"]]
+        for event in events[:2]
+    ] == [["get_issue"], []]
 
 
 async def test_a_confirmed_tool_is_advertised_but_held_for_its_owner(monkeypatch, store, upstream):

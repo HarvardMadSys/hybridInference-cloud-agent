@@ -134,6 +134,10 @@ def test_a_malformed_body_is_refused_rather_than_forwarded():
         (b'{"method":"tools/call","param\xc5\xbf":{}}', -32600),
         (b'{"method":"tools/call","params":{"name":"x","Name":"y"}}', -32600),
         (b'[{"method":"ping"},{"method":"tools/call","params":{"URI":"x"}}]', -32600),
+        # Java's equalsIgnoreCase also matches U+0131 and U+0130 to "i", and
+        # casefold matches neither.
+        (b'{"method":"resources/read","params":{"uri":"a","ur\xc4\xb1":"b"}}', -32600),
+        (b'{"\xc4\xb0d":1,"method":"ping"}', -32600),
     ],
     ids=[
         "invalid-utf8",
@@ -149,6 +153,8 @@ def test_a_malformed_body_is_refused_rather_than_forwarded():
         "long-s",
         "name-case",
         "batch-member-case",
+        "dotless-i",
+        "dotted-capital-i",
     ],
 )
 def test_an_ambiguous_body_is_refused_by_both_decisions(body: bytes, code: int):
@@ -300,3 +306,41 @@ def test_sse_passes_through_frames_that_are_not_catalogues():
     frame = b': keep-alive\n\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'
     sse = SseFilter(_server())
     assert sse.feed(frame) + sse.flush() == frame
+
+
+@pytest.mark.parametrize("ending", [b"\r\n", b"\r"], ids=["crlf", "cr"])
+def test_sse_frames_end_at_any_blank_line_not_only_lf_lf(ending):
+    """A CRLF server's events are framed, streamed and filtered one by one.
+
+    ``sse-starlette``, which the MCP Python SDK serves with, ends lines with
+    CRLF. Framed on LF-LF alone, two such events streamed nothing before the
+    end and left as one frame too garbled to parse -- and so unfiltered.
+    """
+    first = b"event: message" + ending + b"data: " + _catalogue("get_issue", "create_issue")
+    second = b"data: " + _catalogue("create_issue", "list_issues")
+    sse = SseFilter(_server())
+    out = sse.feed(first + ending * 2 + second + ending * 2)
+    assert sse.flush() == b""
+    events = out.split(b"\n\n")
+    assert events[2:] == [b""]
+    assert events[0].startswith(b"event: message\n")
+    assert _listed(events[0].split(b"data: ", 1)[1]) == ["get_issue"]
+    assert _listed(events[1].split(b"data: ", 1)[1]) == ["list_issues"]
+
+
+def test_a_crlf_event_is_released_once_its_blank_line_arrives():
+    """The long-lived stream cannot wait for the size cap to release an event.
+
+    Fed byte by byte, so every CRLF splits across chunks: its LF finishes the
+    line the CR already ended rather than starting a blank one of its own.
+    """
+    event = b"data: " + _catalogue("get_issue", "create_issue") + b"\r\n\r\n"
+    sse = SseFilter(_server())
+    released = [sse.feed(event[i : i + 1]) for i in range(len(event))]
+    # Out on the second CR, not one byte later and not at the end of the stream.
+    assert [bool(chunk) for chunk in released][-3:] == [False, True, False]
+    frame = b"".join(released)
+    assert frame.endswith(b"\n\n") and frame.count(b"\n") == 2
+    assert _listed(frame.split(b"data: ", 1)[1]) == ["get_issue"]
+    assert sse.feed(b": still open\r") == b""
+    assert sse.flush() == b": still open\n"

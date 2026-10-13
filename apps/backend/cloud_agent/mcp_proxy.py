@@ -66,6 +66,14 @@ TOOLS_CALL = "tools/call"
 _MESSAGE_MEMBERS = ("jsonrpc", "id", "method", "params", "result", "error")
 _DECIDED_PARAMS = ("name", "uri", "arguments")
 
+#: The dotted capital and dotless small I. A per-character case-insensitive
+#: match (Java's ``equalsIgnoreCase``, for one) folds both onto ASCII ``i``, and
+#: :meth:`str.casefold` folds neither, so ``uri`` or ``id`` spelled with one
+#: would otherwise pass here as a member no decision reads.
+_EXTRA_FOLDS = str.maketrans(
+    {"\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}": "i", "\N{LATIN SMALL LETTER DOTLESS I}": "i"}
+)
+
 # A single SSE frame is buffered to filter it. The cap bounds what a hostile or
 # broken upstream can make the gateway hold for one frame; it is far above any
 # real tool catalogue.
@@ -152,7 +160,7 @@ def _require_exact_spelling(members: dict[str, Any], names: tuple[str, ...]) -> 
     """Refuse a member that differs from a decided name only by case."""
     canonical = {name.casefold(): name for name in names}
     for key in members:
-        expected = canonical.get(key.casefold())
+        expected = canonical.get(key.translate(_EXTRA_FOLDS).casefold())
         if expected is not None and key != expected:
             raise UnreadableRequest(
                 INVALID_REQUEST, f"{key!r} is not a member this relay reads; send {expected!r}"
@@ -333,16 +341,38 @@ class SseFilter:
     Streaming rather than buffering is what makes this usable on the long-lived
     ``GET`` stream, and on a ``tools/call`` that reports progress before it
     answers: neither can be held until it completes, because neither does.
+
+    Line endings are the one part of the framing rewritten: SSE ends a line with
+    LF, CRLF or a bare CR, servers send all three (``sse-starlette``, under the
+    MCP Python SDK, sends CRLF), and every one leaves here as LF, which a client
+    reads the same. Framing on LF alone would never see a CRLF frame end: a
+    short stream would reach the client as one unparseable, unfiltered frame,
+    and a long one would be held until the size cap released it unfiltered.
     """
 
     def __init__(self, server: McpServer) -> None:
         """Filter frames for one server."""
         self._server = server
         self._buffer = b""
+        self._after_cr = False
+
+    def _normalize(self, chunk: bytes) -> bytes:
+        """Rewrite CRLF and bare CR as LF, including a CRLF split across chunks.
+
+        A CR ending one chunk is a line ending at once, so nothing waits on the
+        next read; a LF opening the next chunk is then the rest of that CRLF,
+        not a second line ending.
+        """
+        if not chunk:
+            return chunk
+        if self._after_cr and chunk.startswith(b"\n"):
+            chunk = chunk[1:]
+        self._after_cr = chunk.endswith(b"\r")
+        return chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
     def feed(self, chunk: bytes) -> bytes:
         """Consume a chunk of upstream bytes, returning complete filtered frames."""
-        self._buffer += chunk
+        self._buffer += self._normalize(chunk)
         out: list[bytes] = []
         while (index := self._buffer.find(_FRAME_SEPARATOR)) != -1:
             frame, self._buffer = self._buffer[:index], self._buffer[index + 2 :]
