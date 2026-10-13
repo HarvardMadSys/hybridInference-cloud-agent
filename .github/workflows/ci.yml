@@ -326,6 +326,10 @@ jobs:
           uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
       # The external checks below run once per commit, in the first shard.
+      # Each test skips when what this job hands it is missing, and pytest
+      # calls a run that only skipped a success, so every external step in this
+      # workflow keeps a junit report and `scripts/ci_tests_ran.py` fails the
+      # step if any test in it declined to run.
       #
       # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
       # Check the real normalizer across Linux UIDs before allowing deployment.
@@ -335,8 +339,11 @@ jobs:
         env:
           AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
         run: |
+          set -euo pipefail
           docker pull "${AGENT_PERMISSION_TEST_IMAGE}"
-          uv run pytest -q -m external tests/external/test_shared_member_permissions.py
+          uv run pytest -q -m external tests/external/test_shared_member_permissions.py \
+            --junitxml="${RUNNER_TEMP}/shared-member-permissions.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/shared-member-permissions.xml"
 
       # Completion can precede the native CLI's history flush. Unit doubles
       # cannot catch that race; exercise the shipped pin before CI can deploy.
@@ -378,7 +385,11 @@ jobs:
         timeout-minutes: 10
         env:
           PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
-        run: uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py
+        run: |
+          set -euo pipefail
+          uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py \
+            --junitxml="${RUNNER_TEMP}/claude-driver-context.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/claude-driver-context.xml"
 
   # The other half of that command. `test` above deselects `dbtest`, and until
   # this job existed nothing selected it — 158 tests that are written, green,
@@ -1199,7 +1210,9 @@ jobs:
           # or loadscope would keep them serial. Dynamic load balances the real
           # CLI processes while the worker databases isolate their storage.
           uv run pytest -q -n "${MCP_TEST_WORKERS}" --dist load \
-            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py
+            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py \
+            --junitxml="${RUNNER_TEMP}/mcp-parity.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/mcp-parity.xml"
 
       # The smoke harness removes its image, so run it after the CLI matrix.
       - name: Start it, and assert what only starting shows
@@ -1446,7 +1459,9 @@ jobs:
           # or loadscope would keep them serial. Dynamic load balances the real
           # CLI processes while the worker databases isolate their storage.
           uv run pytest -q -n "${MCP_TEST_WORKERS}" --dist load \
-            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py
+            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py \
+            --junitxml="${RUNNER_TEMP}/mcp-parity.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/mcp-parity.xml"
 
       - name: Drop this run's containers and image
         if: always() && runner.environment != 'github-hosted'
@@ -1695,7 +1710,9 @@ jobs:
         run: |
           set -euo pipefail
           docker --host=unix:///var/run/docker.sock pull "${AGENT_UPLOAD_TEST_NGINX_IMAGE}"
-          uv run --frozen pytest -q -m external tests/external/test_upload_edge_limits.py
+          uv run --frozen pytest -q -m external tests/external/test_upload_edge_limits.py \
+            --junitxml="${RUNNER_TEMP}/upload-edge-limits.xml"
+          uv run --frozen python scripts/ci_tests_ran.py "${RUNNER_TEMP}/upload-edge-limits.xml"
 
       - name: Retained commands clean up Docker siblings at execution limits
         timeout-minutes: 5
@@ -1704,7 +1721,9 @@ jobs:
         run: |
           set -euo pipefail
           docker --host=unix:///var/run/docker.sock pull "${AGENT_COMMAND_TEST_IMAGE}"
-          uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py
+          uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py \
+            --junitxml="${RUNNER_TEMP}/retained-command-limits.xml"
+          uv run --frozen python scripts/ci_tests_ran.py "${RUNNER_TEMP}/retained-command-limits.xml"
 
   # -------------------------------------------------------------------- gate
   kata:
