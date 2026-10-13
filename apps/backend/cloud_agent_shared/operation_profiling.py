@@ -213,6 +213,9 @@ DEFAULT_ROOT_STAGE = "operation"
 STOP_REASON_EXPIRED = "expired"
 #: Why a configuration is not collecting, when it is not. Shown by the page.
 STOP_REASON_STOPPED = "stopped"
+#: Why a process stopped selecting without being told to: it could not read its
+#: control source. The source's next answer replaces it.
+STOP_REASON_UNAVAILABLE = "control_unavailable"
 
 #: Per-measurement span ceiling; the design budgets 128 spans per attempt.
 MAX_SPANS = 128
@@ -329,9 +332,11 @@ class ControlState:
 
     It is deliberately not the run's own ``config_version`` (that one says which
     immutable manifest this is) and not a lease counter: there is no lease here.
-    A process that loses contact with the control source keeps the last
-    configuration it was given and stops selecting when that experiment's own
-    ``expires_at`` passes.
+    A host that cannot reach the control plane keeps the last configuration it
+    was given and stops selecting when that experiment's own ``expires_at``
+    passes. A process whose own read of the control source fails -- the control
+    plane's loop, or an installed provider that raises -- withdraws the run
+    instead, through :meth:`RuntimePolicyStore.suspend`.
     """
 
     mode: str = MODE_DISABLED
@@ -369,7 +374,9 @@ class RuntimePolicyStore:
 
     There is no lease and no renewal. The configuration is what it is until the
     control source says otherwise, and the experiment's own absolute deadline is
-    what ends it -- including for a node that never hears anything again.
+    what ends it -- including for a node that never hears anything again. The
+    one exception is :meth:`suspend`, for a process that knows its own read of
+    the source just failed.
     """
 
     def __init__(self) -> None:
@@ -393,6 +400,32 @@ class RuntimePolicyStore:
             self._generation += 1
             self._version = state.config_version
             self._state = _Published(state=state, run=parsed, generation=self._generation)
+            return self._state
+
+    def suspend(self, *, stop_reason: str = STOP_REASON_UNAVAILABLE) -> _Published:
+        """Stop selecting under the applied configuration, keeping its version.
+
+        For a process that can no longer read its control source and must not
+        keep collecting on the strength of its last answer. :meth:`publish`
+        cannot say that: such a caller has no version of its own to state, and a
+        "no run" below the applied version is refused as a rollback -- so the
+        fail-closed answer was silently dropped and the run stayed in force.
+
+        The version is kept rather than advanced, so the source's next answer is
+        applied as usual: the same configuration once it can be read again, or a
+        newer one. An older answer is still refused.
+        """
+        with self._lock:
+            base = self._state.state if self._state is not None else ControlState(mode=MODE_ADMIN)
+            state = replace(
+                base,
+                config_version=max(self._version, 0),
+                run=None,
+                stop_reason=stop_reason,
+            )
+            self._generation += 1
+            self._version = state.config_version
+            self._state = _Published(state=state, run=None, generation=self._generation)
             return self._state
 
     def clear(self) -> None:
@@ -507,7 +540,9 @@ def refresh_policy() -> _Published:
 
     Provider failures are published as "no run" rather than raised: a control
     source that is unreachable must not be read as an experiment, and it must
-    not fail the business request that was merely looking for one.
+    not fail the business request that was merely looking for one. The run is
+    withdrawn at the applied version (see :meth:`RuntimePolicyStore.suspend`),
+    because a fresh version-0 "no run" would be refused as a rollback.
     """
     global _REFRESHED
     with _STORE_LOCK:
@@ -519,7 +554,7 @@ def refresh_policy() -> _Published:
         state = provider.snapshot()
     except Exception:
         logger.warning("operation profiling control source is unavailable", exc_info=True)
-        state = ControlState()
+        return _STORE.suspend()
     return _STORE.publish(state)
 
 
@@ -757,6 +792,11 @@ _MODE_LOCK = threading.Lock()
 #: names. Both are deployment configuration, which a restart is what changes.
 _MODE: str | None = None
 _INVALID_MODE = ""
+#: Whether the refused mode above has been reported. The refusal is kept for
+#: as long as the process runs, but it is said once: every request and claim
+#: poll asks for the mode, and a warning on each would be a log write on the
+#: path this module promises to keep cheap.
+_INVALID_MODE_REPORTED = False
 _ENV_RUN: ProfilingRun | None = None
 _ENV_RUN_READ = False
 _BUDGET_LOCK = threading.Lock()
@@ -992,14 +1032,18 @@ def profile_mode() -> str:
     An unrecognized value is reported as ``disabled`` with a warning rather
     than guessed at. "Refuse to collect until somebody fixes the spelling" is
     the safe reading of a typo; treating it as ``environment`` could silently
-    enable collection from a stale descriptor.
+    enable collection from a stale descriptor. The warning is written once per
+    process, by whichever caller asks first.
     """
-    global _MODE
+    global _MODE, _INVALID_MODE_REPORTED
     with _MODE_LOCK:
         if _MODE is None:
             _MODE = _read_mode()
         mode = _MODE
-        invalid = _INVALID_MODE
+        # Claimed under the lock, so concurrent first callers report it once.
+        invalid = "" if _INVALID_MODE_REPORTED else _INVALID_MODE
+        if invalid:
+            _INVALID_MODE_REPORTED = True
     if invalid:
         # Reported outside the lock: a log handler that itself asked about
         # profiling would deadlock the process it is reporting on.
@@ -3030,7 +3074,8 @@ def discard(measurement: Measurement | None) -> None:
 
 def reset_cache() -> None:
     """Drop every cached policy answer and stop the sink. Tests call this."""
-    global _CACHE, _MODE, _ENV_RUN, _ENV_RUN_READ, _INVALID_MODE, _REFRESHED
+    global _CACHE, _MODE, _ENV_RUN, _ENV_RUN_READ, _INVALID_MODE, _INVALID_MODE_REPORTED
+    global _REFRESHED
     with _CACHE_LOCK:
         _CACHE = None
     with _MODE_LOCK:
@@ -3038,6 +3083,7 @@ def reset_cache() -> None:
         _ENV_RUN = None
         _ENV_RUN_READ = False
         _INVALID_MODE = ""
+        _INVALID_MODE_REPORTED = False
     with _STORE_LOCK:
         _REFRESHED = 0
     with _BUDGET_LOCK:
@@ -3086,6 +3132,7 @@ __all__ = [
     "STARTUP_OUTCOME_ALIAS",
     "STOP_REASON_EXPIRED",
     "STOP_REASON_STOPPED",
+    "STOP_REASON_UNAVAILABLE",
     "TARGET_KEYS",
     "ControlState",
     "Measurement",

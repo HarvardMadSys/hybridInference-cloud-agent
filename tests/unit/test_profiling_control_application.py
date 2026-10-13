@@ -31,6 +31,12 @@ from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_PENDING,
     LIFECYCLE_STOPPED,
 )
+from cloud_agent.workers.profiling_control import (
+    ACTIVE_INTERVAL_S,
+    ERROR_INTERVAL_S,
+    ProfilingPolicyWorker,
+)
+from cloud_agent_shared import operation_profiling as profiling
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
@@ -58,6 +64,9 @@ class _FakeControl:
         self.runs: dict[str, dict[str, Any]] = {}
         self.commands: dict[tuple[str, str], dict[str, Any]] = {}
         self.stored = 0
+        #: How often the stored samples were counted: a scan over every row a
+        #: run stored, which only the Admin card may pay for.
+        self.counted = 0
 
     async def get_control_state(self, *, deployment: str) -> dict[str, Any] | None:
         """Return the control row, if this deployment has one."""
@@ -238,6 +247,7 @@ class _FakeControl:
 
     async def count_stored_measurements(self, *, run_id: str) -> int:
         """Return how many samples this experiment stored."""
+        self.counted += 1
         return self.stored
 
     async def mark_run_lifecycle(self, **kwargs: Any) -> None:
@@ -493,6 +503,34 @@ async def test_the_snapshot_names_the_last_stopped_experiment_but_not_as_active(
     assert snapshot["last_stopped_run"]["stop_reason"] == "stopped"
 
 
+async def test_the_policy_read_is_the_revision_and_the_run_and_nothing_else() -> None:
+    """Producers poll this, so it never pays for the Admin card's extras."""
+    fake = _FakeControl()
+    service = _service(fake)
+    started = await service.start(_start_request(), now=NOW)
+
+    policy = await service.policy_snapshot(now=NOW + timedelta(seconds=30))
+    assert policy["revision"] == 1
+    assert policy["run_active"] is True
+    assert policy["run"]["run_id"] == started.run_id
+    assert policy["run"]["expires_at"] == NOW + timedelta(seconds=600)
+
+    await service.stop(
+        control.StopRequest(request_id="s", run_id=str(started.run_id), actor_id="admin"),
+        now=NOW + timedelta(seconds=40),
+    )
+    stopped = await service.policy_snapshot(now=NOW + timedelta(seconds=41))
+    assert stopped["revision"] == 2
+    assert stopped["run"] is None
+    assert stopped["run_active"] is False
+    # Neither the sample count nor the last stopped experiment is policy.
+    assert fake.counted == 0
+    assert "last_stopped_run" not in stopped
+
+    fake.control = None
+    assert (await service.policy_snapshot(now=NOW))["revision"] == 0
+
+
 async def test_the_snapshot_reports_a_deployment_that_was_never_configured() -> None:
     """No control row is reported as unavailable, with nothing invented."""
     fake = _FakeControl()
@@ -538,3 +576,85 @@ async def test_continuous_control_does_not_expire_when_read_days_later(monkeypat
     assert snapshot["run"]["continuous"] is True
     assert snapshot["budget_scope"] == "unlimited"
     assert command.fingerprint() != _start_request(duration_seconds=600).fingerprint()
+
+
+# ── the control plane's sync loop ──────────────────────────────────────
+
+
+class _UnreadableControl(_FakeControl):
+    """The same capability, with a database a test can take away."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unreachable = False
+
+    async def get_control_state(self, *, deployment: str) -> dict[str, Any] | None:
+        """Return the control row, or fail as an unreachable database does."""
+        if self.unreachable:
+            raise ConnectionError("the control database is unreachable")
+        return await super().get_control_state(deployment=deployment)
+
+
+@pytest.fixture
+def _admin_collector(monkeypatch):
+    """This process under Admin control, with nothing published yet."""
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
+    profiling.reset_cache()
+    profiling.reset_policy()
+    yield
+    profiling.reset_cache()
+    profiling.reset_policy()
+
+
+async def test_a_control_plane_that_cannot_read_its_row_stops_selecting(_admin_collector):
+    """A failed read withdraws the run in force; the next good read restores it.
+
+    Regression: the loop published its fail-closed "no run" at revision 0, below
+    the revision it had already applied, and the store refused it as a
+    rollback. The log said collection was paused while a continuous run -- which
+    has no deadline -- went on selecting every file and terminal request.
+    """
+    fake = _UnreadableControl()
+    service = _service(fake)
+    started = await service.start(_start_request(duration_seconds=None), now=NOW)
+    worker = ProfilingPolicyWorker(service=service)
+
+    assert await worker._refresh_once() == ACTIVE_INTERVAL_S
+    live = profiling.active_run()
+    assert live is not None and live.run_id == started.run_id
+
+    fake.unreachable = True
+    assert await worker._refresh_once() == ERROR_INTERVAL_S
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="files.open", host="gpu-1") is None
+    assert profiling.control_state().config_version == started.revision
+
+    fake.unreachable = False
+    assert await worker._refresh_once() == ACTIVE_INTERVAL_S
+    restored = profiling.active_run()
+    assert restored is not None and restored.run_id == started.run_id
+
+
+async def test_the_sync_loop_never_counts_the_runs_samples(_admin_collector):
+    """Every replica refreshes every five seconds while a run is in force.
+
+    Regression: the loop read the Admin card's snapshot, which counts every
+    measurement the run has stored. For a continuous run, with no sample cap
+    and no retention, that scan grows for as long as the run is on, and it ran
+    on every replica's every pass -- only to be thrown away.
+    """
+    fake = _FakeControl()
+    service = _service(fake)
+    started = await service.start(_start_request(duration_seconds=None), now=NOW)
+    worker = ProfilingPolicyWorker(service=service)
+
+    for _ in range(3):
+        assert await worker._refresh_once() == ACTIVE_INTERVAL_S
+    live = profiling.active_run()
+    assert live is not None and live.run_id == started.run_id
+    assert fake.counted == 0
+
+    # The Admin card still says what the run has stored.
+    fake.stored = 4
+    assert (await service.control_snapshot(now=NOW))["stored_samples"] == 4
+    assert fake.counted == 1

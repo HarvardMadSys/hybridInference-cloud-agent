@@ -20,6 +20,11 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+
+from cloud_agent.logging_utils import get_logger
+
+logger = get_logger(__name__)
 
 #: The deployment namespace the control row is keyed by.
 ENV_PROFILING_CONTROL_DEPLOYMENT = "AGENT_OPERATION_PROFILING_DEPLOYMENT"
@@ -33,22 +38,51 @@ DEFAULT_DEPLOYMENT = "default"
 MAX_DEPLOYMENT_CHARS = 64
 _DEPLOYMENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
+#: The refused name already reported. The name is read on every host policy
+#: poll and every Admin read, so the warning is written once per value.
+_REPORTED_REFUSAL: str | None = None
+_REPORT_LOCK = threading.Lock()
+
 
 def profiling_control_deployment() -> str:
     """Return this process's control namespace.
 
     A name that is missing, too long or malformed falls back to the default
     rather than raising: the alternative is a control plane that refuses to
-    start because of a cosmetic misconfiguration, and the failure mode of the
-    fallback is a page that shows the wrong experiment -- which is visible --
-    rather than an outage.
+    start because of a cosmetic misconfiguration. The fallback is not
+    harmless, though -- a deployment that meant to have its own namespace
+    shares ``default`` with whoever else uses it, and each side's Admin page
+    can then see and stop the other's experiment -- so a refused name is
+    logged, with the name used instead.
     """
     raw = (os.environ.get(ENV_PROFILING_CONTROL_DEPLOYMENT) or "").strip()
     if not raw:
         return DEFAULT_DEPLOYMENT
     if len(raw) > MAX_DEPLOYMENT_CHARS or _DEPLOYMENT_PATTERN.fullmatch(raw) is None:
+        _report_refusal(raw)
         return DEFAULT_DEPLOYMENT
     return raw
+
+
+def _report_refusal(raw: str) -> None:
+    """Warn, once per refused value, that the configured name is not in use."""
+    global _REPORTED_REFUSAL
+    with _REPORT_LOCK:
+        if raw == _REPORTED_REFUSAL:
+            return
+        _REPORTED_REFUSAL = raw
+    logger.warning(
+        "%s=%r is not a usable deployment name (at most %d characters of "
+        "letters, digits and ._:-); commanding the %r namespace instead",
+        ENV_PROFILING_CONTROL_DEPLOYMENT,
+        raw[: 2 * MAX_DEPLOYMENT_CHARS],
+        MAX_DEPLOYMENT_CHARS,
+        DEFAULT_DEPLOYMENT,
+        extra={
+            "event": "agent_profiling_deployment_refused",
+            "deployment": DEFAULT_DEPLOYMENT,
+        },
+    )
 
 
 __all__ = [
