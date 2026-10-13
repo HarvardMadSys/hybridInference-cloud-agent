@@ -37,6 +37,7 @@ from cloud_agent.api.deps import (
     get_gateway_client,
     get_grant_client,
     get_job_event_signal,
+    get_source_control,
     get_storage,
     require_store,
 )
@@ -47,7 +48,11 @@ from cloud_agent.application.follow_ups import (
     session_archived_error,
 )
 from cloud_agent.application.job_admission import _idempotency_conflict
-from cloud_agent.application.pending_messages import prepared_head, settle_queue
+from cloud_agent.application.pending_messages import (
+    prepared_head,
+    settle_queue,
+    settle_queue_when_possible,
+)
 from cloud_agent.application.session_fork import materialize_session_fork
 from cloud_agent.broker_routing import broker_for_attempt
 from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
@@ -64,6 +69,9 @@ from cloud_agent.schemas import (
     AgentThreadMessageResult,
     AgentThreadQuestionsResponse,
     AgentThreadQueueResponse,
+)
+from cloud_agent.source_control_runtime import (
+    SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
     JobEventSignal,
@@ -377,6 +385,37 @@ async def _settle(
         return SettleOutcome()
 
 
+async def _settle_without_app(
+    job_store: _TurnsStorage,
+    *,
+    thread_id: str,
+    gateway: Any,
+    source_control: SourceControlRuntime | None,
+) -> SettleOutcome:
+    """Settle after a queue change that must not wait for the GitHub App.
+
+    Withdrawing or holding a waiting message needs no App (issue #47). Refused
+    while the App could not be loaded, the message stayed in line for the sweep
+    to send once the App was back: the very thing its owner was stopping. While
+    the App is unavailable the turn's ending is still acted on, but nothing is
+    sent. Best effort, like ``_settle``: the change itself has committed.
+    """
+    try:
+        return await settle_queue_when_possible(
+            job_store,
+            thread_id=thread_id,
+            gateway=gateway,
+            github_app=None if source_control is None else source_control.github,
+        )
+    except Exception:
+        logger.warning(
+            "agent_pending_queue_settle_failed",
+            extra={"event": "agent_pending_queue_settle_failed", "thread_id": thread_id},
+            exc_info=True,
+        )
+        return SettleOutcome()
+
+
 @router.post(
     "/threads/{thread_id}/messages", response_model=AgentThreadMessageResult, status_code=201
 )
@@ -549,7 +588,7 @@ async def edit_thread_message(
     body: AgentPendingMessageUpdate,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentThreadMessageResult:
     """Change a waiting message, at the revision the caller read.
@@ -558,6 +597,11 @@ async def edit_thread_message(
     queue at this message while it is being rewritten; ``state: queued`` lets
     it go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying
     the message as it is now.
+
+    A new prompt or state is saved whether or not the GitHub App can be loaded
+    right now. A changed skill, upload, model or effort is checked as a new
+    message is, which needs the App: 503 ``source_control_unavailable`` while
+    it cannot be loaded.
     """
     job_store = _require_store(store)
     latest = await _owned_latest_turn(job_store, thread_id, user)
@@ -577,7 +621,9 @@ async def edit_thread_message(
             model=changes.get("model"),
             reasoning_effort=changes.get("reasoning_effort"),
             store=job_store,
-            app_credentials=app_credentials,
+            # Strict: without the App the repository check would see only the
+            # allowlist (issue #47), so this answers 503 while it is unavailable.
+            app_credentials=get_agent_app_credentials(source_control),
             gateway=gateway,
         )
         if changes.get("model"):
@@ -591,8 +637,8 @@ async def edit_thread_message(
     )
     if result.get("error") is not None:
         raise _message_refused(result)
-    outcome = await _settle(
-        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+    outcome = await _settle_without_app(
+        job_store, thread_id=thread_id, gateway=gateway, source_control=source_control
     )
     return await _queue_result(
         job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
@@ -608,13 +654,14 @@ async def delete_thread_message(
     revision: int = Query(..., ge=1),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentThreadMessageResult:
     """Withdraw a waiting message, at the revision the caller read.
 
     Its uploads go back to being staged. A stale ``revision`` is a 409
-    ``revision_conflict`` carrying the message as it is now.
+    ``revision_conflict`` carrying the message as it is now. Withdrawing
+    needs no GitHub App, so it is not refused while the App cannot be loaded.
     """
     job_store = _require_store(store)
     await _owned_latest_turn(job_store, thread_id, user)
@@ -624,9 +671,9 @@ async def delete_thread_message(
     if result.get("error") is not None:
         raise _message_refused(result)
     # The message may have been what stopped the line; what was behind it can
-    # go now.
-    outcome = await _settle(
-        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+    # go now, or once the App is back if it cannot be loaded at the moment.
+    outcome = await _settle_without_app(
+        job_store, thread_id=thread_id, gateway=gateway, source_control=source_control
     )
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 

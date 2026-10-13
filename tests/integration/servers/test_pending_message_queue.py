@@ -792,6 +792,63 @@ async def test_a_github_app_that_cannot_load_holds_a_message_back_without_refusi
     assert (await api.queue(thread_id))["messages"] == []
 
 
+async def test_a_github_app_that_cannot_load_does_not_stop_an_owner_withdrawing_a_message(
+    api: Api,
+):
+    """Issue #47 on the owner's queue edits: an outage must not keep a message in line.
+
+    Withdrawing or holding a waiting message needs no App. Refused, the message
+    stayed for the sweep to send once the App was back, which is what its owner
+    was stopping. A changed model is checked as a new message is, so that edit
+    still waits for the App.
+    """
+
+    class RecoveringApp:
+        loaded = False
+
+        def get(self) -> object:
+            if not self.loaded:
+                raise SourceControlUnavailable("github")
+            return object()  # the repository is allowlisted; the minter is not asked
+
+    job = await api.create()
+    thread_id = job["thread_id"]
+    running = await api.start(job)
+    withdrawn = (await api.send(thread_id, "do not send this after all")).json()["pending"]
+    rewritten = (await api.send(thread_id, "hold this one to rewrite it")).json()["pending"]
+    app = RecoveringApp()
+    api.app.state.source_control = SimpleNamespace(github=app)
+    # The real, strict credentials over that runtime, as in a deployment.
+    del api.app.dependency_overrides[get_agent_app_credentials]
+
+    deleted = await api.delete(thread_id, withdrawn)
+    held = await api.edit(thread_id, rewritten, state="held")
+    reworded = await api.edit(thread_id, held.json()["pending"], prompt="rewritten while held")
+    remodelled = await api.edit(thread_id, reworded.json()["pending"], model="glm-4.6")
+
+    assert deleted.status_code == 200, deleted.text
+    assert held.status_code == 200, held.text
+    assert reworded.status_code == 200, reworded.text
+    assert remodelled.status_code == 503, remodelled.text
+    assert remodelled.json()["detail"]["error"]["type"] == "source_control_unavailable"
+    queue = await api.queue(thread_id)
+    assert [(row["prompt"], row["state"]) for row in queue["messages"]] == [
+        ("rewritten while held", "held")
+    ]
+
+    # The turn ends while the App is down, then the App loads and the sweep
+    # runs: nothing the owner withdrew or held is sent.
+    await api.finish(running)
+    app.loaded = True
+    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
+    queue = await api.queue(thread_id)
+    assert [(row["prompt"], row["state"]) for row in queue["messages"]] == [
+        ("rewritten while held", "held")
+    ]
+
+
 # -- 10.1: idle send, idempotent resends ------------------------------------------
 
 

@@ -29878,7 +29878,7 @@
     },
     "/v1/agent/threads/{thread_id}/messages/{message_id}": {
       "delete": {
-        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now.",
+        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now. Withdrawing\nneeds no GitHub App, so it is not refused while the App cannot be loaded.",
         "operationId": "delete_thread_message_v1_agent_threads__thread_id__messages__message_id__delete",
         "parameters": [
           {
@@ -29951,7 +29951,7 @@
         "summary": "Delete Thread Message"
       },
       "patch": {
-        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.",
+        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.\n\nA new prompt or state is saved whether or not the GitHub App can be loaded\nright now. A changed skill, upload, model or effort is checked as a new\nmessage is, which needs the App: 503 ``source_control_unavailable`` while\nit cannot be loaded.",
         "operationId": "edit_thread_message_v1_agent_threads__thread_id__messages__message_id__patch",
         "parameters": [
           {
