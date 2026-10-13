@@ -328,6 +328,24 @@ describe('task and delegation activity in the conversation', () => {
       expect(within(cards).queryByText('Completed')).not.toBeInTheDocument();
     });
 
+    it('shows the unpacked answer in the inspector, not the stored content blocks', () => {
+      const blocks = [{ type: 'text', text: '## Findings\n\n- inspected' }];
+      const steps = buildTrajectorySteps(
+        delegation(false, blocks, { status: 'completed', agentId: 'aa9397b543b5f2ff7' }),
+      );
+      render(
+        <ToolStepDetails
+          step={steps.find((step) => step.callId === 'toolu_delegate')!}
+          tab="summary"
+          onSelectTab={vi.fn()}
+        />,
+      );
+      const reply = screen.getByRole('region', { name: 'Subagent reply' });
+      expect(within(reply).getByText('Completed')).toBeInTheDocument();
+      expect(within(reply).getByRole('listitem')).toHaveTextContent('inspected');
+      expect(reply).not.toHaveTextContent('"type"');
+    });
+
     it('keeps saying a state was not recorded for a launch that reports neither', () => {
       const cards = renderCards([
         event(1, 'tool_use', {
@@ -344,6 +362,94 @@ describe('task and delegation activity in the conversation', () => {
       expect(
         within(cards).queryByRole('region', { name: 'Subagent reply' }),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  describe('subagent replies from the other runtimes’ records', () => {
+    function renderCards(events: AgentThreadEventApi[]) {
+      render(
+        <ActivityWindow
+          overview={buildActivityOverview(toDisplayJob(job, { events }).events)}
+          turnNo={1}
+          attemptNo={1}
+          onClose={() => {}}
+          stepKeyForEvent={() => undefined}
+          onSelectStep={() => {}}
+        />,
+      );
+      return screen.getByRole('region', { name: 'Subagents overview' });
+    }
+
+    function task(content: string) {
+      return [
+        event(1, 'tool_use', {
+          id: 'call-task',
+          name: 'task',
+          input: { description: 'Review the change', prompt: 'Review.', subagent_type: 'general' },
+        }),
+        event(2, 'tool_result', { tool_use_id: 'call-task', is_error: false, content }),
+      ];
+    }
+
+    it('reads an OpenCode or Kilo task’s answer out of its envelope', () => {
+      const cards = renderCards(
+        task(
+          '<task id="ses_child" state="completed">\n<task_result>\n## Review\n\n- No issues.\n</task_result>\n</task>',
+        ),
+      );
+      const reply = within(cards).getByRole('region', { name: 'Subagent reply' });
+      expect(within(reply).getByRole('heading', { name: 'Review' })).toBeInTheDocument();
+      expect(within(reply).getByRole('listitem')).toHaveTextContent('No issues.');
+      expect(cards).not.toHaveTextContent('task_result');
+      expect(within(cards).queryByRole('note')).not.toBeInTheDocument();
+    });
+
+    it('says when an earlier host stored only the start of a task’s answer', () => {
+      const clipped = `<task id="ses_child" state="completed">\n<task_result>\n${'finding '.repeat(600)}`;
+      const cards = renderCards(task(clipped.slice(0, 4000)));
+      expect(within(cards).getByRole('note')).toHaveTextContent(
+        'The stored reply was cut short; this is not the whole answer.',
+      );
+    });
+
+    it('shows a Codex agent’s answer from the state its wait call returned', () => {
+      function collab(id: number, method: string, item: Record<string, unknown>) {
+        return event(id, 'raw', {
+          protocol: 'codex-app-server',
+          notification: { method, params: { threadId: 'main', turnId: 'turn', item } },
+        });
+      }
+      const spawn = {
+        type: 'collabAgentToolCall',
+        id: 'call-spawn',
+        tool: 'spawnAgent',
+        prompt: 'Review the change.',
+        receiverThreadIds: ['worker'],
+      };
+      const wait = {
+        type: 'collabAgentToolCall',
+        id: 'call-wait',
+        tool: 'wait',
+        receiverThreadIds: ['worker'],
+      };
+      const cards = renderCards([
+        collab(1, 'item/started', { ...spawn, status: 'inProgress' }),
+        collab(2, 'item/completed', {
+          ...spawn,
+          status: 'completed',
+          agentsStates: { worker: { status: 'running', message: null } },
+        }),
+        collab(3, 'item/started', { ...wait, status: 'inProgress' }),
+        collab(4, 'item/completed', {
+          ...wait,
+          status: 'completed',
+          agentsStates: { worker: { status: 'completed', message: '**No issues** found.' } },
+        }),
+      ]);
+      const reply = within(cards).getByRole('region', { name: 'Subagent reply' });
+      expect(reply).toHaveTextContent('No issues found.');
+      expect(within(reply).getByText('No issues').tagName).toBe('STRONG');
+      expect(within(cards).getAllByText('Completed')).toHaveLength(1);
     });
   });
 

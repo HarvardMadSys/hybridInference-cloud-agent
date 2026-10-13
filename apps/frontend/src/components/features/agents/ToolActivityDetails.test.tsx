@@ -140,7 +140,25 @@ describe('ToolActivityDetails', () => {
     expect(screen.getByText('Completed')).toBeInTheDocument();
     expect(screen.getByText('Errored')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
-    expect(screen.getByText('Message').closest('details')).toHaveTextContent('Tests pass.');
+    // A finished agent's message is the answer it returned, shown rather than folded away.
+    const reply = screen.getByRole('region', { name: 'Subagent reply' });
+    expect(reply).toHaveTextContent('Tests pass.');
+    expect(reply.closest('details')).toBeNull();
+    expect(screen.getAllByRole('region', { name: 'Subagent reply' })).toHaveLength(1);
+  });
+
+  it('shows an errored agent’s error as what it returned, with its state shown once', () => {
+    render(
+      view(
+        'wait',
+        { receiver_thread_ids: ['a'] },
+        JSON.stringify({ agents_states: { a: { status: 'errored', message: 'Model refused.' } } }),
+      ),
+    );
+    const reply = screen.getByRole('region', { name: 'Subagent reply' });
+    expect(reply).toHaveTextContent('Model refused.');
+    expect(screen.getAllByText('Errored')).toHaveLength(1);
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 
   it('does not turn failure text or missing task data into a completion', () => {
@@ -182,6 +200,17 @@ describe('DelegationReplyDetails', () => {
     expect(within(reply).getByRole('heading', { name: 'Findings' })).toBeInTheDocument();
     expect(within(reply).getByRole('listitem')).toHaveTextContent('inspected');
     expect(within(reply).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('says when the stored reply is not the whole answer', () => {
+    const rendered = render(
+      <DelegationReplyDetails reply={{ state: 'received', text: 'Partial', truncated: true }} />,
+    );
+    expect(screen.getByRole('note')).toHaveTextContent(
+      'The stored reply was cut short; this is not the whole answer.',
+    );
+    rendered.rerender(<DelegationReplyDetails reply={{ state: 'received', text: 'Whole' }} />);
+    expect(screen.queryByRole('note')).not.toBeInTheDocument();
   });
 
   it('claims no status for an answer whose result recorded none', () => {

@@ -1,10 +1,11 @@
-import { EMPTY_TOOL_OUTPUT } from './adapt';
 import {
   parseToolActivity,
   recordedAgentStates,
   recordedAgentTargets,
+  recordedDelegationReply,
   recordedTasks,
   type ActivityTask,
+  type DelegationReply,
   type ToolActivity,
 } from './toolActivity';
 import type { AgentEvent } from './types';
@@ -12,16 +13,6 @@ import type { AgentEvent } from './types';
 type ToolUseEvent = Extract<AgentEvent, { kind: 'tool_use' }>;
 type TaskActivity = Extract<ToolActivity, { kind: 'tasks' }>;
 type DelegationActivity = Extract<ToolActivity, { kind: 'delegation' }>;
-
-/** What a delegating call returned, for calls whose result is the agent's answer. */
-export interface DelegationReply {
-  /** The call's recorded result; a background launch returns only a notice. */
-  state: 'received' | 'background' | 'failed' | 'cancelled' | 'waiting' | 'not_recorded';
-  /** The agent status the runtime recorded with the result, verbatim. */
-  status?: string;
-  /** The returned text, with content blocks reduced to their text. */
-  text?: string;
-}
 
 export interface OverviewSubagent {
   key: string;
@@ -99,44 +90,16 @@ function isLaunch(event: ToolUseEvent): boolean {
   return ['agent', 'task', 'spawn_agent'].includes(toolKey(event));
 }
 
-/** Claude Code's Agent/Task and OpenCode's task return the agent's answer; spawn_agent does not. */
-function returnsReply(event: ToolUseEvent): boolean {
-  return ['agent', 'task'].includes(toolKey(event));
-}
-
-/** Claude records a delegated answer as content blocks. Anything else is kept verbatim. */
-function replyText(output: string): string {
-  const blocks = parsed(output);
-  if (!Array.isArray(blocks) || !blocks.every((block) => typeof record(block)?.type === 'string')) {
-    return output;
-  }
-  return blocks
-    .flatMap((block) => {
-      const item = record(block);
-      return item?.type === 'text' && typeof item.text === 'string' ? [item.text] : [];
-    })
-    .join('\n\n');
-}
-
-function delegationReply(event: ToolUseEvent, activity: DelegationActivity): DelegationReply {
-  if (event.resultState === 'waiting' || event.resultState === 'not_recorded') {
-    return { state: event.resultState };
-  }
-  const failed = event.outputIsError || event.resultState === 'failed';
-  const cancelled = event.resultState === 'cancelled';
-  if (event.output === undefined && !failed && !cancelled) return { state: 'not_recorded' };
-  const recordedStatus = record(event.structuredOutput)?.status;
-  const status =
-    typeof recordedStatus === 'string' && recordedStatus.trim() ? recordedStatus : undefined;
-  const output = event.output?.join('\n');
-  const text = output === undefined || output === EMPTY_TOOL_OUTPUT ? '' : replyText(output);
-  const details = { ...(status ? { status } : {}), ...(text.trim() ? { text } : {}) };
-  if (cancelled) return { state: 'cancelled', ...details };
-  if (failed) return { state: 'failed', ...details };
-  if (activity.background || status === 'async_launched') {
-    return { state: 'background', ...(status ? { status } : {}) };
-  }
-  return { state: 'received', ...details };
+function replyOf(event: ToolUseEvent): DelegationReply | undefined {
+  return recordedDelegationReply({
+    tool: event.tool,
+    input: event.input,
+    resultState: event.resultState,
+    output: event.output?.join('\n'),
+    isError: event.outputIsError,
+    structuredOutput: event.structuredOutput,
+    outputTruncated: event.outputTruncated,
+  });
 }
 
 function mergeTask(previous: ActivityTask | undefined, raw: Record<string, unknown>): ActivityTask {
@@ -191,9 +154,9 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
           key: id,
           activity: { ...activity, targets: [], states: [] },
           sourceEvent: event,
-          reply: returnsReply(event)
-            ? delegationReply(event, activity)
-            : { state: event.resultState === 'cancelled' ? 'cancelled' : 'failed' },
+          reply: replyOf(event) ?? {
+            state: event.resultState === 'cancelled' ? 'cancelled' : 'failed',
+          },
         });
       }
       continue;
@@ -326,7 +289,7 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
         if (activity[field] !== undefined) Object.assign(merged, { [field]: activity[field] });
       }
       if (activity.prompt !== undefined) merged.promptLabel = activity.promptLabel;
-      const reply = returnsReply(event) ? delegationReply(event, activity) : previous?.reply;
+      const reply = replyOf(event) ?? previous?.reply;
       subagents.set(id, {
         key: id,
         activity: merged,

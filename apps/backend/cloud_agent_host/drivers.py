@@ -1956,12 +1956,18 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                         raw_line=line,
                     )
                 if status in {"completed", "error"}:
+                    content = str(state.get("output") or state.get("error") or "")
+                    # A task's result is its subagent's whole answer, so only the
+                    # marked event bound applies to it. Other tools keep a short
+                    # preview that says it is one.
+                    clipped = part.get("tool") != "task" and len(content) > 4000
                     return HarnessEvent(
                         TOOL_RESULT,
                         {
                             "tool_use_id": call_id,
                             "is_error": status == "error",
-                            "content": str(state.get("output") or state.get("error") or "")[:4000],
+                            "content": content[:4000] if clipped else content,
+                            **({"truncated": True} if clipped else {}),
                         },
                         raw_line=line,
                     )

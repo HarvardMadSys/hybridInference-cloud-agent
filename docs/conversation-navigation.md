@@ -75,17 +75,25 @@ the same row. **Status not recorded** means the selected events contain no statu
 for that task; a successful creation does not mean the task is completed.
 
 Subagent cards show assigned work, agent type, model, expandable prompts, and
-the latest reported agent state. When the delegating call's own result is the
-agent's answer, as with Claude Code's Agent or Task and OpenCode's task, the
-card shows it under **Returned to the main agent**: rendered as Markdown,
-collapsed when long, and with the status the runtime recorded alongside it. A
-card says when that reply is still pending or was not recorded. A failed or
-interrupted launch stays listed with what it returned. A background launch
-returns only a launch notice, and its card says so rather than presenting the
-notice as the answer; a successful background launch does not imply that
-delegated work has finished. Chat keeps compact tool calls with expandable
-recorded arguments and output. **View subagent execution** opens the source call
-in the trajectory inspector when its stored record is available.
+the latest reported agent state. Under **Returned to the main agent** they show
+what the main agent received back, rendered as Markdown and collapsed when
+long:
+
+- Claude Code's Agent or Task, and OpenCode's or Kilo's task, return the
+  agent's answer as the call's own result. Claude records the agent's status
+  beside it.
+- Codex returns a finished agent's answer, or its error, as the message of the
+  agent state its `wait` call reports.
+- pi has no subagents.
+
+A card says when a reply is still pending, was not recorded, or was stored
+only in part. A failed or interrupted launch stays listed with what it
+returned. A background launch returns only a launch notice, and its card says
+so rather than presenting the notice as the answer; a successful background
+launch does not imply that delegated work has finished. Chat keeps compact
+tool calls with expandable recorded arguments and output. **View subagent
+execution** opens the source call in the trajectory inspector when its stored
+record is available, and the call's summary there shows the same reply.
 
 Trajectory marks explicitly recorded child activity with a **Subagent** label.
 Select a delegation step to browse its child steps in the inspector, or use

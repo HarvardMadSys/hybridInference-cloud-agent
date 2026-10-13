@@ -2,11 +2,11 @@
 
 import { useId, useState, type ReactNode } from 'react';
 import { Markdown } from '@/components/ui/Markdown';
-import type { DelegationReply } from './activityOverview';
 import {
   recordedAgentStates,
   recordedAgentTargets,
   recordedTasks,
+  type DelegationReply,
   type ToolActivity,
 } from './toolActivity';
 
@@ -197,21 +197,24 @@ export function ToolActivityDetails({
       {states.length ? (
         <ul className="space-y-1">
           {states.map((state) => (
-            <li key={state.id} className="min-w-0">
+            <li key={state.id} className="min-w-0 space-y-1.5">
               <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
                 <span className="min-w-0 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
                   {state.id}
                 </span>
                 <Status value={state.status} />
-                {state.message ? (
-                  <details className="min-w-0 text-xs text-gray-500 dark:text-gray-400">
-                    <summary className="cursor-pointer">Message</summary>
-                    <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere]">
-                      {state.message}
-                    </p>
-                  </details>
-                ) : null}
               </div>
+              {state.message ? (
+                // Codex reports a finished agent's answer, or its error, as
+                // the message of the state it returns to the main agent.
+                <DelegationReplyDetails
+                  reply={{
+                    state: state.status === 'errored' ? 'failed' : 'received',
+                    text: state.message,
+                  }}
+                  showStatus={false}
+                />
+              ) : null}
             </li>
           ))}
         </ul>
@@ -228,7 +231,14 @@ function ReplyNote({ children }: { children: ReactNode }) {
 }
 
 /** What a delegating call returned to the main agent, read only from its recorded result. */
-export function DelegationReplyDetails({ reply }: { reply: DelegationReply }) {
+export function DelegationReplyDetails({
+  reply,
+  showStatus = true,
+}: {
+  reply: DelegationReply;
+  /** Off where the agent's state is already shown beside the reply. */
+  showStatus?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const bodyId = useId();
 
@@ -244,12 +254,12 @@ export function DelegationReplyDetails({ reply }: { reply: DelegationReply }) {
       </ReplyNote>
     );
   }
-  const status = reply.state === 'received' ? reply.status : reply.state;
+  const status = !showStatus ? undefined : reply.state === 'received' ? reply.status : reply.state;
   const { text } = reply;
   if (!text && reply.state !== 'received') {
     return (
       <p className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400">
-        <Status value={status} />
+        {status ? <Status value={status} /> : null}
         {reply.state === 'failed'
           ? 'The delegation call failed.'
           : 'The delegation call was interrupted.'}
@@ -285,6 +295,11 @@ export function DelegationReplyDetails({ reply }: { reply: DelegationReply }) {
       ) : (
         <ReplyNote>No text was returned.</ReplyNote>
       )}
+      {reply.truncated ? (
+        <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
+          The stored reply was cut short; this is not the whole answer.
+        </p>
+      ) : null}
       {long ? (
         <button
           type="button"
