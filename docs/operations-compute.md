@@ -58,6 +58,33 @@ CloudLab experiments can be observed, but automatic deployment refuses them
 rather than selecting one node. Failed or unsupported installation leaves the
 resource visible and does not destroy it.
 
+### Preferred CloudLab node types
+
+New CloudLab allocations try the following default list from top to bottom.
+These general-purpose families were introduced in 2021 or later, have at least
+16 physical cores and 128 GiB RAM, and each has more than 20 total nodes.
+Hardware and totals were checked against the [CloudLab hardware catalog](https://docs.cloudlab.us/hardware.html)
+and [public inventory](https://www.cloudlab.us/portal-hardware.php) on October 12, 2026.
+
+| Preference | Type | Introduced | Total nodes | Physical cores | RAM (GiB) |
+|---|---|---|---|---|---|
+| 1 | `r6615` | 2025 | 80 | 32 | 192 |
+| 2 | `c6620` | 2025 | 132 | 28 | 128 |
+| 3 | `r650` | 2022 | 32 | 72 | 256 |
+| 4 | `r6525` | 2022 | 32 | 64 | 256 |
+| 5 | `c6525-100g` | 2021 | 36 | 24 | 128 |
+| 6 | `c6525-25g` | 2021 | 144 | 16 | 128 |
+
+Change the ordered list in **Admin → Settings → CloudLab**, or override it for
+a particular server or autoscaling policy. The list is saved with each new
+allocation. Currently free counts are shown separately and do not change the
+preference order. A confirmed capacity rejection advances to the next type;
+an uncertain response pauses acquisition for review. If all types lack
+capacity, the operation waits and retries from the top. An explicit nonempty
+`phystype` profile parameter selects only that type; clear it to resume ordered
+selection. Profiles with a different hardware parameter can use
+`node_type_binding`; an empty list uses the profile's own choice.
+
 ### Sandbox storage path
 
 When adding or creating a server, enter **Sandbox storage path**, for example
@@ -86,7 +113,9 @@ Preflight does not query or start these daemons, and bootstrap never deletes or
 moves existing sandbox data to a different disk. Docker and containerd must use
 their default `/var/lib/docker`
 and `/var/lib/containerd` data directories. Setup rejects custom daemon storage
-configuration before restarting services.
+configuration before restarting services. A host installed by hand uses the
+same binds, `/etc/fstab` lines and systemd drop-ins; see
+[Retained Docker storage on a host](operations.md#retained-docker-storage-on-a-host).
 Daemon startup requires the configured disk and bind mount after
 a reboot. Older API clients that omit `sandbox_storage_path` continue to
 use the operator profile's `data_mount` configuration.
@@ -135,8 +164,12 @@ finish. If a request fails or the browser closes, reopen Server setup and retry
 the pending setup to reuse its exact credentials and routes. Infrastructure
 defaults are saved for future setups. **Start new setup** retains those inputs
 and creates a new request on submission; it leaves an unfinished setup
-unavailable. Profiles are immutable so later deployment operations keep their
-exact inputs.
+unavailable. Tunnel credentials, the install directory, and enrollment stay
+fixed. A control-plane release rolls managed hosts forward: stored profiles
+that share the previous commit and bundle, and the live allocations using
+them, advance together so a later node replacement still sees one revision.
+A rollout that takes the running generation down and then fails restores the
+previous stored bundle. File-backed profile files are not rewritten.
 
 Automatic setup requires a control-plane image built with its full release
 revision, the compute encryption key and the existing broker token. The form
@@ -151,7 +184,9 @@ Host environment, and provide the three tunnel keys and verified known-hosts
 files. The control plane validates the archive, encrypts all environment and
 credential values, and stores them in Postgres. Profile read APIs expose only
 IDs and labels, never generated credentials. Create a new profile to replace
-immutable inputs.
+tunnel credentials, the install directory, or the Host environment. A
+control-plane release moves the commit of stored profiles that still pin the
+previous bundle; it does not rewrite a file-backed profile.
 
 File-backed configuration remains supported for existing deployments and
 recovery. Start with these operator templates:
@@ -434,6 +469,10 @@ Before enabling replacement:
 2. Prepare two alternating deployment profiles with distinct tunnel keys and
    reverse broker ports. Both must pin the same `deployment_sha` and
    `source_sha256`; replacement never selects a profile from another release.
+   A control-plane host rollout advances every stored profile and live
+   snapshot that still pin that pair, including the spare, so the two slots
+   stay on one revision. A profile another deployment is installing is left
+   until its own rollout.
    Keep Docker/containerd versions compatible. Set `data_mount` to the
    profile's local disk, for example `/mydata`; both daemons use it through
    bind mounts.
@@ -459,7 +498,12 @@ expiry.
 
 The worker stops the source Host and container daemons, copies final changes,
 transfers the database binding, starts the replacement and verifies deployment,
-fresh heartbeat and broker access. Claims resume only after successful takeover
+fresh heartbeat and broker access. The stop takes the runner first, then the
+workspace broker alone for up to 10 minutes: its shutdown stops each running
+sandbox cleanly and, when lifecycle archives are enabled, stores its final
+archive. Remaining containers stop afterwards. While archives are enabled, the
+replacement's broker quarantines a sandbox that Docker stopped without the
+broker, so its chat cannot continue. Claims resume only after successful takeover
 is recorded durably. Recovery after that boundary can clean up the source; it
 cannot restore its stale copy over new work.
 

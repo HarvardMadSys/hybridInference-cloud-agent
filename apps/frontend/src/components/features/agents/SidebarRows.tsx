@@ -40,7 +40,7 @@ function DropIndicator({ position }: { position?: 'before' | 'after' }) {
 }
 /** Mouse actions reveal on hover; touch actions stay visible and easy to reach. */
 const ROW_ACTION =
-  'ui-focus-ring absolute top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 disabled:cursor-wait disabled:opacity-60 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100';
+  'ui-focus-ring absolute top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 disabled:cursor-wait disabled:opacity-60 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100';
 export interface RowActions {
   activeKey: string | null;
   isUnread: (row: SidebarConversation) => boolean;
@@ -98,7 +98,7 @@ export function TaskRow({
         aria-current={isActive ? 'page' : undefined}
         data-search-result={search ? 'true' : undefined}
         title={`${job.repo} · ${job.title}`}
-        className={`ui-focus-ring flex min-h-10 w-full items-center gap-2.5 rounded-xl py-2 pl-2.5 pr-20 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-24 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-24 ${
+        className={`ui-focus-ring flex min-h-8 w-full items-center gap-2 rounded-lg py-1 pl-2 pr-16 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-24 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-24 ${
           isActive
             ? 'bg-surface-hover font-medium text-foreground ring-1 ring-inset ring-border/70'
             : 'text-muted hover:bg-surface-hover hover:text-foreground'
@@ -166,7 +166,7 @@ export function TaskRow({
         title={job.pinnedAt ? t('sidebar.unpinTask') : t('sidebar.pinTask')}
         disabled={pinning === key || archiving === key}
         onClick={() => onSetPinned(key, job.id, job.repo, !job.pinnedAt)}
-        className={`${ROW_ACTION} right-10 max-md:right-12 [@media(pointer:coarse)]:right-12 ${
+        className={`${ROW_ACTION} right-8 max-md:right-12 [@media(pointer:coarse)]:right-12 ${
           job.pinnedAt
             ? 'opacity-100'
             : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
@@ -256,7 +256,7 @@ export function ListStatus({
         <button
           disabled={loading}
           onClick={onMore}
-          className="ui-focus-ring min-h-10 w-full rounded-xl px-2 py-2 text-left text-[12px] text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:opacity-50 [@media(pointer:coarse)]:min-h-11"
+          className="ui-focus-ring min-h-8 w-full rounded-lg px-2 py-1.5 text-left text-[12px] text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:opacity-50 [@media(pointer:coarse)]:min-h-11"
         >
           {t('sidebar.loadMore')}
         </button>
@@ -352,7 +352,7 @@ export function ProjectFolder({
           it contains is told apart by weight and an accent folder icon, which
           still reads when the folder is collapsed. */}
       <div
-        className="group relative flex items-center gap-0.5 rounded-xl transition-colors hover:bg-surface-hover"
+        className="group relative flex items-center gap-0.5 rounded-lg transition-colors hover:bg-surface-hover"
         {...reorderProps}
       >
         <DropIndicator position={reorderProps['data-drop-position']} />
@@ -365,7 +365,7 @@ export function ProjectFolder({
           aria-current={active ? 'true' : undefined}
           title={repo}
           onClick={onToggle}
-          className={`ui-focus-ring flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl py-2 pl-2 pr-1 text-left text-[13px] font-medium max-md:min-h-12 [@media(pointer:coarse)]:min-h-12 ${active ? 'text-foreground' : 'text-muted hover:text-foreground'}`}
+          className={`ui-focus-ring flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pl-2 pr-1 text-left text-[13px] font-medium max-md:min-h-12 [@media(pointer:coarse)]:min-h-12 ${active ? 'text-foreground' : 'text-muted hover:text-foreground'}`}
         >
           <svg
             className={`h-3 w-3 shrink-0 text-muted/70 transition-transform ${expanded ? 'rotate-90' : ''}`}

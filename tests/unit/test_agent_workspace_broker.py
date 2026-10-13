@@ -474,6 +474,66 @@ class _ArchiveController(_ArchiveService):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    [
+        ("/shared-sandboxes/athr_source/archive-initial/status", {}),
+        (
+            "/shared-sandboxes/athr_source/archive-initial",
+            {"base_sha": "a" * 40},
+        ),
+    ],
+)
+async def test_initial_archive_routes_return_only_sanitized_failure_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    extra: dict[str, object],
+) -> None:
+    supervisor = _SharedSupervisor()
+    unsafe = "https://s3.invalid/private-object?credential=secret s3://private-bucket/private-key"
+    failure = SandboxError(unsafe)
+    safe = (
+        "archive failure (phase=initial, type=ClientError, code=AccessDenied, status=403); "
+        "archive failure (phase=fail_stop_final, type=ClientError, code=SlowDown, status=503)"
+    )
+    observed: list[BaseException] = []
+
+    def fail_capture(*_args, **_kwargs):
+        raise failure
+
+    def safe_detail(error: BaseException) -> str:
+        observed.append(error)
+        return safe
+
+    supervisor.capture_initial_archive = fail_capture  # type: ignore[attr-defined]
+    monkeypatch.setattr(broker_mod, "archive_failure_http_detail", safe_detail)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,  # type: ignore[arg-type]
+        sandbox_archive_service=_ArchiveService([]),  # type: ignore[arg-type]
+    )
+    payload = {
+        **_identity(),
+        "token": "lease-token",
+        "preparation_id": "ajob_initial",
+        **extra,
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            path,
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json=payload,
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": safe}
+    assert unsafe not in response.text
+    assert observed == [failure]
+
+
+@pytest.mark.asyncio
 async def test_broker_lifespan_preflights_without_a_host_worktree():
     supervisor = _SharedSupervisor()
     backend = ProcessBackend(acknowledged_unsafe=True)
@@ -523,10 +583,16 @@ async def test_archive_shutdown_quiesces_then_strictly_stops_before_cleanup() ->
 
 
 @pytest.mark.asyncio
-async def test_archive_shutdown_surfaces_strict_stop_failure_before_closing_service() -> None:
+async def test_archive_shutdown_surfaces_sanitized_stop_failure_before_closing_service(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     events: list[str] = []
     supervisor = _SharedSupervisor(events=events)
-    supervisor.shutdown_error = RuntimeError("native flush failed")
+    unsafe = "https://user:secret@example.com/private-final?token=leaked"
+    provider_error = RuntimeError(unsafe)
+    archive_error = SandboxError("final sandbox archive could not be stored")
+    archive_error.__cause__ = provider_error
+    supervisor.shutdown_error = archive_error
     archive = _ArchiveService(events)
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
@@ -535,7 +601,7 @@ async def test_archive_shutdown_surfaces_strict_stop_failure_before_closing_serv
         sandbox_archive_service=archive,  # type: ignore[arg-type]
     )
 
-    with pytest.raises(RuntimeError, match="shutdown cleanup failed"):
+    with pytest.raises(RuntimeError, match="shutdown cleanup failed") as raised:
         async with app.router.lifespan_context(app):
             pass
 
@@ -545,6 +611,23 @@ async def test_archive_shutdown_surfaces_strict_stop_failure_before_closing_serv
         "supervisor.close",
         "archive.close",
     ]
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "workspace_broker_cleanup_failed"
+    )
+    assert record.component == "shared_sandbox_stop_all"  # type: ignore[attr-defined]
+    assert record.error_type == "SandboxError"  # type: ignore[attr-defined]
+    assert record.exc_info is None
+    assert unsafe not in caplog.text
+    current: BaseException | None = raised.value
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        assert unsafe not in str(current)
+        current = current.__cause__ or current.__context__
+    assert raised.value.__cause__ is not None
+    assert raised.value.__cause__.__cause__ is None
 
 
 @pytest.mark.asyncio

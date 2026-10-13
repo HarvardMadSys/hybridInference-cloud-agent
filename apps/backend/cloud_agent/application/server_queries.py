@@ -43,7 +43,10 @@ class ServerQueries:
         entry = self.registry.entries.get(row["provider_id"])
         caps = entry.provider.capabilities() if entry else None
         reasons: list[dict[str, str]] = []
-        actions: list[str] = []
+        # Removal is local inventory cleanup and remains available when the
+        # provider or credentials are unavailable. Dependencies and provider
+        # submission journals are checked transactionally when it is applied.
+        actions: list[str] = ["remove"]
         autoscaling_owned = bool(row.get("autoscaling_owned"))
         terminal = row.get("observed_state") in {"terminated", "absent"} or bool(
             row.get("release_committed_at")

@@ -80,6 +80,8 @@ const cloudLabDefaults = {
   profile_name: 'kata-node',
   ssh_username: 'researcher',
   ssh_public_key: '',
+  node_types: ['r6615', 'c6620', 'r650', 'r6525', 'c6525-100g', 'c6525-25g'],
+  node_type_binding: 'phystype',
 };
 
 const getArchiveSettings = vi.mocked(getSandboxArchiveSettings);
@@ -1529,6 +1531,350 @@ describe('global limits', () => {
   });
 });
 
+describe('settings search', () => {
+  function searchFor(query: string) {
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), {
+      target: { value: query },
+    });
+    return screen.getByRole('region', { name: 'Settings search results' });
+  }
+
+  it.each([
+    { key: 'Enter', isComposing: true, keyCode: 13, signal: 'native composition' },
+    { key: 'Escape', isComposing: true, keyCode: 27, signal: 'native composition' },
+    { key: 'Enter', isComposing: false, keyCode: 229, signal: 'legacy IME key code' },
+    { key: 'Escape', isComposing: false, keyCode: 229, signal: 'legacy IME key code' },
+  ])(
+    'ignores $key with $signal while composing a search',
+    async ({ key, isComposing, keyCode }) => {
+      renderSettings('Sandbox');
+      await screen.findByLabelText('Turn time limit for all servers');
+      const input = screen.getByRole('searchbox', { name: 'Search settings' });
+      act(() => input.focus());
+      fireEvent.compositionStart(input);
+      const results = searchFor('claude code');
+      expect(
+        within(results).getByRole('button', { name: 'Open Claude Code in Agent versions' }),
+      ).toBeVisible();
+
+      expect(fireEvent.keyDown(input, { key, isComposing, keyCode })).toBe(true);
+      expect(input).toHaveValue('claude code');
+      expect(input).toHaveFocus();
+      expect(screen.getByRole('region', { name: 'Settings search results' })).toBe(results);
+      expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+      expect(screen.getByRole('tab', { name: 'Sandbox' })).toHaveAttribute('aria-selected', 'true');
+
+      fireEvent.compositionEnd(input);
+      fireEvent.keyDown(input, { key });
+      expect(input).toHaveValue('');
+      expect(
+        screen.queryByRole('region', { name: 'Settings search results' }),
+      ).not.toBeInTheDocument();
+      if (key === 'Enter') {
+        await waitFor(() => expect(screen.getByLabelText('Claude Code')).toHaveFocus());
+        expect(screen.getByRole('tabpanel', { name: 'Agent versions' })).toBeVisible();
+      } else {
+        expect(input).toHaveFocus();
+        expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+      }
+    },
+  );
+
+  it('opens an Advanced application result in its merged category and clears the query', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Appearance' });
+    const input = screen.getByLabelText('Publication Git timeout');
+    expect(input).not.toBeVisible();
+
+    const results = searchFor('PUBLICATION timeout');
+    expect(within(results).getAllByRole('button')).toHaveLength(1);
+    fireEvent.click(
+      within(results).getByRole('button', {
+        name: 'Open Publication Git timeout in Source control',
+      }),
+    );
+
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe(
+      categoryTabId('Source control'),
+    );
+    expect(screen.getByRole('searchbox', { name: 'Search settings' })).toHaveValue('');
+    expect(
+      screen.queryByRole('region', { name: 'Settings search results' }),
+    ).not.toBeInTheDocument();
+    expect(setAgentAdminSettings).not.toHaveBeenCalled();
+  });
+
+  it('selects an unfamiliar server-defined category with Enter without losing an application draft', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(applicationSnapshot());
+    renderSettings();
+    const applicationName = await screen.findByLabelText('Application name');
+    fireEvent.change(applicationName, { target: { value: 'Unsaved application name' } });
+
+    const results = searchFor('future.maximum');
+    expect(within(results).getAllByRole('button')).toHaveLength(1);
+    fireEvent.keyDown(screen.getByRole('searchbox', { name: 'Search settings' }), {
+      key: 'Enter',
+    });
+
+    const future = screen.getByRole('spinbutton', { name: 'Future limit' });
+    await waitFor(() => expect(future).toHaveFocus());
+    expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
+    expect(screen.getByRole('searchbox', { name: 'Search settings' })).toHaveValue('');
+    expect(applicationName).toBeInTheDocument();
+    expect(applicationName).not.toBeVisible();
+    expect(applicationName).toHaveValue('Unsaved application name');
+
+    fireEvent.click(
+      within(searchFor('application name')).getByRole('button', {
+        name: 'Open Application name in Appearance',
+      }),
+    );
+    await waitFor(() => expect(applicationName).toHaveFocus());
+    expect(screen.getByRole('textbox', { name: 'Application name' })).toBe(applicationName);
+    expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
+    expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens an Advanced host setting by its environment key and preserves its draft across searches', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    const input = await screen.findByLabelText('Terminals per server for all servers');
+    expect(input).not.toBeVisible();
+
+    fireEvent.click(
+      within(searchFor('AGENT_TERMINAL_MAX_SESSIONS')).getByRole('button', {
+        name: 'Open Terminals per server in Sandbox',
+      }),
+    );
+
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+    fireEvent.change(input, { target: { value: '100' } });
+    fireEvent.click(
+      within(searchFor('claude-code')).getByRole('button', {
+        name: 'Open Claude Code in Agent versions',
+      }),
+    );
+    await waitFor(() => expect(screen.getByLabelText('Claude Code')).toHaveFocus());
+    expect(input).toHaveValue(100);
+    expect(input).not.toBeVisible();
+
+    fireEvent.click(
+      within(searchFor('Terminals per server')).getByRole('button', {
+        name: 'Open Terminals per server in Sandbox',
+      }),
+    );
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(screen.getByLabelText('Terminals per server for all servers')).toBe(input);
+    expect(input).toHaveValue(100);
+    expect(setLimit).not.toHaveBeenCalled();
+    expect(setVersion).not.toHaveBeenCalled();
+  });
+
+  it('searches CloudLab before visiting it and focuses its Advanced field after defaults arrive', async () => {
+    const pending = deferred<{ defaults: typeof cloudLabDefaults }>();
+    vi.mocked(getCloudLabDefaults).mockReturnValueOnce(pending.promise);
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+
+    const results = searchFor('cloudlab ssh public key');
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(results).getByRole('button', {
+        name: 'Open CloudLab SSH public key in CloudLab',
+      }),
+    );
+    expect(screen.getByRole('tabpanel', { name: 'CloudLab' })).toBeVisible();
+    expect(getCloudLabDefaults).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText('CloudLab SSH public key')).not.toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Search settings' })).toHaveValue('');
+
+    await act(async () => pending.resolve({ defaults: cloudLabDefaults }));
+    const input = await screen.findByLabelText('CloudLab SSH public key');
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(input).toBeVisible();
+    expect(saveCloudLabDefaults).not.toHaveBeenCalled();
+  });
+
+  it('keeps a new search focused when defaults arrive for an earlier CloudLab result', async () => {
+    const pending = deferred<{ defaults: typeof cloudLabDefaults }>();
+    vi.mocked(getCloudLabDefaults).mockReturnValueOnce(pending.promise);
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    fireEvent.click(
+      within(searchFor('cloudlab ssh public key')).getByRole('button', {
+        name: 'Open CloudLab SSH public key in CloudLab',
+      }),
+    );
+    expect(getCloudLabDefaults).toHaveBeenCalledTimes(1);
+
+    const searchInput = screen.getByRole('searchbox', { name: 'Search settings' });
+    act(() => searchInput.focus());
+    searchFor('claude code');
+    await act(async () => pending.resolve({ defaults: cloudLabDefaults }));
+
+    const oldTarget = await screen.findByLabelText('CloudLab SSH public key');
+    expect(searchInput).toHaveFocus();
+    expect(searchInput).toHaveValue('claude code');
+    expect(
+      within(screen.getByRole('region', { name: 'Settings search results' })).getByRole('button', {
+        name: 'Open Claude Code in Agent versions',
+      }),
+    ).toBeVisible();
+    expect(oldTarget.closest('details')).not.toHaveAttribute('open');
+    expect(oldTarget).not.toBeVisible();
+  });
+
+  it('cancels delayed CloudLab result focus when the user chooses another tab', async () => {
+    const pending = deferred<{ defaults: typeof cloudLabDefaults }>();
+    vi.mocked(getCloudLabDefaults).mockReturnValueOnce(pending.promise);
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    fireEvent.click(
+      within(searchFor('cloudlab ssh public key')).getByRole('button', {
+        name: 'Open CloudLab SSH public key in CloudLab',
+      }),
+    );
+
+    const sandboxTab = screen.getByRole('tab', { name: 'Sandbox' });
+    act(() => sandboxTab.focus());
+    fireEvent.click(sandboxTab);
+    await act(async () => pending.resolve({ defaults: cloudLabDefaults }));
+    const oldTarget = await screen.findByLabelText('CloudLab SSH public key');
+    expect(sandboxTab).toHaveFocus();
+    expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+
+    const cloudLabTab = screen.getByRole('tab', { name: 'CloudLab' });
+    act(() => cloudLabTab.focus());
+    fireEvent.click(cloudLabTab);
+    expect(cloudLabTab).toHaveFocus();
+    expect(oldTarget.closest('details')).not.toHaveAttribute('open');
+    expect(oldTarget).not.toBeVisible();
+  });
+
+  it('routes an Advanced archive policy result to Sandbox and focuses its editor', async () => {
+    renderSettings();
+    await screen.findByText('No application settings are available.');
+    await screen.findByLabelText('Maximum archive bytes');
+    fireEvent.click(
+      within(searchFor('max_archive_bytes')).getByRole('button', {
+        name: 'Open Maximum archive bytes in Sandbox archives',
+      }),
+    );
+
+    const input = screen.getByLabelText('Maximum archive bytes');
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe('sandbox');
+    expect(updateArchiveSettings).not.toHaveBeenCalled();
+  });
+
+  it('routes deletion archive metadata to the existing Sandbox page', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Appearance' });
+    fireEvent.click(
+      within(searchFor('sandbox_archive.endpoint')).getByRole('button', {
+        name: 'Open Sandbox archive S3 endpoint in Sandbox',
+      }),
+    );
+
+    const input = screen.getByLabelText('Sandbox archive S3 endpoint');
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'Deletion archive destination' })).toContainElement(
+      input,
+    );
+    expect(screen.queryByRole('tab', { name: 'Sandbox archives' })).not.toBeInTheDocument();
+  });
+
+  it('reveals and focuses deployment prerequisites from another settings section', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(
+      applicationSnapshot({
+        bootstrap: [
+          {
+            key: 'AGENT_DATABASE_URL',
+            label: 'Database connection',
+            description: 'Database connection supplied before the service starts.',
+          },
+        ],
+      }),
+    );
+    renderSettings('Sandbox');
+    await screen.findByRole('tab', { name: 'Appearance' });
+    fireEvent.click(
+      within(searchFor('agent_database_url')).getByRole('button', {
+        name: 'Open Database connection in Deployment setup',
+      }),
+    );
+
+    const target = screen.getByText('Database connection').closest('div')!;
+    await waitFor(() => expect(target).toHaveFocus());
+    expect(target.closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('tabpanel', { name: 'Appearance' })).toBeVisible();
+    expect(target).toBeVisible();
+  });
+
+  it('focuses the setting form when an application result is read-only', async () => {
+    const current = applicationSnapshot();
+    vi.mocked(getAgentAdminSettings).mockResolvedValue({
+      ...current,
+      definitions: current.definitions.map((definition) => ({
+        ...definition,
+        read_only: definition.key === 'future.maximum',
+      })),
+    });
+    renderSettings();
+    await screen.findByRole('tab', { name: 'Appearance' });
+    fireEvent.click(
+      within(searchFor('future limit')).getByRole('button', {
+        name: 'Open Future limit in Future / category ✓',
+      }),
+    );
+
+    const input = screen.getByRole('spinbutton', { name: 'Future limit' });
+    expect(input).toBeDisabled();
+    await waitFor(() => expect(input.closest('form')).toHaveFocus());
+    expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
+  });
+
+  it('keeps the current section for no matches and clears search with Escape or the clear button', async () => {
+    renderSettings('Sandbox');
+    await screen.findByLabelText('Turn time limit for all servers');
+    const input = screen.getByRole('searchbox', { name: 'Search settings' });
+    const results = searchFor('no-such-setting-ever');
+    expect(within(results).getByRole('status')).toHaveTextContent('No settings found.');
+    expect(within(results).queryByRole('button')).not.toBeInTheDocument();
+    input.focus();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input).toHaveValue('no-such-setting-ever');
+    expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
+
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(input).toHaveValue('');
+    expect(input).toHaveFocus();
+    expect(
+      screen.queryByRole('region', { name: 'Settings search results' }),
+    ).not.toBeInTheDocument();
+    searchFor('CloudLab');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(input).toHaveValue('');
+    expect(input).toHaveFocus();
+    expect(
+      screen.queryByRole('region', { name: 'Settings search results' }),
+    ).not.toBeInTheDocument();
+    expect(getCloudLabDefaults).not.toHaveBeenCalled();
+  });
+});
+
 describe('polling and account boundaries', () => {
   it('preserves drafts while polling, then updates application status', async () => {
     vi.useFakeTimers();
@@ -1596,10 +1942,18 @@ describe('polling and account boundaries', () => {
     vi.useFakeTimers();
     renderSettings('Agent versions');
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), {
+      target: { value: 'Claude Code' },
+    });
+    expect(screen.getByRole('region', { name: 'Settings search results' })).toBeInTheDocument();
     list.mockRejectedValue(new APIError('FORBIDDEN', 'Forbidden', 403));
     await vi.advanceTimersByTimeAsync(30_000);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(screen.queryByLabelText('Claude Code')).not.toBeInTheDocument();
+    expect(screen.queryByRole('searchbox', { name: 'Search settings' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('region', { name: 'Settings search results' }),
+    ).not.toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(list).toHaveBeenCalledTimes(2);
   });

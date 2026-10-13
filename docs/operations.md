@@ -75,7 +75,13 @@ preservation rule.
 
 Later deployments keep the saved admin values, and resetting a field never
 restores an old `.env` value. Listeners synchronize saved changes every five
-seconds. The web server reads saved public appearance fields on every request.
+seconds. The web server reads saved public appearance fields on every request,
+with a 400 ms budget for the response and its body. A timeout, unavailable
+backend, or invalid response uses the last valid public appearance read by that
+web process for the same control-plane URL; before its first successful read,
+it uses neutral display defaults. Successful reads show saved edits on the next
+page request. This fallback contains no session or access decisions and does
+not survive a web-process restart.
 Apply changes to subsequent operations as described beside each setting.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by
@@ -160,8 +166,12 @@ services:
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
 ```
 
-Load this override with the normal Compose deployment and keep it private.
-For shared profiles, mount the credentials and configuration files read-only
+Keep the override outside the checkout and set its absolute path as
+`AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE` in the deployment root's private
+`.env`. The deployer validates that it is a readable regular file and appends
+it after release-owned overlays for every stack operation in both source and
+artifact modes. Leaving the setting empty uses only the reviewed deployment
+files. For shared profiles, mount the credentials and configuration files read-only
 in this service and set `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE` and
 `AWS_PROFILE` to their container paths and selected profile. Use the saved
 archive region setting or provision `AWS_DEFAULT_REGION` in the same override.
@@ -269,8 +279,13 @@ and its health state. Before setup, a waiting container is healthy and logs
 `Waiting for first-time setup in Admin -> Database.` After setup, unreadable
 bootstrap storage or unavailable PostgreSQL prevent startup. Setup records
 `agent.database.pgadmin.setup`; opening pgAdmin records
-`agent.database.pgadmin.open` in the Agent audit log; pgAdmin manages SQL
-activity itself. Resetting **Private pgAdmin URL** in Admin Settings disables
+`agent.database.pgadmin.open` in the Agent audit log, both for the launch link
+and for the first request of a new pgAdmin session at any URL. The Agent audit
+log does not record SQL: pgAdmin connects as the database owner, which can
+change any table, the audit log included, so treat pgAdmin access as full
+database access. The proxy adds `frame-ancestors 'self'`, `nosniff` and
+`X-Frame-Options: SAMEORIGIN` to pgAdmin's responses; pgAdmin's own policy still
+allows its inline scripts. Resetting **Private pgAdmin URL** in Admin Settings disables
 access after the listeners synchronize; removing the profile and stopping
 pgAdmin preserves its volume.
 
@@ -520,6 +535,14 @@ deletion acknowledgements keep admission blocked and retry the same request.
 The broker stores its deletion receipts on its own persistent volume so an
 acknowledgement can survive a broker restart.
 
+**Delete without archive** removes the same exact stopped container without
+uploading workspace files or native session history. It does not require an S3
+bucket. The host still refuses a running, busy, or changed container, and the
+control plane marks native resume lost only after the host confirms removal.
+Chat history and the lifecycle audit remain. There is no S3 object to restore
+from. An archive deletion that is already pending or verified is left unchanged;
+wait for it to finish or fail before choosing this action.
+
 **Verify stopped and force delete** recovers a sandbox still recorded as running
 only when the owning broker confirms that the exact reviewed container is
 stopped and idle. It does not stop a running container or bypass unavailable
@@ -531,6 +554,19 @@ failure, verify the [reverse broker route](#the-way-back-the-control-plane-reach
 Control-plane logs record `agent_sandbox_delete_verification_failed` with the
 sandbox, owning host, status code, and failure type without raw broker errors.
 
+**Remove stale entry** is available when the owning host has no heartbeat or
+has not reported for more than 90 seconds. It removes the entry from the default
+admin inventory without contacting the broker, so a retired or unreachable host
+does not leave an entry that can never be cleared. The server rechecks host
+freshness and the reviewed identity, and refuses active turns, workspace
+operations, snapshots, or a pending deletion. The action is audited and
+reversible through **Include removed** and **Restore to inventory**. It preserves
+the recorded lifecycle state, container identity, native state, and chat history,
+without deleting any retained container or files, creating an S3 archive, or
+reclaiming host disk. A matching running host
+observation or new admitted work makes the entry visible again. Restore the
+broker connection to complete S3 archival and physical deletion.
+
 The details show progress, archive location, checksum, size, and any failure.
 Chat history, memberships, execution records, and audit receipts remain in the
 database. Deleted native sessions cannot resume; this operation does not add
@@ -538,6 +574,20 @@ automatic recovery from S3. **Remove from inventory** is a separate reversible
 visibility control for stopped sandboxes. Use **Include removed sandboxes**
 with **All states**, then **Restore to inventory**, to inspect retained entries.
 Resuming a sandbox removed only from inventory makes it visible again.
+
+For batch operations, select individual inventory rows or **Select all visible
+sandboxes**, choose an action, then **Review selected sandboxes**. Selection
+applies only to the current state, search, host, and activity filters; hidden
+rows are excluded. The review reads current details for each selected sandbox
+and lists any blockers before a single confirmation applies the action to
+eligible entries. Stop, archive-and-delete, deletion without an archive,
+inventory removal, and inventory restoration use the same checks as individual
+controls. Up to four requests run at once, and each result is reported
+separately. A stop or deletion result means the request was accepted; host
+completion is still asynchronous. Failed or skipped entries remain selected
+for a new explicit review. Expired reviews and changed containers are refused,
+without automatically retrying a new container identity. No batch feature flag
+or additional migration is required.
 
 CPU is measured in occupied cores over the interval between Docker samples;
 memory is current usage with inactive file cache removed. Network and block
@@ -1222,7 +1272,7 @@ with no leader and no sharding.
 | `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
 | `AGENT_PHYSICAL_HOST` | host name | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix |
 | `AGENT_HOST_SLOTS` | `3` | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read |
-| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
+| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`. Keep this default. Put the durable disk under it by bind-mounting `<disk>/docker` and `<disk>/containerd` onto `/var/lib/docker` and `/var/lib/containerd`. A custom daemon data root is rejected. Verified by the host and broker, and never mounted into a chat container |
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
 | `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
@@ -1536,6 +1586,29 @@ can carry — the CPU and memory on the same page are. The saved number survives
 heartbeats, restarts and re-enrolment: it is a decision about the named
 machine, and only _Host default_ returns it to the environment.
 
+#### Removing a server
+
+Open a server's details on the admin Servers page and choose **Remove server**
+from its action menu. Confirm permanent removal to delete its allocation, nodes,
+registered hosts, host settings and capacity history, node registration tokens,
+admission holds, and compute activity. Shared connections and deployment profiles
+remain available. User conversations, runs, and deleted-sandbox audit records are
+preserved.
+
+Release cloud resources before removing their records. Attached servers without
+release support can be removed after their hosts are disabled. Remove retained
+sandboxes through the sandbox deletion flow and wait for cleanup to finish; clear
+the default placement pin, running attempts, and deployment drains first. Removal
+checks these dependencies in the same transaction as cleanup and refuses work
+whose provider result is unresolved. An acquisition that never submitted to its
+provider can be removed even when resource observation is unavailable.
+
+The compute API is `DELETE /admin/agent/servers/<allocation_id>` with
+`{"expected_revision": N}`. A revision conflict requires refreshing the server.
+For hosts without an allocation, the action uses the existing guarded
+`DELETE /admin/agent/runner-hosts/<host>` endpoint. Stop an unmanaged host agent
+before removal; inventory cleanup does not shut down its machine or remove files.
+
 #### Sandbox settings
 
 Use the admin settings pages for sandbox and workspace limits. The turn time
@@ -1576,6 +1649,21 @@ requires `overlay2` on XFS mounted with project quotas (`pquota` or
 `prjquota`); Docker rejects creation on an unsupported host. Existing groups
 keep their original limits through follow-ups, restarts, snapshots and Fork.
 See `ENVIRONMENT.md` for bootstrap variables and storage requirements.
+
+**Recommended for servers that run untrusted work.** An `untrusted-kata-v1`
+sandbox's writable layer holds its workspace and every installed file, survives
+`docker stop`, and shares one disk with every other sandbox on the server, so
+without a disk limit one tenant can fill that disk for all of them. Set
+**Container disk** above 0 on each Kata server once its Docker data root is on
+XFS with project quotas. This is a recommendation, not a requirement: scheduling
+and admission do not change, and a server left at 0 keeps taking untrusted
+work. Each claim reports the limit a new group would get (the claim
+attestation's `sandbox_disk_limit_mib`). The control plane logs
+`agent_untrusted_sandbox_without_disk_quota` when it hands such a server a new
+untrusted group, the runner logs the same event as it starts that group, and
+the Servers page shows **No container disk quota** under that server's
+Storage. Existing groups keep the limit they were created with and are not
+flagged.
 
 #### Sandbox archives
 
@@ -2289,50 +2377,73 @@ leaves the database with no writer.
 
 ### Retained Docker storage on a host
 
-Retained chat state is the Docker container writable layer, so durable
-same-host operation attaches storage to the Docker daemon, not to each
-sandbox. A Linux host can use this shape (device and filesystem choices remain
-operator-specific):
+Retained chat state is the Docker container writable layer. On a daemon that
+uses the containerd image store, the images live beside it under containerd.
+Durable same-host operation puts both stores on a mounted data disk and leaves
+the daemon paths at their defaults. `docker info` must keep reporting
+`DockerRootDir=/var/lib/docker`, and `AGENT_RETAINED_DOCKER_DATA_ROOT` stays
+`/var/lib/docker`. A custom `data-root`, `graph`, or containerd `root` is
+rejected before the host starts.
 
-```bash
-# Mount the durable block volume before Docker starts.
-findmnt --target /mnt/agent-docker
+Automatic SSH bootstrap does this from the server's sandbox storage path. See
+[Sandbox storage path](operations-compute.md#sandbox-storage-path). It refuses
+to move a nonempty store that is not already this bind.
+
+A manual host uses the same layout. `<disk>` is an existing writable mount,
+for example `/scratch/hybridInference-cloud-agent/sandbox`:
+
+```text
+<disk>/docker      bind -> /var/lib/docker
+<disk>/containerd  bind -> /var/lib/containerd
 ```
 
-Configure `/etc/docker/daemon.json` with this data root:
+Persist the binds in `/etc/fstab`:
 
-```json
-{"data-root":"/mnt/agent-docker"}
+```text
+<disk>/docker /var/lib/docker none bind,nofail,x-systemd.requires-mounts-for=<disk> 0 0
+<disk>/containerd /var/lib/containerd none bind,nofail,x-systemd.requires-mounts-for=<disk> 0 0
 ```
 
-Restart Docker and verify the reported path:
+Give each daemon a drop-in, `/etc/systemd/system/docker.service.d/cloud-agent-storage.conf`
+and `/etc/systemd/system/containerd.service.d/cloud-agent-storage.conf`:
 
-```bash
-sudo systemctl restart docker
-docker info --format '{{.DockerRootDir}}'
-# /mnt/agent-docker
+```ini
+[Unit]
+RequiresMountsFor=<disk> /var/lib/docker
 ```
 
-Then set `AGENT_RETAINED_DOCKER_DATA_ROOT=/mnt/agent-docker`. The workspace
-broker compares that exact daemon-reported value during startup and refuses a
-mismatch. It deliberately cannot prove `findmnt` itself: giving the broker a
-host-root mount just to inspect storage would violate the Docker-only boundary.
-Put the mount check in host provisioning/systemd (`RequiresMountsFor=` is a
-reasonable additional guard) before Docker and the agent stack start.
+The containerd file names `/var/lib/containerd` instead of `/var/lib/docker`.
+Run `systemctl daemon-reload`. A missing disk then keeps that daemon stopped
+instead of opening an empty store at the bare path.
 
-Do not bind `/mnt/agent-docker`, `/var/lib/docker`, `/workspace`, or
-`/agent-state` into the broker or sandbox. Do not use generic `docker system
+To move a store that already has data, copy it while the daemons are running,
+stop Docker and containerd, and copy again with `--delete` until that copy
+exits 0. Move the old directories aside, create empty mount points, bind-mount,
+then start the daemons. Do not point `daemon.json` at the new path. Containers
+with `restart=no` stay stopped across that restart and must be started by
+hand. Delete the copies left aside only after a reboot has come back on these
+binds and the host is serving.
+
+The workspace broker compares `AGENT_RETAINED_DOCKER_DATA_ROOT` with the
+daemon-reported `DockerRootDir` and refuses a mismatch. It deliberately cannot
+prove `findmnt` itself: giving the broker a host-root mount just to inspect
+storage would violate the Docker-only boundary. The mount check belongs in
+host provisioning, as the `RequiresMountsFor=` drop-ins above.
+
+Do not bind `<disk>`, `/var/lib/docker`, `/var/lib/containerd`, `/workspace`,
+or `/agent-state` into the broker or sandbox. Do not use generic `docker system
 prune`, container TTL cleanup, `docker rm`, or image garbage collection against
 `org.freeinference.chat-sandbox=true` objects. Inspect and operate them through
 Docker (`docker inspect`, `docker exec`, `docker cp`, and the broker RPC), not by
-walking overlay directories. Backup or move the whole Docker data-root only
-with the daemon stopped and using Docker/storage-driver-supported procedures.
+walking overlay directories. Back up or move both graphs only with Docker and
+containerd stopped, preserving ownership, hard links, extended attributes and
+sparse files.
 
 This makes `docker stop`/`docker start` survive runner, broker, Docker daemon,
-and host reboots as long as the same Docker data-root returns. It does **not**
+and host reboots as long as the same binds return. It does **not**
 make a missing container recoverable on another host: export to object/cold
 storage and cross-host restore remain the explicitly deferred persistent
-checkpoint phase. Until that lands, loss of the Docker data-root is context
+checkpoint phase. Until that lands, loss of these graphs is context
 `LOST`, and the control-plane database still supplies the authoritative
 thread→host→container identity needed to locate it.
 
@@ -2800,8 +2911,9 @@ Refused:
   `127.0.0.0/8`, `169.254.0.0/16` (cloud metadata among them), `172.16.0.0/12`,
   `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`,
   `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4` and
-  `240.0.0.0/4` — and whatever `AGENT_EGRESS_PROTECTED_CIDRS` adds, on any
-  port;
+  `240.0.0.0/4` — plus Azure's WireServer, `168.63.129.16`, a platform
+  service on a public address, and whatever `AGENT_EGRESS_PROTECTED_CIDRS`
+  adds, on any port;
 - other groups, this deployment's or another's;
 - every other port and protocol: UDP 443 (QUIC), ping, all IPv6;
 - connections started from outside. A reply is accepted only for a connection
@@ -2884,8 +2996,9 @@ rules, not the host's.
   removed with the bridge. The relay's own default route stays on its stack
   network, because it joins every group bridge at gateway priority -1.
 - **Watched while groups run.** While any group of this deployment is
-  running, the broker re-reads the tables at most once a minute and reinstalls
-  whatever is missing. If that fails twice in a row, it logs
+  running, the broker reads the tables back on every five-second sweep, logs
+  `network_guard_rules_changed` when they differ from what it installed, and
+  reinstalls whatever is missing. If that fails twice in a row, it logs
   `shared_chat_network_unguarded` and stops every running group — workspaces
   and native sessions kept — rather than let one go on without the boundary it
   was started behind. Waking a group reinstalls and verifies the rules first,
@@ -3032,9 +3145,10 @@ network; the workspace is kept:
   - `relay host:port unreachable: …`;
   - `the host at …:9/udp was refused by ECONNREFUSED, not by the network
     rules`, `the metadata address 169.254.169.254:80 answered; the network
-    rules are not in this guest's path`, or `… was not refused within 2s` —
-    the host and the metadata address must be refused at once by the rules'
-    own ICMP answer, and were not: the guest's traffic is not passing this
+    rules are not in this guest's path` (or the same for `the platform
+    address 168.63.129.16:80`), or `… was not refused within 2s` — the host
+    and both platform addresses must be refused at once by the rules' own
+    ICMP answer, and were not: the guest's traffic is not passing this
     deployment's tables.
 
   The sandbox is stopped, not deleted. Reaching the public internet is not

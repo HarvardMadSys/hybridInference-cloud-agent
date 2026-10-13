@@ -252,16 +252,19 @@ export default function SandboxArchiveSettingsCard({
   const numericFields = [
     {
       key: 'maxArchiveBytes' as const,
+      targetId: 'archive-setting-max_archive_bytes',
       label: 'Maximum archive bytes',
       description: 'Maximum compressed size of one archive. Hard limit: 4 GiB.',
     },
     {
       key: 'multipartThresholdBytes' as const,
+      targetId: 'archive-setting-multipart_threshold_bytes',
       label: 'Multipart threshold bytes',
       description: 'Archives at or above this size use multipart upload. Maximum: 64 MiB.',
     },
     {
       key: 'multipartPartBytes' as const,
+      targetId: 'archive-setting-multipart_part_bytes',
       label: 'Multipart part bytes',
       description: 'Size of each uploaded part, from 5 MiB through 64 MiB.',
     },
@@ -358,6 +361,7 @@ export default function SandboxArchiveSettingsCard({
             </h3>
             <label className="flex items-start gap-3 text-sm text-gray-800 dark:text-gray-200">
               <input
+                id="archive-setting-enabled"
                 type="checkbox"
                 aria-label="Enable sandbox archives"
                 aria-describedby="archive-enabled-description"
@@ -383,6 +387,7 @@ export default function SandboxArchiveSettingsCard({
               <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
                 S3 destination
                 <input
+                  id="archive-setting-s3_uri"
                   type="text"
                   value={settings.s3_uri}
                   readOnly
@@ -401,6 +406,7 @@ export default function SandboxArchiveSettingsCard({
               <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
                 AWS region
                 <input
+                  id="archive-setting-region"
                   type="text"
                   value={draft.region}
                   disabled={busy}
@@ -417,6 +423,7 @@ export default function SandboxArchiveSettingsCard({
               <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
                 AWS access key ID
                 <input
+                  id="archive-setting-aws_access_key_id"
                   type="text"
                   value={draft.awsAccessKeyId}
                   disabled={busy}
@@ -443,6 +450,7 @@ export default function SandboxArchiveSettingsCard({
               <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
                 AWS secret access key
                 <input
+                  id="archive-setting-aws_secret_access_key"
                   type="password"
                   value={draft.awsSecretAccessKey}
                   disabled={busy}
@@ -475,6 +483,7 @@ export default function SandboxArchiveSettingsCard({
               <label className="text-sm font-medium text-gray-800 dark:text-gray-200">
                 Expected bucket owner
                 <input
+                  id="archive-setting-expected_bucket_owner"
                   type="text"
                   inputMode="numeric"
                   value={draft.expectedBucketOwner}
@@ -494,6 +503,7 @@ export default function SandboxArchiveSettingsCard({
               <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
                 Customer-managed KMS key ARN
                 <input
+                  id="archive-setting-kms_key_arn"
                   type="text"
                   value={draft.kmsKeyArn}
                   disabled={busy}
@@ -528,10 +538,11 @@ export default function SandboxArchiveSettingsCard({
               Upload limits
             </h3>
             <div className="grid gap-4 sm:grid-cols-2">
-              {numericFields.map(({ key, label, description }) => (
+              {numericFields.map(({ key, targetId, label, description }) => (
                 <label key={key} className="text-sm font-medium text-gray-800 dark:text-gray-200">
                   {label}
                   <input
+                    id={targetId}
                     type="number"
                     inputMode="numeric"
                     step="1"

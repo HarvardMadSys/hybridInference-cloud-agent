@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from cloud_agent.domain.cloudlab import DEFAULT_CLOUDLAB_NODE_TYPES
 from cloud_agent.domain.compute import normalize_user_public_key
 from cloud_agent.ports.external.host_bootstrap import validate_sandbox_storage_path
 
@@ -41,6 +42,18 @@ class CloudLabDefaults(ComputeRequest):
         default="", max_length=128, pattern=r"^(?:[a-zA-Z_][a-zA-Z0-9_.-]*)?$"
     )
     ssh_public_key: str = Field(default="", max_length=8192)
+    node_types: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")]] = Field(
+        default_factory=lambda: list(DEFAULT_CLOUDLAB_NODE_TYPES), max_length=20
+    )
+    node_type_binding: str = Field(default="phystype", pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+    @field_validator("node_types")
+    @classmethod
+    def validate_node_types(cls, value: list[str]) -> list[str]:
+        """Preserve the reviewed order while rejecting duplicate candidates."""
+        if len(set(value)) != len(value):
+            raise ValueError("candidate node types must be distinct")
+        return value
 
     @field_validator("ssh_public_key")
     @classmethod
@@ -340,6 +353,12 @@ class RetireComputeRequest(ComputeRequest):
     """Request retirement against the allocation scope the admin reviewed."""
 
     request_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0)
+
+
+class RemoveComputeRequest(ComputeRequest):
+    """Remove server inventory against the allocation the admin reviewed."""
+
     expected_revision: int = Field(ge=0)
 
 

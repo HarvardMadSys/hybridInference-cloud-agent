@@ -20,11 +20,13 @@ export function Picker({
   value,
   options,
   onChange,
+  compact = false,
 }: {
   label: string;
   value: string;
   options: string[];
   onChange: (next: string) => void;
+  compact?: boolean;
 }) {
   if (options.length === 0) {
     return null;
@@ -32,13 +34,13 @@ export function Picker({
   return (
     <label
       title={`${label}: ${value}`}
-      className="relative inline-flex min-h-10 max-w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15 [@media(pointer:coarse)]:min-h-11"
+      className="relative inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-xs text-foreground transition-colors hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15 [@media(pointer:coarse)]:min-h-11"
     >
-      <span className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-[10px] font-normal leading-none text-muted">{label}</span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        {!compact ? <span className="shrink-0 text-muted">{label}</span> : null}
         {/* The width of the control follows the selection. Long identifiers
             truncate so the setting and its label stay inside narrow panes. */}
-        <span aria-hidden className="min-w-0 max-w-[13rem] truncate leading-4">
+        <span aria-hidden className="min-w-0 max-w-[11rem] truncate font-medium">
           {value}
         </span>
       </span>

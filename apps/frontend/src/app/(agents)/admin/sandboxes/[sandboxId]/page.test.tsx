@@ -459,6 +459,40 @@ describe('admin sandbox trajectory', () => {
     expect(deleteAdminSandbox).not.toHaveBeenCalled();
   });
 
+  it('deletes the stopped sandbox without an archive after confirmation', async () => {
+    vi.mocked(deleteAdminSandbox).mockResolvedValue({
+      sandbox: sandbox({
+        deletion_state: 'pending',
+        deletion_discard: true,
+        deletion_requested_at: '2026-10-10T10:01:00Z',
+      }),
+      members: [],
+      observed_at: '2026-10-10T10:01:00Z',
+    });
+    render(<AdminSandboxTrajectoryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete without archive' }));
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringMatching(/without uploading it to S3/),
+    );
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/cannot be restored/));
+    expect(deleteAdminSandbox).toHaveBeenCalledWith(
+      'sandbox/one',
+      {
+        generation: 4,
+        container_id: 'container-one',
+        last_activity_at: '2026-10-10T09:59:00Z',
+      },
+      expect.any(AbortSignal),
+      false,
+      true,
+    );
+    expect(await screen.findByText(/without an S3 archive/)).toBeInTheDocument();
+    expect(screen.getByText(/No S3 archive is being uploaded/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Deleting without archive…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Deletion in progress' })).toBeDisabled();
+  });
+
   it('allows a safely failed archive request to be confirmed and retried', async () => {
     vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
       trajectory({

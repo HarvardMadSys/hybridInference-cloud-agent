@@ -337,18 +337,18 @@ export function ArchivedTasksView() {
 
   return (
     <section
-      className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-7 lg:px-10 lg:py-10"
+      className="mx-auto w-full max-w-5xl px-4 py-4 sm:px-5 lg:px-6"
       aria-labelledby="archive-page-title"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1
             id="archive-page-title"
-            className="text-2xl font-medium tracking-tight text-gray-900 dark:text-gray-100"
+            className="text-lg font-medium tracking-tight text-gray-900 dark:text-gray-100"
           >
             {t('archive.title')}
           </h1>
-          <p className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+          <p className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
             {t('archive.subtitle')}
           </p>
         </div>

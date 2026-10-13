@@ -77,7 +77,24 @@ local_host_slots() {
 
 local_deployment_sha() {
   deployment_sha=$(env_file_value AGENT_DEPLOYMENT_SHA)
-  printf '%s\n' "${deployment_sha:-local-$(local_project_name)}"
+  case "$deployment_sha" in
+    '' | local-*)
+      # Older local env files used a human-readable generation here. Host
+      # bundles now accept only an exact reviewed commit or the explicit
+      # development sentinel; never mislabel dirty local source as HEAD.
+      printf '%s\n' unknown
+      ;;
+    unknown)
+      printf '%s\n' "$deployment_sha"
+      ;;
+    *)
+      if ! printf '%s\n' "$deployment_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+        echo "AGENT_DEPLOYMENT_SHA must be 'unknown' or an exact 40-character lowercase commit." >&2
+        return 1
+      fi
+      printf '%s\n' "$deployment_sha"
+      ;;
+  esac
 }
 
 local_control_network() {
@@ -191,7 +208,7 @@ upgrade_existing_env() {
   append_env_if_missing LOCAL_PROJECT_NAME freeinference-local
   append_env_if_missing LOCAL_SANDBOX_IMAGE "$(local_sandbox_image)"
   append_env_if_missing LOCAL_HOST_SLOTS 2
-  append_env_if_missing AGENT_DEPLOYMENT_SHA "local-$(local_project_name)"
+  append_env_if_missing AGENT_DEPLOYMENT_SHA unknown
   append_env_if_missing LOCAL_RELAY_NETWORK freeinference-local-agent-relays
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
   append_dns_server_if_missing
@@ -251,7 +268,7 @@ ensure_env() {
       'LOCAL_PROJECT_NAME=freeinference-local' \
       'LOCAL_SANDBOX_IMAGE=freeinference-cloud-agent-sandbox-freeinference-local:local' \
       'LOCAL_HOST_SLOTS=2' \
-      'AGENT_DEPLOYMENT_SHA=local-freeinference-local' \
+      'AGENT_DEPLOYMENT_SHA=unknown' \
       'LOCAL_RELAY_NETWORK=freeinference-local-agent-relays' \
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
       'GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize' \

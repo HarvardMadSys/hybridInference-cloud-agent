@@ -115,7 +115,8 @@ def test_there_is_no_mode_to_select() -> None:
 def test_every_protected_block_is_outside_global_unicast() -> None:
     # The 6to4 relay anycast block is still "global" to Python, but RFC 7526
     # deprecated it and nothing legitimate should be reached there any more.
-    deliberate = {"192.88.99.0/24"}
+    # Azure's WireServer is a platform service on a public address.
+    deliberate = {"192.88.99.0/24", "168.63.129.16/32"}
     for block in PROTECTED_IPV4:
         network = ipaddress.IPv4Network(block)
         if block in deliberate or network.is_multicast:
@@ -143,11 +144,28 @@ def test_ordinary_public_hosts_are_not_protected(address: str) -> None:
         "255.255.255.255",
         "0.0.0.0",
         "127.0.0.1",
+        "168.63.129.16",
+        "100.100.100.200",
     ],
 )
 def test_the_usual_internal_targets_are_protected(address: str) -> None:
     network = _network()
     assert any(ipaddress.IPv4Address(address) in block for block in network.protected)
+
+
+def test_the_installed_table_refuses_azures_platform_address() -> None:
+    """WireServer is public address space, so only an explicit entry covers it."""
+    network = _network()
+    assert ipaddress.IPv4Address("168.63.129.16").is_global
+    elements = next(
+        line
+        for line in render_ruleset(network).splitlines()
+        if line.startswith(f"add element inet {network.table} protected4 ")
+    )
+    assert "168.63.129.16/32" in elements.split("{", 1)[1].rstrip(" }").split(", ")
+    # Still refused when an operator's own additions collapse around it.
+    widened = _network(AGENT_EGRESS_PROTECTED_CIDRS="168.63.0.0/16")
+    assert any(ipaddress.IPv4Address("168.63.129.16") in b for b in widened.protected)
 
 
 def test_operator_additions_only_widen_protection() -> None:

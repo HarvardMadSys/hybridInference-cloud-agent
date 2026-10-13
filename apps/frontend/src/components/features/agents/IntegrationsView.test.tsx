@@ -10,6 +10,7 @@ import {
   type UserMemoryView,
 } from '@/lib/api/userMemory';
 import { getMemoryProjects } from '@/lib/api/projectMemory';
+import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
@@ -20,6 +21,7 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -154,6 +156,13 @@ function unloadedGithub(
 }
 
 beforeEach(() => {
+  vi.mocked(getUserProfile).mockResolvedValue({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  });
   localStorage.clear();
   document.documentElement.lang = 'en';
   vi.mocked(getAgentConfig).mockResolvedValue({
@@ -182,7 +191,8 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView connectedProvider="github" />);
 
-    expect(screen.getByRole('heading', { level: 1, name: 'Setting' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'My Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
     expect(
@@ -210,7 +220,7 @@ describe('IntegrationsView', () => {
     expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
   });
 
-  it('keeps source-linked memory, suggestions, and privacy controls on the Setting page without an avatar', async () => {
+  it('keeps source-linked memory and privacy controls on the Setting page while user suggestions live on the homepage', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
     render(<IntegrationsView />);
 
@@ -225,7 +235,10 @@ describe('IntegrationsView', () => {
       'href',
       '/job_memory_source',
     );
-    expect(within(section).getByText(memory.suggestions[0].action)).toBeInTheDocument();
+    expect(within(section).queryByRole('heading', { name: 'Suggestions' })).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].title)).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].reason)).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].action)).not.toBeInTheDocument();
     const toggle = within(section).getByRole('switch', { name: 'Remember automatically' });
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).not.toBeChecked());
@@ -251,14 +264,16 @@ describe('IntegrationsView', () => {
       </LocaleProvider>,
     );
 
-    expect(await screen.findByRole('heading', { level: 1, name: '设置' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '我的设置' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '个人资料' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '记忆' })).toBeInTheDocument();
     const section = screen.getByRole('tabpanel', { name: '用户记忆' });
     await within(section).findByRole('switch', { name: '自动记忆' });
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
     expect(within(section).getByRole('switch', { name: '自动记忆' })).toBeChecked();
+    expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的连接、技能、记忆和通知。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料、连接、技能、记忆和通知。')).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

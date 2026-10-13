@@ -173,6 +173,7 @@ describe('standalone pinned section', () => {
     await screen.findByRole('link', { name: /Pin 51/ });
     expect(api.list).toHaveBeenCalledWith(
       expect.objectContaining({ pinned: true, cursor: 'next-pins' }),
+      expect.any(AbortSignal),
     );
     expect(screen.getByTitle('owner/quiet')).toHaveAttribute('aria-expanded', 'false');
   });
@@ -190,6 +191,7 @@ describe('standalone pinned section', () => {
     await waitFor(() =>
       expect(api.list).toHaveBeenCalledWith(
         expect.objectContaining({ repo: 'owner/quiet', pinned: false }),
+        expect.any(AbortSignal),
       ),
     );
     expect(screen.getAllByRole('link', { name: /Pinned quiet task/ })).toHaveLength(1);
@@ -232,7 +234,10 @@ describe('standalone pinned section', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Pinned quiet' } });
     await waitFor(() =>
-      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ q: 'Pinned quiet' })),
+      expect(api.list).toHaveBeenCalledWith(
+        expect.objectContaining({ q: 'Pinned quiet' }),
+        expect.any(AbortSignal),
+      ),
     );
     await waitFor(() =>
       expect(screen.getAllByRole('link', { name: /Pinned quiet task/ })).toHaveLength(1),

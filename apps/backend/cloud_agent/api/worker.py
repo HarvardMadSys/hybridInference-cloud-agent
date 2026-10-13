@@ -52,6 +52,7 @@ from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
+from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
@@ -78,6 +79,7 @@ from cloud_agent.schemas import (
     WorkerAckResponse,
     WorkerAttachmentContentResponse,
     WorkerAttachmentListResponse,
+    WorkerClaimAttestation,
     WorkerClaimRequest,
     WorkerClaimResponse,
     WorkerContinuityRequest,
@@ -482,6 +484,33 @@ async def _worker_workspace_broker(
     return broker
 
 
+def _warn_on_unbounded_untrusted_group(
+    claim: dict[str, Any], attestation: WorkerClaimAttestation | None, *, host: str
+) -> None:
+    """Log a new untrusted group handed to a host that sets no disk quota.
+
+    Recommended, not required: such a group's writable layer holds its
+    workspace, survives ``docker stop``, and shares one disk with every other
+    group on the host. The claim still goes ahead; the admin hosts page shows
+    the same warning. A runner from before the report attests nothing and is
+    not named here.
+    """
+    if attestation is None or attestation.sandbox_disk_limit_mib != 0:
+        return
+    if claim.get("execution_profile") != ExecutionProfile.UNTRUSTED_KATA_V1:
+        return
+    if isinstance(claim.get("thread_sandbox"), dict):
+        return
+    logger.warning(
+        "agent_untrusted_sandbox_without_disk_quota",
+        extra={
+            "event": "agent_untrusted_sandbox_without_disk_quota",
+            "host": host,
+            "job_id": claim["id"],
+        },
+    )
+
+
 async def _require_owner_agent_access(
     job_store: _WorkerStorage,
     gateway: Any,
@@ -801,6 +830,7 @@ async def worker_claim(
     )
     if claim is None:
         return None
+    _warn_on_unbounded_untrusted_group(claim, body.attestation, host=claiming_host["host"])
     fence = {
         "job_id": claim["id"],
         "attempt_id": claim["attempt_id"],

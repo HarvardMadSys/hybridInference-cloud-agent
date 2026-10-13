@@ -10,6 +10,7 @@ infrastructure remain bootstrap. Runtime identity and service keys are persisted
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import math
 import os
 import re
@@ -46,9 +47,18 @@ class Setting:
     secret: bool = False
     url: bool = False
     minimum_bytes: int = 0
+    #: The floor arrived after deployments had already saved this value. A
+    #: shorter saved or imported value still loads, and startup warns about
+    #: it: refusing it would stop the control plane before the settings page
+    #: that replaces it could open. Every new value is held to the floor.
+    minimum_bytes_new_values_only: bool = False
 
-    def validate(self, value: Any) -> SettingValue:
-        """Return a checked value, raising a message that contains no supplied data."""
+    def validate(self, value: Any, *, saved: bool = False) -> SettingValue:
+        """Return a checked value, raising a message that contains no supplied data.
+
+        ``saved`` marks a value already stored or imported from the
+        environment rather than one an administrator is submitting now.
+        """
         valid = True
         if self.kind == "boolean":
             valid = isinstance(value, bool)
@@ -70,7 +80,12 @@ class Setting:
             valid = isinstance(value, str) and "\x00" not in value
             if valid:
                 valid = len(value) <= (131072 if self.secret else 4096)
-            if valid and value and self.minimum_bytes:
+            if (
+                valid
+                and value
+                and self.minimum_bytes
+                and not (saved and self.minimum_bytes_new_values_only)
+            ):
                 valid = len(value.encode()) >= self.minimum_bytes
             if valid and self.key == "gateway_issuer" and value:
                 valid = value == value.strip() and not any(ord(char) < 32 for char in value)
@@ -127,6 +142,10 @@ class Setting:
                         "sandbox_archive.endpoint",
                     }:
                         valid = valid and parsed.scheme == "https" and not parsed.query
+                    if self.key in _GATEWAY_TRUST_URLS and not saved:
+                        valid = valid and (
+                            parsed.scheme == "https" or _private_host(parsed.hostname or "")
+                        )
                 except (ValueError, ValidationError):
                     valid = False
         if not valid:
@@ -161,6 +180,29 @@ class Setting:
         return result
 
 
+#: Where the control plane sends its gateway dispatch token, fetches the keys
+#: that identity tokens are checked against, and sends a browser to sign in.
+#: A new value must use HTTPS unless it names this machine or a private name
+#: (see :func:`_private_host`). A value saved or imported before this rule
+#: still loads, so an internal plain-HTTP gateway keeps working.
+_GATEWAY_TRUST_URLS = frozenset({"gateway_base_url", "gateway_jwks_url", "gateway_authorize_url"})
+
+
+def _private_host(host: str) -> bool:
+    """Whether plain HTTP to ``host`` stays on this machine or a private network.
+
+    Loopback addresses and ``localhost`` names, and a single-label name such
+    as a Compose service (``local-gateway``), which public DNS cannot answer.
+    """
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return bool(host) and "." not in host
+
+
 def _numeric(
     key: str,
     label: str,
@@ -184,6 +226,12 @@ def _numeric(
         description=description,
     )
 
+
+#: RFC 7518 §3.2's floor for an HS256 key, which the session key has always
+#: been held to. Below it a signing key is brute-forceable offline from any one
+#: value it signed, and every sandbox holds a worker token the control signing
+#: key signed; a bearer secret that short is guessable outright.
+MINIMUM_CREDENTIAL_BYTES = 32
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(
@@ -857,6 +905,8 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CONTROL_TOKEN_SECRET",
         secret=True,
+        minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
+        minimum_bytes_new_values_only=True,
         description="Use a random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
     ),
     Setting(
@@ -893,7 +943,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Execution",
         "",
         env="AGENT_BROKER_URL_ALLOWED_HOSTS",
-        description="Comma-separated exact hostnames allowed to receive the workspace broker credential. Empty retains unrestricted host selection.",
+        description="Comma-separated hostnames, or scheme://host:port origins that also pin the scheme and port, allowed to receive the workspace broker credential. Empty retains unrestricted host selection.",
     ),
     Setting(
         "default_execution_profile",
@@ -1017,7 +1067,7 @@ def _decode(encoded: Mapping[str, Any]) -> dict[str, SettingValue]:
             value = _cipher(setting.key).decrypt(value["ciphertext"])
         elif setting.secret and value:
             raise ValueError(f"Unencrypted stored secret for {setting.label}")
-        values[setting.key] = setting.validate(value)
+        values[setting.key] = setting.validate(value, saved=True)
     _validate_relations(values)
     return values
 
@@ -1055,13 +1105,35 @@ def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
 
 
 def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, Any]) -> None:
-    """Keep stored credential encryption keys stable while validating an atomic update."""
+    """Validate an atomic update against the snapshot it replaces.
+
+    Stored credential encryption keys stay stable. And the gateway URL cannot
+    move away from the dispatch token it was configured with: the token is
+    write-only, but it is sent to whatever URL is saved, so an update that
+    changes the URL must also supply the token again or clear it. A supplied
+    secret is always fresh ciphertext (Fernet's IV is random), so an encoded
+    value equal to the previous one is a token this update did not supply.
+    """
     before, after = _decode(previous), _decode(encoded)
     for key in ("source_control_encryption_key", "compute_encryption_key"):
         if before[key] and before[key] != after[key]:
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
             )
+    if (
+        after["gateway_base_url"]
+        and after["gateway_base_url"] != before["gateway_base_url"]
+        and after["gateway_dispatch_token"]
+        and encoded.get("gateway_dispatch_token") == previous.get("gateway_dispatch_token")
+    ):
+        url, token = (
+            SETTINGS_BY_KEY["gateway_base_url"].label,
+            SETTINGS_BY_KEY["gateway_dispatch_token"].label,
+        )
+        raise ValueError(
+            f"{token} is sent to {url}. To change {url}, clear {token} first and "
+            "enter it again afterwards, or save both in one update."
+        )
 
 
 def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
@@ -1100,7 +1172,7 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
                 elif setting.key == "log_format":
                     normalized = raw.strip().lower()
                     value = normalized if normalized in {"text", "json"} else "text"
-                value = setting.validate(value)
+                value = setting.validate(value, saved=True)
             except (ValueError, OverflowError):
                 raise ValueError(f"Invalid initial configuration for {setting.label}") from None
         values[setting.key] = value
@@ -1307,6 +1379,25 @@ def settings_environment() -> dict[str, str]:
     return result
 
 
+def weak_credentials() -> list[str]:
+    """Name each configured credential shorter than :data:`MINIMUM_CREDENTIAL_BYTES`.
+
+    Names only; no value leaves this function. The control signing key is read
+    from the adopted snapshot, where a value saved before its floor existed may
+    still be short. ``ADMIN_TOKEN`` is read from the process environment, the
+    only place it lives: it is not refused, because a deployment's recovery
+    door closing on upgrade would be a silent lock-out, but it is reported.
+    """
+    weak = []
+    control = text_setting("control_signing_secret")
+    if control and len(control.encode()) < MINIMUM_CREDENTIAL_BYTES:
+        weak.append("AGENT_CONTROL_TOKEN_SECRET")
+    admin = (os.environ.get("ADMIN_TOKEN") or "").strip()
+    if admin and len(admin.encode()) < MINIMUM_CREDENTIAL_BYTES:
+        weak.append("ADMIN_TOKEN")
+    return weak
+
+
 async def initialize_settings(repository: SettingsRepository, *, seed: bool = True) -> None:
     """Seed once, then adopt the database rather than reimporting the environment."""
     revision, encoded = await repository.read_settings()
@@ -1329,6 +1420,16 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
                     "The main control plane must initialize admin settings before the relay starts"
                 )
     apply_settings(revision, encoded)
+    from cloud_agent.logging_utils import get_logger
+
+    for name in weak_credentials():
+        get_logger(__name__).warning(
+            "agent_weak_credential %s is shorter than %d bytes; "
+            "replace it with a value from `openssl rand -base64 32`",
+            name,
+            MINIMUM_CREDENTIAL_BYTES,
+            extra={"event": "agent_weak_credential", "credential": name},
+        )
 
 
 async def synchronize_settings(repository: SettingsRepository) -> None:

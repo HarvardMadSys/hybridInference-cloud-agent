@@ -4,7 +4,10 @@ import { useLocale } from '@/components/providers';
 import type { MemoryView } from './MemoryPanel';
 import { ChevronIcon } from './icons';
 
-/** The derived profile and suggestions, folded away below the saved memories. */
+/**
+ * The derived profile, folded away below the saved memories. Project memory also
+ * lists its suggestions; user suggestions live on the homepage.
+ */
 export function MemoryDetails({
   view,
   project,
@@ -26,17 +29,19 @@ export function MemoryDetails({
     <details className="group mt-4 rounded-lg border border-border">
       <summary className="ui-focus-ring flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg px-3 text-sm font-medium text-foreground hover:bg-surface-hover [&::-webkit-details-marker]:hidden">
         <ChevronIcon className="h-4 w-4 shrink-0 text-muted transition-transform group-open:rotate-90" />
-        {t('settings.memory.details')}
+        {t(project ? 'settings.projectMemory.details' : 'settings.memory.portrait')}
       </summary>
-      <div className="grid gap-5 border-t border-border p-3 sm:grid-cols-2">
+      <div className={`grid gap-5 border-t border-border p-3 ${project ? 'sm:grid-cols-2' : ''}`}>
         <div>
-          <h3 className="text-sm font-semibold text-foreground">
-            {t(project ? 'settings.projectMemory.portrait' : 'settings.memory.portrait')}
-          </h3>
+          {project ? (
+            <h3 className="mb-2 text-sm font-semibold text-foreground">
+              {t('settings.projectMemory.portrait')}
+            </h3>
+          ) : null}
           {portrait.summary || shownFacts.length ? (
             <>
               {portrait.summary ? (
-                <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-muted">
+                <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted">
                   {portrait.summary}
                 </p>
               ) : null}
@@ -52,34 +57,36 @@ export function MemoryDetails({
               ) : null}
             </>
           ) : (
-            <p className="mt-2 text-sm text-muted">{t('settings.memory.emptyPortrait')}</p>
+            <p className="text-sm text-muted">{t('settings.memory.emptyPortrait')}</p>
           )}
         </div>
 
-        <div>
-          <h3 className="text-sm font-semibold text-foreground">
-            {t('settings.memory.suggestions')}
-          </h3>
-          {view.suggestions.length ? (
-            <ul className="mt-2 space-y-3">
-              {view.suggestions.map((suggestion) => (
-                <li key={suggestion.id}>
-                  <p className="break-words text-sm font-medium text-foreground">
-                    {suggestion.title}
-                  </p>
-                  <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-muted">
-                    {suggestion.reason}
-                  </p>
-                  <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
-                    {suggestion.action}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-2 text-sm text-muted">{t('settings.memory.emptySuggestions')}</p>
-          )}
-        </div>
+        {project ? (
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">
+              {t('settings.memory.suggestions')}
+            </h3>
+            {view.suggestions.length ? (
+              <ul className="mt-2 space-y-3">
+                {view.suggestions.map((suggestion) => (
+                  <li key={suggestion.id}>
+                    <p className="break-words text-sm font-medium text-foreground">
+                      {suggestion.title}
+                    </p>
+                    <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-muted">
+                      {suggestion.reason}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
+                      {suggestion.action}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-2 text-sm text-muted">{t('settings.memory.emptySuggestions')}</p>
+            )}
+          </div>
+        ) : null}
       </div>
     </details>
   );

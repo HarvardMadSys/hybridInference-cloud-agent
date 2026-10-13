@@ -19,8 +19,10 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_WORKDIR,
     CLAUDE_SHARED_PROJECTS_DIR,
+    LEGACY_MEMBER_HOME_COLLECTIONS,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
+    PRIVATE_MEMBER_HOME_COLLECTIONS,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
@@ -44,6 +46,7 @@ from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_d
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:
+    import subprocess
     from collections.abc import Iterator
 
 #: The dialect a resident transport is speaking; the transport only reads the
@@ -61,27 +64,90 @@ _SessionRuntimeT = TypeVar("_SessionRuntimeT", bound=DialectRuntime)
 # point those CLIs at one common provider home. The workspace remains shared;
 # the state captured at the native fork boundary is copied into the child's
 # private home before the two processes resume independently.
-PRIVATE_MEMBER_STATE_ROOTS = {
-    "codex": f"{CHAT_STATE_DIR}/codex-members",
-    "opencode": f"{CHAT_STATE_DIR}/opencode-members",
-    "kilo": f"{CHAT_STATE_DIR}/kilo-members",
-}
+PRIVATE_MEMBER_STATE_ROOTS = dict(
+    zip(("codex", "opencode", "kilo"), PRIVATE_MEMBER_HOME_COLLECTIONS, strict=True)
+)
+_LEGACY_MEMBER_STATE_ROOTS = dict(
+    zip(("codex", "opencode", "kilo"), LEGACY_MEMBER_HOME_COLLECTIONS, strict=True)
+)
+
+#: Exit status of a member script that found its collection untrusted. The
+#: caller secures the collections as the sandbox user and asks once more.
+_UNTRUSTED_COLLECTION_EXIT = 75
 
 # Each home is private to its member UID, not only distinct: its config and
 # plugins run at every process start as that member, with that member's grant
-# and MCP token. A collection stays group-writable so every member can add its
-# own home, but the home itself is created mode 0700 and an older release's
-# setgid, group-writable home is narrowed to that on the member's next start.
-# A home that is a symlink or belongs to another UID was planted by someone
-# else and is refused rather than adopted. Shell prologue; expects ``$target``.
-_PRIVATE_MEMBER_HOME_PROLOGUE = (
-    'collection=${target%/*}; (umask 0007; mkdir -p -- "$collection"); '
-    'umask 0077; mkdir -p -- "$target"; '
+# and MCP token. Mode 0700 keeps a sibling out of the home; the collection
+# around it keeps a sibling from renaming the home away and putting its own
+# tree at the same path between this check and the CLI's start. Every path
+# component is therefore checked first: /agent-state and the collection must be
+# sticky and owned by the sandbox user (``$trusted``), so no member UID can
+# rename an entry it does not own (see
+# ChatSandboxManager.ensure_private_member_collections). A home that is a
+# symlink or belongs to another UID was put there by someone else and is
+# refused rather than adopted. A sibling can still squat on an unused name,
+# which only refuses that start. Shell prologue; expects ``$target`` and
+# ``$trusted``.
+_PRIVATE_MEMBER_HOME_CHECK = (
+    "collection=${target%/*}; root=${collection%/*}; "
+    'if test -z "$(find "$root" -maxdepth 0 -type d -uid "$trusted" -perm -1000)" '
+    '|| test -z "$(find "$collection" -maxdepth 0 -type d -uid "$trusted" '
+    '-perm -3770 ! -perm /0007)"; then '
+    'echo "member provider collection is not trusted" >&2; '
+    f"exit {_UNTRUSTED_COLLECTION_EXIT}; fi; "
+    "umask 0077; "
+)
+# An earlier release kept the home in a member-created, group-writable
+# collection, where a sibling could rename or replace it at any time. The
+# member moves whatever is at that path into the trusted collection once, and
+# only then judges it, where no sibling can swap it any more; a moved home is
+# also narrowed to the member alone. Expects ``$legacy`` as well.
+_PRIVATE_MEMBER_HOME_MIGRATE = (
+    "migrated=; "
+    'if test ! -e "$target" && test ! -L "$target" '
+    '&& { test -e "$legacy" || test -L "$legacy"; }; then '
+    'mv -T -- "$legacy" "$target"; migrated=1; fi; '
+)
+_PRIVATE_MEMBER_HOME_CLAIM = (
+    'mkdir -p -- "$target"; '
     'if test -L "$target" || test ! -d "$target" '
     '|| test "$(stat -c %u -- "$target")" != "$(id -u)"; then '
     'echo "member provider home is not owned by this member" >&2; exit 1; fi; '
     'chmod u=rwx,go=,g-s -- "$target"; '
 )
+# Judged on every start, not only after a move: whether a home is adopted must
+# never depend on an earlier start having managed to set a bad one aside. Every
+# legitimate writer of a provider home runs as its member -- the CLI, plugin
+# installation, lock cleanup, and the fork copy's unpack -- so an entry owned
+# by any other UID was put there by someone else (through an earlier release's
+# group-writable home). Such a home is refused, and first renamed to an
+# unpredictable name so the next start can begin clean: a sibling can create
+# entries in the sticky collection, and a guessable name it had taken would
+# make the rename fail. If the rename still fails, the start is refused all the
+# same. A walk that cannot be completed is refused too. The walk stops at the
+# first foreign entry; a clean home costs one lstat per entry.
+_PRIVATE_MEMBER_HOME_VERIFY = (
+    'foreign=$(find "$target" -xdev ! -uid "$(id -u)" -print -quit); '
+    'if test -n "$foreign"; then '
+    "attempt=0; "
+    'until aside=$(mktemp -u -- "$target.refused-XXXXXXXXXXXXXXXX") '
+    '&& mv -T -- "$target" "$aside" 2>/dev/null; do '
+    'attempt=$((attempt + 1)); test "$attempt" -lt 3 || break; done; '
+    'echo "member provider home holds another UID files" >&2; exit 1; fi; '
+)
+_PRIVATE_MEMBER_HOME_NARROW_MIGRATED = (
+    'if test -n "$migrated"; then '
+    'find "$target" -xdev -mindepth 1 ! -type l -exec chmod go=,g-s -- {} +; fi; '
+)
+_PRIVATE_MEMBER_HOME_PROLOGUE = (
+    _PRIVATE_MEMBER_HOME_CHECK
+    + _PRIVATE_MEMBER_HOME_MIGRATE
+    + _PRIVATE_MEMBER_HOME_CLAIM
+    + _PRIVATE_MEMBER_HOME_VERIFY
+    + _PRIVATE_MEMBER_HOME_NARROW_MIGRATED
+)
+#: For a home that has no earlier location: a fork child's.
+_NEW_PRIVATE_MEMBER_HOME_PROLOGUE = _PRIVATE_MEMBER_HOME_CHECK + _PRIVATE_MEMBER_HOME_CLAIM
 
 # Host-owned exactly-once receipts must not live inside a provider home. Some
 # CLIs enumerate their whole state root, and the deliberately unreadable
@@ -391,6 +457,12 @@ class ResidentTransportFactory:
         member_key = hashlib.sha256(launch.thread_id.encode("utf-8")).hexdigest()
         return f"{root}/{member_key}"
 
+    @staticmethod
+    def _legacy_member_state_dir(launch: ResidentLaunch) -> str:
+        """Where an earlier release kept this member's provider home."""
+        member_key = hashlib.sha256(launch.thread_id.encode("utf-8")).hexdigest()
+        return f"{_LEGACY_MEMBER_STATE_ROOTS[launch.runtime_id]}/{member_key}"
+
     def _prepare_member_state(
         self,
         spec: ChatSandboxSpec,
@@ -398,10 +470,22 @@ class ResidentTransportFactory:
         state_dir: str,
     ) -> None:
         """Create the member-owned provider home used by this shared group."""
-        if launch.runtime_id == "codex":
-            self._prepare_codex_member_state(spec, launch, state_dir)
-            return
-        self._prepare_http_member_state(spec, launch, state_dir)
+        prepare = (
+            self._prepare_codex_member_state
+            if launch.runtime_id == "codex"
+            else self._prepare_http_member_state
+        )
+        result = prepare(spec, launch, state_dir)
+        if result.returncode == _UNTRUSTED_COLLECTION_EXIT:
+            # A group created by an earlier release, or a collection name a
+            # member squatted on before the sandbox user secured it.
+            self._manager.ensure_private_member_collections(spec)
+            result = prepare(spec, launch, state_dir)
+        if result.returncode != 0:
+            raise DriverError(
+                f"{launch.runtime_id} member state could not be prepared: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
 
     def _prepare_claude_member_state(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
         """Share Claude native history while keeping launch input slot-private.
@@ -467,14 +551,14 @@ class ResidentTransportFactory:
         spec: ChatSandboxSpec,
         launch: ResidentLaunch,
         state_dir: str,
-    ) -> None:
+    ) -> subprocess.CompletedProcess[bytes]:
         """Create an isolated OpenCode/Kilo XDG root for one membership."""
         runtime_id = launch.runtime_id
         if runtime_id not in {"opencode", "kilo"}:
             raise DriverError(f"runtime {runtime_id!r} has no private HTTP state home")
         uid = MEMBER_UID_BASE + launch.slot_id
         script = (
-            'set -eu; target="$1"; runtime="$2"; '
+            'set -eu; target="$1"; runtime="$2"; legacy="$3"; trusted="$4"; '
             'marker="$target/.freeinference-member-state-v1"; '
             + _PRIVATE_MEMBER_HOME_PROLOGUE
             + 'if test ! -e "$marker"; then '
@@ -482,7 +566,7 @@ class ResidentTransportFactory:
             '  : > "$marker"; '
             "fi"
         )
-        result = self._manager.exec_capture(
+        return self._manager.exec_capture(
             spec,
             [
                 "/bin/sh",
@@ -491,28 +575,25 @@ class ResidentTransportFactory:
                 "sh",
                 state_dir,
                 runtime_id,
+                self._legacy_member_state_dir(launch),
+                str(self._manager.backend.uid),
             ],
             workdir="/",
             timeout_s=120,
             user_uid=uid,
             user_gid=self._manager.backend.gid,
         )
-        if result.returncode != 0:
-            raise DriverError(
-                f"{runtime_id} member state could not be prepared: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
 
     def _prepare_codex_member_state(
         self,
         spec: ChatSandboxSpec,
         launch: ResidentLaunch,
         state_dir: str,
-    ) -> None:
+    ) -> subprocess.CompletedProcess[bytes]:
         """Create one UID-owned Codex home from the image bootstrap config."""
         uid = MEMBER_UID_BASE + launch.slot_id
         script = (
-            'set -eu; source="$1"; target="$2"; '
+            'set -eu; source="$1"; target="$2"; legacy="$3"; trusted="$4"; '
             'marker="$target/.freeinference-member-state-v1"; '
             + _PRIVATE_MEMBER_HOME_PROLOGUE
             + 'if test ! -e "$marker"; then '
@@ -522,7 +603,7 @@ class ResidentTransportFactory:
             '  mkdir -p -- "$target/tmp" "$target/.tmp"; : > "$marker"; '
             "fi"
         )
-        result = self._manager.exec_capture(
+        return self._manager.exec_capture(
             spec,
             [
                 "/bin/sh",
@@ -531,17 +612,14 @@ class ResidentTransportFactory:
                 "sh",
                 CHAT_STATE_DIR,
                 state_dir,
+                self._legacy_member_state_dir(launch),
+                str(self._manager.backend.uid),
             ],
             workdir="/",
             timeout_s=120,
             user_uid=uid,
             user_gid=self._manager.backend.gid,
         )
-        if result.returncode != 0:
-            raise DriverError(
-                "Codex member state could not be prepared: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
 
     def _clone_private_member_state(
         self,
@@ -571,8 +649,8 @@ class ResidentTransportFactory:
             'exec tar --create --file=- --files-from=/dev/null "$@"'
         )
         unpack = (
-            'set -eu; target="$1"; runtime="$2"; '
-            + _PRIVATE_MEMBER_HOME_PROLOGUE
+            'set -eu; target="$1"; runtime="$2"; trusted="$3"; '
+            + _NEW_PRIVATE_MEMBER_HOME_PROLOGUE
             + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             'tar --extract --file=- --directory="$target" --no-same-owner '
             "--no-same-permissions; "
@@ -582,11 +660,22 @@ class ResidentTransportFactory:
             "esac; "
             ': > "$target/.freeinference-member-state-v1"'
         )
+        # The source's open already secured the collections; this also covers
+        # a fork recovered by a broker that has not opened the source yet.
+        self._manager.ensure_private_member_collections(spec)
         source, target = self._manager.pipe_member_exec(
             spec,
             source_argv=["/bin/sh", "-c", archive, "sh", source_dir],
             source_uid=MEMBER_UID_BASE + source_launch.slot_id,
-            target_argv=["/bin/sh", "-c", unpack, "sh", target_dir, runtime_id],
+            target_argv=[
+                "/bin/sh",
+                "-c",
+                unpack,
+                "sh",
+                target_dir,
+                runtime_id,
+                str(self._manager.backend.uid),
+            ],
             target_uid=MEMBER_UID_BASE + target_launch.slot_id,
             user_gid=self._manager.backend.gid,
             timeout_s=120,

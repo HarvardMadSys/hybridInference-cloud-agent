@@ -228,8 +228,69 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.dateOtherYear': '{year}/{month}/{day}',
 
   // ── Settings ────────────────────────────────────────────────────────────
-  'settings.title': '设置',
-  'settings.description': '管理你的连接、技能、记忆和通知。',
+  'home.suggestions.title': '下一次请求的改进建议',
+  'home.suggestions.description':
+    '根据你近期在各项目中的活动，提供让请求更清晰、更有效的实用建议。',
+  'home.suggestions.loading': '正在加载建议…',
+  'home.suggestions.error': '无法加载建议，你仍然可以开始任务。',
+  'home.suggestions.empty': '当任务活动提供足够背景时，系统会生成建议。',
+  'home.suggestions.retry': '重试建议',
+  'home.memorySettings': '管理用户记忆',
+  'home.memoryPaused':
+    '已暂停自动建立用户记忆。现有建议与头像主题会保留，直到你在设置中启用更新或清除记忆。',
+  'home.avatar.title': '头像是如何生成的',
+  'home.avatar.generation':
+    '宝可梦头像由多层插画图形组合而成，无需照片或图像生成模型。栖息地与工作徽章来自对你在各项目中最近最多 50 条符合条件的请求进行英文关键词匹配。',
+  'home.avatar.character': '你的宝可梦伙伴',
+  'home.avatar.characterDescription':
+    '账号会分配皮卡丘、妙蛙种子、小火龙、杰尼龟、伊布、耿鬼或胖丁，并保持固定的姿态与表情。轮廓、耳朵、尾巴与面容逐层组合，保留宝可梦熟悉的配色。',
+  'home.avatar.theme': '栖息地配色',
+  'home.avatar.themeDescription':
+    '背景、光环与平台的配色反映最常出现的工作领域，为你的伙伴构建一个小小的栖息地。',
+  'home.avatar.badges': '工作徽章轨道',
+  'home.avatar.badgesDescription':
+    '右上角最大的徽章表示最常见的工作领域，左侧徽章表示第二常见的领域，下方的小徽章表示其他近期领域。它们反映工作主题，不表示技能水平或成就。',
+  'home.avatar.default': '默认栖息地',
+  'home.avatar.defaultDescription':
+    '未识别到工作领域时，伙伴使用账号固定的默认栖息地与装饰细节，不显示工作徽章。',
+  'home.avatar.legend': '工作领域的配色与徽章',
+  'home.avatar.legend.backend': '代码括号 · 蓝色 · 后端与 API',
+  'home.avatar.legend.frontend': '窗口 · 玫瑰色 · 前端与界面',
+  'home.avatar.legend.testing': '对勾 · 绿色 · 测试',
+  'home.avatar.legend.debugging': '虫子 · 金色 · 可靠性与调试',
+  'home.avatar.legend.security': '盾牌 · 紫色 · 安全',
+  'home.avatar.legend.data': '数据库 · 青色 · 数据与存储',
+  'home.avatar.legend.deployment': '云朵 · 桃色 · 部署与基础设施',
+  'home.avatar.controls':
+    '关闭自动建立用户记忆会暂停栖息地与徽章更新。清除用户记忆会恢复默认栖息地。两项操作都会保留同一只宝可梦及其姿态与表情，可在用户记忆设置中管理。',
+
+  'settings.title': '我的设置',
+  'settings.description': '管理你的个人资料、连接、技能、记忆和通知。',
+  'settings.profile.title': '个人资料',
+  'settings.profile.email': '邮箱',
+  'settings.profile.image': '头像',
+  'settings.profile.imageAlt': '你的头像',
+  'settings.profile.upload': '上传图片',
+  'settings.profile.remove': '移除头像',
+  'settings.profile.imageHelp': '支持 PNG、JPEG 或 WebP，最大 2 MB',
+  'settings.profile.firstName': '名',
+  'settings.profile.lastName': '姓',
+  'settings.profile.save': '保存',
+  'settings.profile.saving': '正在保存…',
+  'settings.profile.saved': '个人资料已保存。',
+  'settings.profile.loading': '正在加载个人资料…',
+  'settings.profile.reading': '正在读取图片…',
+  'settings.profile.signIn': '登录后管理你的个人资料。',
+  'settings.profile.retry': '重试',
+  'settings.profile.reload': '重新加载资料',
+  'settings.profile.error.load': '无法加载个人资料，请重试。',
+  'settings.profile.error.save': '保存失败，已保留你的修改，请重试。',
+  'settings.profile.error.conflict':
+    '个人资料已在其他地方更新。请重新加载并检查后再保存；重新加载将替换尚未保存的修改。',
+  'settings.profile.imageError.type': '请选择 PNG、JPEG 或 WebP 图片。',
+  'settings.profile.imageError.size': '请选择不超过 2 MB 的非空图片。',
+  'settings.profile.imageError.read':
+    '无法使用这张图片，请选择有效的 PNG、JPEG 或 WebP，且像素总数不超过 1600 万。',
   'settings.memory.title': '记忆',
   'settings.memory.description': 'Agent 会从你的请求中学习偏好和项目背景，并用于之后的任务。',
   'settings.memory.tabs': '记忆范围',
@@ -265,7 +326,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.memory.memories': '已保存的记忆',
   'settings.memory.bounds': '{count}/12 条 · {characters}/2,400 字符 · 最多 3 条适用于所有项目',
   'settings.memory.emptyMemory': '还没有记忆。',
-  'settings.memory.details': '画像与建议',
   'settings.memory.portrait': '近期工作',
   'settings.memory.projects': '项目',
   'settings.memory.focusAreas': '关注领域',
@@ -316,6 +376,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.projectMemory.confirmDescription':
     '将删除此仓库的记忆和建议，过去的请求不会被重新学习。用户记忆和其他仓库不受影响。',
   'settings.projectMemory.portrait': '项目画像',
+  'settings.projectMemory.details': '画像与建议',
   'settings.notifications.title': '通知',
   'settings.notifications.description':
     'Agent 提问或完成一轮任务时接收浏览器通知。请保持应用打开以接收通知。',
@@ -386,6 +447,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'conversation.executionHistory': '执行记录（{count}）',
   'conversation.viewingExecution': '正在查看第 {number} 次执行',
   'conversation.executionHistoryHint': '选择一次历史执行，查看当时的活动记录。',
+  'conversation.markdownImage': '图片：{alt}',
+  'conversation.markdownImageUntitled': '图片',
 
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': '已归档会话',
@@ -462,8 +525,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'archive.order': '按归档时间从近到远',
 
   // ── Composer ────────────────────────────────────────────────────────────
-  'composer.avatarAlt': '为你自动生成的插画头像',
-  'composer.avatarDescription': '头像的基础角色保持不变，配色与细节会随近期工作变化。',
+  'composer.avatarAlt': '你的宝可梦伙伴头像',
+  'composer.avatarDescription': '宝可梦伙伴保持不变，栖息地与环绕徽章会随近期工作变化。',
   'composer.heading': '让 Agent 做什么?',
   'composer.subheading': '在隔离沙箱里运行。',
   'composer.subheadingFirstVisit':

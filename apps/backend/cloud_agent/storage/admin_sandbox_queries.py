@@ -62,7 +62,7 @@ class AdminSandboxQueries:
                 """
                 WITH page AS (
                     SELECT g.id, g.generation, g.stop_requested_at, g.archived_at,
-                           g.deletion_state, g.deletion_request_id, g.deletion_requested_at,
+                           g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                            g.deletion_archive_key, g.deletion_archive_version_id,
                            g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
                            g.origin_thread_id, g.user_id, g.host,
@@ -80,7 +80,7 @@ class AdminSandboxQueries:
                     ORDER BY g.id LIMIT $2
                 )
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
-                       g.deletion_state, g.deletion_request_id, g.deletion_requested_at,
+                       g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
                        g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
@@ -146,7 +146,7 @@ class AdminSandboxQueries:
             row = await conn.fetchrow(
                 """
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
-                       g.deletion_state, g.deletion_request_id, g.deletion_requested_at,
+                       g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
                        g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
@@ -219,7 +219,7 @@ class AdminSandboxQueries:
             row = await conn.fetchrow(
                 """
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
-                       g.deletion_state, g.deletion_request_id, g.deletion_requested_at,
+                       g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
                        g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')

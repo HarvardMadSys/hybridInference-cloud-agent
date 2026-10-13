@@ -12,6 +12,7 @@ import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
@@ -67,12 +68,15 @@ class PostgresSandboxRepository:
         archived: bool,
         actor_id: str,
         admin_ip: str,
+        allow_stale_host: bool = False,
     ) -> str:
         """Audit a reviewed inventory removal or restore without deleting state.
 
-        Only stopped, quiescent groups may be hidden. A new turn or running
-        host observation makes a removed group visible again automatically.
-        Native sessions, container writable layers and ledger rows survive.
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
@@ -101,8 +105,28 @@ class PostgresSandboxRepository:
                 return "accepted"
             if group["deletion_state"] in {"pending", "archived"}:
                 return "busy"
+            stale_host_removal = archived and allow_stale_host
             if archived:
-                if group["state"] != "stopped" and group["deletion_state"] != "deleted":
+                if stale_host_removal:
+                    # This is a reversible visibility change, so do not add
+                    # host row locks to the lifecycle lock order. A matching
+                    # running observation restores visibility if the host
+                    # returns while or just after this transaction commits.
+                    host_online = await conn.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM agent_runner_hosts
+                            WHERE host = $1
+                              AND last_heartbeat_at >= clock_timestamp()
+                                  - make_interval(secs => $2)
+                        )
+                        """,
+                        group["host"],
+                        FRESH_AFTER_SECONDS,
+                    )
+                    if host_online:
+                        return "host_online"
+                elif group["state"] != "stopped" and group["deletion_state"] != "deleted":
                     return "not_stopped"
                 busy = await conn.fetchval(
                     """
@@ -137,7 +161,8 @@ class PostgresSandboxRepository:
                 actor_id=actor_id,
                 from_state="visible" if archived else "archived",
                 to_state="archived" if archived else "visible",
-                details={"container_present": container_id is not None},
+                details={"container_present": container_id is not None}
+                | ({"stale_host_removal": True} if stale_host_removal else {}),
             )
             await conn.execute(
                 "UPDATE agent_sandboxes "
@@ -163,6 +188,7 @@ class PostgresSandboxRepository:
                         "generation": generation,
                         "container_id": container_id,
                     }
+                    | ({"stale_host_removal": True} if stale_host_removal else {})
                 ),
             )
         return "accepted"
@@ -177,14 +203,16 @@ class PostgresSandboxRepository:
         actor_id: str,
         admin_ip: str,
         broker_confirmed_stopped: bool = False,
+        discard: bool = False,
     ) -> str:
-        """Fence an idle stopped sandbox for verified S3 archival and deletion.
+        """Fence an idle stopped sandbox for deletion.
 
-        A durable request closes admission before host export. No native state
-        or ledger row is removed; only a verified host receipt may finalize
-        physical container deletion and mark its native context lost. A stale
-        RUNNING row may be repaired only after the API proves the exact host
-        container is stopped and idle.
+        A durable request closes admission before the host removes Docker. The
+        default path exports and verifies an S3 archive first. ``discard``
+        removes the exact stopped container without uploading it. No native
+        state or ledger row is removed until the host confirms that removal.
+        A stale RUNNING row may be repaired only after the API proves the exact
+        host container is stopped and idle.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
@@ -254,7 +282,7 @@ class PostgresSandboxRepository:
                 actor_id=actor_id,
                 from_state=str(group["deletion_state"]),
                 to_state="pending",
-                details={"request_id": request_id},
+                details={"request_id": request_id, "discard": discard},
             )
             await conn.execute(
                 """
@@ -273,6 +301,7 @@ class PostgresSandboxRepository:
                     deletion_last_activity_at = last_activity_at,
                     deletion_claim_token = NULL, deletion_claim_expires_at = NULL,
                     deletion_cleanup_required = FALSE, deletion_cleanup_archive_key = NULL,
+                    deletion_discard = $4,
                     deletion_archive_key = NULL, deletion_archive_version_id = NULL,
                     deletion_sha256 = NULL, deletion_size_bytes = NULL, deletion_error = NULL,
                     updated_at = NOW()
@@ -281,6 +310,7 @@ class PostgresSandboxRepository:
                 sandbox_id,
                 request_id,
                 forced_stopped_recovery,
+                discard,
             )
             await self._audit_admin_deletion(
                 conn,
@@ -320,7 +350,7 @@ class PostgresSandboxRepository:
                 FROM due WHERE g.id = due.id
                 RETURNING g.id, g.user_id, g.origin_thread_id, g.host, g.generation,
                           g.container_id, g.last_activity_at, g.deletion_request_id,
-                          g.deletion_state, g.deletion_claim_token,
+                          g.deletion_state, g.deletion_discard, g.deletion_claim_token,
                           g.deletion_cleanup_required, g.deletion_cleanup_archive_key,
                           g.deletion_archive_key, g.deletion_archive_version_id,
                           g.deletion_sha256, g.deletion_size_bytes
@@ -536,6 +566,79 @@ class PostgresSandboxRepository:
                 sha256=group["deletion_sha256"],
                 size_bytes=group["deletion_size_bytes"],
                 archive_version_id=group["deletion_archive_version_id"],
+            )
+        return True
+
+    async def complete_admin_sandbox_discard(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> bool:
+        """Mark native context lost after the host removes a container with no archive."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetch(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await self._locked_admin_deletion(
+                conn, sandbox_id, request_id, claim_token, generation, container_id
+            )
+            if group is None:
+                return False
+            if group["deletion_state"] == "deleted":
+                return bool(group["deletion_discard"])
+            if group["deletion_state"] != "pending" or not group["deletion_discard"]:
+                return False
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="deletion_completed",
+                source="system",
+                actor_id="sandbox-deletion-worker",
+                from_state="pending",
+                to_state="deleted",
+                details={"request_id": request_id, "discard": True},
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET state = 'lost', deletion_state = 'deleted', deleted_at = NOW(),
+                    deletion_error = NULL, idle_deadline = NULL, stop_requested_at = NULL,
+                    deletion_retry_at = NULL, deletion_claim_expires_at = NULL,
+                    resource_snapshot = NULL, resource_sampled_at = NULL,
+                    resource_received_at = NULL, terminal_count = NULL,
+                    terminal_count_observed_at = NULL, updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET native_state = 'lost', context_status = 'lost', resident_state = 'lost',
+                    updated_at = NOW()
+                WHERE sandbox_id = $1
+                """,
+                sandbox_id,
+            )
+            for member in members:
+                await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.discarded",
             )
         return True
 
@@ -1380,6 +1483,11 @@ class PostgresSandboxRepository:
         base_sha: str | None = None,
     ) -> dict[str, Any] | None:
         """Close one turn boundary and arm deactivation without deleting state."""
+        # The runner canonicalizes observed locators the same way. Repeat it at
+        # the repository boundary for non-HTTP callers and rolling clients.
+        native_session_id = (
+            native_session_id.strip() if native_session_id is not None else None
+        ) or None
         async with self._pool.acquire() as conn, conn.transaction():
             # Attempt first, then thread -> job -> membership. Terminal
             # transition and the reaper use the same outer order; taking the
@@ -1428,7 +1536,10 @@ class PostgresSandboxRepository:
                   AND m.active_attempt_id IS NULL
                   AND m.admitted_job_id = $7 AND m.last_settled_job_id = $7
                   AND m.native_state = 'ready' AND m.context_status = $8
-                  AND ($9::text IS NULL OR m.native_session_id = $9)
+                  AND (
+                        $9::text IS NULL
+                        OR BTRIM(m.native_session_id) = $9
+                  )
                   AND a.lease_generation = $3 AND a.job_id = $7
                   AND j.thread_id = m.thread_id AND j.current_attempt_id = a.id
                   AND j.state = 'running'
@@ -1726,7 +1837,13 @@ class PostgresSandboxRepository:
                 SET active_attempt_id = NULL,
                     context_status = CASE WHEN $6 THEN 'lost' ELSE m.context_status END,
                     native_state = CASE WHEN $6 THEN 'lost' ELSE m.native_state END,
-                    resident_state = CASE WHEN $6 THEN 'lost' ELSE 'restarting' END,
+                    resident_state = CASE
+                        WHEN $6 THEN 'lost'
+                        WHEN m.native_session_id IS NULL
+                             OR m.native_session_id !~ '[^[:space:]]'
+                            THEN 'stopped'
+                        ELSE 'restarting'
+                    END,
                     last_error = $7, updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
@@ -2224,6 +2341,20 @@ class PostgresSandboxRepository:
                     sandbox_id,
                     running,
                 )
+                if recovered == "stopped":
+                    await conn.execute(
+                        """
+                        UPDATE agent_thread_sandbox_memberships
+                        SET resident_state = CASE
+                                WHEN native_state = 'lost' OR context_status = 'lost'
+                                    THEN 'lost'
+                                ELSE 'stopped'
+                            END,
+                            updated_at = NOW()
+                        WHERE sandbox_id = $1
+                        """,
+                        sandbox_id,
+                    )
                 return None if recovered is None else str(recovered)
             if running:
                 if group["stop_requested_at"] is not None:
@@ -2270,7 +2401,7 @@ class PostgresSandboxRepository:
                 SET state = 'stopped', idle_deadline = NULL,
                     stop_requested_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND (
-                    state IN ('stopping', 'stopped_dirty', 'lost')
+                    state IN ('stopped', 'stopping', 'stopped_dirty', 'lost')
                     OR (state = 'running' AND idle_deadline IS NOT NULL
                         AND idle_deadline <= clock_timestamp())
                 )
@@ -2284,13 +2415,18 @@ class PostgresSandboxRepository:
                 """
                 UPDATE agent_thread_sandbox_memberships
                 SET resident_state = CASE
-                        WHEN native_state = 'lost' THEN 'lost' ELSE 'stopped' END,
+                        WHEN native_state = 'lost' OR context_status = 'lost'
+                            THEN 'lost'
+                        ELSE 'stopped'
+                    END,
                     updated_at = NOW()
                 WHERE sandbox_id = $1
                 """,
                 sandbox_id,
             )
-            return None if row is None else str(row["state"])
+            # A repeated stopped observation may still repair stale member
+            # state, but it does not ask the host to perform another stop.
+            return None if group["state"] == "stopped" else str(row["state"])
 
     @staticmethod
     async def _record_terminal_observation(

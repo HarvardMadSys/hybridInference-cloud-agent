@@ -21,7 +21,7 @@ export function DeploymentFooter() {
   const deployedTimeEastern = deployedAt ? easternTime.format(new Date(deployedAt)) : null;
 
   return (
-    <footer className="flex shrink-0 flex-wrap items-center justify-center gap-x-4 gap-y-1 border-t border-gray-200/80 bg-gray-50 px-4 py-2 text-xs text-gray-500 dark:border-white/10 dark:bg-gray-950 dark:text-gray-400">
+    <footer className="flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-0.5 border-t border-border bg-surface-muted px-3 py-1 text-[11px] text-muted">
       <a
         href="https://seas.harvard.edu/"
         target="_blank"

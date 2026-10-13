@@ -234,9 +234,72 @@ export const en = {
   'sidebar.dateThisYear': '{month}/{day}',
   'sidebar.dateOtherYear': '{month}/{day}/{year}',
 
+  // ── Homepage profile ────────────────────────────────────────────────────
+  'home.suggestions.title': 'Suggestions for your next request',
+  'home.suggestions.description':
+    'Practical ways to improve your requests, based on your recent activity across projects.',
+  'home.suggestions.loading': 'Loading your suggestions…',
+  'home.suggestions.error': 'Could not load your suggestions. You can still start a task.',
+  'home.suggestions.empty': 'Suggestions will appear when your activity provides enough context.',
+  'home.suggestions.retry': 'Retry suggestions',
+  'home.memorySettings': 'Manage user memory',
+  'home.memoryPaused':
+    'Automatic user memory is paused. Existing suggestions and your avatar theme are kept until you enable updates or clear memory in settings.',
+  'home.avatar.title': 'How your avatar is generated',
+  'home.avatar.generation':
+    'Your Pokémon avatar is assembled from layered illustrated shapes, without a photo or an image-generation model. Its habitat and work badges come from English keywords in up to your 50 most recent eligible requests across projects.',
+  'home.avatar.character': 'Your Pokémon companion',
+  'home.avatar.characterDescription':
+    'Your account gets Pikachu, Bulbasaur, Charmander, Squirtle, Eevee, Gengar, or Jigglypuff with a consistent pose and expression. Silhouette, ears, tail, and face are layered together; familiar Pokémon colors stay the same.',
+  'home.avatar.theme': 'Habitat palette',
+  'home.avatar.themeDescription':
+    'The backdrop, halo, and platform take their colors from your most frequently detected work area, creating a little habitat around your companion.',
+  'home.avatar.badges': 'Work orbit',
+  'home.avatar.badgesDescription':
+    'The largest badge at the top right shows your leading work area; the left badge shows the second. Smaller badges below show the rest of your recent mix. They describe topics, not skill levels or achievements.',
+  'home.avatar.default': 'Default habitat',
+  'home.avatar.defaultDescription':
+    'When no work area is recognized, your companion keeps an account-specific default habitat with decorative details instead of work badges.',
+  'home.avatar.legend': 'Work area colors and badges',
+  'home.avatar.legend.backend': 'Code brackets · Blue · Backend and APIs',
+  'home.avatar.legend.frontend': 'Window · Rose · Frontend and UI',
+  'home.avatar.legend.testing': 'Checkmark · Green · Testing',
+  'home.avatar.legend.debugging': 'Bug · Gold · Reliability and debugging',
+  'home.avatar.legend.security': 'Shield · Violet · Security',
+  'home.avatar.legend.data': 'Database · Teal · Data and storage',
+  'home.avatar.legend.deployment': 'Cloud · Peach · Deployment and infrastructure',
+  'home.avatar.controls':
+    'Turning off automatic user memory pauses habitat and badge updates. Clearing user memory restores the default habitat. Both keep the same Pokémon, pose, and expression. You can manage both in user memory settings.',
+
   // ── Settings ────────────────────────────────────────────────────────────
-  'settings.title': 'Setting',
-  'settings.description': 'Manage your connections, skills, memory, and notifications.',
+  'settings.title': 'My Settings',
+  'settings.description': 'Manage your profile, connections, skills, memory, and notifications.',
+  'settings.profile.title': 'Profile',
+  'settings.profile.email': 'Email',
+  'settings.profile.image': 'Profile Image',
+  'settings.profile.imageAlt': 'Your profile image',
+  'settings.profile.upload': 'Upload image',
+  'settings.profile.remove': 'Remove image',
+  'settings.profile.imageHelp': 'PNG, JPEG, or WebP up to 2 MB',
+  'settings.profile.firstName': 'First Name',
+  'settings.profile.lastName': 'Last Name',
+  'settings.profile.save': 'Save',
+  'settings.profile.saving': 'Saving…',
+  'settings.profile.saved': 'Profile saved.',
+  'settings.profile.loading': 'Loading profile…',
+  'settings.profile.reading': 'Reading image…',
+  'settings.profile.signIn': 'Sign in to manage your profile.',
+  'settings.profile.retry': 'Try again',
+  'settings.profile.reload': 'Reload profile',
+  'settings.profile.error.load': 'Could not load your profile. Please try again.',
+  'settings.profile.error.save':
+    'Could not save your profile. Your edits are kept. Please try again.',
+  'settings.profile.error.conflict':
+    'Your profile changed elsewhere. Reload to review it before saving. Reloading replaces your unsaved edits.',
+  'settings.profile.imageError.type': 'Choose a PNG, JPEG, or WebP image.',
+  'settings.profile.imageError.size': 'Choose a nonempty image up to 2 MB.',
+  'settings.profile.imageError.read':
+    'Could not use this image. Choose a valid PNG, JPEG, or WebP with at most 16 million pixels.',
   'settings.memory.title': 'Memory',
   'settings.memory.description':
     'The agent learns your preferences and project context from requests and uses them in later tasks.',
@@ -273,7 +336,6 @@ export const en = {
   'settings.memory.memories': 'Saved memories',
   'settings.memory.bounds': '{count}/12 · {characters}/2,400 characters · up to 3 for all projects',
   'settings.memory.emptyMemory': 'No memories yet.',
-  'settings.memory.details': 'Profile and suggestions',
   'settings.memory.portrait': 'Recent work',
   'settings.memory.projects': 'Projects',
   'settings.memory.focusAreas': 'Focus areas',
@@ -328,6 +390,7 @@ export const en = {
   'settings.projectMemory.confirmDescription':
     'Removes this repository’s memories and suggestions. Past requests won’t be learned again. User memory and other repositories are not affected.',
   'settings.projectMemory.portrait': 'Project profile',
+  'settings.projectMemory.details': 'Profile and suggestions',
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -403,6 +466,8 @@ export const en = {
   'conversation.executionHistory': 'Execution history ({count})',
   'conversation.viewingExecution': 'Viewing execution {number}',
   'conversation.executionHistoryHint': 'Select a past execution to view its recorded activity.',
+  'conversation.markdownImage': 'Image: {alt}',
+  'conversation.markdownImageUntitled': 'Image',
 
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': 'Archived sessions',
@@ -486,9 +551,9 @@ export const en = {
   'archive.order': 'Recently archived first',
 
   // ── Composer ────────────────────────────────────────────────────────────
-  'composer.avatarAlt': 'Your automatically generated illustrated avatar',
+  'composer.avatarAlt': 'Your Pokémon companion avatar',
   'composer.avatarDescription':
-    'Your base character stays the same while colors and details reflect your recent work.',
+    'Your Pokémon stays the same while its habitat and orbiting badges reflect your recent work.',
   'composer.heading': 'What should the agent do?',
   'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.subheadingFirstVisit':

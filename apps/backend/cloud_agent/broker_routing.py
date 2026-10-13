@@ -22,7 +22,7 @@ import asyncio
 import contextlib
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -40,11 +40,34 @@ logger = get_logger(__name__)
 
 #: Hosts a broker URL may name. Empty means "any", which is the shape a
 #: single-host deployment runs in and the shape this had before the check.
+#: An entry is either a bare hostname, which admits that host on any scheme and
+#: port as it always did, or a ``scheme://host:port`` origin, which admits
+#: exactly that origin.
 ENV_BROKER_HOSTS = "AGENT_BROKER_URL_ALLOWED_HOSTS"
 
 
 class BrokerUrlRefused(ValueError):
     """A host reported a broker address this deployment will not talk to."""
+
+
+def _origin(scheme: str, hostname: str, port: int | None) -> str:
+    """Render one origin canonically, with its default port made explicit."""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    return f"{scheme}://{host}:{port or (443 if scheme == 'https' else 80)}"
+
+
+def _allowlisted(entry: str, hostname: str, origin: str) -> bool:
+    """Whether one allowlist entry admits this broker address."""
+    if "://" not in entry:
+        return entry.lower() == hostname
+    try:
+        parsed = urlsplit(entry)
+        port = parsed.port
+    except ValueError:
+        return False  # An entry that is not an origin admits nothing.
+    if parsed.hostname is None or parsed.path not in ("", "/"):
+        return False
+    return _origin(parsed.scheme.lower(), parsed.hostname, port) == origin
 
 
 def validate_broker_url(url: str | None) -> str | None:
@@ -55,15 +78,24 @@ def validate_broker_url(url: str | None) -> str | None:
     that receives a credential good for every broker in the pool — a
     compromised host, or one with a typo, could name anything and be handed it.
 
-    Two checks, both structural:
+    The checks are structural:
 
     * **Scheme.** `http`/`https` only. A `file:` or `gopher:` URL is not a
       broker, and the client would do something surprising with it.
-    * **Host allowlist**, when configured. Names, not patterns: a pattern is a
-      thing to get subtly wrong, and the set of machines in a pool is small
-      and known. Unconfigured means any host, which is what this did before —
-      the check is opt-in so that turning it on is a deployment's decision
-      rather than something that breaks every existing pool on upgrade.
+    * **An origin and nothing else.** Requests are built by appending
+      ``/workspaces/...`` to this address, so a query or fragment would swallow
+      that path and send the credentialed request somewhere else on the host,
+      a path would choose a different service behind it, and credentials in
+      the authority are a second secret no broker needs. Each is refused; a
+      single trailing slash is allowed.
+    * **Allowlist**, when configured. Names or exact origins, not patterns: a
+      pattern is a thing to get subtly wrong, and the set of machines in a pool
+      is small and known. A bare name admits that host on any port, as it
+      always did; an origin entry also pins the scheme and port, which is what
+      tells apart brokers that share one tunnel address. Unconfigured means any
+      host, which is what this did before — the check is opt-in so that turning
+      it on is a deployment's decision rather than something that breaks every
+      existing pool on upgrade.
 
     Raises:
         BrokerUrlRefused: If the URL is unusable or names a host outside the
@@ -74,17 +106,35 @@ def validate_broker_url(url: str | None) -> str | None:
         return None
     candidate = url.strip()
     try:
-        parsed = urlparse(candidate)
+        parsed = urlsplit(candidate)
     except ValueError:
         raise BrokerUrlRefused("broker_url must be a valid http(s) URL") from None
+    try:
+        port = parsed.port
+    except ValueError:
+        raise BrokerUrlRefused(f"broker_url has an invalid port, got {candidate!r}") from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise BrokerUrlRefused(f"broker_url must be an http(s) URL, got {candidate!r}")
+    if "@" in parsed.netloc:
+        raise BrokerUrlRefused("broker_url must not carry credentials")
+    if (
+        parsed.path not in ("", "/")
+        or "?" in candidate
+        or "#" in candidate
+        or "\\" in candidate
+        or any(character.isspace() for character in candidate)
+    ):
+        raise BrokerUrlRefused(
+            f"broker_url must be a scheme://host:port origin with no path, query or "
+            f"fragment, got {candidate!r}"
+        )
 
     allowed = [
         entry.strip() for entry in (setting_env(ENV_BROKER_HOSTS) or "").split(",") if entry.strip()
     ]
-    if allowed and parsed.hostname not in allowed:
-        raise BrokerUrlRefused(f"broker_url host {parsed.hostname!r} is not in {ENV_BROKER_HOSTS}")
+    origin = _origin(parsed.scheme, parsed.hostname, port)
+    if allowed and not any(_allowlisted(entry, parsed.hostname, origin) for entry in allowed):
+        raise BrokerUrlRefused(f"broker_url {origin!r} is not in {ENV_BROKER_HOSTS}")
     return candidate
 
 
@@ -287,6 +337,31 @@ BROKER_PROBE_INTERVAL_S = 60.0
 #: about right now rather than about history.
 _PROBE_CACHE: dict[str, tuple[float, str]] = {}
 
+#: Probe answers about this deployment's own configuration. They say nothing
+#: about what the advertised address is or what answers there.
+PROBE_NO_URL = "host did not advertise a workspace broker URL"
+PROBE_NO_CREDENTIAL = "control plane has no workspace broker credential"
+PROBE_REFUSED_BY_POLICY = "workspace broker is unavailable under the current configuration"
+#: What a host is told about every other probe failure.
+PROBE_FAILED_FOR_HOST = (
+    "the control plane could not reach or authenticate to the advertised workspace broker; "
+    "the control-plane log has the detail"
+)
+
+
+def probe_error_for_host(error: str | None) -> str | None:
+    """Reduce a probe failure to what the host that advertised the address may see.
+
+    The full reason names the dial error, or quotes the ``detail`` of whatever
+    answered at the address. Handed back to the host that chose the address,
+    it would make the control plane a reachability and content oracle for its
+    own network; the operator reads it in the control-plane log instead.
+    Answers about this deployment's configuration pass through unchanged.
+    """
+    if error is None or error in (PROBE_NO_URL, PROBE_NO_CREDENTIAL, PROBE_REFUSED_BY_POLICY):
+        return error
+    return PROBE_FAILED_FOR_HOST
+
 
 async def probe_broker(host: str, broker_url: str | None, *, force: bool = False) -> str | None:
     """Check that this deployment can actually use ``broker_url``.
@@ -307,14 +382,14 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
     """
     url = (broker_url or "").strip()
     if not url:
-        return "host did not advertise a workspace broker URL"
+        return PROBE_NO_URL
 
     # Revalidate even a cached successful probe after a live policy change.
     client = _client_for({"host": host, "broker_url": url})
     if client is None:
         if not (setting_env(ENV_BROKER_TOKEN) or "").strip():
-            return "control plane has no workspace broker credential"
-        return "workspace broker is unavailable under the current configuration"
+            return PROBE_NO_CREDENTIAL
+        return PROBE_REFUSED_BY_POLICY
 
     now = time.monotonic()
     cached = _PROBE_CACHE.get(host)

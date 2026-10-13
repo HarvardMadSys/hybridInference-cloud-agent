@@ -28,10 +28,13 @@ The orchestrator then waits until that exact host still reports `draining` and
 no later claim can commit while the status remains draining. The host is
 activated while the fence stays in place. Control-plane activation sets
 `AGENT_DEPLOY_DRAINING_HOST` to the exact enrollment name, which authorizes the
-deployment readiness check to accept only that named draining host. The check
-requires zero occupied slots, the target deployment capability, a fresh
-heartbeat and a successful reverse broker probe, then rereads the same
-conditions after the network await. Ordinary readiness remains online-only.
+deployment readiness check to accept only that named draining host. When
+new-chat placement is pinned to a different enrolled host, that host must be
+online at the same target commit; the name difference is not itself a failure.
+The check requires zero occupied slots on the draining host, the target
+deployment capability, a fresh heartbeat and a successful reverse broker probe,
+then rereads the same conditions after the network await. Ordinary readiness
+remains online-only.
 
 Only a normal fenced release holding the exact active owner token may put the host online.
 An identical acquire or release retry is idempotent, including after a lost
@@ -181,9 +184,10 @@ minutes old:
 
 Follow-ups waiting behind an earlier turn are excluded. Occupied slots with
 running work are normal backpressure. The monitor reports state; it never claims
-jobs, restarts hosts, changes scheduling or relaxes isolation. External
-process/HTTP monitoring remains necessary because a dead API cannot monitor
-itself.
+jobs, restarts hosts, changes scheduling or relaxes isolation. Compute-managed
+hosts follow a new control-plane commit through the compute worker's upgrade
+operation, which uses the host recipe's drain. External process/HTTP monitoring
+remains necessary because a dead API cannot monitor itself.
 
 Events are logged even without external delivery. To enable notifications, set
 `AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` to an operator-owned

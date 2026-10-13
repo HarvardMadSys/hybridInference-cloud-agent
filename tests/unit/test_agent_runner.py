@@ -576,7 +576,9 @@ def _run_shared_boundary_case(
     supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (code, "API error", [], frame)
+        runner_mod,
+        "_stream_shared_agent_turn",
+        lambda **_kwargs: (code, "API error", [], frame, None),
     )
     finish = Mock()
     if configure is not None:
@@ -743,7 +745,7 @@ def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatc
     from cloud_agent_host import runner as runner_mod
 
     monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
-    stream = Mock(return_value=(0, "", [], {"kind": "result", "status": "completed"}))
+    stream = Mock(return_value=(0, "", [], {"kind": "result", "status": "completed"}, None))
 
     def configure(control, supervisor, finish):
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
@@ -828,6 +830,45 @@ def test_native_failure_preserves_only_a_verified_turn_boundary(
         assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
 
 
+@pytest.mark.parametrize("settled", [True, False])
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
+def test_a_failed_turn_is_explained_by_what_it_reported(monkeypatch, settled, runtime_id):
+    """The CLI's own reason beats the end of its output, settled or not."""
+    frame = {"kind": "result", "status": "failed", "native_turn_settled": settled}
+    reported = "agent reported an error: API Error: Stream idle timeout - no chunks received"
+
+    def configure(_control, _supervisor, _finish):
+        monkeypatch.setattr(
+            runner_mod,
+            "_stream_shared_agent_turn",
+            lambda **_kwargs: (1, '"uuid":"tail-of-a-json-result"}\n', [], frame, reported),
+        )
+
+    result, _control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 1, frame, runtime_id, configure=configure
+    )
+
+    assert result == 1
+    assert finish.call_args.args[:2] == ("failed", reported)
+
+
+@pytest.mark.parametrize(
+    ("settled", "expected"),
+    [
+        (True, "agent failed at native turn boundary: API error"),
+        (False, "agent exited 1: API error"),
+    ],
+)
+def test_a_failed_turn_that_reported_nothing_keeps_its_output_tail(monkeypatch, settled, expected):
+    frame = {"kind": "result", "status": "failed", "native_turn_settled": settled}
+
+    _result, _control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 1, frame, "claude-code"
+    )
+
+    assert finish.call_args.args[:2] == ("failed", expected)
+
+
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
 @pytest.mark.parametrize("code", [0, 1])
 def test_shared_runner_never_persists_a_different_session_returned_by_the_broker(
@@ -910,7 +951,7 @@ def test_shared_interrupt_drains_the_brokers_terminal_resource_frame(
     )
     control = _Control()
 
-    code, _tail, _errors, result = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -942,6 +983,69 @@ def test_shared_turn_lease_loss_interrupts_and_fences():
     assert supervisor.stream.closed is True
 
 
+def _run_frames(frames):
+    return runner_mod._stream_shared_agent_turn(
+        supervisor=_Supervisor(frames),
+        job=_JOB,
+        control=_Control(),
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+
+def test_a_turn_reports_its_clis_last_error_as_the_reason():
+    """A Codex turn refused with 403 printed a config warning last."""
+    *_, reported = _run_frames(
+        [
+            {
+                "kind": "event",
+                "event_type": "error",
+                "payload": {"text": "an earlier error"},
+                "raw_line": "raw\n",
+            },
+            {
+                "kind": "event",
+                "event_type": "error",
+                "payload": {
+                    "text": "unexpected status 403 Forbidden: This account has no active API key"
+                },
+                "raw_line": "raw\n",
+            },
+            {"kind": "result", "status": "failed", "exit_code": 1, "stderr": "WARN bubblewrap"},
+        ]
+    )
+
+    assert reported == (
+        "agent reported an error: unexpected status 403 Forbidden: "
+        "This account has no active API key"
+    )
+
+
+def test_a_turn_reports_the_sandboxs_failure_when_the_cli_reported_none():
+    code, tail, _errors, _result, reported = _run_frames(
+        [
+            {"kind": "event", "event_type": "message", "payload": {"text": "done"}},
+            {"kind": "error", "detail": "shared member activation boundary failed: chmod"},
+        ]
+    )
+
+    assert code == 1
+    assert "shared member activation boundary failed" in tail
+    assert reported == "sandbox failed: shared member activation boundary failed: chmod"
+
+
+def test_a_turn_that_reported_no_error_has_no_reason():
+    *_, reported = _run_frames(
+        [
+            {"kind": "event", "event_type": "error", "payload": {"text": "  "}},
+            {"kind": "result", "status": "completed", "exit_code": 0, "stderr": ""},
+        ]
+    )
+
+    assert reported is None
+
+
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
 def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     supervisor = _Supervisor(
@@ -962,7 +1066,7 @@ def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     )
     control = _Control()
 
-    code, tail, errors, result = runner_mod._stream_shared_agent_turn(
+    code, tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=replace(_JOB, runtime=runtime_id),
         control=control,
@@ -989,7 +1093,7 @@ def test_shared_turn_reports_dispatch_before_waiting_for_runtime_output():
     supervisor = _Supervisor()
     supervisor.stream.frames = frames
 
-    code, _tail, _errors, _result = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, _result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -1084,7 +1188,7 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
         # real helper owns: the prompt handoff is what closes the measurement.
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1166,7 +1270,7 @@ def test_startup_path_comes_from_the_actions_the_supervisor_reported(
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1205,7 +1309,7 @@ def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1275,7 +1379,7 @@ def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, t
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1368,7 +1472,7 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
         started.append(kwargs)
         return _Stream()
 
-    code, _tail, _errors, _frame = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, _frame, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
         job=_JOB,
         control=SimpleNamespace(append_event=lambda _event: None),
@@ -1547,7 +1651,7 @@ def test_the_runner_hands_its_selection_to_the_broker(monkeypatch, tmp_path):
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1577,7 +1681,7 @@ def test_the_runner_offers_the_broker_nothing_when_it_is_not_profiling(monkeypat
 
     def configure(_control, _supervisor, _finish):
         def stream(**_kwargs):
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1609,7 +1713,7 @@ def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypa
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1649,7 +1753,7 @@ def test_a_truncated_broker_fragment_makes_the_record_partial(monkeypatch, tmp_p
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1691,7 +1795,7 @@ def test_a_reuse_that_does_no_timed_work_is_a_complete_fragment(monkeypatch, tmp
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1735,7 +1839,7 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
     def configure(control, supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
         # The retry rotates the residency grant before reopening the process.
@@ -1804,7 +1908,7 @@ def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monk
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 

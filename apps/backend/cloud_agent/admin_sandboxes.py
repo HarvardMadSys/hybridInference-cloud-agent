@@ -104,6 +104,7 @@ class AdminSandbox(BaseModel):
     stop_requested_at: datetime | None = None
     archived_at: datetime | None = None
     deletion_state: Literal["none", "pending", "archived", "deleted", "failed"] = "none"
+    deletion_discard: bool = False
     deletion_request_id: str | None = None
     deletion_requested_at: datetime | None = None
     deletion_archive_key: str | None = None

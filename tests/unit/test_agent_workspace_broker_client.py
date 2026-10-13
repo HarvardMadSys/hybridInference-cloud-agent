@@ -364,3 +364,121 @@ async def test_terminal_coordination_identifies_the_turn_owning_each_suspension(
         {"lease_generation": 2, "job_id": "ajob_parent"},
         {"job_id": "ajob_parent"},
     ]
+
+
+def _counting_body(chunks: int, size: int = 64 * 1024):
+    """An async body that records how far a reader pulled it."""
+    pulled = [0]
+
+    async def body():
+        for _ in range(chunks):
+            pulled[0] += 1
+            yield b" " * size
+
+    return body, pulled
+
+
+def _broker(handler) -> WorkspaceBrokerClient:
+    return WorkspaceBrokerClient(
+        "http://broker",
+        "secret",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call", "limit_name"),
+    [
+        (lambda broker: broker.files("athr_one", "src"), "MAX_BROKER_CONTENT_BYTES"),
+        (lambda broker: broker.list_terminals("athr_one"), "MAX_BROKER_CONTROL_BYTES"),
+        (
+            lambda broker: broker.capture_shared_snapshot(_shared_snapshot()),
+            "MAX_BROKER_CONTENT_BYTES",
+        ),
+        (
+            lambda broker: broker.shared_chat_sandbox_status("athr_origin"),
+            "MAX_BROKER_CONTROL_BYTES",
+        ),
+    ],
+)
+async def test_an_oversized_broker_reply_is_refused_before_it_is_buffered(
+    monkeypatch, call, limit_name
+):
+    """The host decides how much it sends; this process decides how much it keeps."""
+    monkeypatch.setattr(workspace_broker_client, limit_name, 1024 * 1024)
+    body, pulled = _counting_body(64)
+
+    def respond(request):
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, content=body())
+
+    with pytest.raises(WorkspaceBrokerError) as refused:
+        await call(_broker(respond))
+    assert refused.value.status_code == 502
+    assert "more data than the control plane accepts" in refused.value.message
+    # 1 MiB is 16 chunks; the 17th is refused instead of kept.
+    assert pulled[0] == 17
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_inventory_is_refused(monkeypatch):
+    monkeypatch.setattr(workspace_broker_client, "MAX_BROKER_CONTROL_BYTES", 1024 * 1024)
+    body, pulled = _counting_body(64)
+    broker = _broker(lambda request: httpx.Response(200, content=body()))
+
+    with pytest.raises(WorkspaceBrokerError) as refused:
+        await broker.list_sandboxes()
+    assert refused.value.status_code == 502
+    assert pulled[0] == 17
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_error_reply_keeps_its_status_and_drops_its_detail(monkeypatch):
+    monkeypatch.setattr(workspace_broker_client, "MAX_BROKER_CONTROL_BYTES", 1024 * 1024)
+    body, pulled = _counting_body(64)
+    broker = _broker(lambda request: httpx.Response(409, content=body()))
+
+    with pytest.raises(WorkspaceBrokerError) as refused:
+        await broker.list_terminals("athr_one")
+    assert (refused.value.status_code, refused.value.message) == (
+        409,
+        "The live workspace request failed.",
+    )
+    assert pulled[0] == 17
+
+
+@pytest.mark.asyncio
+async def test_a_health_probe_never_reads_a_success_body():
+    body, pulled = _counting_body(64)
+    broker = _broker(lambda request: httpx.Response(200, content=body()))
+
+    await broker.health()
+    assert pulled[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_compressed_broker_reply_is_refused_before_decoding():
+    broker = _broker(
+        lambda request: httpx.Response(
+            200, content=b"\x1f\x8b not json", headers={"Content-Encoding": "gzip"}
+        )
+    )
+
+    with pytest.raises(WorkspaceBrokerError) as refused:
+        await broker.files("athr_one", "src")
+    assert refused.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_reply_still_decodes_and_errors_keep_their_detail():
+    def respond(request):
+        if request.url.path.endswith("/files"):
+            return httpx.Response(200, json={"kind": "directory", "entries": []})
+        return httpx.Response(404, json={"detail": "terminal not found"})
+
+    broker = _broker(respond)
+    assert await broker.files("athr_one", "") == {"kind": "directory", "entries": []}
+    with pytest.raises(WorkspaceBrokerError) as missing:
+        await broker.list_terminals("athr_one")
+    assert (missing.value.status_code, missing.value.message) == (404, "terminal not found")

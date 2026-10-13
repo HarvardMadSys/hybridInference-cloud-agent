@@ -18,10 +18,7 @@ export function MemorySettings() {
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
 
   return (
-    <section
-      aria-labelledby="settings-memory"
-      className="ui-card mt-6 rounded-2xl bg-surface p-4 sm:p-6"
-    >
+    <section aria-labelledby="settings-memory" className="ui-card mt-4 bg-surface p-3 sm:p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 id="settings-memory" className="text-base font-semibold text-foreground">
           {t('settings.memory.title')}

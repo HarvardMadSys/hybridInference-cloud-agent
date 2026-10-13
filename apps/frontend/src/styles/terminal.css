@@ -1,0 +1,19 @@
+@import '@xterm/xterm/css/xterm.css';
+
+.agent-xterm .xterm {
+  height: 100%;
+}
+
+.agent-xterm .xterm-viewport {
+  scrollbar-color: #d1d5db transparent;
+  scrollbar-width: thin;
+}
+
+/* Match the pane beneath the terminal's last rendered row. */
+.agent-xterm .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
+.dark .agent-xterm .xterm-viewport {
+  scrollbar-color: #4b5563 transparent;
+}

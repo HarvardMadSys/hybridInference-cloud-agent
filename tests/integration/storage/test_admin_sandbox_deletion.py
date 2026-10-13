@@ -60,6 +60,34 @@ async def checkpoint_archive(store, claim, **overrides):
     )
 
 
+async def test_discard_deletes_without_an_archive_receipt(db, store):
+    origin = await seed(db, store, "asbx_discard", state="stopped")
+    await member(db, "asbx_discard", origin, 0)
+    assert await request_delete(store, "asbx_discard", discard=True) == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None and claim["deletion_discard"] is True
+    assert claim["deletion_state"] == "pending"
+    assert not await store.sandbox.complete_admin_sandbox_deletion(**worker_fence(claim))
+    assert await store.sandbox.complete_admin_sandbox_discard(**worker_fence(claim))
+    assert await store.sandbox.complete_admin_sandbox_discard(**worker_fence(claim))
+    detail = await store.admin_sandboxes.detail("asbx_discard")
+    assert detail is not None
+    assert detail.sandbox.deletion_state == "deleted"
+    assert detail.sandbox.deletion_discard is True
+    assert detail.sandbox.state == "lost"
+    assert detail.sandbox.deletion_archive_key is None
+    assert detail.sandbox.deleted_at is not None
+    assert detail.sandbox.archived_at is None
+    native = await store.sandbox.thread_sandbox(thread_id=origin["thread_id"])
+    assert native is not None and native["native_state"] == "lost"
+    async with db.acquire() as conn:
+        actions = await conn.fetch("SELECT action FROM agent_admin_audit_log ORDER BY id")
+    assert [row["action"] for row in actions] == [
+        "agent.sandbox.delete.requested",
+        "agent.sandbox.delete.discarded",
+    ]
+
+
 async def test_deletion_requires_verified_archive_and_retains_native_and_job_ledger(db, store):
     origin = await seed(db, store, "asbx_delete", state="stopped")
     await member(db, "asbx_delete", origin, 0)

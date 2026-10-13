@@ -91,6 +91,33 @@ describe('owner failure wording', () => {
     expect(other.failureCause).toBeUndefined();
   });
 
+  it("shows the agent's own reason for failing, not the end of its output", () => {
+    const cases: [string, string][] = [
+      [
+        'agent reported an error: Failed to authenticate. API Error: 403 This account has no active API key, so its spending limit cannot be applied.',
+        'Failed to authenticate. API Error: 403 This account has no active API key, so its spending limit cannot be applied.',
+      ],
+      [
+        'agent reported an error: unexpected status 403 Forbidden: This account has no active API key, so its spending limit cannot be applied.',
+        'unexpected status 403 Forbidden: This account has no active API key, so its spending limit cannot be applied.',
+      ],
+      [
+        'agent reported an error: API Error: Stream idle timeout - no chunks received',
+        'API Error: Stream idle timeout - no chunks received',
+      ],
+    ];
+    for (const [detail, expected] of cases) {
+      expect(ownerFailureMessage(detail)).toBe(expected);
+      expect(toDisplayJob({ ...JOB, state: 'failed', detail }, {}).stateNote).toBe(expected);
+    }
+  });
+
+  it('names a sandbox failure as one, without its internal paths', () => {
+    const detail =
+      "sandbox failed: shared member activation boundary failed: shared member permission normalization failed: chmod: cannot access '/agent-state/codex-members/abc/.tmp/plugins-clone-x': No such file or directory";
+    expect(ownerFailureMessage(detail)).toBe('The sandbox failed while running this response.');
+  });
+
   it('keeps a site misconfiguration in its own words and marks it for an admin', () => {
     // The runner's SITE_MISCONFIGURED_MCP, verbatim.
     const detail =

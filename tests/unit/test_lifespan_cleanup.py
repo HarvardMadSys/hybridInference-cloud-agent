@@ -111,7 +111,6 @@ _STAGES = [
         ("async_client", False, False),
         ("gateway_client", True, False),
         ("grant_client", True, False),
-        ("source_control", True, False),
         ("listen", True, False),
         ("mcp_maintenance", True, True),
         ("measurement_writer", True, True),
@@ -120,6 +119,7 @@ _STAGES = [
     ),
     *_only(
         True,
+        ("source_control", True, False),
         ("compute_runtime", True, False),
         ("compute_run", True, False),
         ("mcp_catalog", True, False),
@@ -433,7 +433,8 @@ def _assert_released(prepared: _Prepared, stage: _Stage, caplog: pytest.LogCaptu
     assert prepared.events.count("host") == 1
     assert prepared.events.count("brokers") == 1
     assert prepared.events.count("http") == (1 if stage.opens_http else 0)
-    assert prepared.events.count("source") == (0 if stage.name in _BEFORE_SOURCE else 1)
+    expected_source_closes = int(stage.background and stage.name not in _BEFORE_SOURCE)
+    assert prepared.events.count("source") == expected_source_closes
     if stage.opens_http:
         assert prepared.events.index("host") < prepared.events.index("http")
         assert prepared.events.index("http") < prepared.events.index("pool")
@@ -501,7 +502,7 @@ async def test_successful_shutdown_keeps_its_order(
         *expected_tasks,
         "host",
         "brokers",
-        "source",
+        *(["source"] if background else []),
         "http",
         "pool",
         "reset_settings",

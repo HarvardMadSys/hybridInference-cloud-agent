@@ -382,6 +382,8 @@ function formatTokens(value: number | null): string {
 export interface AdaptOptions {
   events?: AgentJobEventApi[];
   threadEvents?: AgentThreadEventApi[];
+  /** Keep complete durable replies visible while activity pages are still arriving. */
+  historyLoading?: boolean;
   patch?: string | null;
   thread?: AgentThreadApi | null;
 }
@@ -490,6 +492,13 @@ export function siteMisconfiguredReason(detail: string): string {
  * The original detail remains in the API and operator logs for diagnosis.
  */
 export function ownerFailureMessage(detail: string): string {
+  // The agent's own words for why it stopped, e.g. the gateway refusing the
+  // request. The host records them with this prefix; the rest is the reason.
+  const reported = /^agent reported an error: ([\s\S]+)$/.exec(detail);
+  if (reported) return reported[1].trim();
+  if (/^sandbox failed: /.test(detail)) {
+    return 'The sandbox failed while running this response.';
+  }
   // Written for the owner already, and naming what only an admin can fix; it
   // must never fold into the generic connection message below.
   if (SITE_MISCONFIGURED.test(detail)) return detail;
@@ -973,6 +982,7 @@ function displayHistoryTurn(
   job: AgentJobApi,
   messages: AgentThreadMessageApi[],
   events: AgentThreadEventApi[],
+  historyLoading = false,
 ): AgentHistoryTurn {
   const goalTurn = storedGoalTurn(job);
   return {
@@ -983,14 +993,34 @@ function displayHistoryTurn(
     forkable: job.native_fork_available === true,
     ...(goalTurn ? { goalTurn } : {}),
     messages: messages.map(mapThreadMessage),
-    events: displayEvents(events, job),
+    events: transcriptEvents(events, job, messages, historyLoading),
   };
+}
+
+function transcriptEvents(
+  events: AgentJobEventApi[],
+  job: AgentJobApi,
+  messages: AgentThreadMessageApi[],
+  historyLoading: boolean,
+): AgentEvent[] {
+  const projected = displayEvents(events, job);
+  if (!historyLoading) return projected;
+  // Event ids and durable-message ids do not identify each other. Do not let
+  // the first partial reply suppress the remaining durable replies, or show
+  // the same text twice while the ledger is incomplete.
+  const hasReplies = messages.some((message) => message.role === 'assistant');
+  const hasUsers = messages.some((message) => message.role === 'user');
+  return projected.filter(
+    (event) =>
+      !(hasReplies && event.kind === 'message') && !(hasUsers && event.kind === 'user_message'),
+  );
 }
 
 type HistoryProjector = (
   jobs: AgentJobApi[],
   messages: Map<string, AgentThreadMessageApi[]>,
   events: Map<string, AgentThreadEventApi[]>,
+  historyLoading: boolean,
 ) => AgentHistoryTurn[];
 
 /**
@@ -1004,12 +1034,13 @@ export function createDisplayJobAdapter(): typeof toDisplayJob {
     job: AgentJobApi;
     messages: AgentThreadMessageApi[];
     events: AgentThreadEventApi[];
+    historyLoading: boolean;
     turn: AgentHistoryTurn;
   };
   let scope: string | undefined;
   let cached = new Map<string, CachedTurn>();
   let history: AgentHistoryTurn[] = [];
-  const projectHistory: HistoryProjector = (jobs, messages, events) => {
+  const projectHistory: HistoryProjector = (jobs, messages, events, historyLoading) => {
     const nextCache = new Map<string, CachedTurn>();
     const nextHistory = jobs.map((job) => {
       const jobMessages = messages.get(job.id) ?? [];
@@ -1018,6 +1049,7 @@ export function createDisplayJobAdapter(): typeof toDisplayJob {
       if (
         !entry ||
         entry.job !== job ||
+        entry.historyLoading !== historyLoading ||
         !sameRecords(entry.messages, jobMessages) ||
         !sameRecords(entry.events, jobEvents)
       ) {
@@ -1025,7 +1057,8 @@ export function createDisplayJobAdapter(): typeof toDisplayJob {
           job,
           messages: jobMessages,
           events: jobEvents,
-          turn: displayHistoryTurn(job, jobMessages, jobEvents),
+          historyLoading,
+          turn: displayHistoryTurn(job, jobMessages, jobEvents, historyLoading),
         };
       }
       nextCache.set(job.id, entry);
@@ -1058,7 +1091,11 @@ function adaptJob(
   const failureCause = failureCauseOf(job.detail);
   const events = options.events ?? [];
   const patch = options.patch ?? '';
-  const renderedEvents = displayEvents(events, job);
+  const ownStoredMessages = (options.thread?.messages ?? []).filter(
+    (message) => message.job_id === job.id,
+  );
+  const historyLoading = options.historyLoading === true;
+  const renderedEvents = transcriptEvents(events, job, ownStoredMessages, historyLoading);
   const liveStatus = agentLiveStatus(job, events);
 
   // Attempts are inferred from the event log rather than fetched: an attempt
@@ -1139,13 +1176,14 @@ function adaptJob(
   if (threadEvents !== undefined) {
     const eventsByJob = groupByJob(threadEvents);
     if (projectHistory) {
-      historyTurns = projectHistory(historicalJobs, messagesByJob, eventsByJob);
+      historyTurns = projectHistory(historicalJobs, messagesByJob, eventsByJob, historyLoading);
     } else {
       historyTurns = historicalJobs.map((threadJob) =>
         displayHistoryTurn(
           threadJob,
           messagesByJob.get(threadJob.id) ?? [],
           eventsByJob.get(threadJob.id) ?? [],
+          historyLoading,
         ),
       );
     }
@@ -1156,7 +1194,7 @@ function adaptJob(
   // the turn keeps its chronology and the prompt card knows to stand down.
   const settled = job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled';
   let ownMessages: ReturnType<typeof mapThreadMessage>[] = [];
-  if (settled && !events.some((event) => event.event_type === 'message')) {
+  if (historyLoading || (settled && !events.some((event) => event.event_type === 'message'))) {
     ownMessages = (messagesByJob.get(job.id) ?? []).map(mapThreadMessage);
   }
   const threadPrJob = [...(options.thread?.jobs ?? [])]

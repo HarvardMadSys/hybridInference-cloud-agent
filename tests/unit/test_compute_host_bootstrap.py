@@ -366,6 +366,88 @@ def test_remote_deployment_retry_identity_and_enrollment_cleanup(
     assert all(json.loads(line)["ready"] for line in capsys.readouterr().out.splitlines())
 
 
+def _release_payload() -> bytes:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        data = b"A='keep'\nAGENT_ENROLL_TOKEN='spent-token'\n"
+        member = tarfile.TarInfo(".env")
+        member.size, member.mode = len(data), 0o600
+        archive.addfile(member, io.BytesIO(data))
+    return payload.getvalue()
+
+
+def test_same_owner_advances_the_release_only_after_the_recipe_succeeds(
+    tmp_path, monkeypatch, capsys
+):
+    import subprocess
+    from types import SimpleNamespace
+
+    root = tmp_path / "managed"
+    root.mkdir()
+    old = {
+        "allocation_id": "alloc",
+        "node_id": "node",
+        "host": "managed",
+        "deployment_sha": "a" * 40,
+    }
+    (root / ".compute-identity.json").write_text(json.dumps(old))
+    new = {**old, "deployment_sha": "b" * 40}
+    params = {"root": str(root), "sha": "b" * 40, "install": False, "identity": new}
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(_release_payload())))
+    monkeypatch.setattr(
+        "subprocess.run", lambda args, **kwargs: subprocess.CompletedProcess(args, 0)
+    )
+    exec(_DEPLOY, {})
+    assert json.loads((root / ".compute-identity.json").read_text()) == new
+    assert (root / ".deployed-sha").read_text() == "b" * 40 + "\n"
+    assert json.loads(capsys.readouterr().out)["ready"] is True
+
+
+@pytest.mark.parametrize("still_advertising", [True, False])
+def test_failed_rollout_keeps_the_previous_marker(tmp_path, monkeypatch, capsys, still_advertising):
+    import subprocess
+    from types import SimpleNamespace
+
+    root = tmp_path / "managed"
+    root.mkdir()
+    old = {
+        "allocation_id": "alloc",
+        "node_id": "node",
+        "host": "managed",
+        "deployment_sha": "a" * 40,
+    }
+    (root / ".compute-identity.json").write_text(json.dumps(old))
+    if still_advertising:
+        (root / ".shared-live-ready").write_text("a" * 40 + "\n")
+    params = {
+        "root": str(root),
+        "sha": "b" * 40,
+        "install": False,
+        "identity": {**old, "deployment_sha": "b" * 40},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(_release_payload())))
+
+    def run(args, **kwargs):
+        code = 1 if args == ["bash", "deploy/host/sandbox_host.sh", "up"] else 0
+        return subprocess.CompletedProcess(args, code)
+
+    monkeypatch.setattr("subprocess.run", run)
+    try:
+        exec(_DEPLOY, {})
+    except SystemExit as exc:
+        assert exc.code in (0, None)
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "ready": False,
+        "blocked_reasons": ["host_deployment_failed"],
+        "advertising": still_advertising,
+    }
+    assert json.loads((root / ".compute-identity.json").read_text()) == old
+    assert not (root / ".deployed-sha").exists()
+
+
 def test_profile_rejects_system_root_or_traversal():
     kwargs = {
         "id": "id",

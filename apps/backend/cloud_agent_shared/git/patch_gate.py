@@ -15,6 +15,8 @@ Four gates, in the order they matter:
    released by a human explicitly.
 2. **Path escape.** ``..`` segments, absolute paths, and symlink-mode entries
    let a patch write outside the worktree or turn a file into a link to one.
+   Names carrying control characters are refused too: the publisher renders
+   changed names into the pull request body.
 3. **Secret scan.** An agent can inadvertently paste credentials it saw (env
    dumps, logs, a leaked token) into the diff; a match blocks publication.
 4. **Size limits.** A patch larger than the cap, or touching more files than
@@ -30,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import re
+import unicodedata
 import zlib
 from collections import Counter
 from dataclasses import dataclass, field
@@ -192,6 +195,20 @@ def _binary_expansion_violations(
     return []
 
 
+# The single-letter escapes git's `quote_c_style` writes; every other control
+# byte arrives as octal. Decoding all of them keeps a path's control characters
+# visible to the pre-apply gate rather than turning `\a` into a plain `a`.
+_C_ESCAPES = {
+    "a": b"\a",
+    "b": b"\b",
+    "f": b"\f",
+    "n": b"\n",
+    "r": b"\r",
+    "t": b"\t",
+    "v": b"\v",
+}
+
+
 def _unquote_path(raw: str) -> str:
     r"""Decode one path as git writes it in a diff header.
 
@@ -225,7 +242,7 @@ def _unquote_path(raw: str) -> str:
                 continue
             except ValueError:
                 pass
-        out.extend({"n": b"\n", "t": b"\t", "r": b"\r"}.get(escape, escape.encode("utf-8")))
+        out.extend(_C_ESCAPES.get(escape, escape.encode("utf-8")))
         index += 1
     return out.decode("utf-8", errors="replace")
 
@@ -314,6 +331,16 @@ def _is_escaping(path: str) -> bool:
     return any(segment == ".." for segment in path.replace("\\", "/").split("/"))
 
 
+def _has_control_character(path: str) -> bool:
+    """Return whether a path carries a control character, such as a newline.
+
+    Git stores any byte but NUL in a path. A newline or carriage return in a
+    file name is not something a repository legitimately needs, and it is how
+    a name rendered into the pull request body breaks out of its code span.
+    """
+    return any(unicodedata.category(char) == "Cc" for char in path)
+
+
 def _scan_secrets(patch: str, paths: list[str]) -> list[str]:
     """Return the names of secret patterns found in added content or new paths.
 
@@ -370,6 +397,14 @@ def validate_change_set(
     escaping = [path for path in unique_files if _is_escaping(path)]
     if escaping:
         violations.append(f"patch writes outside the repository: {', '.join(sorted(escaping))}")
+
+    # Counted rather than listed: the names are exactly what cannot be shown
+    # safely, and one may also carry a credential the scan below withholds.
+    controlled = [path for path in unique_files if _has_control_character(path)]
+    if controlled:
+        violations.append(
+            f"patch introduces {len(controlled)} path(s) containing control characters"
+        )
 
     symlink_paths = sorted({path for path in (symlinks or []) if path and path != "/dev/null"})
     if symlink_paths:

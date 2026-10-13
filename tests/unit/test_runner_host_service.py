@@ -2518,6 +2518,27 @@ def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, _json.dumps(_descriptor()))
     operation_profiling.reset_cache()
 
+    # Hold the exporter's write until the delivery drains it. Left to its own
+    # thread, the exporter can win the race against the assertion below on a
+    # busy machine; gated, the record is certainly still queued when the
+    # delivery starts, and only the delivery's own drain can release it.
+    import threading
+
+    drained = threading.Event()
+    publish = operation_profiling._Exporter._publish
+    flush_sink = operation_profiling.flush_sink
+
+    def held_publish(self: Any, line: str, target: str | None) -> None:
+        drained.wait(timeout=10)
+        publish(self, line, target)
+
+    def draining_flush(timeout: float = 2.0) -> None:
+        drained.set()
+        flush_sink(timeout)
+
+    monkeypatch.setattr(operation_profiling._Exporter, "_publish", held_publish)
+    monkeypatch.setattr(operation_profiling, "flush_sink", draining_flush)
+
     # The record is frozen into the exporter while the file does not exist.
     frozen = operation_profiling.start_operation(
         operation=operation_profiling.STARTUP_OPERATION, host="host-a"

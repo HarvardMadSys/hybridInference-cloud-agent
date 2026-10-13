@@ -211,6 +211,100 @@ async def test_explicit_draining_mode_never_accepts_a_different_host() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_pinned_host_and_a_different_idle_draining_host_both_pass() -> None:
+    started = datetime.now(UTC)
+    calls: list[tuple[str, str, bool]] = []
+
+    async def probe(host: str, url: str, *, force: bool = False) -> None:
+        calls.append((host, url, force))
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(started + timedelta(seconds=1), host="pinned-host"),
+                _host(
+                    started + timedelta(seconds=1),
+                    host="rolled-host",
+                    status="draining",
+                    slots_used=0,
+                    broker_url="http://broker-b:8092",
+                ),
+            ],
+            active_host="pinned-host",
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="rolled-host",
+        broker_probe=probe,
+    )
+
+    assert verdict.ready is True
+    assert "pinned-host" in verdict.detail
+    assert "rolled-host" in verdict.detail
+    assert calls == [
+        ("pinned-host", "http://broker-a:8092", True),
+        ("rolled-host", "http://broker-b:8092", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_different_draining_host_does_not_excuse_an_unready_pin() -> None:
+    started = datetime.now(UTC)
+    pin = _host(started + timedelta(seconds=1), host="pinned-host")
+    pin["capabilities"] = [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                pin,
+                _host(
+                    started + timedelta(seconds=1),
+                    host="rolled-host",
+                    status="draining",
+                    slots_used=0,
+                ),
+            ],
+            active_host="pinned-host",
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="rolled-host",
+    )
+
+    assert verdict.ready is False
+    assert "pinned-host" in verdict.detail
+    assert "has not completed target deployment" in verdict.detail
+
+
+@pytest.mark.asyncio
+async def test_the_pinned_host_can_itself_be_the_idle_draining_host() -> None:
+    started = datetime.now(UTC)
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    status="draining",
+                    slots_used=0,
+                )
+            ],
+            active_host="runner-a",
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-a",
+        broker_probe=lambda *_args, **_kwargs: _async_none(),
+    )
+
+    assert verdict.ready is True
+    assert "runner-a" in verdict.detail
+
+
+@pytest.mark.asyncio
 async def test_explicit_draining_host_must_not_transition_online() -> None:
     started = datetime.now(UTC)
 

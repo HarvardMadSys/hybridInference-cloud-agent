@@ -8,9 +8,12 @@ import re
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 from urllib.parse import urlparse
 
-from cloud_agent.broker_routing import broker_for_host
+import httpx
+
+from cloud_agent.broker_routing import broker_configuration_error, broker_for_host
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import S3SandboxArchiveStore
+from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,6 +46,50 @@ def _validate_receipt(receipt: dict[str, Any], expected: dict[str, Any]) -> None
         raise ValueError("Sandbox archive receipt did not match the reviewed container.")
 
 
+def _discard_failure_reason(cause: BaseException) -> str:
+    """Classify broker failures without persisting their text or request URLs."""
+    transport = cause.__cause__ if isinstance(cause, WorkspaceBrokerError) else cause
+    if isinstance(transport, httpx.TimeoutException):
+        return "The owning host's workspace broker timed out before confirming removal."
+    if isinstance(transport, httpx.TransportError):
+        return "The owning host's workspace broker could not be reached. Check its connectivity."
+    if not isinstance(cause, WorkspaceBrokerError):
+        return ""
+    if cause.status_code in {401, 403}:
+        return (
+            "The owning host rejected the workspace broker credential. "
+            "Check that the control plane and host use the same credential."
+        )
+    if cause.status_code == 404:
+        return (
+            "The owning host could not find the sandbox or deletion endpoint. "
+            "Check its container inventory and workspace broker version."
+        )
+    if cause.status_code == 409:
+        return (
+            "The owning host refused deletion of the reviewed container. "
+            "Confirm that the exact container is stopped and idle."
+        )
+    if cause.status_code == 410:
+        return (
+            "The owning host could not recover the retained sandbox. "
+            "Check the reviewed container on that host."
+        )
+    if cause.status_code == 422:
+        return (
+            "The owning host rejected the deletion request. "
+            "Check that its workspace broker is up to date."
+        )
+    if cause.status_code == 429:
+        return "The owning host's workspace broker is busy."
+    if cause.status_code >= 500:
+        return (
+            "The owning host's workspace broker failed while processing deletion. "
+            "Check its broker logs."
+        )
+    return "The owning host rejected the deletion request."
+
+
 async def delete_one_archived_sandbox(
     store: _DeletionStorage,
     *,
@@ -67,9 +114,41 @@ async def delete_one_archived_sandbox(
     }
     broker = None
     payload: dict[str, Any] | None = None
+    discarding = bool(claim.get("deletion_discard"))
     verified = claim["deletion_state"] == "archived"
     archive_verified = verified
+    configuration_error = None
+    request_phase = "resolve_broker"
     try:
+        if discarding:
+            host = await store.host_pool.get_host(host=str(claim["host"]))
+            broker = broker_for_host(host) if host is not None else None
+            if broker is None:
+                configuration_error = broker_configuration_error(host)
+                raise ValueError("The owning workspace broker is unavailable.")
+            payload = {
+                "request_id": fence["request_id"],
+                "generation": fence["generation"],
+                "expected_container_id": fence["container_id"],
+                "sandbox_id": fence["sandbox_id"],
+            }
+            request_phase = "discard"
+            deleted = await broker.discard_sandbox_deletion(str(claim["origin_thread_id"]), payload)
+            request_phase = "validate_discard_receipt"
+            _validate_receipt(
+                deleted,
+                {
+                    "request_id": fence["request_id"],
+                    "container_id": fence["container_id"],
+                },
+            )
+            if deleted.get("deleted") is not True:
+                raise ValueError("The host did not confirm container deletion.")
+            request_phase = "complete_discard"
+            completed = await store.sandbox.complete_admin_sandbox_discard(**fence)
+            if not completed:
+                raise ValueError("Container deletion lost its durable request fence.")
+            return True
         host = await store.host_pool.get_host(host=str(claim["host"]))
         broker = broker_for_host(host) if host is not None else None
         if broker is None:
@@ -162,7 +241,7 @@ async def delete_one_archived_sandbox(
         # Upload URLs are credentials. Never persist arbitrary SDK/HTTP errors
         # containing request URLs in user-visible state or operational logs.
         abort_acknowledged = False
-        if not archive_verified and broker is not None and payload is not None:
+        if not discarding and not archive_verified and broker is not None and payload is not None:
             with contextlib.suppress(Exception):
                 # Renew before touching the host barrier. An expired claimant
                 # must not abort a newer worker's operation for this request.
@@ -185,16 +264,26 @@ async def delete_one_archived_sandbox(
                         },
                     )
                     abort_acknowledged = aborted.get("aborted") is True
-        retain_pending = archive_verified or not abort_acknowledged
-        error = "S3 archive or sandbox deletion could not complete. " + (
-            "The verified archive is retained; deletion will be retried."
-            if archive_verified
-            else (
-                "The container is retained; the request will retry when the host is available."
-                if retain_pending
-                else "The container has not been deleted. Refresh details before retrying."
+        # A discard may already have removed Docker. Retry that exact request
+        # instead of aborting it or starting an archive for a missing container.
+        retain_pending = discarding or archive_verified or not abort_acknowledged
+        if discarding:
+            reason = configuration_error or _discard_failure_reason(cause)
+            error = (
+                "Container removal without an archive could not be confirmed. "
+                + (f"{reason} " if reason else "")
+                + "Deletion will be retried."
             )
-        )
+        else:
+            error = "S3 archive or sandbox deletion could not complete. " + (
+                "The verified archive is retained; deletion will be retried."
+                if archive_verified
+                else (
+                    "The container is retained; the request will retry when the host is available."
+                    if retain_pending
+                    else "The container has not been deleted. Refresh details before retrying."
+                )
+            )
         with contextlib.suppress(Exception):
             await store.sandbox.fail_admin_sandbox_deletion(
                 **fence, error=error, retain_pending=retain_pending
@@ -205,7 +294,14 @@ async def delete_one_archived_sandbox(
             raise
         logger.warning(
             "Sandbox archive/delete request did not complete",
-            extra={"sandbox_id": fence["sandbox_id"], "failure_type": type(cause).__name__},
+            extra={
+                "sandbox_id": fence["sandbox_id"],
+                "failure_type": type(cause).__name__,
+                "request_phase": request_phase if discarding else "archive_delete",
+                "broker_status": cause.status_code
+                if isinstance(cause, WorkspaceBrokerError)
+                else None,
+            },
         )
     return True
 

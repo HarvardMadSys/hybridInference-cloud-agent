@@ -616,6 +616,102 @@ def test_pi_rpc_two_turns_and_native_abort(tmp_path):
     assert "-p" not in argv
 
 
+def _codex_turn(tmp_path):
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
+    )
+    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session.ensure_started(model="gpt", reasoning_effort=None)
+    process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
+    return process, session.start_turn(TurnInput(prompt="read", model="gpt"))
+
+
+def test_codex_reports_the_error_that_fails_its_turn(tmp_path):
+    """Staging's 2026-09-27 turn: five retried 403s, then the final one."""
+    process, turn = _codex_turn(tmp_path)
+    refused = (
+        "unexpected status 403 Forbidden: This account has no active API key, so its "
+        "spending limit cannot be applied."
+    )
+    retried = {
+        "message": "Reconnecting... 1/5",
+        "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 403}},
+        "additionalDetails": f"{refused}, url: http://agent-gateway:8080/v1/responses",
+    }
+    final = {
+        "message": f"{refused}, url: http://agent-gateway:8080/v1/responses, request id: r-1",
+        "codexErrorInfo": "other",
+        "additionalDetails": None,
+    }
+    process.feed = _turn_lines(
+        {"method": "configWarning", "params": {"summary": "Codex's Linux sandbox uses bubblewrap"}},
+        {"method": "error", "params": {"error": retried, "willRetry": True, "turnId": "turn-a"}},
+        {"method": "error", "params": {"error": final, "willRetry": False, "turnId": "turn-a"}},
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"id": "turn-a", "status": "failed", "error": final}},
+        },
+    )
+    events = list(turn.iter_events())
+
+    errors = [event.payload for event in events if event.event_type == "error"]
+    # A retried error is not the turn's; the gateway relay address is dropped
+    # from the text and kept, with the rest, in the error Codex sent.
+    assert errors == [{"text": refused, "error": final}]
+    assert turn.wait().status == "failed"
+
+
+def test_a_codex_json_rpc_error_reads_as_its_message(tmp_path):
+    process, turn = _codex_turn(tmp_path)
+    error = {"code": -32600, "message": "turn is not active"}
+    process.feed = _turn_lines(
+        {"id": "late-1", "error": error},
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-a", "status": "failed"}}},
+    )
+    events = list(turn.iter_events())
+
+    assert [e.payload for e in events if e.event_type == "error"] == [
+        {"text": "turn is not active", "error": error}
+    ]
+
+
+def test_pi_reports_a_prompt_it_refused_before_running(tmp_path):
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {
+            "id": "state-1",
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {"sessionId": "pi-a", "sessionFile": "/agent-state/pi-a.jsonl"},
+        }
+    )
+    session = PiDriver(PiRuntime()).launch_live(context)
+    session.ensure_started(model="m", reasoning_effort=None)
+    turn = session.start_turn(TurnInput(prompt="hello", model="m"))
+    prompt_id = json.loads(process.sent[-1])["id"]
+    # pi 0.73.1 answers a prompt this way only when it fails before preflight.
+    process.feed = _turn_lines(
+        {
+            "id": prompt_id,
+            "type": "response",
+            "command": "prompt",
+            "success": False,
+            "error": "No API key found for freeinference",
+        }
+    )
+    events = list(turn.iter_events())
+
+    assert [e.payload for e in events if e.event_type == "error"] == [
+        {"text": "No API key found for freeinference"}
+    ]
+    assert turn.wait().status == "failed"
+
+
 def test_pi_rpc_forks_before_the_next_native_prompt(tmp_path):
     process = _LiveProcess()
     context, _spawned = _protocol_context(process, tmp_path)

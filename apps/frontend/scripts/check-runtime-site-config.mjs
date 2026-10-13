@@ -53,6 +53,13 @@
 //      rather than inferred from the shape of the loop.
 //  12. metadata and layout share one saved-settings fetch per request, while
 //      the next request sees saved edits without restarting the server.
+//  13. stalled settings headers or bodies cannot delay pages for seconds:
+//      cold processes render neutral branding and warmed processes retain the
+//      last valid appearance, with successful edits still visible on recovery.
+//  14. every document carries the security headers, its mount point included,
+//      and every script in it is one its Content-Security-Policy allows: the
+//      policy comes from middleware whose matcher is relative to `basePath`,
+//      so a page the matcher misses is only visible in a served build.
 //
 // Run from `apps/frontend/`.
 // Use --saved-config-only to check request-scoped caching against an existing
@@ -668,6 +675,8 @@ async function assertNeutralDeployment(variant) {
 async function assertSavedConfigRequestScope(variant) {
   let target = DEPLOYMENTS[0];
   let reads = 0;
+  let mode = 'slow headers';
+  const fallbackTimings = [];
   const controlPlane = createServer((request, response) => {
     if (request.url !== '/v1/agent/site-config') {
       response.writeHead(404).end();
@@ -678,42 +687,118 @@ async function assertSavedConfigRequestScope(variant) {
       branding: expectedIdentity(target),
       features: { rag: target.rag },
     };
+    if (mode === 'http') {
+      response.writeHead(503).end();
+      return;
+    }
+    if (mode === 'invalid') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ...saved, features: { rag: 'invalid' } }));
+      return;
+    }
+    if (mode === 'slow body') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write(JSON.stringify(saved).slice(0, 1));
+    }
     // Keep the two readers overlapping: a module cache or Next's fetch
     // deduplication behaving differently must still satisfy the request count.
-    setTimeout(() => {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(saved));
-    }, 20);
+    const slowBody = mode === 'slow body';
+    const timer = setTimeout(
+      () => {
+        if (slowBody) response.end(JSON.stringify(saved).slice(1));
+        else {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify(saved));
+        }
+      },
+      mode.startsWith('slow') ? 5_000 : 20,
+    );
+    response.on('close', () => clearTimeout(timer));
   });
   await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
 
   const port = nextPort++;
   const server = startServer(
-    { AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}` },
+    {
+      ...DEPLOYMENTS[0].env,
+      AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
+    },
     port,
   );
   const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
-  try {
-    for (const deployment of DEPLOYMENTS) {
-      target = deployment;
-      const before = reads;
-      const response = await waitForResponse(url);
-      const html = await response.text();
-      const where = `${variant.name} / saved ${target.name}`;
-      if (response.status !== 200) {
-        throw new Error(`${where}: page answered ${response.status}\n${server.logs.join('')}`);
-      }
-      if (reads - before !== 1) {
-        throw new Error(`${where}: rendered one page with ${reads - before} settings fetches`);
-      }
-      if (titleOf(html) !== target.appName || textOf(html, 'h1') !== target.appName) {
-        throw new Error(`${where}: metadata and layout did not read the current saved name`);
-      }
-      const identity = serializedIdentity(flightPayload(html));
-      if (JSON.stringify(identity) !== JSON.stringify(expectedIdentity(target))) {
-        throw new Error(`${where}: hydration did not receive the current saved identity`);
+
+  async function assertSnapshot(expected, label, bounded = false) {
+    const before = reads;
+    const started = performance.now();
+    const response = await fetch(url, { signal: AbortSignal.timeout(2_500) });
+    const html = await response.text();
+    const elapsed = performance.now() - started;
+    const where = `${variant.name} / ${label}`;
+    if (response.status !== 200) {
+      throw new Error(`${where}: page answered ${response.status}\n${server.logs.join('')}`);
+    }
+    if (reads - before !== 1) {
+      throw new Error(`${where}: rendered one page with ${reads - before} settings fetches`);
+    }
+    if (titleOf(html) !== expected.appName || textOf(html, 'h1') !== expected.appName) {
+      throw new Error(`${where}: metadata and layout did not read the expected saved name`);
+    }
+    const identity = serializedIdentity(flightPayload(html));
+    if (JSON.stringify(identity) !== JSON.stringify(expected)) {
+      throw new Error(`${where}: hydration did not receive the expected saved identity`);
+    }
+    // This includes the complete HTML, not merely streamed response headers.
+    // Allow rendering/CI overhead beyond the unit-tested 400ms read budget,
+    // while rejecting the previous five-second configuration bottleneck.
+    if (bounded) {
+      fallbackTimings.push(elapsed);
+      if (elapsed > 1_500) {
+        throw new Error(`${where}: fallback page took ${elapsed.toFixed(0)}ms (limit 1500ms)`);
       }
     }
+  }
+
+  try {
+    // Start the production process through an asset request, so its startup
+    // time cannot hide the appearance budget or prime the public fallback.
+    const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
+      /^main-app-.*\.js$/.test(file),
+    );
+    if (!chunk) throw new Error('No main-app chunk to check production server readiness');
+    const asset = await waitForResponse(
+      `http://127.0.0.1:${port}${variant.basePath}/_next/static/chunks/${chunk}`,
+    );
+    await asset.arrayBuffer();
+    if (asset.status !== 200 || reads !== 0) {
+      throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
+    }
+
+    const neutral = {
+      appName: NEUTRAL.appName,
+      orgName: '',
+      orgUrl: '',
+      statusUrl: '',
+      gatewayUrl: '',
+    };
+    for (const stalled of ['slow headers', 'slow body']) {
+      mode = stalled;
+      await assertSnapshot(neutral, `cold ${mode}`, true);
+    }
+
+    mode = 'success';
+    for (const deployment of DEPLOYMENTS) {
+      target = deployment;
+      await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
+    }
+
+    for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
+      mode = failure;
+      await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
+    }
+
+    mode = 'success';
+    target = DEPLOYMENTS[0];
+    await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
 
     // Separate concurrent page requests must each read their own settings,
     // rather than sharing a process-wide in-flight promise.
@@ -723,11 +808,101 @@ async function assertSavedConfigRequestScope(variant) {
     if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
       throw new Error(`${variant.name}: concurrent pages did not each read one settings snapshot`);
     }
+    console.log(
+      `${variant.name}: cold and retained appearance fallbacks rendered within ` +
+        `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
+    );
   } finally {
     await server.stop();
     await new Promise((done, reject) =>
       controlPlane.close((error) => (error ? reject(error) : done())),
     );
+  }
+}
+
+/** The headers every response carries, documents and build assets alike. */
+const STATIC_SECURITY_HEADERS = [
+  ['x-content-type-options', 'nosniff'],
+  ['referrer-policy', 'strict-origin-when-cross-origin'],
+  ['x-frame-options', 'DENY'],
+];
+
+function assertStaticSecurityHeaders(where, headers) {
+  for (const [name, value] of STATIC_SECURITY_HEADERS) {
+    if (headers.get(name) !== value) {
+      fail(`${where}: ${name} is ${JSON.stringify(headers.get(name))}, expected ${value}`);
+    }
+  }
+}
+
+/**
+ * The documents' Content-Security-Policy, read off the served build.
+ *
+ * Each script in a document must be allowed by that document's policy — by the
+ * request's nonce, or, for an inline script without one, by its hash — and
+ * nothing may fall back to `'unsafe-inline'`, which would also allow the
+ * script the policy is there to refuse. The mount point is checked as well as
+ * a page under it, because that is the path a `basePath`-relative matcher can
+ * miss while every other one matches.
+ */
+async function assertSecurityHeaders(variant) {
+  const port = nextPort++;
+  const server = startServer(DEPLOYMENTS[0].env, port);
+  const origin = `http://127.0.0.1:${port}`;
+  try {
+    const nonces = new Set();
+    let asset = null;
+    for (const path of [variant.basePath || '/', `${variant.basePath}/login`]) {
+      const where = `${variant.name} / security headers of ${path}`;
+      const response = await waitForResponse(`${origin}${path}`);
+      const html = await response.text();
+      if (response.status !== 200) {
+        fail(`${where}: answered ${response.status}\n${server.logs.join('')}`);
+      }
+      assertStaticSecurityHeaders(where, response.headers);
+
+      const policy = response.headers.get('content-security-policy');
+      if (!policy) fail(`${where}: the document has no Content-Security-Policy`);
+      const directives = new Map(
+        policy.split(';').map((directive) => {
+          const [name, ...sources] = directive.trim().split(/\s+/);
+          return [name, sources];
+        }),
+      );
+      for (const name of ['frame-ancestors', 'object-src', 'base-uri']) {
+        if (directives.get(name)?.join(' ') !== "'none'") {
+          fail(`${where}: ${name} is not 'none' in ${JSON.stringify(policy)}`);
+        }
+      }
+      const scriptSources = directives.get('script-src') ?? [];
+      if (scriptSources.includes("'unsafe-inline'") || scriptSources.includes("'unsafe-eval'")) {
+        fail(`${where}: script-src allows inline or evaluated code: ${JSON.stringify(policy)}`);
+      }
+      const nonce = scriptSources.map((source) => /^'nonce-(.+)'$/.exec(source)?.[1]).find(Boolean);
+      if (!nonce) fail(`${where}: script-src carries no nonce: ${JSON.stringify(policy)}`);
+      nonces.add(nonce);
+
+      const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+      if (scripts.length === 0) {
+        fail(`${where}: the document has no scripts, so this check would pass vacuously`);
+      }
+      for (const [, attributes, body] of scripts) {
+        if (attributes.includes(`nonce="${nonce}"`)) continue;
+        const hash = `'sha256-${createHash('sha256').update(body).digest('base64')}'`;
+        if (attributes.includes('src=') || !scriptSources.includes(hash)) {
+          fail(`${where}: the policy does not allow <script${attributes}>`);
+        }
+      }
+      asset ??= firstMatch(html, /src="([^"]*\/_next\/static\/[^"]*\.js)"/);
+    }
+    if (nonces.size !== 2) fail(`${variant.name}: two documents were given the same nonce`);
+
+    if (!asset) fail(`${variant.name}: no script asset to read the static headers from`);
+    const response = await fetch(`${origin}${asset}`);
+    await response.arrayBuffer();
+    assertStaticSecurityHeaders(`${variant.name} / security headers of ${asset}`, response.headers);
+  } finally {
+    await server.stop();
   }
 }
 
@@ -743,6 +918,7 @@ async function main() {
     await assertReturnTo(variant);
     await assertNeutralDeployment(variant);
     await assertSavedConfigRequestScope(variant);
+    await assertSecurityHeaders(variant);
 
     // One artifact, two environments, and the two documents must differ — the
     // core assertion. Equal documents mean the value was resolved at build

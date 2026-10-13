@@ -839,3 +839,39 @@ def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, 
         {"text": "All done.", "preview_id": "second"},
     ]
     assert turn.wait().final_output == "Let me check.\n\nAll done."
+
+
+@pytest.mark.parametrize(
+    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
+)
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [
+        (
+            {"name": "APIError", "data": {"message": "403 no active API key", "statusCode": 403}},
+            "403 no active API key",
+        ),
+        ({"name": "MessageOutputLengthError", "data": {}}, "MessageOutputLengthError"),
+    ],
+)
+def test_a_session_error_reads_the_way_the_clis_own_output_prints_it(
+    tmp_path, driver, runtime, error, text
+):
+    process = _LiveProcess()
+    context, _ = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
+    session = driver(runtime()).launch_live(context)
+    session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
+    turn = session.start_turn(TurnInput(prompt="look", model="deepseek-v4-flash"))
+    turn_id = json.loads(process.sent[-1])["id"]
+    process.feed = _turn_lines(
+        {
+            "bridge": "event",
+            "turn_id": turn_id,
+            "event": {"type": "session.error", "properties": {"error": error}},
+        },
+        {"bridge": "settled", "turn_id": turn_id, "status": "failed"},
+    )
+    events = list(turn.iter_events())
+
+    assert [event.payload for event in events if event.event_type == "error"] == [{"text": text}]

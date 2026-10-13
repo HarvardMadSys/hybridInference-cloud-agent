@@ -84,11 +84,18 @@ without loading the old shared settings. Claude loads only private user settings
 project and local settings in the shared repository cannot configure a sibling's
 credential-bearing process. Private homes and settings are never widened by the
 shared-workspace permission-normalization pass.
-Codex, OpenCode and Kilo homes under `/agent-state/<runtime>-members` are mode
+Codex, OpenCode and Kilo homes under `/agent-state/<runtime>-homes` are mode
 0700 to their member UID, with no group access or setgid, because their config
-and plugins run as that member at every process start. Fork copies a flushed
-source home into the child's through a host-side pipe between a source-UID
-`tar` and a child-UID unpack, so neither UID ever opens the other's home.
+and plugins run as that member at every process start. Each collection is owned
+by the sandbox user, mode 3770 (setgid, sticky), inside a sticky `/agent-state`,
+so a sibling can neither rename a member's home away and put its own tree at
+that path before the CLI starts, nor replace the collection; the member checks
+both before using its home. A home an earlier release left in the
+member-created `/agent-state/<runtime>-members` is moved into the trusted
+collection once and only then judged: it must be the member's own directory
+holding only the member's files. Fork copies a flushed source home into the
+child's through a host-side pipe between a source-UID `tar` and a child-UID
+unpack, so neither UID ever opens the other's home.
 The thread key prevents a reassigned execution slot from inheriting a previous
 member's settings; old slot processes are reaped before launch-state preparation.
 

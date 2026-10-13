@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { NEUTRAL_SITE_CONFIG, parseSavedSiteConfig } from './site';
+import { NEUTRAL_SITE_CONFIG, parseSavedSiteConfig, parseSavedPublicAppearance } from './site';
 
 const saved = {
   branding: {
@@ -14,6 +14,27 @@ const saved = {
 };
 
 describe('saved public site settings', () => {
+  it('allows only validated public display fields into the server fallback', () => {
+    expect(
+      parseSavedPublicAppearance({
+        ...saved,
+        deployment: { version: 'foreign-image' },
+        agent_access: { allowed: true },
+        secret: 'must-never-be-published',
+      }),
+    ).toEqual({
+      branding: { ...saved.branding, gatewayUrl: 'https://gateway.example.com' },
+      features: saved.features,
+    });
+    expect(parseSavedPublicAppearance({})).toBeNull();
+    expect(
+      parseSavedPublicAppearance({
+        ...saved,
+        branding: { ...saved.branding, gatewayUrl: 'javascript:alert(1)' },
+      }),
+    ).toBeNull();
+  });
+
   it('uses saved branding and switches while retaining only deployment metadata from the server', () => {
     const site = parseSavedSiteConfig(
       { ...saved, secret: 'must-never-be-published' },

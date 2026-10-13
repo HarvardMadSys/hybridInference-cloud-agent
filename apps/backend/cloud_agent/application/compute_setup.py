@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -40,11 +41,108 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class HostRelease:
-    """One immutable, build-produced archive shared by every route slot."""
+    """One build-produced archive shared by every route slot of this release."""
 
     sha: str
     digest: str
     bundle: bytes
+    path: Path
+
+
+class HostReleaseError(Exception):
+    """The embedded host bundle is missing or belongs to another commit."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_RELEASE_UNAVAILABLE = (
+    "automatic_release_unavailable",
+    "Automatic setup needs the Host bundle included in the control-plane release. Update the deployment or use advanced manual setup.",
+)
+_RELEASE_MISMATCH = (
+    "automatic_release_mismatch",
+    "The Host bundle does not match the running control-plane release. Update the deployment before preparing servers.",
+)
+_HOST_BUNDLE_FILES = {
+    "deploy/host/sandbox_host.sh",
+    "deploy/host/setup_kata_runtime.sh",
+    "deploy/host/docker-compose.sandbox.yml",
+    "pyproject.toml",
+}
+
+
+def validate_host_bundle(bundle: bytes) -> None:
+    """Reject an unsafe or incomplete host archive.
+
+    Raises ``ValueError('invalid')`` or ``ValueError('incomplete')``.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:*") as archive:
+            names: set[str] = set()
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or ".." in name.split("/")
+                    or not (member.isdir() or member.isfile())
+                    or name in {".env", ".compute-identity.json"}
+                    or name.startswith((".compute-secrets/", ".git/"))
+                ):
+                    raise ValueError("invalid")
+                names.add(name)
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise ValueError("invalid") from exc
+    if not names >= _HOST_BUNDLE_FILES:
+        raise ValueError("incomplete")
+
+
+def load_host_release(directory: Path, *, expected_sha: str) -> HostRelease:
+    """Read the host archive shipped beside this control plane."""
+    try:
+        manifest_path = directory / "release.json"
+        if manifest_path.is_symlink() or manifest_path.stat().st_size > 4096:
+            raise ValueError
+        manifest = json.loads(manifest_path.read_text())
+        sha = manifest["source_commit"]
+        digest = manifest["source_sha256"]
+        if (
+            manifest.get("format_version") != 1
+            or manifest.get("bundle") != "source.tar.gz"
+            or not isinstance(sha, str)
+            or not re.fullmatch(r"[a-f0-9]{40}", sha)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+        ):
+            raise ValueError
+        bundle_path = directory / "source.tar.gz"
+        if bundle_path.is_symlink() or not 0 < bundle_path.stat().st_size <= 64 * 1024 * 1024:
+            raise ValueError
+        bundle = bundle_path.read_bytes()
+        if hashlib.sha256(bundle).hexdigest() != digest:
+            raise ValueError
+    except (OSError, ValueError, KeyError, TypeError):
+        raise HostReleaseError(*_RELEASE_UNAVAILABLE) from None
+    if sha != expected_sha:
+        raise HostReleaseError(*_RELEASE_MISMATCH)
+    return HostRelease(sha, digest, bundle, bundle_path)
+
+
+def load_control_plane_host_release(directory: Path | None = None) -> HostRelease | None:
+    """Return this process's host bundle, or None when it cannot be deployed."""
+    directory = directory or Path("/app/compute-host-release")
+    if not directory.is_dir():
+        return None
+    try:
+        release = load_host_release(
+            directory, expected_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", "")
+        )
+        validate_host_bundle(release.bundle)
+    except (HostReleaseError, ValueError):
+        return None
+    return release
 
 
 class AutomaticComputeSetup:
@@ -71,41 +169,14 @@ class AutomaticComputeSetup:
 
     def _release(self) -> HostRelease:
         try:
-            manifest_path = self.release_directory / "release.json"
-            if manifest_path.is_symlink() or manifest_path.stat().st_size > 4096:
-                raise ValueError
-            manifest = json.loads(manifest_path.read_text())
-            sha = manifest["source_commit"]
-            digest = manifest["source_sha256"]
-            if (
-                manifest.get("format_version") != 1
-                or manifest.get("bundle") != "source.tar.gz"
-                or not isinstance(sha, str)
-                or not re.fullmatch(r"[a-f0-9]{40}", sha)
-                or not isinstance(digest, str)
-                or not re.fullmatch(r"[a-f0-9]{64}", digest)
-            ):
-                raise ValueError
-            bundle_path = self.release_directory / "source.tar.gz"
-            if bundle_path.is_symlink() or not 0 < bundle_path.stat().st_size <= 64 * 1024 * 1024:
-                raise ValueError
-            bundle = bundle_path.read_bytes()
-            if hashlib.sha256(bundle).hexdigest() != digest:
-                raise ValueError
-        except (OSError, ValueError, KeyError, TypeError):
-            raise ComputeRefusal(
-                "automatic_release_unavailable",
-                "Automatic setup needs the Host bundle included in the control-plane release. Update the deployment or use advanced manual setup.",
-                status=503,
-            ) from None
-        if sha != os.environ.get("AGENT_DEPLOYMENT_SHA", ""):
-            raise ComputeRefusal(
-                "automatic_release_mismatch",
-                "The Host bundle does not match the running control-plane release. Update the deployment before preparing servers.",
-                status=503,
+            release = load_host_release(
+                self.release_directory,
+                expected_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
             )
-        self.validate_bundle(bundle)
-        return HostRelease(sha, digest, bundle)
+        except HostReleaseError as exc:
+            raise ComputeRefusal(exc.code, str(exc), status=503) from None
+        self.validate_bundle(release.bundle)
+        return release
 
     def status(self) -> dict[str, Any]:
         """Return only release readiness and actionable non-secret prerequisites."""

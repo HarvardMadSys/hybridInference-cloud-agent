@@ -165,12 +165,19 @@ class PreflightResult(ComputeValue):
 
 
 class BootstrapResult(ComputeValue):
-    """Local deployment readiness; pool admission also needs heartbeat evidence."""
+    """Local deployment readiness; pool admission also needs heartbeat evidence.
+
+    ``advertising`` says whether the host still publishes a deployment
+    generation after a failed rollout. ``None`` means this result did not
+    check. A false value is the only signal that the previous generation was
+    already taken down.
+    """
 
     ready: bool
     host: str
     deployment_sha: str
     blocked_reasons: tuple[str, ...] = ()
+    advertising: bool | None = None
 
 
 class HostInventory(ComputeValue):

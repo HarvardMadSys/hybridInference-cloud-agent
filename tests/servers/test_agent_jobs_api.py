@@ -5719,6 +5719,12 @@ class _FakeGitHubApp:
     async def token_for(self, repo: str, **kwargs: Any) -> str:
         return "ghs_x"
 
+    async def require_commit_on_branch(
+        self, repo: str, sha: str, *, branch: str | None = None
+    ) -> str:
+        """Every base is on its branch unless a test says otherwise."""
+        return branch or "main"
+
 
 def _store_with_grants(store: FakeStorage) -> FakeStorage:
     """Give the fake store the grant surface the router uses."""
@@ -6709,6 +6715,25 @@ async def test_reserved_base_ref_metadata_cannot_invent_a_branch(client: AsyncCl
     assert created.json()["metadata"] is None
 
 
+async def test_reserved_oncall_mark_cannot_be_claimed_by_an_owner(
+    client: AsyncClient, store: FakeStorage
+):
+    """Only the on-call door stamps the mark; an owner's copy is dropped."""
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "m",
+            "metadata": {"oncall": True, "ticket": "ABC-1"},
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["metadata"] == {"ticket": "ABC-1"}
+    assert store.jobs[created.json()["id"]]["metadata"] == {"ticket": "ABC-1"}
+
+
 async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage, monkeypatch):
     """Better a clear 400 than a job queued against a ref that does not exist."""
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
@@ -6736,6 +6761,94 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage,
 
     assert created.status_code == 400
     assert "nope" in created.text
+
+
+class _HistoryApp(_FakeGitHubApp):
+    """Resolves every ref to ``resolved``; only ``on_branch`` is in branch history."""
+
+    def __init__(self, *, resolved: str, on_branch: set[str]) -> None:
+        super().__init__(installations=[], repos_by_installation={})
+        self.resolved = resolved
+        self.on_branch = on_branch
+        self.checked: list[tuple[str, str, str | None]] = []
+
+    async def resolve_ref(self, repo: str, ref: str) -> str:
+        return self.resolved
+
+    async def require_commit_on_branch(
+        self, repo: str, sha: str, *, branch: str | None = None
+    ) -> str:
+        from cloud_agent.github_app import CommitNotOnBranch
+
+        self.checked.append((repo, sha, branch))
+        if sha not in self.on_branch:
+            raise CommitNotOnBranch(f"commit {sha[:12]} is not in the history of branch 'main'")
+        return branch or "main"
+
+
+async def _create_with_history_app(
+    store: FakeStorage, monkeypatch, app_creds: _HistoryApp, **fields: str
+) -> Any:
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    from cloud_agent.api.deps import get_agent_app_credentials
+
+    app = _build_app(_store_with_grants(store))
+    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "owner/name", "task_prompt": "fix it", "model": "m", **fields},
+        )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        # A named commit, with and without the branch it claims to come from.
+        {"base_sha": "c" * 40},
+        {"base_sha": "c" * 40, "base_ref": "dev"},
+        # A ref that resolves to such a commit is the same request.
+        {"base_ref": "refs/pull/5/head"},
+    ],
+)
+async def test_a_base_outside_the_repository_history_is_refused_at_creation(
+    store: FakeStorage, monkeypatch, fields
+):
+    """GitHub serves a fork's pull request head by hash; that is not this repository's history.
+
+    The publisher fetches the base by hash and pushes a branch built on it, so
+    a base the repository's branches do not contain would have the platform
+    push someone else's commits under its own name.
+    """
+    app_creds = _HistoryApp(resolved="c" * 40, on_branch={"f" * 40})
+    jobs_before = dict(store.jobs)
+
+    created = await _create_with_history_app(store, monkeypatch, app_creds, **fields)
+
+    assert created.status_code == 400, created.text
+    error = created.json()["detail"]["error"]
+    assert error["type"] == "invalid_request"
+    assert "not in the history of branch" in error["message"]
+    assert "base_ref" in error["message"]
+    assert app_creds.checked == [("owner/name", "c" * 40, fields.get("base_ref"))]
+    assert store.jobs == jobs_before
+
+
+@pytest.mark.parametrize(
+    "fields", [{"base_sha": "f" * 40}, {"base_sha": "f" * 40, "base_ref": "dev"}, {}]
+)
+async def test_a_base_on_its_branch_is_accepted_at_creation(
+    store: FakeStorage, monkeypatch, fields
+):
+    """Only a base that exists is checked, and one on its branch is kept as named."""
+    app_creds = _HistoryApp(resolved="f" * 40, on_branch={"f" * 40})
+
+    created = await _create_with_history_app(store, monkeypatch, app_creds, **fields)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["base_sha"] == fields.get("base_sha")
+    expected = [("owner/name", "f" * 40, fields.get("base_ref"))] if fields else []
+    assert app_creds.checked == expected
 
 
 async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeStorage, monkeypatch):

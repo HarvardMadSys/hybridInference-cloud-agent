@@ -41,7 +41,21 @@ router = APIRouter(
 )
 
 PGADMIN_PATH = "/admin/agent/pgadmin"
-_COOKIES = {"pga4_session", "remember_token"}
+_SESSION_COOKIE = "pga4_session"
+_COOKIES = {_SESSION_COOKIE, "remember_token"}
+
+#: Added to every proxied response, whatever pgAdmin sends. pgAdmin is served
+#: on the Agent's own origin and keeps its own (permissive) policy for its
+#: inline scripts, so a script policy here would break it; these directives
+#: are enforced alongside that one and break nothing pgAdmin does. No other
+#: site may frame pgAdmin's SQL editor, and nothing it serves is sniffed into
+#: a script or rendered as a plugin.
+_SECURITY_HEADERS = (
+    (b"content-security-policy", b"frame-ancestors 'self'; object-src 'none'; base-uri 'self'"),
+    (b"x-frame-options", b"SAMEORIGIN"),
+    (b"x-content-type-options", b"nosniff"),
+)
+_REPLACED_HEADERS = {"cache-control", "x-frame-options", "x-content-type-options"}
 _REQUEST_HEADERS = {
     "accept",
     "accept-language",
@@ -386,7 +400,7 @@ async def pgadmin_proxy(
     }
     headers = []
     for name, value in upstream.headers.multi_items():
-        if name in excluded or name == "cache-control":
+        if name in excluded or name in _REPLACED_HEADERS:
             continue
         if name == "set-cookie":
             headers.extend(_cookie(value, config))
@@ -394,12 +408,17 @@ async def pgadmin_proxy(
             if name == "location":
                 value = _location(value, config)
             headers.append((name.encode("latin-1"), value.encode("latin-1")))
-    response.raw_headers = [*headers, (b"cache-control", b"no-store")]
-    if not path and request.method == "GET":
+    response.raw_headers = [*headers, (b"cache-control", b"no-store"), *_SECURITY_HEADERS]
+    # The launch link opens the root, but a browser can enter pgAdmin at any
+    # URL. A request with no pgAdmin session cookie is the first of a new
+    # pgAdmin session wherever it lands, so that is recorded as well.
+    new_session = _SESSION_COOKIE not in request.cookies
+    if new_session or (not path and request.method == "GET"):
         await log_admin_action(
             store,
             get_client_ip(request),
             "agent.database.pgadmin.open",
+            details={"pgadmin_session": "new" if new_session else "existing"},
             actor_id=admin,
             success=upstream.status_code < 400,
         )

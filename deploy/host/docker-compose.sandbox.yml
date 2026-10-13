@@ -199,8 +199,8 @@ services:
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
       AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       # Daemon-side path, observed through `docker info`; it is deliberately
-      # not mounted into this container. Production points Docker itself at a
-      # durable block volume and sets this to that exact data-root.
+      # not mounted into this container. Leave the default. A durable disk is
+      # bind-mounted onto /var/lib/docker, not selected as a custom data-root.
       AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
       # Broker-only archival receipts and temporary exports survive service
       # replacement. No sandbox or runner mounts this directory.

@@ -410,6 +410,52 @@ async def _reserve_shared_chat(
     return job, claim, sandbox
 
 
+async def test_settlement_never_persists_a_whitespace_native_locator(
+    pool,
+    store: Storage,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-blank-native-locator",
+        context_status="new",
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+    )
+
+    settled = await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+        context_status="live",
+        native_session_id=" \t\r\n ",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+
+    assert settled is not None
+    assert settled["native_session_id"] is None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT native_session_id FROM agent_thread_sandbox_memberships "
+                "WHERE thread_id = $1",
+                job["thread_id"],
+            )
+            is None
+        )
+
+
 async def test_sandbox_reservation_rechecks_expiry_after_waiting_on_membership(
     pool, store: Storage
 ):
@@ -1686,6 +1732,14 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         "source_process_generation": 2,
         "target_process_generation": 1,
     }
+    assert (
+        await store.session_fork.record_session_fork_materialized(
+            operation_id=operation["id"],
+            coordinator_token=coordinator,
+            receipt={**receipt, "target_native_session_id": " \t\r\n "},
+        )
+        is None
+    )
     materialized = await store.session_fork.record_session_fork_materialized(
         operation_id=operation["id"],
         coordinator_token=coordinator,
@@ -4236,6 +4290,42 @@ async def test_failed_preadmission_activation_requests_an_immediate_stop(
     assert abandoned["idle_deadline"] is None
 
 
+async def test_terminal_preadmission_container_without_locator_stops_member(
+    store: Storage,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-terminal-before-admission",
+        context_status="new",
+    )
+
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="runner exited before prompt admission",
+    )
+
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["state"] == "stopping"
+    assert durable["active_attempt_id"] is None
+    assert durable["admitted_job_id"] is None
+    assert durable["native_session_id"] is None
+    assert durable["context_status"] == "new"
+    assert durable["resident_state"] == "stopped"
+
+
 async def test_failed_preadmission_before_container_creation_can_be_reprovisioned(
     store: Storage,
 ):
@@ -4256,6 +4346,8 @@ async def test_failed_preadmission_before_container_creation_can_be_reprovisione
     assert abandoned["container_id"] is None
     assert abandoned["state"] == "provisioning"
     assert abandoned["context_status"] == "new"
+    assert abandoned["native_session_id"] is None
+    assert abandoned["resident_state"] == "stopped"
     assert abandoned["active_attempt_id"] is None
     assert abandoned["idle_deadline"] is None
 
@@ -4385,6 +4477,61 @@ async def test_failed_preadmission_late_container_observation_is_stopped(
     assert due is not None
     assert due["reason"] == "orphaned_attempt"
     assert due["activation_generation"] == 0
+
+
+async def test_stopped_observation_normalizes_a_reported_restarting_member(
+    store: Storage,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    container_id = "container-stopped-restart-observation"
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id=container_id,
+        context_status="new",
+    )
+    abandoned = await store.sandbox.abandon_thread_sandbox(
+        **fence,
+        lost=False,
+        detail="activation ended before a native locator was reported",
+        idle_timeout_seconds=1800,
+    )
+    assert abandoned is not None and abandoned["state"] == "stopping"
+    observation = {
+        "thread_id": job["thread_id"],
+        "host": "runner-a",
+        "sandbox_id": sandbox["sandbox_id"],
+        "container_id": container_id,
+        "sandbox_generation": sandbox["generation"],
+        "running": False,
+    }
+    assert await store.sandbox.reconcile_thread_sandbox_observation(**observation) == "stopped"
+
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observation,
+            members=[
+                {
+                    "thread_id": job["thread_id"],
+                    "activation_generation": sandbox["activation_generation"],
+                    "process_generation": 0,
+                    "residency_generation": sandbox["residency_generation"],
+                    "resident_state": "restarting",
+                }
+            ],
+        )
+        is None
+    )
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["state"] == "stopped"
+    assert durable["resident_state"] == "stopped"
 
 
 async def test_expired_shared_admission_loses_only_that_member_and_residency(

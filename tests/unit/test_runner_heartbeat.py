@@ -217,7 +217,7 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
     )
     heart.start()
     try:
-        code, _tail, errors, result = runner._stream_shared_agent_turn(
+        code, _tail, errors, result, _reported = runner._stream_shared_agent_turn(
             supervisor=supervisor,
             job=job,
             control=control,

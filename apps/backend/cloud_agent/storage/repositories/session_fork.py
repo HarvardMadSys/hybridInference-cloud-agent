@@ -153,7 +153,7 @@ class PostgresSessionForkRepository:
                 return {"error": "native_fork_unavailable"}
             if row["active_attempt_id"] is not None:
                 return {"error": "source_busy"}
-            if row["native_state"] != "ready" or not row["native_session_id"]:
+            if row["native_state"] != "ready" or not str(row["native_session_id"] or "").strip():
                 return {"error": "native_context_unavailable"}
             latest_settled = await conn.fetchrow(
                 """
@@ -609,7 +609,7 @@ class PostgresSessionForkRepository:
             }
             if any(receipt.get(key) != value for key, value in expected.items()):
                 return None
-            target_native_id = str(receipt.get("target_native_session_id") or "")
+            target_native_id = str(receipt.get("target_native_session_id") or "").strip()
             source_process = int(receipt.get("source_process_generation") or 0)
             target_process = int(receipt.get("target_process_generation") or 0)
             if (
@@ -949,7 +949,12 @@ class PostgresSessionForkRepository:
                             WHEN context_status = 'lost' THEN 'lost' ELSE 'ready' END,
                         fork_operation_id = NULL,
                         resident_state = CASE
-                            WHEN context_status = 'lost' THEN 'lost' ELSE 'restarting' END,
+                            WHEN context_status = 'lost' THEN 'lost'
+                            WHEN native_session_id IS NULL
+                                 OR native_session_id !~ '[^[:space:]]'
+                                THEN 'stopped'
+                            ELSE 'restarting'
+                        END,
                         last_error = $3, updated_at = NOW()
                     WHERE thread_id = $1 AND fork_operation_id = $2
                     """,

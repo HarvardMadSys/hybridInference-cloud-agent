@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
 import type {
   AgentConfigApi,
@@ -26,7 +26,8 @@ import { useAuth } from '@/components/providers/AuthProvider';
 import { useComposerDraft } from './useComposerDraft';
 import { Picker } from './Picker';
 import { RepositoryPicker } from './RepositoryPicker';
-import { CreateRepositoryDialog } from './CreateRepositoryDialog';
+import { DeferredCreateRepositoryDialog } from './DeferredCreateRepositoryDialog';
+import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { PromptRewrite } from './PromptRewrite';
@@ -36,12 +37,21 @@ import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { useComposerMcp } from './mcp/useComposerMcp';
-import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
-import { PluginSelectionDialog } from './plugins/PluginSelectionDialog';
 import { UserAvatar } from './UserAvatar';
+import { UserHomeInsights } from './UserHomeInsights';
+import { useUserHomeProfile } from './useUserHomeProfile';
+
+const SkillSelectionDialog = lazy(() =>
+  import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
+);
+const PluginSelectionDialog = lazy(() =>
+  import('./plugins/PluginSelectionDialog').then((module) => ({
+    default: module.PluginSelectionDialog,
+  })),
+);
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -89,6 +99,7 @@ function readNewTaskDraft(value: string): NewTaskDraft | null {
 function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; userId?: string }) {
   const router = useRouter();
   const t = useT();
+  const userProfile = useUserHomeProfile(userId);
   const draftStore = useComposerDraft({ userId, threadId: 'new-task' });
   const mounted = useRef(true);
   useEffect(() => {
@@ -568,40 +579,40 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     return (
       <section
         aria-busy="true"
-        className="mx-auto w-full max-w-3xl px-4 pb-10 pt-10 sm:px-8 md:pt-16"
+        className="mx-auto w-full max-w-3xl px-4 pb-8 pt-8 sm:px-6 md:pt-10"
       >
         <div
           aria-hidden="true"
-          className="mx-auto h-16 w-16 rounded-2xl bg-surface-hover motion-safe:animate-pulse"
+          className="mx-auto h-[152px] w-[152px] rounded-[32px] bg-surface-hover motion-safe:animate-pulse"
         />
-        <p aria-live="polite" className="mt-6 text-center text-sm text-muted">
+        <p aria-live="polite" className="mt-4 text-center text-sm text-muted">
           {t('common.loading')}
         </p>
         <div
           aria-hidden="true"
-          className="mt-8 h-64 rounded-2xl border border-border bg-surface-muted motion-safe:animate-pulse"
+          className="mt-5 h-40 rounded-xl border border-border bg-surface-muted motion-safe:animate-pulse"
         />
       </section>
     );
   }
 
   return (
-    <section className="ui-enter mx-auto w-full max-w-3xl px-4 pb-10 pt-8 sm:px-8 md:pt-14 lg:pt-16">
+    <section className="ui-enter mx-auto w-full max-w-3xl px-4 pb-8 pt-6 sm:px-6 md:pt-10">
       <div className="ui-welcome-enter">
-        <UserAvatar />
+        <UserAvatar view={userProfile.view} />
         <h1
           id={headingId}
-          className="text-balance text-center text-[28px] font-semibold leading-tight tracking-[-0.035em] text-foreground sm:text-[34px] lg:text-[36px]"
+          className="text-balance text-center text-xl font-semibold leading-tight tracking-tight text-foreground sm:text-2xl"
         >
           {t('composer.heading')}
         </h1>
-        <p className="mx-auto mt-3 max-w-md text-balance text-center text-sm leading-6 text-muted">
+        <p className="mx-auto mt-1.5 max-w-md text-balance text-center text-[13px] leading-5 text-muted">
           {firstVisit ? t('composer.subheadingFirstVisit') : t('composer.subheading')}
         </p>
       </div>
 
       {disconnected ? (
-        <div className="mt-8">
+        <div className="mt-5">
           <ConnectSourceControl
             installUrl={config.github_install_url}
             unavailable={githubUnavailable}
@@ -611,7 +622,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
         </div>
       ) : noRepositories ? (
-        <div className="mt-8">
+        <div className="mt-5">
           <ConnectSourceControl
             installUrl={config.github_install_url}
             step="repositories"
@@ -655,7 +666,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         }}
         className={`ui-composer ${
           dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''
-        } ${disconnected || noRepositories ? 'mt-4' : 'mt-8'} ${locked ? 'bg-surface-muted' : ''}`}
+        } ${disconnected || noRepositories ? 'mt-3' : 'mt-5'} ${locked ? 'bg-surface-muted' : ''}`}
       >
         <ComposerCommandMenu
           id={goalCommand.menuId}
@@ -698,7 +709,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           aria-labelledby={headingId}
           aria-describedby={keyboardHintId}
           disabled={locked}
-          className="block min-h-[150px] w-full resize-y rounded-t-2xl border-0 bg-transparent px-5 pb-4 pt-5 text-base leading-relaxed text-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[160px] sm:px-6"
+          className="block min-h-[88px] w-full resize-y rounded-t-xl border-0 bg-transparent px-4 pb-2 pt-3 text-sm leading-6 text-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[104px]"
         />
 
         {disconnected ? null : (
@@ -722,55 +733,55 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
         )}
 
-        <div className="flex flex-col gap-2 rounded-b-2xl border-t border-border bg-surface-muted/50 p-3 sm:px-4">
-          <div className="flex min-w-0 flex-wrap items-center gap-1">
-            {disconnected ? (
-              <span
-                aria-live="polite"
-                className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
-                  connectNudged
-                    ? 'text-crimson-dark dark:text-crimson-light'
-                    : 'text-gray-400 dark:text-gray-500'
-                }`}
+        <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
+          {disconnected ? (
+            <span
+              aria-live="polite"
+              className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
+                connectNudged
+                  ? 'text-crimson-dark dark:text-crimson-light'
+                  : 'text-gray-400 dark:text-gray-500'
+              }`}
+            >
+              <svg
+                className="h-4 w-4 shrink-0"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden="true"
               >
-                <svg
-                  className="h-4 w-4 shrink-0"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  aria-hidden="true"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
-                  />
-                </svg>
-                {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
-              </span>
-            ) : (
-              <>
-                <ComposerPlusMenu
-                  disabled={busy}
-                  onOpen={goalCommand.dismiss}
-                  onFiles={attachments.add}
-                  onOpenSkills={() => setSkillsOpen(true)}
-                  skillSummary={
-                    pendingSkillDefaults
-                      ? t('attach.skillsDefaults')
-                      : String(selectedSkills.length)
-                  }
-                  goalSummary={t('commands.goalHint')}
-                  onOpenGoal={insertGoalCommand}
-                  mcp={mcp}
-                  mcpBlockedReason={mcpBlockedReason}
-                  onOpenPlugins={
-                    pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
-                  }
-                  pluginSummary={String(plugins.length)}
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
                 />
-                <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
+              </svg>
+              {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
+            </span>
+          ) : (
+            <>
+              <ComposerPlusMenu
+                disabled={busy}
+                onOpen={goalCommand.dismiss}
+                onFiles={attachments.add}
+                onOpenSkills={() => setSkillsOpen(true)}
+                skillSummary={
+                  pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
+                }
+                goalSummary={t('commands.goalHint')}
+                onOpenGoal={insertGoalCommand}
+                mcp={mcp}
+                mcpBlockedReason={mcpBlockedReason}
+                onOpenPlugins={
+                  pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
+                }
+                pluginSummary={String(plugins.length)}
+              />
+              <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+              {/* Leave the scroller unpositioned so the repository menu anchors
+                  to the composer and can extend outside the scroll area. */}
+              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
                 <RepositoryPicker
                   repos={config?.repos ?? []}
                   value={repo}
@@ -797,12 +808,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                   options={branches}
                   onChange={setBranch}
                 />
-              </>
-            )}
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-1">
-            {!disconnected && (
-              <>
                 <Picker
                   label={t('composer.agent')}
                   value={runtime}
@@ -821,29 +826,29 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                   options={efforts}
                   onChange={setEffort}
                 />
-              </>
-            )}
+              </div>
+            </>
+          )}
 
-            <button
-              type="button"
-              disabled={!canRun}
-              onClick={() => void run()}
-              title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
-              className="ui-button ui-button-primary ml-auto shrink-0 px-4 text-xs shadow-sm"
+          <button
+            type="button"
+            disabled={!canRun}
+            onClick={() => void run()}
+            title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
+            className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
+          >
+            {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
+            <svg
+              aria-hidden="true"
+              className="h-3.5 w-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
             >
-              {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
-              <svg
-                aria-hidden="true"
-                className="h-3.5 w-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
-              </svg>
-            </button>
-          </div>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -856,40 +861,64 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       ) : null}
 
-      <p id={keyboardHintId} className="mt-4 text-center text-xs leading-relaxed text-muted">
+      <p id={keyboardHintId} className="mt-3 text-center text-xs leading-5 text-muted">
         {t('composer.keyboardHint')}
       </p>
 
-      {pluginsOpen ? (
-        <PluginSelectionDialog
-          runtime={runtime}
-          selected={plugins}
-          onChange={setPlugins}
-          onClose={() => setPluginsOpen(false)}
-          blockedReason={pluginBlockedReason}
+      {userId ? (
+        <UserHomeInsights
+          view={userProfile.view}
+          loading={userProfile.loading}
+          error={userProfile.error}
+          onRetry={userProfile.retry}
         />
+      ) : null}
+
+      {pluginsOpen ? (
+        <Suspense
+          fallback={
+            <ComposerDialogLoading
+              title={t('plugins.title')}
+              onClose={() => setPluginsOpen(false)}
+            />
+          }
+        >
+          <PluginSelectionDialog
+            runtime={runtime}
+            selected={plugins}
+            onChange={setPlugins}
+            onClose={() => setPluginsOpen(false)}
+            blockedReason={pluginBlockedReason}
+          />
+        </Suspense>
       ) : null}
       {skillsOpen ? (
-        <SkillSelectionDialog
-          limits={config?.skill_limits}
-          selected={selectedSkills}
-          onClose={() => setSkillsOpen(false)}
-          onApply={(skills) => {
-            // Only a real change is recorded. Leaving the selection alone keeps
-            // `chosenSkills` null, which is what makes the request omit
-            // `skill_ids` and let the server resolve account defaults.
-            const originalIds = new Set(selectedSkills.map((skill) => skill.id));
-            if (
-              skills.length !== originalIds.size ||
-              skills.some((skill) => !originalIds.has(skill.id))
-            ) {
-              setChosenSkills(skills);
-            }
-            setSkillsOpen(false);
-          }}
-        />
+        <Suspense
+          fallback={
+            <ComposerDialogLoading title={t('skills.title')} onClose={() => setSkillsOpen(false)} />
+          }
+        >
+          <SkillSelectionDialog
+            limits={config?.skill_limits}
+            selected={selectedSkills}
+            onClose={() => setSkillsOpen(false)}
+            onApply={(skills) => {
+              // Only a real change is recorded. Leaving the selection alone keeps
+              // `chosenSkills` null, which is what makes the request omit
+              // `skill_ids` and let the server resolve account defaults.
+              const originalIds = new Set(selectedSkills.map((skill) => skill.id));
+              if (
+                skills.length !== originalIds.size ||
+                skills.some((skill) => !originalIds.has(skill.id))
+              ) {
+                setChosenSkills(skills);
+              }
+              setSkillsOpen(false);
+            }}
+          />
+        </Suspense>
       ) : null}
-      <CreateRepositoryDialog
+      <DeferredCreateRepositoryDialog
         open={createRepositoryOpen}
         onClose={() => setCreateRepositoryOpen(false)}
         onAvailable={(repo, config) => {
@@ -939,7 +968,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       ) : null}
       {firstVisit && (
-        <div className="mt-8 grid gap-5 border-t border-border pt-6 sm:grid-cols-3">
+        <div className="mt-6 grid gap-3 border-t border-border pt-4 sm:grid-cols-3">
           {(
             [
               ['composer.repository', 'composer.workflowRepository'],

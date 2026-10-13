@@ -91,6 +91,37 @@ def _serves(payload: Any, status_code: int = 200):
     return handler
 
 
+async def test_profile_email_lookup_checks_owner_and_ignores_roles():
+    def serve(request):
+        assert request.url.path == "/internal/users/owner/status"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        return httpx.Response(
+            200,
+            json={
+                "user_id": "owner",
+                "exists": True,
+                "email": "owner@example.com",
+                "role": "admin",
+            },
+        )
+
+    assert await _client(serve).user_email("owner") == "owner@example.com"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"user_id": "someone-else", "exists": True, "email": "private@example.com"},
+        {"user_id": "owner", "exists": False},
+        {"user_id": "owner", "exists": True, "email": "invalid"},
+        {"user_id": "owner", "exists": True},
+    ],
+)
+async def test_profile_email_rejects_missing_or_mismatched_account_data(body):
+    with pytest.raises(GatewayError):
+        await _client(_serves(body)).user_email("owner")
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------

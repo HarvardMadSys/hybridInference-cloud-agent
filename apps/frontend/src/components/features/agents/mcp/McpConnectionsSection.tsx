@@ -13,6 +13,7 @@ import {
   type McpConnectionApi,
   type McpConnectionsApi,
 } from '@/lib/api/mcp';
+import { describeMcpAuthorizationFailure } from '@/lib/authorizationOutcome';
 
 interface CapabilityCounts {
   tool_count: number;
@@ -36,6 +37,7 @@ export function capabilitySummary(counts: CapabilityCounts): string {
 export interface McpAuthorizationResult {
   ok: boolean;
   connectionId: string | null;
+  /** `mcp_message` as the redirect carried it: anyone can write that link. */
   message: string | null;
 }
 
@@ -133,7 +135,7 @@ export function McpConnectionsSection({
         if (cancelled || !authorizationResult || authorizationNoticeChecked.current) return;
         authorizationNoticeChecked.current = true;
         if (!authorizationResult.ok) {
-          setError(authorizationResult.message || 'Sign-in did not complete. Try again.');
+          setError(describeMcpAuthorizationFailure(authorizationResult.message));
           return;
         }
         const connection = response.connections.find(

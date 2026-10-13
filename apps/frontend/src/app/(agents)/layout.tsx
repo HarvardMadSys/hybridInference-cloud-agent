@@ -20,9 +20,9 @@ import { WebsitePreferences } from '@/components/features/settings/WebsitePrefer
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 const NAV_ITEM =
-  'ui-focus-ring inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 py-2 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md px-2 py-1 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
 const NAV_ITEM_CURRENT =
-  'ui-focus-ring inline-flex min-h-9 shrink-0 items-center rounded-lg bg-surface-hover px-3 py-2 text-foreground transition-colors [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md bg-surface-hover px-2 py-1 text-foreground transition-colors [@media(pointer:coarse)]:min-h-11';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
@@ -50,19 +50,19 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   };
 
   return (
-    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b border-border bg-surface px-4 py-2.5 sm:gap-x-5 sm:px-5 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
-      <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
+    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
+      <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
         {sidebarToggle}
         <Link
           href="/"
-          className="ui-focus-ring flex min-w-0 items-center gap-2 rounded-lg text-[16px] font-semibold tracking-tight text-foreground transition-colors hover:text-accent sm:gap-2.5"
+          className="ui-focus-ring flex min-w-0 items-center gap-1.5 rounded-md text-sm font-semibold tracking-tight text-foreground transition-colors hover:text-accent"
         >
           <span
             aria-hidden="true"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-subtle text-accent"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-subtle text-accent"
           >
             <svg
-              className="h-5 w-5"
+              className="h-3.5 w-3.5"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -172,7 +172,7 @@ function SidebarToggleButton({
       aria-controls="agents-sidebar"
       aria-keyshortcuts="Meta+B Control+B"
       title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-      className="ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+      className="ui-focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg
         aria-hidden="true"

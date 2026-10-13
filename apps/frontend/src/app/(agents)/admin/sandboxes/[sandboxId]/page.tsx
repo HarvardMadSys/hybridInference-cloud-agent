@@ -236,7 +236,9 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
   const deleteBlocked = !sandbox
     ? 'Load the current sandbox before deleting it.'
     : deletionPending
-      ? 'Wait for the S3 archive and container deletion to finish.'
+      ? sandbox.deletion_discard
+        ? 'Wait for container deletion to finish. No S3 archive is being uploaded.'
+        : 'Wait for the S3 archive and container deletion to finish.'
       : deletionComplete
         ? 'This sandbox has already been deleted.'
         : sandbox.state !== 'stopped'
@@ -246,17 +248,13 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
               ? 'The retained container identity is unavailable.'
               : null));
 
-  async function requestDeletion() {
+  async function requestDeletion(discard = false) {
     if (!sandbox || deleteBlocked || actionRequest.current) return;
-    if (
-      !window.confirm(
-        `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${memberCount} ${
-          memberCount === 1 ? 'session' : 'sessions'
-        }? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. ` +
-          'Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.',
-      )
-    )
-      return;
+    const sessions = `${memberCount} ${memberCount === 1 ? 'session' : 'sessions'}`;
+    const confirmation = discard
+      ? `Permanently delete sandbox ${sandbox.id}, shared by ${sessions}, without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`
+      : `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${sessions}? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`;
+    if (!window.confirm(confirmation)) return;
 
     const controller = new AbortController();
     actionRequest.current = controller;
@@ -266,15 +264,14 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
     setDeleting(true);
     setActionError(null);
     try {
-      const next = await deleteAdminSandbox(
-        sandbox.id,
-        {
-          generation: sandbox.generation!,
-          container_id: sandbox.container_id!,
-          last_activity_at: sandbox.last_activity_at,
-        },
-        controller.signal,
-      );
+      const reviewed = {
+        generation: sandbox.generation!,
+        container_id: sandbox.container_id!,
+        last_activity_at: sandbox.last_activity_at,
+      };
+      const next = discard
+        ? await deleteAdminSandbox(sandbox.id, reviewed, controller.signal, false, true)
+        : await deleteAdminSandbox(sandbox.id, reviewed, controller.signal);
       if (controller.signal.aborted) return;
       setTrajectory((current) => {
         if (!current) return current;
@@ -357,9 +354,11 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                 role="status"
                 className="mt-5 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200"
               >
-                Sandbox deleted{sandbox.deleted_at ? ` ${dateTime(sandbox.deleted_at)}` : ''}. Its
-                workspace files and native session history were archived and verified in S3 before
-                the retained container was removed. Live native resume is no longer available.
+                Sandbox deleted{sandbox.deleted_at ? ` ${dateTime(sandbox.deleted_at)}` : ''}.{' '}
+                {sandbox.deletion_discard
+                  ? 'The retained container was removed without an S3 archive. Workspace files and native session history on the host are gone.'
+                  : 'Its workspace files and native session history were archived and verified in S3 before the retained container was removed.'}{' '}
+                Live native resume is no longer available.
                 <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
                   Chat history and lifecycle history remain available for administrative audit.
                 </span>
@@ -374,8 +373,9 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                 {sandbox.deletion_requested_at && (
                   <>Deletion requested {dateTime(sandbox.deletion_requested_at)}. </>
                 )}
-                Archiving to S3. The retained container will be deleted only after the upload is
-                verified.
+                {sandbox.deletion_discard
+                  ? 'Deleting the retained container without an S3 archive. Workspace files will not be uploaded.'
+                  : 'Archiving to S3. The retained container will be deleted only after the upload is verified.'}
               </div>
             )}
 
@@ -438,25 +438,43 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                     Only a fully stopped, idle sandbox can be deleted.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  disabled={deleting || deleteBlocked !== null}
-                  onClick={() => void requestDeletion()}
-                  className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
-                >
-                  {deleting
-                    ? 'Requesting deletion…'
-                    : deletionComplete
-                      ? 'Sandbox deleted'
-                      : deletionState === 'pending'
-                        ? 'Archiving to S3…'
-                        : deletionState === 'archived'
-                          ? 'Deleting archived sandbox…'
-                          : deletionState === 'failed'
-                            ? 'Retry archive and delete'
-                            : 'Archive to S3 and delete'}
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={deleting || deleteBlocked !== null}
+                    onClick={() => void requestDeletion(false)}
+                    className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
+                  >
+                    {deleting
+                      ? 'Requesting deletion…'
+                      : deletionComplete
+                        ? 'Sandbox deleted'
+                        : deletionState === 'pending'
+                          ? sandbox.deletion_discard
+                            ? 'Deletion in progress'
+                            : 'Archiving to S3…'
+                          : deletionState === 'archived'
+                            ? 'Deleting archived sandbox…'
+                            : deletionState === 'failed'
+                              ? 'Retry archive and delete'
+                              : 'Archive to S3 and delete'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deleting || deleteBlocked !== null}
+                    onClick={() => void requestDeletion(true)}
+                    className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
+                  >
+                    {deletionState === 'pending' && sandbox.deletion_discard
+                      ? 'Deleting without archive…'
+                      : 'Delete without archive'}
+                  </button>
+                </div>
               </div>
+              <p className="mt-3 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                Delete without archive destroys the host copy. It does not upload workspace files or
+                native session history.
+              </p>
               {deleteBlocked && (
                 <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{deleteBlocked}</p>
               )}

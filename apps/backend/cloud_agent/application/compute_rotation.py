@@ -1049,6 +1049,7 @@ class ComputeRotation:
             scope=None,
             **self.reconciler._fence(operation),
         )
+        await self._revoke_after_rollback(operation, source, candidate)
         await self.reconciler._checkpoint(
             operation,
             "releasing_candidate",
@@ -1065,6 +1066,29 @@ class ComputeRotation:
         await self._fail_candidate(
             operation, slot, result["candidate"], rollback["class"], rollback["code"]
         )
+
+    async def _revoke_after_rollback(
+        self, operation: dict[str, Any], source: NodeObservation, candidate: dict[str, Any]
+    ) -> None:
+        """Withdraw the transfer key from a replacement that will not take over.
+
+        Cleanup revokes it after a move succeeds; a move that rolls back used to
+        leave it authorized, letting the source keep writing to the replacement
+        until that node was released — and release can wait or fail. This runs
+        once the original node serves again, so it never delays the restart.
+        A failure is logged rather than retried: the node is being released,
+        and releasing it removes the key with it.
+        """
+        if not candidate.get("nodes"):
+            return
+        target, _, _ = self._target(operation, candidate)
+        try:
+            await self.bootstrap.revoke_transfer(source, target)
+        except ProviderError as exc:
+            logger.warning(
+                "compute_rotation_rollback_revoke_failed",
+                extra={"operation_id": operation["id"], "reason": exc.code},
+            )
 
     # ---- the discard operation ------------------------------------------
 

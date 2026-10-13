@@ -26,6 +26,7 @@ _ACCOUNT = "123456789012"
 _REGION = "us-east-1"
 _KMS_KEY = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789abc"
 _KMS_KEY_2 = "arn:aws:kms:us-east-1:123456789012:key/abcdefab-1234-1234-1234-123456789abc"
+_UNSAFE_CLOSE_ERROR = "https://user:secret@example.com/archive?token=leaked"
 
 
 def _policy(
@@ -69,7 +70,7 @@ class _Service:
         self.closed = True
         self.close_calls += 1
         if self.fail_close:
-            raise RuntimeError("client close failed")
+            raise RuntimeError(_UNSAFE_CLOSE_ERROR)
 
     def status(self) -> dict[str, object]:
         return {"enabled": True, "running": self.started, "pending": 0}
@@ -312,7 +313,9 @@ def test_in_flight_call_keeps_its_service_until_the_revision_swaps() -> None:
     controller.close()
 
 
-def test_retired_client_close_failure_cannot_rollback_policy_application() -> None:
+def test_retired_client_close_failure_cannot_rollback_policy_application(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     controller, services = _controller()
     controller.start()
     controller.apply(_policy(1))
@@ -323,6 +326,14 @@ def test_retired_client_close_failure_cannot_rollback_policy_application() -> No
     assert status["applied_revision"] == 2
     assert services[0].close_calls == 1
     assert services[1].started is True
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "sandbox_archive_service_close_failed"
+    )
+    assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert record.exc_info is None
+    assert _UNSAFE_CLOSE_ERROR not in caplog.text
     controller.close()
 
 

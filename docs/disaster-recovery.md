@@ -56,10 +56,12 @@ Preserve all of the following privately:
   `.deployed-sha`, readiness marker, namespace/project, tunnel SSH credentials
   and verified `known_hosts`, and host runtime/storage configuration. The
   credential must match the restored host row's credential hash.
-- The complete retained Docker data-root and any separate containerd state
-  required by that host's image store. Preserve ownership, modes, hard links,
-  extended attributes and sparse files using storage-driver-supported backup
-  procedures. Keep the thread-to-host-to-container identities in the matching
+- The complete retained Docker store and the containerd image store. With the
+  supported bind layout those trees are `<disk>/docker` and
+  `<disk>/containerd`, while `docker info` still reports
+  `DockerRootDir=/var/lib/docker`. Copy both with Docker and containerd
+  stopped. Preserve ownership, modes, hard links, extended attributes and
+  sparse files. Keep the thread-to-host-to-container identities in the matching
   database; exporting a container filesystem alone omits required metadata.
 - The verified `release.json`, its reviewed pinned SHA-256, `recipe.tar.gz`,
   extracted recipe, helper dependencies and image digests for both the current

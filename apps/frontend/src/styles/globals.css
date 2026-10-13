@@ -1,28 +1,6 @@
-@import '@xterm/xterm/css/xterm.css';
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-.agent-xterm .xterm {
-  height: 100%;
-}
-
-.agent-xterm .xterm-viewport {
-  scrollbar-color: #d1d5db transparent;
-  scrollbar-width: thin;
-}
-
-/* xterm's stylesheet paints the viewport black and its theme paints only the
-   rows, so the part of the pane below the last whole row showed as a black
-   strip. The pane's own background matches both terminal themes. */
-.agent-xterm .xterm .xterm-viewport {
-  background-color: transparent;
-}
-
-.dark .agent-xterm .xterm-viewport {
-  scrollbar-color: #4b5563 transparent;
-}
 
 @layer base {
   :root {
@@ -105,7 +83,7 @@
 
   .ui-button,
   .ui-icon-button {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors duration-150;
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md text-sm font-medium transition-colors duration-150;
     transition-property: color, background-color, border-color, box-shadow, transform;
     transition-duration: var(--ui-duration-fast);
     transition-timing-function: var(--ui-ease);
@@ -117,11 +95,11 @@
   }
 
   .ui-button {
-    @apply min-h-10 px-3 py-2;
+    @apply min-h-8 px-2.5 py-1;
   }
 
   .ui-icon-button {
-    @apply min-h-10 min-w-10 p-2;
+    @apply min-h-8 min-w-8 p-1.5;
   }
 
   .ui-button:disabled,
@@ -152,11 +130,11 @@
   }
 
   .ui-card {
-    @apply rounded-xl border border-border bg-surface-raised text-foreground shadow-subtle;
+    @apply rounded-lg border border-border bg-surface-raised text-foreground shadow-subtle;
   }
 
   .ui-tab {
-    @apply min-h-10 border-b-2 border-transparent text-muted transition-colors duration-150;
+    @apply min-h-8 border-b-2 border-transparent text-muted transition-colors duration-150;
   }
 
   .ui-tab:hover {
@@ -173,7 +151,7 @@
   }
 
   .ui-tool-row {
-    @apply flex items-center gap-2 rounded-lg border border-border bg-surface-muted text-muted transition-colors duration-150;
+    @apply flex items-center gap-1.5 rounded-md border border-border bg-surface-muted text-muted transition-colors duration-150;
   }
 
   .ui-tool-row:hover:not(:disabled) {
@@ -181,7 +159,7 @@
   }
 
   .ui-input {
-    @apply min-h-10 rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-foreground placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50;
+    @apply min-h-8 rounded-md border border-border-strong bg-surface px-2.5 py-1 text-sm text-foreground placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .ui-input:focus-visible {
@@ -189,10 +167,8 @@
   }
 
   .ui-composer {
-    @apply relative rounded-2xl border border-border bg-surface text-foreground;
-    box-shadow:
-      0 2px 8px -4px rgb(var(--ui-foreground) / 0.08),
-      0 12px 32px -20px rgb(var(--ui-foreground) / 0.12);
+    @apply relative rounded-xl border border-border bg-surface text-foreground;
+    box-shadow: 0 1px 2px rgb(var(--ui-foreground) / 0.05);
     transition:
       border-color var(--ui-duration-fast) ease,
       box-shadow var(--ui-duration-fast) ease,
@@ -200,10 +176,8 @@
   }
 
   .ui-composer:focus-within {
-    border-color: rgb(var(--ui-accent) / 0.35);
-    box-shadow:
-      0 0 0 3px rgb(var(--ui-accent) / 0.06),
-      0 12px 32px -20px rgb(var(--ui-foreground) / 0.12);
+    border-color: rgb(var(--ui-accent) / 0.4);
+    box-shadow: 0 0 0 2px rgb(var(--ui-accent) / 0.08);
   }
 
   /* Opacity-only entrances keep measured menus and resizable panes stable. */
@@ -279,24 +253,28 @@
 
 /* The sidebar and resizable workspace change available width independently of
    the viewport, so these controls follow their own container. */
-/* Admin pages sit on a muted ground so the masthead and cards read as a surface. */
+/* Admin pages sit on a flat muted ground. Cards supply the only surface. */
 .admin-canvas {
   background-color: rgb(var(--ui-surface-muted));
-  background-image: linear-gradient(180deg, rgb(var(--ui-accent) / 0.07), transparent 220px);
 }
 
 .agent-conversation-header {
   container: conversation-header / inline-size;
 }
 
-@container conversation-header (max-width: 900px) {
+@container conversation-header (min-width: 900px) {
   .agent-conversation-toolbar {
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    align-items: center;
+    gap: 1rem;
   }
-  .agent-conversation-context,
+
+  .agent-conversation-context {
+    flex: 0 1 20rem;
+  }
+
   .agent-conversation-controls {
-    width: 100%;
+    flex: 1 1 0%;
   }
 }
 

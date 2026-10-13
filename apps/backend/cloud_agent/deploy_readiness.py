@@ -133,18 +133,19 @@ async def shared_live_readiness(
 
     rows, active_host, _, retained_hosts = await store.deployment_runner_pool()
     rows_by_host = {str(row.get("host")): row for row in rows if row.get("host")}
-    if draining_host is not None:
-        if draining_host not in rows_by_host:
-            return SharedLiveReadiness(False, f"draining host {draining_host!r} is not registered")
-        if active_host is not None and active_host != draining_host:
-            return SharedLiveReadiness(
-                False,
-                f"pinned host {active_host!r} does not match draining host {draining_host!r}",
-            )
+    if draining_host is not None and draining_host not in rows_by_host:
+        return SharedLiveReadiness(False, f"draining host {draining_host!r} is not registered")
     if active_host is not None:
         placement_rows = [row for row in rows if row.get("host") == active_host]
         if not placement_rows:
             return SharedLiveReadiness(False, f"pinned host {active_host!r} is not registered")
+        # New chats stay on the pin. A rollout may still replace a different
+        # enrolled host. That host has to stay draining and idle, and the pin
+        # has to stay online at the same target commit. Treating the name
+        # difference as fatal made every control-plane release fail once
+        # placement moved to another server.
+        if draining_host is not None and draining_host != active_host:
+            placement_rows.append(rows_by_host[draining_host])
     else:
         # With no pin, every online host advertising the current historical-
         # fork surface may claim one of the new jobs this rollout enables.
@@ -273,6 +274,12 @@ async def shared_live_readiness(
         current_placement_names = {
             str(row["host"]) for row in current_rows if row.get("host") == active_host
         }
+        if (
+            draining_host is not None
+            and draining_host != active_host
+            and draining_host in current_by_host
+        ):
+            current_placement_names.add(draining_host)
     else:
         current_placement_names = {
             str(row["host"])

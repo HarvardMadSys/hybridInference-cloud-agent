@@ -13,13 +13,15 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from cloud_agent.domain.cloudlab import DEFAULT_CLOUDLAB_NODE_TYPES
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 
 CLOUDLAB_HARDWARE_URL: Final = "https://www.cloudlab.us/portal-hardware.php"
 _MAX_RESPONSE_BYTES: Final = 1_000_000
-_MIN_AVAILABLE_EXCLUSIVE: Final = 16
+_MIN_TOTAL_EXCLUSIVE: Final = 20
 _MIN_INTRODUCED_YEAR: Final = 2021
 _MIN_PHYSICAL_CORES: Final = 16
 _MIN_MEMORY_GIB: Final = 128
@@ -42,7 +44,7 @@ class _PreferredNodeSpec:
 # Deliberately conservative. These are general-purpose, non-GPU CloudLab node
 # families introduced in 2021 or later with at least 16 physical cores and
 # 128 GiB RAM. Hardware facts come from CloudLab's public hardware catalog;
-# availability is always taken from the live portal payload below.
+# total population and availability come from the live portal payload below.
 _PREFERRED_NODE_SPECS: Final[dict[str, _PreferredNodeSpec]] = {
     "c6525-25g": _PreferredNodeSpec(
         "Utah", "urn:publicid:IDN+utah.cloudlab.us+authority+cm", 2021, 16, 32, 128
@@ -61,12 +63,6 @@ _PREFERRED_NODE_SPECS: Final[dict[str, _PreferredNodeSpec]] = {
     ),
     "r6615": _PreferredNodeSpec(
         "Clemson", "urn:publicid:IDN+clemson.cloudlab.us+authority+cm", 2025, 32, 64, 192
-    ),
-    "sm220u": _PreferredNodeSpec(
-        "Wisconsin", "urn:publicid:IDN+wisc.cloudlab.us+authority+cm", 2023, 32, 64, 256
-    ),
-    "sm110p": _PreferredNodeSpec(
-        "Wisconsin", "urn:publicid:IDN+wisc.cloudlab.us+authority+cm", 2023, 16, 32, 128
     ),
 }
 
@@ -130,7 +126,7 @@ class CloudLabNodeInventory:
         self._lock = asyncio.Lock()
 
     async def preferred_nodes(self) -> dict[str, Any]:
-        """Return only fresh, currently plentiful candidates in preference order."""
+        """Return fresh candidates with more than 20 total nodes in preference order."""
         cached = self._fresh_cache()
         if cached is not None:
             return cached
@@ -171,7 +167,7 @@ class CloudLabNodeInventory:
             "observed_at": self._now().isoformat(),
             "source": "CloudLab public hardware inventory",
             "filters": {
-                "availability_greater_than": _MIN_AVAILABLE_EXCLUSIVE,
+                "total_greater_than": _MIN_TOTAL_EXCLUSIVE,
                 "minimum_introduced_year": _MIN_INTRODUCED_YEAR,
                 "minimum_physical_cores": _MIN_PHYSICAL_CORES,
                 "minimum_memory_gib": _MIN_MEMORY_GIB,
@@ -223,7 +219,8 @@ class CloudLabNodeInventory:
                 raise ValueError("CloudLab site inventory missing")
 
         nodes: list[dict[str, Any]] = []
-        for node_type, spec in _PREFERRED_NODE_SPECS.items():
+        for node_type in DEFAULT_CLOUDLAB_NODE_TYPES:
+            spec = _PREFERRED_NODE_SPECS[node_type]
             typeinfo = inventory[spec.site_urn]["typeinfo"]
             availability = typeinfo.get(node_type)
             if availability is None:
@@ -240,7 +237,7 @@ class CloudLabNodeInventory:
                 or free > total
             ):
                 raise ValueError("invalid node availability")
-            if free <= _MIN_AVAILABLE_EXCLUSIVE:
+            if total <= _MIN_TOTAL_EXCLUSIVE:
                 continue
             nodes.append(
                 {
@@ -254,4 +251,4 @@ class CloudLabNodeInventory:
                     "memory_gib": spec.memory_gib,
                 }
             )
-        return sorted(nodes, key=lambda node: (-node["available"], node["node_type"]))
+        return nodes

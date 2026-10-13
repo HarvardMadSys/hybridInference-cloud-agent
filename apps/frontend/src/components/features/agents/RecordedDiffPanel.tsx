@@ -1,7 +1,7 @@
 'use client';
 
 import { useT } from '@/components/providers';
-import type { RecordedFileSelection } from './turnDeliverables';
+import type { RecordedFileSelection } from './recordedTurnOutputs';
 
 const LINE_STYLE = {
   hunk: 'bg-surface-muted text-muted',

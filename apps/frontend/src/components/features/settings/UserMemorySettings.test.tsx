@@ -140,7 +140,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('memory settings', () => {
-  it('automatically loads recent work, source-linked memory, and actionable suggestions without an avatar', async () => {
+  it('automatically loads recent work and source-linked memory while user suggestions live on the homepage', async () => {
     render(panel());
     expect(screen.getByRole('status')).toHaveTextContent('Loading memory');
     await screen.findByRole('switch');
@@ -149,9 +149,8 @@ describe('memory settings', () => {
     expect(screen.getByText('Applies to every project.')).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Remember automatically' })).toBeChecked();
     expect(getUserMemory).toHaveBeenCalledWith(expect.any(AbortSignal));
-    fireEvent.click(screen.getByText('Profile and suggestions'));
-    expect(screen.getByRole('heading', { name: 'Recent work' })).toBeVisible();
-    expect(screen.getByText(populated.portrait.summary)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Recent work'));
+    expect(screen.getByText(populated.portrait.summary)).toBeVisible();
     expect(screen.getByText('alice/toolbox', { selector: 'dd' })).toBeInTheDocument();
     expect(screen.getByText('Testing')).toBeInTheDocument();
     expect(screen.getByText('codex')).toBeInTheDocument();
@@ -164,9 +163,10 @@ describe('memory settings', () => {
       'href',
       '/job%2Fone',
     );
-    expect(screen.getByText(populated.suggestions[0].title)).toBeInTheDocument();
-    expect(screen.getByText(populated.suggestions[0].reason)).toBeInTheDocument();
-    expect(screen.getByText(populated.suggestions[0].action)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Suggestions' })).not.toBeInTheDocument();
+    expect(screen.queryByText(populated.suggestions[0].title)).not.toBeInTheDocument();
+    expect(screen.queryByText(populated.suggestions[0].reason)).not.toBeInTheDocument();
+    expect(screen.queryByText(populated.suggestions[0].action)).not.toBeInTheDocument();
     expect(screen.getByText(/^Updated /)).toBeInTheDocument();
   });
 
@@ -176,7 +176,7 @@ describe('memory settings', () => {
     await screen.findByRole('switch');
     expect(screen.getByText('Appears after a few requests.')).toBeInTheDocument();
     expect(screen.getByText('No memories yet.')).toBeInTheDocument();
-    expect(screen.getByText('None yet.')).toBeInTheDocument();
+    expect(screen.queryByText('None yet.')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Consolidate' })).toBeDisabled();
   });
 
@@ -303,8 +303,9 @@ describe('memory settings', () => {
     expect(await screen.findByRole('switch', { name: '自动记忆' })).toBeChecked();
     expect(screen.getByText('适用于所有项目。')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '已保存的记忆' })).toBeInTheDocument();
-    fireEvent.click(screen.getByText('画像与建议'));
-    expect(screen.getByRole('heading', { name: '建议' })).toBeVisible();
+    fireEvent.click(screen.getByText('近期工作'));
+    expect(screen.getByText(populated.portrait.summary)).toBeVisible();
+    expect(screen.queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '整合' }));
     expect(screen.getByRole('group', { name: '整合记忆' })).toBeInTheDocument();

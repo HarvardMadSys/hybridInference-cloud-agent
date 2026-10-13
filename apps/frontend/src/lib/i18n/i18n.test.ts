@@ -68,8 +68,8 @@ describe('translate', () => {
   });
 
   it('answers in the requested language', () => {
-    expect(translate('en', 'settings.title')).toBe('Setting');
-    expect(translate('zh-CN', 'settings.title')).toBe('设置');
+    expect(translate('en', 'settings.title')).toBe('My Settings');
+    expect(translate('zh-CN', 'settings.title')).toBe('我的设置');
   });
 });
 

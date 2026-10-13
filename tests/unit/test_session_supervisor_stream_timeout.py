@@ -114,7 +114,7 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
 
     control = SimpleNamespace(append_event=on_event)
     try:
-        code, _tail, errors, result = _run_turn(quiet_broker.client, control=control)
+        code, _tail, errors, result, _reported = _run_turn(quiet_broker.client, control=control)
     finally:
         timer.cancel()
         timer.join(timeout=5)
@@ -158,7 +158,7 @@ def test_quiet_turn_remains_interruptible(quiet_broker, monkeypatch, reason):
         with pytest.raises(LeaseLost):
             _run_turn(quiet_broker.client, **kwargs)
     else:
-        code, _tail, _errors, result = _run_turn(quiet_broker.client, **kwargs)
+        code, _tail, _errors, result, _reported = _run_turn(quiet_broker.client, **kwargs)
         assert code == (124 if reason == "deadline" else 130)
         assert result["resources"]["process_observation_complete"] is True
     # The client can interrupt after consuming init before the server resumes

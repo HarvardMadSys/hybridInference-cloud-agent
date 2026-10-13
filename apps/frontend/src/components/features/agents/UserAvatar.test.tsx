@@ -56,12 +56,12 @@ describe('homepage avatar', () => {
       });
       const rendered = render(avatar());
       const image = await screen.findByRole('img', {
-        name: 'Your automatically generated illustrated avatar',
+        name: 'Your Pokémon companion avatar',
       });
       expect(image).toHaveAttribute('src', dataUrl);
       expect(image).toHaveAttribute(
         'title',
-        'Your base character stays the same while colors and details reflect your recent work.',
+        'Your Pokémon stays the same while its habitat and orbiting badges reflect your recent work.',
       );
       rendered.unmount();
     }
@@ -116,9 +116,9 @@ describe('homepage avatar', () => {
   it('translates the avatar description into Chinese', async () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     render(avatar());
-    expect(await screen.findByRole('img', { name: '为你自动生成的插画头像' })).toHaveAttribute(
+    expect(await screen.findByRole('img', { name: '你的宝可梦伙伴头像' })).toHaveAttribute(
       'title',
-      '头像的基础角色保持不变，配色与细节会随近期工作变化。',
+      '宝可梦伙伴保持不变，栖息地与环绕徽章会随近期工作变化。',
     );
   });
 });

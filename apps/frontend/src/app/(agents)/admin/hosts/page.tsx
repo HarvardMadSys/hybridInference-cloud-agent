@@ -894,6 +894,18 @@ function HostsView() {
                             muted={facts.stale}
                             meter={facts.capacity?.storage_used_percent ?? null}
                           />
+                          {/* A recommendation, not a refusal: this host takes
+                                untrusted work and gives each new sandbox an
+                                unbounded writable layer on the disk above. */}
+                          {host.untrusted_without_disk_quota === true && (
+                            <span
+                              role="status"
+                              title="This server runs untrusted sandboxes with no container disk quota, so one sandbox can fill the disk the others write to. Set Container disk above 0 (needs Docker overlay2 on XFS with project quotas)."
+                              className="mt-1 block max-w-[15rem] text-[11px] font-medium text-amber-700 dark:text-amber-300"
+                            >
+                              No container disk quota
+                            </span>
+                          )}
                         </td>
                         <td
                           data-label="Sandboxes"

@@ -84,3 +84,74 @@ def test_snapshot_coordinator_rejects_a_non_positive_interval():
 
     with pytest.raises(ValueError, match="positive"):
         asyncio.run(run())
+
+
+def _claimed_snapshot() -> dict[str, Any]:
+    return {
+        "snapshot_id": 7,
+        "sandbox_id": "asbx_shared",
+        "generation": 2,
+        "container_id": "container-shared",
+        "workspace_epoch": 4,
+        "base_sha": "a" * 40,
+        "anchor_job_id": "ajob_one",
+    }
+
+
+class _CapturePort:
+    def __init__(self) -> None:
+        self.recorded: list[dict[str, Any]] = []
+        self.deferred: list[dict[str, Any]] = []
+
+    async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
+        return _claimed_snapshot()
+
+    async def record_sandbox_snapshot_capture(self, **kwargs: Any) -> str:
+        self.recorded.append(kwargs)
+        return "captured"
+
+    async def defer_sandbox_snapshot_capture(self, **kwargs: Any) -> bool:
+        self.deferred.append(kwargs)
+        return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_a_receipt_patch_past_the_capture_limit_is_never_recorded(monkeypatch, oversized):
+    """No honest host produces a patch past its own Git output limit."""
+    import hashlib
+
+    from cloud_agent import broker_routing
+
+    patch = "x" * (control_plane.MAX_SNAPSHOT_PATCH_BYTES + (1 if oversized else 0))
+    claimed = _claimed_snapshot()
+
+    class _Broker:
+        async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "snapshot_id": claimed["snapshot_id"],
+                "sandbox_id": claimed["sandbox_id"],
+                "sandbox_generation": claimed["generation"],
+                "container_id": claimed["container_id"],
+                "workspace_epoch": claimed["workspace_epoch"],
+                "base_sha": claimed["base_sha"],
+                "patch": patch,
+                "content_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+            }
+
+    async def broker_for_job(_store: Any, _job_id: str) -> _Broker:
+        return _Broker()
+
+    monkeypatch.setattr(broker_routing, "broker_for_job", broker_for_job)
+    port = _CapturePort()
+    store = type("Store", (), {"snapshot": port, "host_pool": None})()
+
+    assert await control_plane._capture_due_shared_snapshot(store) is True
+    if oversized:
+        assert port.recorded == []
+        [deferred] = port.deferred
+        assert deferred["dirty"] is True
+        assert "patch size limit" in deferred["detail"]
+    else:
+        assert [row["patch"] for row in port.recorded] == [patch]
+        assert port.deferred == []

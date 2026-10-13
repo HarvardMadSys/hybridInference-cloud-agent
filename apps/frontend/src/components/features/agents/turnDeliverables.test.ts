@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
-import { createRecordedOutputsSelector, recordedTurnOutputs } from './turnDeliverables';
+import { createRecordedOutputsSelector, recordedTurnOutputs } from './recordedTurnOutputs';
 
 const JOB: Pick<AgentJobApi, 'id' | 'state' | 'published_pr_url' | 'current_attempt_id'> = {
   id: 'old-turn',

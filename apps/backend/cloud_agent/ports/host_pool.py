@@ -91,6 +91,7 @@ class HostPoolRepository(Protocol):
         *,
         host: str,
         credential_hash: str,
+        enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
         broker_url: str | None = None,
@@ -481,8 +482,11 @@ class HostPoolRepository(Protocol):
         ``"fenced"``,
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
-        A disabled attached machine without external release capability may
-        be deregistered after dependency checks; this never shuts it down.
+        A sandbox whose deletion has completed is an audit row: it keeps the
+        host name and does not block forgetting. A live group, or one whose
+        deletion failed or is still in progress, does. A disabled attached
+        machine without external release capability may be deregistered after
+        dependency checks; this never shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the

@@ -578,15 +578,24 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
 
     # The MCP listener shares the database but must not start another scheduler.
     compute_builder.reset_mock()
+    relay_runtime_builder = Mock(
+        side_effect=AssertionError("the MCP relay must not initialize source control")
+    )
+    monkeypatch.setattr(
+        "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
+        relay_runtime_builder,
+    )
     relay = FastAPI()
     async with lifespan(relay, background=False):
         await asyncio.sleep(0)
+        assert relay.state.source_control is None
         assert relay.state.compute_commands is None
         assert relay.state.compute_resource_task is None
         assert relay.state.sandbox_deletion_task is None
         assert relay.state.pr_archive_task is None
         assert relay.state.user_memory_task is None
         compute_builder.assert_not_called()
+        relay_runtime_builder.assert_not_called()
 
 
 def test_only_the_routes_that_describe_the_state_tolerate_an_unloaded_app() -> None:

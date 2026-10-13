@@ -42,7 +42,7 @@ from cloud_agent.capacity_protocol import (
     history_point_grid,
     resolve_history_range,
 )
-from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.execution_profiles import KATA_RUNTIME, default_execution_profile
 from cloud_agent.host_pool import (
     HOST_DRAINING,
     HOST_ONLINE,
@@ -129,6 +129,19 @@ def _require_store(store: _AdminHostsStorage | None) -> _AdminHostsStorage:
     return store
 
 
+def _untrusted_without_disk_quota(row: dict[str, Any]) -> bool:
+    """Whether a host that can take untrusted work reports applying no disk quota.
+
+    Only the Kata runtime is handed ``untrusted-kata-v1`` work, so only it is
+    named. The applied report is the host's own word for what a new sandbox
+    gets; a host that has not reported the setting is not guessed about.
+    """
+    if row.get("sandbox_runtime") != KATA_RUNTIME:
+        return False
+    applied = reported_values(row.get("settings_applied")) or {}
+    return applied.get("sandbox_disk_mib") == 0
+
+
 def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunnerHost:
     last_seen: datetime = row["last_seen_at"]
     read_at = datetime.now(UTC) if now is None else now
@@ -187,6 +200,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         sandbox_archive_settings_applied_revision=row.get(
             "sandbox_archive_settings_applied_revision"
         ),
+        untrusted_without_disk_quota=_untrusted_without_disk_quota(row),
     )
 
 
@@ -490,8 +504,9 @@ async def forget_agent_runner_host(
 ) -> ListAgentRunnerHostsResponse:
     """Drop a decommissioned host from the list.
 
-    Housekeeping only: a runner still polling on that machine re-adds itself
-    within seconds. The active host cannot be dropped, because doing so would
+    Housekeeping only: removal invalidates its credential and enrollment tokens;
+    the machine needs a fresh administrator-issued token to register again.
+    The active host cannot be dropped, because doing so would
     silently unpin new-chat placement, which is the opposite of what removing a
     host from a list looks like it does. Existing retained owners are not moved
     by forgetting their pool row; their broker routing continues to fail closed

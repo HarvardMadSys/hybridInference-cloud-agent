@@ -27,7 +27,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
-from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
+from cloud_agent.broker_routing import (
+    BrokerUrlRefused,
+    probe_broker,
+    probe_error_for_host,
+    validate_broker_url,
+)
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -185,8 +190,9 @@ async def register_host(
     # operator can correct; consuming the token first turns that typo into a
     # second privileged admin operation for no security benefit.
     broker_url = _checked_broker_url(body.broker_url)
+    enrollment_token_hash = hash_secret(body.enroll_token)
     if not await job_store.host_pool.consume_enroll_token(
-        token_hash=hash_secret(body.enroll_token), host=body.name
+        token_hash=enrollment_token_hash, host=body.name
     ):
         # One answer for expired, already-spent, never-issued and issued-for-
         # another-host: they are the same fact from the presenter's side — this
@@ -207,6 +213,7 @@ async def register_host(
         host = await job_store.host_pool.register_host(
             host=body.name,
             credential_hash=hash_secret(credential),
+            enrollment_token_hash=enrollment_token_hash,
             capabilities=body.capabilities,
             slots_total=body.slots_total,
             broker_url=broker_url,
@@ -215,6 +222,16 @@ async def register_host(
         )
     except ValueError as exc:
         error_type = str(exc)
+        if error_type == "enrollment_token_removed":
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "type": "unauthorized",
+                        "message": "This enrollment token is no longer valid. Issue a new one.",
+                    }
+                },
+            ) from exc
         if error_type == "host_drain_fenced":
             raise HTTPException(
                 status_code=409,
@@ -438,13 +455,16 @@ from cloud_agent.application.residency import residency_ttl_s
 async def _probed_broker_error(
     host: str, broker_url: str | None, *, force: bool = False
 ) -> str | None:
-    """Probe the reported broker, log a failure, and hand it back to the host.
+    """Probe the reported broker, log a failure, and tell the host it failed.
 
     Two audiences, because they notice different things. The log is where an
-    operator looks after something is already wrong. The response is what the
-    runner prints on the machine being deployed — which `sandbox_host.sh
-    up` tails, so a misconfigured deploy says so while somebody is still
-    watching it.
+    operator looks after something is already wrong, and it gets the full
+    reason. The response is what the runner prints on the machine being
+    deployed — which `sandbox_host.sh up` tails, so a misconfigured deploy says
+    so while somebody is still watching it. It gets only
+    :func:`~cloud_agent.broker_routing.probe_error_for_host`: the host chose
+    the address being dialled, so the dial's own error would tell it what this
+    control plane can reach.
 
     Never raises and never refuses the registration. A broker that is slow to
     start is normal — compose brings it up beside the runner — and a control
@@ -460,4 +480,4 @@ async def _probed_broker_error(
                 "broker_error": error,
             },
         )
-    return error
+    return probe_error_for_host(error)

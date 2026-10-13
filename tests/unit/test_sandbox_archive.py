@@ -136,6 +136,142 @@ def _upload(service, identity, receipt, monkeypatch, *, status=200, handler=None
     return calls, result
 
 
+def test_discard_removes_stopped_container_without_export_and_replays(archive_setup):
+    manager, supervisor, service, identity, _spec, _members = archive_setup
+    discard = replace(identity, request_id="discard-1", archive_key="")
+    result = service.discard(discard)
+    assert result == {
+        "request_id": "discard-1",
+        "container_id": "container-1",
+        "deleted": True,
+    }
+    assert manager.exports == 0
+    assert manager.removals == 1
+    assert not supervisor.owns("thread-origin")
+    assert not supervisor.owns("thread-peer")
+    directory = service._directory(discard)
+    assert (directory / "discard.json").exists()
+    assert (directory / "discarded.json").exists()
+    assert not (directory / "archive.tar").exists()
+    (directory / "discarded.json").unlink()
+    assert service.discard(discard)["deleted"] is True
+    assert manager.removals == 1
+
+
+def test_discard_refuses_a_request_that_already_prepared_an_archive(archive_setup):
+    manager, _supervisor, service, identity, _spec, _members = archive_setup
+    service.prepare(identity)
+    with pytest.raises(SessionLeaseLost, match="cannot be discarded"):
+        service.discard(replace(identity, archive_key=""))
+    assert manager.removals == 0
+    assert manager.exports == 1
+
+
+@pytest.mark.parametrize("discard", [False, True])
+@pytest.mark.parametrize("remaining", ["absent", "replacement", "renamed", "unavailable"])
+def test_deletion_retry_checks_absence_after_status_marks_container_lost(
+    archive_setup, monkeypatch, discard, remaining
+):
+    manager, supervisor, service, identity, _spec, _members = archive_setup
+    original = manager.current
+    if discard:
+        identity = replace(identity, request_id="discard-1", archive_key="")
+
+        def delete():
+            return service.discard(identity)
+
+    else:
+        receipt = service.prepare(identity)
+        _upload(service, identity, receipt, monkeypatch)
+
+        def delete():
+            return service.commit(
+                identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"]
+            )
+
+    remove = manager.remove_stopped_archived
+
+    def lost_removal_response(spec, *, container_id):
+        remove(spec, container_id=container_id)
+        raise SandboxError("Docker removal response was lost")
+
+    monkeypatch.setattr(manager, "remove_stopped_archived", lost_removal_response)
+    with pytest.raises(SandboxError, match="response was lost"):
+        delete()
+    assert manager.current is None
+    with pytest.raises(SandboxError, match="container is missing"):
+        supervisor.list_for_thread(identity.thread_id)
+
+    if remaining == "replacement":
+        manager.current = replace(original, container_id="replacement")
+    elif remaining == "renamed":
+        manager.current = replace(original, name="renamed-original")
+    elif remaining == "unavailable":
+
+        def unavailable(_container):
+            raise SandboxError("Docker inspection unavailable")
+
+        monkeypatch.setattr(manager, "inspect", unavailable)
+
+    if remaining == "absent":
+        assert delete()["deleted"] is True
+        assert not supervisor.owns("thread-origin")
+        assert not supervisor.owns("thread-peer")
+    else:
+        with pytest.raises(SandboxError):
+            delete()
+        assert supervisor.owns("thread-origin")
+        assert supervisor.owns("thread-peer")
+    assert manager.removals == 1
+
+
+def test_discard_completes_stale_membership_after_proving_container_absent(archive_setup):
+    manager, _supervisor, service, identity, spec, _members = archive_setup
+    manager.current = None
+    restarted = SandboxArchiveService(
+        SharedChatSessionSupervisor(manager), state_dir=service._state_dir
+    )
+    discard = replace(identity, request_id="discard-absent", archive_key="")
+
+    result = restarted.discard(discard, sandbox_id=spec.sandbox_id)
+
+    assert result == {
+        "request_id": "discard-absent",
+        "container_id": "container-1",
+        "deleted": True,
+    }
+    directory = restarted._directory(discard)
+    assert json.loads((directory / "discard.json").read_text())["target_absent"] is True
+    assert (directory / "discarded.json").exists()
+    assert manager.removals == 0
+    # Replay from the authorization record after a crash before the final
+    # acknowledgement; absence is proved again before completing.
+    (directory / "discarded.json").unlink()
+    with pytest.raises(SessionLeaseLost, match="identity changed"):
+        restarted.discard(discard, sandbox_id="another-sandbox")
+    assert not (directory / "discarded.json").exists()
+    # An older control-plane retry uses the identity in the durable record.
+    assert restarted.discard(discard) == result
+    assert json.loads((directory / "discarded.json").read_text())["sandbox_id"] == spec.sandbox_id
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_discard_does_not_mistake_an_unregistered_container_for_absence(archive_setup, replacement):
+    manager, _supervisor, service, identity, spec, _members = archive_setup
+    restarted = SandboxArchiveService(
+        SharedChatSessionSupervisor(manager), state_dir=service._state_dir
+    )
+    discard = replace(identity, request_id="discard-unregistered", archive_key="")
+    if replacement:
+        manager.current = replace(manager.current, container_id="replacement-container")
+
+    with pytest.raises(SandboxError, match="no shared sandbox membership"):
+        restarted.discard(discard, sandbox_id=spec.sandbox_id)
+
+    assert not restarted._directory(discard).joinpath("discard.json").exists()
+    assert manager.removals == 0
+
+
 def test_complete_native_backup_keeps_container_until_verified_commit(archive_setup, monkeypatch):
     manager, supervisor, service, identity, spec, members = archive_setup
     receipt = service.prepare(identity)
