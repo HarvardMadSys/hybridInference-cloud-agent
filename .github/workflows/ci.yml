@@ -56,7 +56,7 @@ jobs:
       web: ${{ steps.classify.outputs.web }}
       docker: ${{ steps.classify.outputs.docker }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: the diff below needs both endpoints, and shallow-clone
           # packs with missing delta bases have been failing random checkouts
@@ -167,7 +167,7 @@ jobs:
     if: needs.changes.outputs.backend == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: GitHub intermittently serves shallow-clone packs with
           # missing delta bases ("pack has N unresolved deltas"), which fails
@@ -192,7 +192,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -276,7 +276,7 @@ jobs:
     env:
       SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -287,7 +287,7 @@ jobs:
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -327,7 +327,7 @@ jobs:
       # Inference is a loopback protocol fixture, with no API key or model cost.
       - name: Set up Node for native CLI regression
         if: matrix.shard == 1
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -423,7 +423,7 @@ jobs:
           --health-retries 15
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -451,7 +451,7 @@ jobs:
           } >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -619,7 +619,7 @@ jobs:
     env:
       SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: shallow-clone packs with missing delta bases have been
           # failing random checkouts on this pool.
@@ -639,7 +639,7 @@ jobs:
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -708,7 +708,7 @@ jobs:
     if: needs.changes.outputs.web == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: shallow-clone packs with missing delta bases have been
           # failing random checkouts on this pool.
@@ -721,7 +721,7 @@ jobs:
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -776,7 +776,7 @@ jobs:
     name: Gitleaks
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -924,7 +924,7 @@ jobs:
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -971,7 +971,7 @@ jobs:
         # PRs use anonymous pulls and receive no registry credential, including
         # same-repository PRs where GitHub would otherwise make secrets available.
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -1068,7 +1068,7 @@ jobs:
         # backstop, because a build can still fail for reasons of its own and
         # running it once more is cheaper than a red cell.
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1089,7 +1089,7 @@ jobs:
       # before the first attempt. What can still fail is the build itself.
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1125,7 +1125,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -1260,7 +1260,7 @@ jobs:
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1334,7 +1334,7 @@ jobs:
       - name: Build ${{ matrix.artifact.name }}
         id: build
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1349,7 +1349,7 @@ jobs:
 
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1377,7 +1377,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -1464,7 +1464,7 @@ jobs:
     # pull requests can parse these files on a disposable x64 hosted VM.
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ARM64","image-verify-arm64"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1474,7 +1474,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -1705,7 +1705,7 @@ jobs:
       group: cloud-agent-kata-ci
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: Isolate build configuration
@@ -1713,7 +1713,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/kata-docker" "${RUNNER_TEMP}/kata-buildx"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/kata-docker" >> "$GITHUB_ENV"
           echo "BUILDX_CONFIG=${RUNNER_TEMP}/kata-buildx" >> "$GITHUB_ENV"
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         if: github.event_name != 'pull_request'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
