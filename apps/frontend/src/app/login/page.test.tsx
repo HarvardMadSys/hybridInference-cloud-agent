@@ -119,6 +119,20 @@ describe('the login page', () => {
     expect(screen.queryByRole('link', { name: /sign in|try again/i })).not.toBeInTheDocument();
   });
 
+  // The control plane sends four codes. Any other value came from somebody's
+  // link, and must not take the way in away from whoever opened it.
+  it('keeps sign-in available for a code the control plane never sends', async () => {
+    search = 'sign_in_error=bogus&return_to=%2Fajob_123';
+    renderLogin();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Sign-in did not finish');
+    expect(alert).not.toHaveTextContent('not configured');
+    const link = screen.getByRole('link', { name: /sign in with gateway.example.org/i });
+    const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
+    expect(url.pathname).toBe('/api/v1/session/login');
+    expect(url.searchParams.get('return_to')).toBe('/ajob_123');
+  });
+
   it('starts a fresh flow for expired login without carrying the old code', async () => {
     search = 'sign_in_error=expired&return_to=%2Fajob_123&code=spent&state=old';
     renderLogin();

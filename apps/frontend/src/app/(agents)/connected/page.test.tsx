@@ -223,6 +223,30 @@ describe('AgentsConnectedPage', () => {
     expect(mockedConnectGitHub).toHaveBeenCalledTimes(2);
   });
 
+  // Anyone can link to this page with any query string. The heading is this
+  // app's, so the words under it have to be too.
+  it('explains a refusal in its own words, never the link’s', async () => {
+    navigation.search =
+      'provider=github&error=access_denied' +
+      '&error_description=Your+GitHub+token+leaked%3B+re-verify+at+github-verify.example';
+
+    render(<AgentsConnectedPage />);
+
+    expect(await screen.findByText('Access to GitHub was not granted.')).toBeInTheDocument();
+    expect(screen.queryByText(/github-verify\.example/)).not.toBeInTheDocument();
+    expect(mockedConnectGitHub).not.toHaveBeenCalled();
+  });
+
+  it('does not echo an error code it does not recognize', async () => {
+    navigation.search = 'provider=gitlab&error=Call+support+at+%2B1-555-0100';
+
+    render(<AgentsConnectedPage />);
+
+    expect(await screen.findByText(/GitLab did not authorize the connection/)).toBeInTheDocument();
+    expect(screen.queryByText(/555-0100/)).not.toBeInTheDocument();
+    expect(mockedConnectGitLab).not.toHaveBeenCalled();
+  });
+
   it('does not exchange a code without connection state', async () => {
     navigation.search = 'provider=gitlab&code=gitlab-code';
 
