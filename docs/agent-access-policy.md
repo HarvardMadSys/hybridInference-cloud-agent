@@ -35,7 +35,11 @@ on `/v1/session/me`. The session response exposes
 is missing, including responses from an older backend.
 
 Checks govern admission of each request. A policy change does not itself close
-an open stream or cancel a running job. Agent caches no session permissions;
+an open stream or cancel a running job. An owner stream (a job's events, the
+account's change feed, a terminal's output) is admitted when it opens and ends
+after about 15 minutes. The client reconnects from where it left off, and that
+request is admitted again, so a withdrawn permission or an expired session
+stops a stream within that bound. Agent caches no session permissions;
 the Gateway's account cache can still delay direct database edits until its
 expiry. Ordinary Gateway account-management operations invalidate that cache.
 

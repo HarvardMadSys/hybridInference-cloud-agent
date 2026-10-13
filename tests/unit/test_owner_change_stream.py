@@ -11,7 +11,9 @@ What has to hold:
 * another owner's change costs this stream nothing;
 * a reset of the listening connection tells it to resynchronise, and whether
   pushes are flowing;
-* where nothing pushes, the endpoint says so (404) and the tab polls.
+* where nothing pushes, the endpoint says so (404) and the tab polls;
+* no stream outlives the owner-stream cap: the tab's reconnect is admitted
+  again, and its ``hello`` has it read its lists.
 
 The endpoint's generator is driven directly: an HTTP client test transport
 collects the whole body before returning.
@@ -254,6 +256,27 @@ async def test_an_idle_stream_sends_keepalives(monkeypatch):
     assert await asyncio.wait_for(anext(stream), AT_ONCE_S) == ": keepalive\n\n"
     assert queries.reads == []
     await stream.aclose()
+
+
+async def test_a_stream_ends_at_the_cap_and_delivers_what_changed_before_it(monkeypatch):
+    """Admission is checked once per connection, so no connection outlives the cap."""
+    monkeypatch.setattr(changes, "OWNER_STREAM_MAX_S", 0.3)
+    queries = Queries()
+    signal = _listening()
+    stream = await _open(queries, signal)
+    assert _parse(await asyncio.wait_for(anext(stream), AT_ONCE_S))[0] == "hello"
+    frame = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0.05)
+
+    _notify(signal, "queue", "athr_1")
+
+    assert _parse(await asyncio.wait_for(frame, AT_ONCE_S)) == ("queue", {"id": "athr_1"})
+
+    async def drain() -> list[str]:
+        return [rest async for rest in stream]
+
+    assert await asyncio.wait_for(drain(), 2) == [], "it ends, with no keepalive first"
+    assert signal.subscribers(OWNER) == 0, "an ended stream leaves no subscription behind"
 
 
 async def test_where_nothing_pushes_the_tab_is_told_to_poll():

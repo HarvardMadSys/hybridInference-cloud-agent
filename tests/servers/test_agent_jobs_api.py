@@ -4228,6 +4228,55 @@ async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
     assert broker.stream.closed is True
 
 
+class _EndlessTerminalStream:
+    """A shell that never exits, its frames cut where a network might cut them."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self):
+        seq = 0
+        while True:
+            seq += 1
+            frame = f'event: output\ndata: {{"seq":{seq},"data":"aGk="}}\n\n'.encode()
+            for cut in (frame[:9], frame[9:-1], frame[-1:]):
+                await asyncio.sleep(0.005)
+                yield cut
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_live_terminal_stream_ends_at_the_owner_stream_cap_between_frames(
+    store: FakeStorage, monkeypatch
+):
+    """Admission is checked when a stream opens, so a live shell's is not open forever.
+
+    The relay stops after the cap, and only where a frame ends: the browser
+    resumes after the last sequence it applied, and that request is admitted
+    again. The broker's stream is released.
+    """
+    broker = _TerminalSessionBroker()
+    broker.stream = _EndlessTerminalStream()  # type: ignore[assignment]
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    monkeypatch.setattr(agent_workspace, "OWNER_STREAM_MAX_S", 0.1)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        response = await asyncio.wait_for(
+            client.get(f"/v1/agent/jobs/{job_id}/terminals/term_1/stream"), 5
+        )
+
+    assert response.status_code == 200
+    *frames, rest = response.content.split(b"\n\n")
+    assert rest == b"", "the relay stopped where a frame ends"
+    sequences = [json.loads(frame.split(b"data: ", 1)[1])["seq"] for frame in frames]
+    assert sequences == list(range(1, len(frames) + 1))
+    assert sequences, "frames before the cap are relayed"
+    assert broker.stream.closed is True
+
+
 async def test_full_terminal_lifecycle_is_available_while_agent_runs(
     store: FakeStorage, monkeypatch
 ):
@@ -4729,6 +4778,38 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
     assert response.json()["state"] == "cancelled"
     assert broker.calls == [("resume_settled", thread_id, job_id)]
     assert store.jobs[job_id]["terminal_resume_pending"] is False
+
+
+async def test_cancel_reports_its_commit_when_the_workspace_host_cannot_be_reached(
+    store: FakeStorage,
+    monkeypatch,
+):
+    """Stop answers with the cancel it committed, not with the host it could not reach.
+
+    The retained group's broker cannot be hydrated, so the terminals are not
+    resumed now; the durable marker stays set for the reaper's next pass.
+    """
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+
+    broker = _TerminalSessionBroker()
+
+    async def unreachable(_sandbox: dict[str, Any]) -> None:
+        raise WorkspaceBrokerError(503, "The shared chat supervisor is temporarily unavailable.")
+
+    monkeypatch.setattr(broker, "register_shared_sandbox", unreachable)
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        store.jobs[job_id]["current_attempt_id"] = 100
+        response = await client.post(f"/v1/agent/jobs/{job_id}/cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "cancelled"
+    assert response.json()["cancel_requested"] is True
+    assert broker.calls == []
+    assert store.jobs[job_id]["terminal_resume_pending"] is True, "left for the reaper"
 
 
 async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeStorage):

@@ -23307,7 +23307,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {
@@ -24630,7 +24630,7 @@
     },
     "/v1/agent/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47).",
+        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47), and whether or not\nthe workspace's host can be reached.",
         "operationId": "cancel_agent_job_v1_agent_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -25148,7 +25148,7 @@
     },
     "/v1/agent/jobs/{job_id}/stream": {
       "get": {
-        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off — which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection.",
+        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` (or ``after``) resumes exactly where it left off —\nwhich is what makes the finite stream cap safe for jobs that outlive one\nconnection. A stream ends after at most ``OWNER_STREAM_MAX_S`` (15\nminutes), without ``job_finished`` if the job is still going; the client\nreconnects from its cursor, and that request is admitted again.",
         "operationId": "stream_agent_job_events_v1_agent_jobs__job_id__stream_get",
         "parameters": [
           {
@@ -25633,7 +25633,7 @@
     },
     "/v1/agent/jobs/{job_id}/terminals/{terminal_id}/stream": {
       "get": {
-        "description": "Relay a resumable private PTY stream without exposing its broker token.",
+        "description": "Relay a resumable private PTY stream without exposing its broker token.\n\nThe relay ends after about ``OWNER_STREAM_MAX_S`` (15 minutes), between two\nframes; the client reconnects with ``after`` set to the last sequence it\napplied, and that request is admitted again.",
         "operationId": "stream_agent_job_terminal_v1_agent_jobs__job_id__terminals__terminal_id__stream_get",
         "parameters": [
           {
@@ -28481,9 +28481,26 @@
     },
     "/v1/agent/service/oncall/jobs": {
       "post": {
-        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.",
+        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.\n\nAn optional ``Idempotency-Key`` names one dispatch, as on the owner route:\na relay that retries after a timeout gets the job its first send created,\nnot a second analysis on the service account's quota, and the same key\nwith a different body is a 409 ``idempotency_conflict``. Without the\nheader every request creates a job.",
         "operationId": "create_oncall_job_v1_agent_service_oncall_jobs_post",
         "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
@@ -29894,7 +29911,7 @@
     },
     "/v1/agent/threads/{thread_id}/messages/{message_id}": {
       "delete": {
-        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now.",
+        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now. Withdrawing\nneeds no GitHub App, so it is not refused while the App cannot be loaded.",
         "operationId": "delete_thread_message_v1_agent_threads__thread_id__messages__message_id__delete",
         "parameters": [
           {
@@ -29967,7 +29984,7 @@
         "summary": "Delete Thread Message"
       },
       "patch": {
-        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.",
+        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.\n\nA new prompt or state is saved whether or not the GitHub App can be loaded\nright now. A changed skill, upload, model or effort is checked as a new\nmessage is, which needs the App: 503 ``source_control_unavailable`` while\nit cannot be loaded.",
         "operationId": "edit_thread_message_v1_agent_threads__thread_id__messages__message_id__patch",
         "parameters": [
           {

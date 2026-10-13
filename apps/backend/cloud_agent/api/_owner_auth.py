@@ -39,6 +39,16 @@ if TYPE_CHECKING:
     from cloud_agent.ports import ConversationQueries
 
 
+#: The longest one owner SSE response stays open: a job's events, the account's
+#: change feed, a terminal's output. Admission (the session and the Gateway's
+#: ``agent.use``) is checked once, when a stream opens. Each stream ends after
+#: this long, so an expired session or a withdrawn permission stops receiving
+#: within it. Every client resumes from what it last applied (an event id, a
+#: terminal sequence, or a ``hello`` that re-reads its lists), and that
+#: reconnect is admitted again.
+OWNER_STREAM_MAX_S = 15 * 60.0
+
+
 async def authenticate_agent_owner(
     request: Request,
     authorization: str | None = Header(None),

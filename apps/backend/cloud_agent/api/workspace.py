@@ -13,6 +13,7 @@ the owner may still reach the repository the workspace was cloned from.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
@@ -26,7 +27,7 @@ from cloud_agent.api._operation_measurements import (
     profiling_answer_headers,
     record_measurement,
 )
-from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
 from cloud_agent.api._workspace_access import (
     _TERMINAL_ID_PATTERN,
     _workspace_broker_for_job,
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
         SandboxRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerStream
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -552,6 +554,36 @@ async def list_agent_job_terminals(
             raise
 
 
+#: How the broker ends each terminal SSE frame, keepalives included.
+_SSE_FRAME_END = b"\n\n"
+
+
+async def _relay_terminal_stream(
+    upstream: WorkspaceBrokerStream, request: Request
+) -> AsyncIterator[bytes]:
+    """Relay the broker's PTY stream until the client leaves or the stream cap passes.
+
+    The cap, ``OWNER_STREAM_MAX_S``, ends the relay only between two frames:
+    the client resumes after the last sequence it applied, and must never be
+    handed half a frame. The broker writes a keepalive frame into a quiet
+    stream every 15 seconds, so a boundary is never far off.
+    """
+    clock = asyncio.get_running_loop().time
+    closes_at = clock() + OWNER_STREAM_MAX_S
+    tail = b""
+    try:
+        async for chunk in upstream:
+            if await request.is_disconnected():
+                break
+            yield chunk
+            # Chunks are cut where the network cut them, not at frames.
+            tail = (tail + chunk)[-len(_SSE_FRAME_END) :]
+            if tail == _SSE_FRAME_END and clock() >= closes_at:
+                break
+    finally:
+        await upstream.aclose()
+
+
 @router.get("/jobs/{job_id}/terminals/{terminal_id}/stream")
 async def stream_agent_job_terminal(
     job_id: str,
@@ -562,7 +594,12 @@ async def stream_agent_job_terminal(
     store: _WorkspaceStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> StreamingResponse:
-    """Relay a resumable private PTY stream without exposing its broker token."""
+    """Relay a resumable private PTY stream without exposing its broker token.
+
+    The relay ends after about ``OWNER_STREAM_MAX_S`` (15 minutes), between two
+    frames; the client reconnects with ``after`` set to the last sequence it
+    applied, and that request is admitted again.
+    """
     job, broker = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
@@ -596,17 +633,8 @@ async def stream_agent_job_terminal(
                 )
                 measure.outcome = "completed"
 
-            async def relay() -> AsyncIterator[Any]:
-                try:
-                    async for chunk in upstream:
-                        if await request.is_disconnected():
-                            break
-                        yield chunk
-                finally:
-                    await upstream.aclose()
-
             response = StreamingResponse(
-                relay(),
+                _relay_terminal_stream(upstream, request),
                 media_type="text/event-stream",
                 headers=(
                     _SSE_HEADERS
