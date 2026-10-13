@@ -266,6 +266,13 @@ cancellation authority. A member may see the shared workspace and eligible
 runtime-native project data by design, but it must not read another process's
 credential from argv, disk, `/proc`, or reusable environment files.
 
+That isolation is against reading, not against writing. The workspace,
+including `.git`, stays one writable tree for every member, so code one member
+plants there -- a Git hook, `core.fsmonitor` or another repository config
+entry, a build or test script -- runs with the UID and environment, and so the
+credentials, of whichever member executes it next. Siblings belong to one
+owner; this design does not protect them from each other's writes.
+
 Resource attribution follows the same ownership boundary. Whole-container
 Docker CPU, memory, I/O, and network counters belong to the group and are never
 copied onto a member attempt. Every current turn records an explicit
