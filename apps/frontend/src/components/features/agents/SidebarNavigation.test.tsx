@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   get: vi.fn(),
   thread: vi.fn(),
   archive: vi.fn(),
+  deleteSessions: vi.fn(),
   restore: vi.fn(),
   sessions: vi.fn(),
   setArchived: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobGit: api.git,
   streamAgentJob: api.stream,
   archiveAgentJob: api.archive,
+  deleteAgentSessions: api.deleteSessions,
   restoreAgentJob: api.restore,
   listAgentSessions: api.sessions,
   setAgentSessionsArchived: api.setArchived,
@@ -70,6 +72,7 @@ import {
   receiveSync,
   receiveThreadChange,
   resetAgentPush,
+  setAgentPushLive,
 } from './agentPush';
 function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   return {
@@ -122,13 +125,66 @@ afterEach(() => {
   resetAgentPush();
   vi.useRealTimers();
   vi.resetAllMocks();
+  vi.restoreAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it.each([false, true])(
+    'defers hidden-tab polling and pushed list refreshes, then refreshes once with push live %s',
+    async (pushLive) => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      setAgentPushLive(pushLive);
+      api.projects.mockResolvedValue([
+        { repo: 'owner/repo', task_count: 2, active_count: 1, last_activity_at: null },
+      ]);
+      await act(async () => render(<AgentsSidebar />));
+      expect(screen.getByText('Task a')).toBeInTheDocument();
+      api.list.mockClear();
+      api.projects.mockClear();
+
+      visibility.mockReturnValue('hidden');
+      fireEvent(document, new Event('visibilitychange'));
+      await act(async () => {
+        receiveJobChange({ id: 'a', thread_id: 'thread-a', revision: 1, state: 'running' });
+        receiveThreadChange({ id: 'thread-a', revision: 1, title: 'Updated task' });
+        await vi.advanceTimersByTimeAsync(pushLive ? 120_000 : 20_000);
+      });
+      expect(api.list).not.toHaveBeenCalled();
+      expect(api.projects).not.toHaveBeenCalled();
+
+      await act(async () => {
+        visibility.mockReturnValue('visible');
+        fireEvent(document, new Event('visibilitychange'));
+      });
+      // One reload for each mounted list (pinned and expanded project), and
+      // one project read, regardless of how many changes arrived while hidden.
+      expect(api.list).toHaveBeenCalledTimes(2);
+      expect(api.projects).toHaveBeenCalledTimes(1);
+      fireEvent(document, new Event('visibilitychange'));
+      expect(api.list).toHaveBeenCalledTimes(2);
+      expect(api.projects).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('still refreshes a local session mutation while the tab is hidden', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    await act(async () => render(<AgentsSidebar />));
+    api.list.mockClear();
+    api.projects.mockClear();
+    visibility.mockReturnValue('hidden');
+    await act(async () =>
+      announceAgentSessionsChanged({ threadIds: ['thread-a'], pinnedAt: null }),
+    );
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledTimes(1);
+  });
+
   it('shows one Setting link and highlights it on the integrations route', async () => {
     const view = render(<AgentsSidebar />);
     await screen.findByText('Task a');
-    const setting = screen.getByRole('link', { name: 'Setting' });
-    expect(screen.getAllByText('Setting')).toHaveLength(1);
+    const setting = screen.getByRole('link', { name: 'My Settings' });
+    expect(screen.getAllByText('My Settings')).toHaveLength(1);
     expect(setting).toHaveAttribute('href', '/integrations');
     expect(setting).not.toHaveAttribute('aria-current');
     expect(screen.queryByRole('link', { name: /^Integrations?$/ })).not.toBeInTheDocument();
@@ -137,8 +193,11 @@ describe('sidebar navigation interactions', () => {
 
     api.pathname = '/integrations';
     view.rerender(<AgentsSidebar />);
-    expect(screen.getByRole('link', { name: 'Setting' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getAllByRole('link', { name: 'Setting' })).toHaveLength(1);
+    expect(screen.getByRole('link', { name: 'My Settings' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getAllByRole('link', { name: 'My Settings' })).toHaveLength(1);
     expect(api.get).not.toHaveBeenCalled();
     expect(api.thread).not.toHaveBeenCalled();
   });
@@ -379,8 +438,14 @@ describe('sidebar navigation interactions', () => {
       });
 
       expect(api.projects).toHaveBeenCalledOnce();
-      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
-      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ pinned: true }));
+      expect(api.list).toHaveBeenCalledWith(
+        expect.objectContaining({ repo: 'owner/repo' }),
+        expect.any(AbortSignal),
+      );
+      expect(api.list).toHaveBeenCalledWith(
+        expect.objectContaining({ pinned: true }),
+        expect.any(AbortSignal),
+      );
     },
   );
 
@@ -786,6 +851,7 @@ describe('sidebar navigation interactions', () => {
     expect(document.querySelector('img')).not.toBeInTheDocument();
     expect(api.list).toHaveBeenLastCalledWith(
       expect.objectContaining({ q: '<img>', includeArchived: true }),
+      expect.any(AbortSignal),
     );
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     expect(screen.getByRole('link', { name: /Old <img> task/ })).toHaveFocus();
@@ -881,10 +947,51 @@ describe('sidebar navigation interactions', () => {
       await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
     ).toHaveAttribute('href', '/a');
   });
+  it('permanently deletes an unarchived conversation after confirmation', async () => {
+    api.pathname = '/a';
+    let deleted = false;
+    api.deleteSessions.mockImplementation(async (threadIds: string[]) => {
+      deleted = true;
+      return { thread_ids: threadIds };
+    });
+    api.list.mockImplementation(async () => ({
+      conversations: deleted ? [base[1]] : base,
+      next_cursor: null,
+    }));
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete Task a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Permanently delete this session?' });
+    expect(within(dialog).getByText(/no longer be able to view or restore/)).toBeVisible();
+    expect(within(dialog).getByText('Session: Task a')).toBeVisible();
+    // Nothing is sent before the owner confirms.
+    expect(api.deleteSessions).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently delete 1 session' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(api.deleteSessions).toHaveBeenCalledWith(['thread-a']);
+    await waitFor(() => expect(screen.queryByText('Task a')).not.toBeInTheDocument());
+    expect(api.replace).toHaveBeenCalledWith('/');
+  });
+  it('keeps the confirmation open with the reason when deletion is refused', async () => {
+    const { APIError } = await import('@/lib/utils/errors');
+    api.deleteSessions.mockRejectedValueOnce(
+      new APIError('fork_in_progress', 'Server conflict', 409),
+    );
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete Task a' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently delete 1 session' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('being forked');
+    expect(screen.getByText('Task a')).toBeInTheDocument();
+  });
   it('loads pins and only expanded project pages, and records no history IDs before manual order', async () => {
     render(<AgentsSidebar />);
     await screen.findByText('Task a');
-    expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'owner/repo' }),
+      expect.any(AbortSignal),
+    );
     expect(
       api.list.mock.calls.every(
         ([options]) => options.pinned === true || options.repo === 'owner/repo',
@@ -892,6 +999,7 @@ describe('sidebar navigation interactions', () => {
     ).toBe(true);
     expect(api.list).toHaveBeenCalledWith(
       expect.objectContaining({ pinned: true, repo: undefined }),
+      expect.any(AbortSignal),
     );
     expect(localStorage.getItem(sidebarPreferencesKey('alice'))).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'View options' }));
@@ -993,6 +1101,9 @@ describe('sidebar navigation interactions', () => {
     expect(api.projects).not.toHaveBeenCalled();
     act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'alice' }));
     await waitFor(() => expect(api.projects).toHaveBeenCalledOnce());
-    expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'owner/repo' }),
+      expect.any(AbortSignal),
+    );
   });
 });

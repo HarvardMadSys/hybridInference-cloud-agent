@@ -101,6 +101,7 @@ services:
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
@@ -156,6 +157,11 @@ services:
       # header the caller chose.
       AGENT_SESSION_COOKIE_SECURE: ${AGENT_SESSION_COOKIE_SECURE:-true}
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
+      # Serves the API schema and its docs pages on the main listener; for
+      # development only. The MCP-only listener never serves them.
+      AGENT_API_DOCS: ${AGENT_API_DOCS:-false}
+      # Live-update streams one account may hold open on this process.
+      AGENT_MAX_STREAMS_PER_USER: ${AGENT_MAX_STREAMS_PER_USER:-24}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       # Opt-in operation profiling. All three values are inert by default;
@@ -239,15 +245,15 @@ services:
       AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
 
       # --- Workspaces -------------------------------------------------------
-      # Authorizes this service to the hosts' workspace brokers. Per-host
-      # broker addresses come from each host's registration row, not from here.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:-}
-      # Which hosts a registering machine may name as its broker. The token
+      # Authorizes this service to the hosts' sandbox managers. Per-host
+      # sandbox manager addresses come from each host's registration row, not from here.
+      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:-${AGENT_WORKSPACE_BROKER_TOKEN:-}}
+      # Which hosts a registering machine may name as its sandbox manager. The token
       # above is shared across the pool, so an address accepted at
       # registration is an address that receives a credential good for every
-      # broker in it. Unset means any host, which is what this did before the
+      # sandbox manager in it. Unset means any host, which is what this did before the
       # check existed — a multi-host pool should name its machines here.
-      AGENT_BROKER_URL_ALLOWED_HOSTS: ${AGENT_BROKER_URL_ALLOWED_HOSTS:-}
+      AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS: ${AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS:-${AGENT_BROKER_URL_ALLOWED_HOSTS:-}}
     volumes:
       - agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap
       # The GitHub App key, read-only, as a file. `AGENT_GITHUB_APP_PRIVATE_KEY_PATH`
@@ -303,6 +309,7 @@ services:
       # listener. Without this, health stays green but every connected server
       # is reported as unavailable at the first tool call.
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:

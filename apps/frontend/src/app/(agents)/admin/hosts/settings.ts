@@ -197,7 +197,7 @@ export function parseSettingInput(
 /**
  * What saving a shorter value does to terminals already open, or null.
  *
- * The broker judges open terminals by the new limits from its next sweep
+ * The sandbox manager judges open terminals by the new limits from its next sweep
  * (`_TerminalManager.configure`), so a shorter one closes those already past
  * it. The other settings take effect for later turns, imports or sandboxes,
  * which their descriptions say.

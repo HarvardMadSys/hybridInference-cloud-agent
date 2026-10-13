@@ -307,6 +307,8 @@ export interface McpInvocationApi {
   /** Server-supplied hints (title, readOnlyHint, ...): untrusted, display only. */
   capability_annotations: Record<string, unknown>;
   status: McpInvocationStatus;
+  /** Server-owned permission save, independent of this page staying open. */
+  always_allow_status?: 'pending' | 'applied' | 'discarded' | null;
   arguments_digest: string;
   /** Null when the platform could not decode the stored body. */
   arguments: Record<string, unknown> | null;
@@ -600,11 +602,12 @@ export async function listMcpInvocations(query: McpInvocationQuery): Promise<Mcp
 export async function decideMcpInvocation(
   invocationId: number,
   approve: boolean,
+  alwaysAllow = false,
 ): Promise<McpInvocationApi> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/mcp/invocations/${invocationId}/decision`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approve }),
+    body: JSON.stringify(alwaysAllow ? { approve, always_allow: true } : { approve }),
   });
   return jsonOrThrow(resp);
 }

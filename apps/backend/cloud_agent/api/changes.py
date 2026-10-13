@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 
 from cloud_agent.api._job_views import _iso
 from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, require_agent_owner
+from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
 from cloud_agent.api.usage import job_usage_response
 from cloud_agent.workers.owner_change_signal import (
@@ -120,6 +121,8 @@ async def stream_owner_changes(
     process pushes nothing, which a tab treats as "keep reading on a clock".
     The stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab
     reconnects, is admitted again, and its ``hello`` has it read its lists.
+    429 when the account already holds as many streams as this process allows
+    one account (:mod:`cloud_agent.api._stream_slots`).
     """
     job_store = require_store(store)
     if signal is None:
@@ -133,6 +136,7 @@ async def stream_owner_changes(
             },
         )
     user_id = str(user["user_id"])
+    slot = STREAM_SLOTS.acquire(user_id)
 
     async def frames() -> AsyncIterator[str]:
         clock = asyncio.get_running_loop().time
@@ -175,4 +179,6 @@ async def stream_owner_changes(
                 if not (woken or changes.resync) and clock() < closes_at:
                     yield ": keepalive\n\n"
 
-    return StreamingResponse(frames(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return StreamingResponse(
+        slot.hold(frames()), media_type="text/event-stream", headers=_SSE_HEADERS
+    )

@@ -1,7 +1,7 @@
 """Index every owner's turns by creation time for the admin listings.
 
-Revision ID: 0060_admin_job_listing_index
-Revises: 0059_counter_constraints
+Revision ID: 0066_admin_job_listing_index
+Revises: 0065_environments
 
 The admin run list, conversation list and usage selection read turns across
 owners in a ``created_at`` window, newest or oldest first with ``id`` as the
@@ -18,8 +18,8 @@ upgrade drops any index of this name first and builds it again.
 
 from alembic import op
 
-revision = "0060_admin_job_listing_index"
-down_revision = "0059_counter_constraints"
+revision = "0066_admin_job_listing_index"
+down_revision = "0065_environments"
 branch_labels = None
 depends_on = None
 

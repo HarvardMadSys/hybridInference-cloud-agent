@@ -10,9 +10,12 @@ from starlette.datastructures import Headers
 from cloud_agent import identity, settings, tokens
 from cloud_agent.api.deps import get_client_ip
 from cloud_agent.api.session import _cookie_is_secure
-from cloud_agent.broker_routing import BrokerUrlRefused, validate_broker_url
 from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.sandbox_manager_routing import (
+    SandboxManagerUrlRefused,
+    validate_sandbox_manager_url,
+)
 from cloud_agent.source_control import SourceControlCipher
 
 
@@ -34,7 +37,7 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
         {
             "gateway_issuer": "https://identity.example",
             "session_signing_secret": "test-session-key-longer-than-thirty-two-bytes",
-            "control_signing_secret": "test-control-signing-key-of-32-bytes",
+            "control_signing_secret": "test-control-signing-key-longer-than-32-bytes",
         }
     )
     settings.apply_settings(1, encoded)
@@ -49,7 +52,7 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
         {
             **encoded,
             **settings.encode_changes(
-                {"control_signing_secret": "new-control-signing-key-of-32-bytes"}
+                {"control_signing_secret": "new-control-signing-key-longer-than-32-bytes"}
             ),
         },
     )
@@ -75,14 +78,14 @@ def test_saved_encryption_keys_work_for_clients_constructed_before_admin_setup()
     assert cipher.decrypt(cipher.encrypt("private-user-token")) == "private-user-token"
 
 
-def test_saved_cookie_proxy_broker_and_execution_policies_are_applied():
+def test_saved_cookie_proxy_sandbox_manager_and_execution_policies_are_applied():
     settings.apply_settings(
         1,
         settings.encode_changes(
             {
                 "session_cookie_secure": False,
                 "trust_proxy_headers": True,
-                "broker_url_allowed_hosts": "broker.example",
+                "sandbox_manager_url_allowed_hosts": "sandbox_manager.example",
                 "default_execution_profile": "untrusted-kata-v1",
             }
         ),
@@ -92,9 +95,12 @@ def test_saved_cookie_proxy_broker_and_execution_policies_are_applied():
         get_client_ip(SimpleNamespace(headers=Headers({"x-forwarded-for": "198.51.100.1"})))
         == "198.51.100.1"
     )
-    assert validate_broker_url("https://broker.example") == "https://broker.example"
-    with pytest.raises(BrokerUrlRefused):
-        validate_broker_url("https://other.example")
+    assert (
+        validate_sandbox_manager_url("https://sandbox_manager.example")
+        == "https://sandbox_manager.example"
+    )
+    with pytest.raises(SandboxManagerUrlRefused):
+        validate_sandbox_manager_url("https://other.example")
     assert default_execution_profile().value == "untrusted-kata-v1"
 
 

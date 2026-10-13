@@ -54,6 +54,7 @@ import {
   operationName,
   parseAttemptId,
   partialReasons,
+  producerLabel,
   runLabel,
   sampleResult,
   selectionFromQuery,
@@ -1029,7 +1030,7 @@ function barClass(row: TimelineRow): string {
 function nameTitle(row: TimelineRow): string | undefined {
   if (row.kind === 'gap') return GAP_NOTE;
   if (row.kind !== 'attached') return row.rawName ?? undefined;
-  const source = row.source ? ` · measured by ${row.source}` : '';
+  const source = row.source ? ` · measured by ${producerLabel(row.source)}` : '';
   return `${row.rawName ?? row.name}${source}. ${ATTACHED_STAGE_NOTE}`;
 }
 
@@ -1057,7 +1058,7 @@ function TimelineLine({ row, total }: { row: TimelineRow; total: number }) {
       >
         {row.name}
         {attached && row.source && (
-          <span className="text-gray-400 dark:text-gray-500"> · {row.source}</span>
+          <span className="text-gray-400 dark:text-gray-500"> · {producerLabel(row.source)}</span>
         )}
         {row.problem && (
           <span className="ml-1.5 text-red-600 dark:text-red-400">{row.problem}</span>

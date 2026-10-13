@@ -26,7 +26,9 @@ import {
 } from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
+import { SettingsSearch } from './SettingsSearchPanel';
 import { applicationCategoryName } from './settingsOrganization';
+import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
@@ -65,6 +67,8 @@ function AccessDenied() {
 
 function SettingsView() {
   const queryTab = useSearchParams().get('tab');
+  const content = useRef<HTMLDivElement>(null);
+  const [searchTarget, setSearchTarget] = useState<string | null>(null);
   const [cloudLabVisited, setCloudLabVisited] = useState(queryTab === 'cloudlab');
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const focusedTab = useRef<HTMLButtonElement | null>(null);
@@ -162,6 +166,7 @@ function SettingsView() {
   }, [selectedTab, selectedTabIndex]);
 
   const selectTab = (tab: string) => {
+    setSearchTarget(null);
     const category = applicationCategories.find((name) => categoryTabId(name) === tab);
     if (category) applicationSettings.selectCategory(category);
     selectUrlTab(tab);
@@ -229,17 +234,72 @@ function SettingsView() {
     }
   };
 
-  if (denied) return <AccessDenied />;
-
   const servers: NamedHost[] = serverInventory(
     pool?.hosts ?? [],
     pool?.execution_profile ?? 'untrusted-kata-v1',
   ).flatMap(({ name, host }) => (host && host.status !== 'disabled' ? [{ name, host }] : []));
   const definitions = pool?.host_setting_definitions ?? [];
   const showHostStatus = selectedTab === 'versions' || selectedTab === 'sandbox';
+  const versionMenu = runtimeMenu(servers.map(({ host }) => host));
+  const searchItems = buildSettingsSearchItems({
+    snapshot: applicationSettings.snapshot,
+    hostDefinitions: definitions,
+    runtimes: [
+      ...new Set([
+        ...versionMenu.map(([runtime]) => runtime),
+        ...Object.keys(pool?.runtime_versions ?? {}),
+      ]),
+    ],
+    archiveAvailable: archiveSettings !== null,
+    applicationTab: applicationCategories.length
+      ? categoryTabId(applicationCategories[0])
+      : 'application',
+  });
+
+  const selectSearchResult = (item: SettingsSearchItem) => {
+    if (item.applicationKey) {
+      setSearchTarget(null);
+      applicationSettings.revealSetting(item.applicationKey);
+    } else {
+      selectTab(item.tab);
+      setSearchTarget(item.targetId);
+    }
+  };
+
+  useEffect(() => {
+    if (!searchTarget || !content.current || denied) return;
+    const root = content.current;
+    const focusTarget = () => {
+      const target = document.getElementById(searchTarget);
+      if (!target || !root.contains(target) || target.closest('[hidden]')) return false;
+      for (let ancestor = target.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+      }
+      let control = target.matches('input, select, textarea, button, [tabindex]')
+        ? target
+        : target.querySelector<HTMLElement>('input, select, textarea, button');
+      if (control?.matches(':disabled')) {
+        control = control.closest<HTMLElement>('label, form') ?? target;
+        control.tabIndex = -1;
+      }
+      (control ?? target).focus();
+      target.scrollIntoView?.({ block: 'center' });
+      setSearchTarget(null);
+      return true;
+    };
+    if (focusTarget()) return;
+    // CloudLab fields arrive after its first visit; retain the target while loading.
+    const observer = new MutationObserver(() => {
+      if (focusTarget()) observer.disconnect();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [searchTarget, selectedTab, denied]);
+
+  if (denied) return <AccessDenied />;
 
   return (
-    <div className="min-w-0 flex-1 overflow-y-auto">
+    <div ref={content} className="min-w-0 flex-1 overflow-y-auto">
       <section className={ADMIN_PAGE}>
         <AdminPageHeader
           section="Settings"
@@ -257,6 +317,12 @@ function SettingsView() {
             </Link>
             .
           </p>
+          <SettingsSearch
+            items={searchItems}
+            loading={loading || applicationSettings.loading}
+            onInteract={() => setSearchTarget(null)}
+            onSelect={selectSearchResult}
+          />
           <div
             role="tablist"
             aria-label="Settings sections"
@@ -381,7 +447,7 @@ function SettingsView() {
           >
             {pool && (
               <AgentVersions
-                menu={runtimeMenu(servers.map(({ host }) => host))}
+                menu={versionMenu}
                 servers={servers}
                 selected={pool.runtime_versions ?? {}}
                 busy={busy}

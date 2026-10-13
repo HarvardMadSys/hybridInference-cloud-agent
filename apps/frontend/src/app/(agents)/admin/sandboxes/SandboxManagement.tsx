@@ -4,23 +4,20 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
-import {
-  archiveAdminSandbox,
-  deleteAdminSandbox,
-  getAdminSandbox,
-  restoreAdminSandbox,
-  stopAdminSandbox,
-  type AdminSandboxDetail,
-} from '@/lib/api/adminSandboxes';
+import { getAdminSandbox, type AdminSandboxDetail } from '@/lib/api/adminSandboxes';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
 
+import {
+  applySandboxAction,
+  REVIEW_FRESHNESS_MS,
+  sandboxActionBlocked,
+  sandboxActionState,
+  type SandboxAction,
+} from './sandboxActions';
+
 const REFRESH_MS = 30_000;
-const TERMINAL_FRESHNESS_MS = 90_000;
-const REVIEW_FRESHNESS_MS = 90_000;
-const HOST_FRESHNESS_MS = 90_000;
-type SandboxAction = 'stop' | 'archive' | 'restore' | 'delete';
 
 export function SandboxManagement({
   sandboxId,
@@ -98,82 +95,19 @@ export function SandboxManagement({
 
   const sandbox = detail?.sandbox;
   const busy = pendingAction !== null;
-  const serverNow = detail
-    ? Date.parse(detail.observed_at) + Math.max(0, nowMs - observedAtMs)
-    : NaN;
-  const terminalObserved = Date.parse(sandbox?.terminal_count_observed_at ?? '');
-  const deletionPending = ['pending', 'archived'].includes(sandbox?.deletion_state ?? 'none');
-  const deletionComplete = sandbox?.deletion_state === 'deleted';
-  const deletionBusyReason = deletionPending
-    ? 'Wait for the S3 archive and container deletion to finish.'
-    : null;
-  const reviewBlocked = !sandbox
-    ? 'Load the current sandbox details before changing it.'
-    : nowMs - observedAtMs > REVIEW_FRESHNESS_MS
-      ? 'Refresh details before changing this sandbox.'
-      : sandbox.generation == null
-        ? 'The current container identity is unavailable.'
-        : null;
-  const idleBlocked = sandbox
-    ? sandbox.active_attempt_count > 0
-      ? 'Wait for all active turns to finish.'
-      : (sandbox.active_operation_count ?? 0) > 0
-        ? 'Wait for active workspace operations to finish.'
-        : ['pending', 'snapshotting', 'importing'].includes(sandbox.snapshot_state ?? '')
-          ? 'Wait for the workspace snapshot to finish.'
-          : null
-    : null;
-  const hostHeartbeat = Date.parse(sandbox?.host_last_heartbeat_at ?? '');
-  const staleInventoryEntry =
-    Boolean(sandbox) &&
-    sandbox?.state !== 'stopped' &&
-    !deletionComplete &&
-    (sandbox?.host_last_heartbeat_at === null ||
-      (Number.isFinite(serverNow) &&
-        Number.isFinite(hostHeartbeat) &&
-        serverNow - hostHeartbeat > HOST_FRESHNESS_MS));
-  const forceDelete =
-    sandbox?.state === 'running' &&
-    reviewBlocked === null &&
-    deletionBusyReason === null &&
-    !deletionComplete &&
-    idleBlocked === null &&
-    Boolean(sandbox.container_id);
-  const stopBlocked =
-    reviewBlocked ??
-    deletionBusyReason ??
-    (sandbox?.state !== 'running' ? 'Only a running idle sandbox can be stopped.' : null) ??
-    idleBlocked ??
-    detail?.terminal_activity_error ??
-    (sandbox?.terminal_count == null || !Number.isFinite(terminalObserved)
-      ? 'Terminal activity is unavailable. Refresh details to check the host.'
-      : !Number.isFinite(serverNow) || serverNow - terminalObserved > TERMINAL_FRESHNESS_MS
-        ? 'Terminal activity is stale. Refresh details to check the host.'
-        : sandbox.terminal_count > 0
-          ? 'Close all open terminals before stopping the sandbox.'
-          : !sandbox.container_id
-            ? 'The current container identity is unavailable.'
-            : null);
-  const removalBlocked =
-    sandbox?.state !== 'stopped' && !deletionComplete && !staleInventoryEntry
-      ? 'Wait for the host to confirm a clean stop before removing this sandbox.'
-      : idleBlocked;
-  const inventoryBlocked =
-    reviewBlocked ?? deletionBusyReason ?? (sandbox?.archived_at ? null : removalBlocked);
-  const deleteBlocked =
-    reviewBlocked ??
-    deletionBusyReason ??
-    (deletionComplete ? 'This sandbox has already been deleted.' : null) ??
-    (sandbox?.state !== 'stopped' && sandbox?.state !== 'running'
-      ? 'Wait for the host to confirm a clean stop before deleting this sandbox.'
-      : null) ??
-    idleBlocked ??
-    (!sandbox?.container_id ? 'The retained container identity is unavailable.' : null);
-  const controlsBlocked = reviewBlocked ?? deletionBusyReason;
+  const actionState = sandboxActionState(detail, observedAtMs, nowMs);
+  const {
+    stopBlocked,
+    inventoryBlocked,
+    deleteBlocked,
+    controlsBlocked,
+    forceDelete,
+    staleInventoryEntry,
+    deletionComplete,
+  } = actionState;
 
   async function applyAction(kind: SandboxAction) {
-    const blocked =
-      kind === 'stop' ? stopBlocked : kind === 'delete' ? deleteBlocked : inventoryBlocked;
+    const blocked = sandboxActionBlocked(kind, actionState);
     if (!sandbox || blocked || request.current || action.current || accessRevoked.current) return;
     if (
       kind === 'stop' &&
@@ -184,15 +118,20 @@ export function SandboxManagement({
       )
     )
       return;
-    if (kind === 'delete') {
+    if (kind === 'delete' || kind === 'discard') {
+      const sessions = `${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'}`;
       const confirmation =
-        sandbox.state === 'running'
-          ? `Verify the exact retained container shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} is stopped and idle, then permanently delete it? ` +
-            'The server refuses if that exact container is still running or has activity; this action does not stop a running container. ' +
-            'Workspace files and native session history are still uploaded to S3 and verified before deletion. Live native resume will no longer be available. Chat history remains.'
-          : `Archive to S3 and permanently delete the stopped sandbox shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'}? ` +
-            'Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted for every member. ' +
-            'Live native resume will no longer be available. Chat history remains.';
+        kind === 'discard'
+          ? sandbox.state === 'running'
+            ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle, then delete it without an S3 archive? The server refuses if that exact container is still running or has activity; this action does not stop a running container. Workspace files and native session history on the host will be destroyed and will not be uploaded. Live native resume will no longer be available. Chat history remains.`
+            : `Permanently delete the stopped sandbox shared by ${sessions} without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history remains.`
+          : sandbox.state === 'running'
+            ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle, then permanently delete it? ` +
+              'The server refuses if that exact container is still running or has activity; this action does not stop a running container. ' +
+              'Workspace files and native session history are still uploaded to S3 and verified before deletion. Live native resume will no longer be available. Chat history remains.'
+            : `Archive to S3 and permanently delete the stopped sandbox shared by ${sessions}? ` +
+              'Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted for every member. ' +
+              'Live native resume will no longer be available. Chat history remains.';
       if (!window.confirm(confirmation)) return;
     }
     if (
@@ -223,31 +162,7 @@ export function SandboxManagement({
     setPendingAction(kind);
     setError(null);
     try {
-      const reviewed = {
-        generation: sandbox.generation!,
-        container_id: sandbox.container_id,
-        last_activity_at: sandbox.last_activity_at,
-      };
-      let next: AdminSandboxDetail;
-      if (kind === 'stop') {
-        next = await stopAdminSandbox(
-          sandbox.id,
-          { ...reviewed, container_id: sandbox.container_id! },
-          controller.signal,
-        );
-      } else if (kind === 'delete') {
-        const deleteRequest = { ...reviewed, container_id: sandbox.container_id! };
-        next =
-          sandbox.state === 'running'
-            ? await deleteAdminSandbox(sandbox.id, deleteRequest, controller.signal, true)
-            : await deleteAdminSandbox(sandbox.id, deleteRequest, controller.signal);
-      } else if (kind === 'archive') {
-        next = staleInventoryEntry
-          ? await archiveAdminSandbox(sandbox.id, reviewed, controller.signal, true)
-          : await archiveAdminSandbox(sandbox.id, reviewed, controller.signal);
-      } else {
-        next = await restoreAdminSandbox(sandbox.id, reviewed, controller.signal);
-      }
+      const next = await applySandboxAction(kind, sandbox, controller.signal, staleInventoryEntry);
       if (controller.signal.aborted) return;
       setDetail(next);
       setObservedAtMs(performance.now());
@@ -327,7 +242,9 @@ export function SandboxManagement({
           )}
           {sandbox.deletion_state === 'pending' && (
             <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
-              Archiving to S3. Waiting for the archive to be uploaded and verified before deletion.
+              {sandbox.deletion_discard
+                ? 'Deleting the retained container without an S3 archive. Workspace files will not be uploaded.'
+                : 'Archiving to S3. Waiting for the archive to be uploaded and verified before deletion.'}
             </p>
           )}
           {sandbox.deletion_state === 'archived' && (
@@ -337,8 +254,9 @@ export function SandboxManagement({
           )}
           {deletionComplete && (
             <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-              Sandbox deleted. Its files and native session history are archived in S3; live native
-              resume is no longer available.
+              {sandbox.deletion_discard
+                ? 'Sandbox deleted without an S3 archive. Workspace files and native session history on the host are gone; live native resume is no longer available.'
+                : 'Sandbox deleted. Its files and native session history are archived in S3; live native resume is no longer available.'}
               {sandbox.deleted_at && <> Deleted {dateTime(sandbox.deleted_at)}.</>}
             </p>
           )}
@@ -460,8 +378,24 @@ export function SandboxManagement({
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 {deleteBlocked ??
                   (forceDelete
-                    ? 'Asks the server to verify that this exact container is already stopped and idle. It will not stop a running container, and S3 archival is still required before deletion.'
+                    ? 'Asks the server to verify that this exact container is already stopped or dead, and idle. It will not stop a running container, and S3 archival is still required before deletion.'
                     : 'Uploads and verifies files and native session history in S3 before deleting the retained container. Live native resume will no longer be available.')}
+              </p>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={`${BUTTON} text-red-700 dark:text-red-400`}
+              disabled={busy || loading || deleteBlocked !== null}
+              onClick={() => void applyAction('discard')}
+            >
+              {pendingAction === 'discard' ? 'Requesting deletion…' : 'Delete without archive'}
+            </button>
+            {!controlsBlocked && deleteBlocked === null && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Removes the retained container without uploading workspace files or native session
+                history. The host copy cannot be restored.
               </p>
             )}
           </div>

@@ -17,10 +17,8 @@ export default function SetupPage() {
   };
 
   return (
-    <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
-      <h1 className="text-2xl font-semibold text-gray-900 dark:text-gray-50">
-        Administrator setup
-      </h1>
+    <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-5">
+      <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-50">Administrator setup</h1>
       <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">
         Configure the deployment before Gateway sign-in is available. Use the administrator recovery
         token supplied when this service was deployed.
@@ -49,7 +47,7 @@ export default function SetupPage() {
         </>
       ) : (
         <form
-          className="ui-card mt-6 max-w-lg p-5 sm:p-6"
+          className="ui-card mt-4 max-w-lg p-4"
           onSubmit={(event) => {
             event.preventDefault();
             if (!draft.trim()) return;

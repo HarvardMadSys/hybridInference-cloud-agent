@@ -30,7 +30,50 @@ import 'server-only';
 import { cache } from 'react';
 import { connection } from 'next/server';
 
-import { parseRuntimeSiteConfig, parseSavedSiteConfig, type RuntimeSiteConfig } from './site';
+import {
+  parseRuntimeSiteConfig,
+  parseSavedSiteConfig,
+  parseSavedPublicAppearance,
+  type RuntimeSiteConfig,
+} from './site';
+
+// Appearance is public display data, not session state or admission policy.
+// Keep it only as a failure fallback: every render still asks for fresh saved
+// settings. Keying by the control-plane URL keeps deployments separate, and
+// omitting deployment metadata lets each render attach its current image data.
+type PublicAppearance = Pick<RuntimeSiteConfig, 'branding' | 'features'>;
+let lastKnownGood: { api: string; sequence: number; appearance: PublicAppearance } | null = null;
+let readSequence = 0;
+const APPEARANCE_READ_BUDGET_MS = 400;
+
+async function readPublicAppearance(api: string): Promise<PublicAppearance | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(null);
+      controller.abort();
+    }, APPEARANCE_READ_BUDGET_MS);
+  });
+  const read = (async () => {
+    const response = await fetch(`${api}/v1/agent/site-config`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return parseSavedPublicAppearance(await response.json());
+  })();
+
+  try {
+    // Bound the whole response, including its JSON body, even if cancellation
+    // is delayed. Late responses have no side effects on the saved fallback.
+    return await Promise.race([read, deadline]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * The site identity for the request being rendered.
@@ -47,17 +90,21 @@ export const readRuntimeSiteConfig = cache(async (): Promise<RuntimeSiteConfig> 
   await connection();
   const api = (process.env['AGENT_CONTROL_PLANE_URL'] || '').replace(/\/+$/, '');
   if (api) {
-    try {
-      const response = await fetch(`${api}/v1/agent/site-config`, {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(5000),
-      });
-      if (response.ok) return parseSavedSiteConfig(await response.json(), process.env);
-    } catch {
-      // Appearance settings must not prevent the administrator opening the
-      // settings page during a transient backend failure or malformed response.
+    const sequence = ++readSequence;
+    const appearance = await readPublicAppearance(api);
+    if (appearance) {
+      // An older overlapping render must not replace a newer successful read.
+      if (sequence > (lastKnownGood?.sequence ?? 0)) {
+        lastKnownGood = { api, sequence, appearance };
+      }
+      return parseSavedSiteConfig(appearance, process.env);
     }
-    return parseSavedSiteConfig(null, process.env);
+    // A slow or unavailable backend must not hold every page for seconds or
+    // reset a known deployment's branding. Cold starts use neutral defaults.
+    return parseSavedSiteConfig(
+      lastKnownGood?.api === api ? lastKnownGood.appearance : null,
+      process.env,
+    );
   }
   return parseRuntimeSiteConfig(process.env);
 });

@@ -18,14 +18,19 @@ _CREATE = {"repo": "owner/repo", "task_prompt": "Fix it", "model": "m"}
 def _previous_rule(kind: str, payload: dict[str, Any]) -> str:
     """The rule the fingerprints already stored against live keys were made with.
 
-    The last one released, which had learned to drop a null ``plugins`` too;
-    the release before it never sent that field, so the two agree.
+    The last one released, which had learned to drop a null ``plugins`` and an
+    unset repository environment too; the releases before it never sent those
+    fields, so they all agree.
     """
     kept = {
         key: value
         for key, value in payload.items()
         if (key not in {"skill_ids", "plugins", "expected_latest_job_id"} or value is not None)
         and (key != "require_idle" or value is not False)
+        and not (
+            key in {"environment_id", "environment_revision", "global_revision"} and value is None
+        )
+        and not (key == "environment_overrides" and not value)
     }
     canonical = json.dumps(
         {"kind": kind, **kept}, sort_keys=True, separators=(",", ":"), default=str
@@ -91,11 +96,15 @@ def test_every_later_request_field_is_omitted_by_a_value_the_rule_drops(model: A
 
     This is what keeps the frozen set honest: a new field defaulting to null
     needs nothing, one defaulting to ``False`` must be named beside
-    ``require_idle``, and any other default needs its own decision here.
+    ``require_idle``, one defaulting to an empty list beside
+    ``environment_overrides``, and any other default needs its own decision
+    here.
     """
     for name, field in model.model_fields.items():
         if name in requests._HISTORICAL_FIELDS:
             continue
-        assert field.default is None or (
-            name in requests._FALSE_WHEN_OMITTED and field.default is False
+        assert (
+            field.default is None
+            or (name in requests._FALSE_WHEN_OMITTED and field.default is False)
+            or (name in requests._EMPTY_WHEN_OMITTED and field.default_factory is list)
         ), name

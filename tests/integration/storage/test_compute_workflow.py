@@ -103,11 +103,12 @@ async def rig(store, hosts, monkeypatch):
 
     bootstrap.deploy = AsyncMock(side_effect=deploy)
     bootstrap.readiness = AsyncMock(side_effect=readiness)
-    broker = SimpleNamespace(
+    sandbox_manager = SimpleNamespace(
         health=AsyncMock(return_value={}), list_sandboxes=AsyncMock(return_value=[])
     )
     monkeypatch.setattr(
-        "cloud_agent.application.compute_reconcile.broker_for_host", lambda host: broker
+        "cloud_agent.application.compute_reconcile.sandbox_manager_for_host",
+        lambda host: sandbox_manager,
     )
     reconciler = ComputeReconciler(commands=commands, host_pool=hosts, bootstrap=bootstrap)
     request_id = str(uuid4())
@@ -134,7 +135,7 @@ async def rig(store, hosts, monkeypatch):
         op=op,
         provider=provider,
         bootstrap=bootstrap,
-        broker=broker,
+        sandbox_manager=sandbox_manager,
         observation=observation,
     )
 
@@ -146,7 +147,7 @@ async def run_next(rig):
     return await rig.repo.get_operation(claimed["id"])
 
 
-async def test_acquisition_to_global_placement_then_release_requires_empty_broker(
+async def test_acquisition_to_global_placement_then_release_requires_empty_sandbox_manager(
     db, store, hosts, monkeypatch
 ):
     r = await rig(store, hosts, monkeypatch)
@@ -169,7 +170,9 @@ async def test_acquisition_to_global_placement_then_release_requires_empty_broke
         return ProviderReceipt(outcome="confirmed", resource=ref, observation=gone)
 
     r.provider.release.side_effect = release
-    r.broker.list_sandboxes.return_value = [{"sandbox_id": "stopped-group", "status": "stopped"}]
+    r.sandbox_manager.list_sandboxes.return_value = [
+        {"sandbox_id": "stopped-group", "status": "stopped"}
+    ]
     await r.repo.create_operation(
         request_id="retire",
         fingerprint="retire",
@@ -182,7 +185,7 @@ async def test_acquisition_to_global_placement_then_release_requires_empty_broke
     assert blocked["state"] == "blocked", blocked
     r.provider.release.assert_not_awaited()
     assert (await hosts.get_host(host=host))["enrolled"]
-    r.broker.list_sandboxes.return_value = []
+    r.sandbox_manager.list_sandboxes.return_value = []
     await r.repo.retry_operation(blocked["id"])
     retired = await run_next(r)
     assert retired["state"] == "succeeded", retired

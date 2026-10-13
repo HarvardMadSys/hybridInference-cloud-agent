@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseToolActivity, recordedAgentStates, recordedTasks } from './toolActivity';
+import {
+  parseToolActivity,
+  recordedAgentStates,
+  recordedDelegationReply,
+  recordedTasks,
+} from './toolActivity';
 
 describe('task tool arguments', () => {
   it('reads namespaced plans and preserves missing and unfamiliar statuses', () => {
@@ -188,5 +193,98 @@ describe('delegation tool arguments', () => {
       states: [],
     });
     expect(parseToolActivity('TaskUpdate', null)).toMatchObject({ kind: 'tasks', tasks: [] });
+  });
+});
+
+describe('a delegated agent’s recorded reply', () => {
+  // As the pinned OpenCode 1.18.9 and Kilo 7.4.17 render a task's result.
+  function envelope(state: string, body: string, tag = 'task_result', summary?: string): string {
+    return [
+      `<task id="ses_child" state="${state}">`,
+      ...(summary ? [`<summary>${summary}</summary>`] : []),
+      `<${tag}>`,
+      body,
+      `</${tag}>`,
+      '</task>',
+    ].join('\n');
+  }
+
+  it('reads the answer inside an OpenCode or Kilo task envelope', () => {
+    expect(
+      recordedDelegationReply({
+        tool: 'task',
+        input: { description: 'Review', prompt: 'Review.', subagent_type: 'general' },
+        resultState: 'received',
+        output: envelope('completed', '## Findings\n\n- one'),
+      }),
+    ).toEqual({ state: 'received', text: '## Findings\n\n- one' });
+  });
+
+  it('says a task envelope is cut short when its closing tags were not stored', () => {
+    const whole = envelope('completed', 'Line one\nLine two');
+    expect(
+      recordedDelegationReply({
+        tool: 'task',
+        input: {},
+        resultState: 'received',
+        output: whole.slice(0, whole.indexOf('Line two') + 4),
+      }),
+    ).toEqual({ state: 'received', text: 'Line one\nLine', truncated: true });
+  });
+
+  it('treats a running envelope as a background notice and an error envelope as a failure', () => {
+    expect(
+      recordedDelegationReply({
+        tool: 'task',
+        input: { background: true },
+        resultState: 'received',
+        output: envelope('running', 'Working in the background.', 'task_result', 'Started'),
+      }),
+    ).toEqual({ state: 'background' });
+    expect(
+      recordedDelegationReply({
+        tool: 'task',
+        input: {},
+        resultState: 'received',
+        output: envelope('error', 'Provider failed.', 'task_error'),
+      }),
+    ).toEqual({ state: 'failed', text: 'Provider failed.' });
+  });
+
+  it('does not call a Claude reply cut short when only another field of its event was', () => {
+    const blocks = JSON.stringify([{ type: 'text', text: 'Complete answer' }]);
+    const notice = '\n\n[Content truncated: event payload exceeded 256 KiB.]';
+    expect(
+      recordedDelegationReply({
+        tool: 'Agent',
+        input: {},
+        resultState: 'received',
+        output: blocks + notice,
+        outputTruncated: true,
+      }),
+    ).toEqual({ state: 'received', text: 'Complete answer' });
+    expect(
+      recordedDelegationReply({
+        tool: 'Agent',
+        input: {},
+        resultState: 'received',
+        output: blocks.slice(0, 20) + notice,
+        outputTruncated: true,
+      }),
+    ).toMatchObject({ state: 'received', truncated: true });
+  });
+
+  it('claims nothing for calls whose result is not an answer, or whose records disagree', () => {
+    expect(
+      recordedDelegationReply({
+        tool: 'spawn_agent',
+        input: {},
+        resultState: 'received',
+        output: '{}',
+      }),
+    ).toBeUndefined();
+    expect(
+      recordedDelegationReply({ tool: 'Agent', input: {}, resultState: 'unknown', output: 'x' }),
+    ).toBeUndefined();
   });
 });

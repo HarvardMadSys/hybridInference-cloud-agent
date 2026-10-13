@@ -237,13 +237,17 @@ async def test_a_wrong_admin_token_is_refused(client: AsyncClient, monkeypatch) 
     assert response.status_code == 401
 
 
-async def test_a_non_ascii_admin_token_is_an_ordinary_refusal(
+async def test_a_non_ascii_admin_token_is_refused_not_a_server_error(
     client: AsyncClient, monkeypatch
 ) -> None:
-    """Not a 500: comparing it must not raise for anybody's input."""
+    """A header value the comparison cannot take as text still fails closed.
+
+    Header values reach the app as latin-1 text, and ``hmac.compare_digest``
+    raises on a non-ASCII ``str`` — which was a 500 instead of a refusal.
+    """
     monkeypatch.setenv(deps.ENV_ADMIN_TOKEN, "the-admin-token")
 
-    response = await client.get("/admin", headers={"Authorization": b"Bearer caf\xe9"})
+    response = await client.get("/admin", headers={"Authorization": b"Bearer th\xe9-admin-token"})
 
     assert response.status_code == 401
 

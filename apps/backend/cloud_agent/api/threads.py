@@ -28,6 +28,7 @@ from cloud_agent.api._job_views import (
     _pending_response,
 )
 from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
+from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
@@ -247,10 +248,13 @@ async def stream_agent_job_events(
     which is what makes the finite stream cap safe for jobs that outlive one
     connection. A stream ends after at most ``OWNER_STREAM_MAX_S`` (15
     minutes), without ``job_finished`` if the job is still going; the client
-    reconnects from its cursor, and that request is admitted again.
+    reconnects from its cursor, and that request is admitted again. 429 when
+    the account already holds as many streams as this process allows one
+    account (:mod:`cloud_agent.api._stream_slots`).
     """
     job_store = _require_store(store)
     await _owned_job(job_store.conversation_queries, job_id, user)
+    slot = STREAM_SLOTS.acquire(str(user["user_id"]))
 
     cursor = after
     if last_event_id:
@@ -339,7 +343,7 @@ async def stream_agent_job_events(
             raise
 
     return StreamingResponse(
-        event_source(),
+        slot.hold(event_source()),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )

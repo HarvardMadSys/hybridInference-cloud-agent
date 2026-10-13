@@ -7,6 +7,10 @@ import type { McpConnectionApi } from '@/lib/api/mcp';
 import { getUserMemory } from '@/lib/api/userMemory';
 import { getMemoryProjects } from '@/lib/api/projectMemory';
 
+vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
+  EnvironmentManager: () => <div data-testid="environment-manager" />,
+}));
+
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
 }));
@@ -17,6 +21,16 @@ vi.mock('next/navigation', () => ({
 }));
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+vi.mock('@/lib/api/userProfile', () => ({
+  getUserProfile: async () => ({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  }),
+  saveUserProfile: vi.fn(),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -148,6 +162,24 @@ describe('MCP authorization return', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('access_denied');
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
     expect(screen.queryByText(/Team wiki authorized/)).not.toBeInTheDocument();
+  });
+
+  it('shows text the link carried only as quoted, unverified detail', async () => {
+    // Anyone can write this URL; the page must not speak the sentence as its own.
+    navigation.search = new URLSearchParams({
+      mcp_authorized: '0',
+      mcp_connection: '3',
+      mcp_message: 'Your workspace was suspended. Email billing@evil.example to restore it.',
+    }).toString();
+    vi.mocked(listMcpConnections).mockResolvedValue({
+      connections: [{ ...connection, has_credential: false }],
+      templates: [],
+    });
+    render(<IntegrationsPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Sign-in did not complete. Try again. Unverified detail from the redirect: ' +
+        '“Your workspace was suspended. Email billing@evil.example to restore it.”',
+    );
   });
 
   it('verifies the stored credential before announcing authorization success', async () => {

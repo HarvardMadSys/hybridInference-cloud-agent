@@ -114,6 +114,34 @@ describe('admin sandbox inventory client', () => {
     });
   });
 
+  it('requests container deletion without an archive upload', async () => {
+    const response = {
+      sandbox: {
+        state: 'stopped',
+        deletion_state: 'pending',
+        deletion_discard: true,
+        deletion_request_id: 'request-one',
+      },
+      members: [],
+      observed_at: 'now',
+    };
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockResolvedValue(new Response(JSON.stringify(response), { status: 202 }));
+    const reviewed = {
+      generation: 3,
+      container_id: 'container-one',
+      last_activity_at: '2026-10-10T09:59:00Z',
+    };
+
+    expect(await deleteAdminSandbox('sandbox/one', reviewed, undefined, true, true)).toEqual(
+      response,
+    );
+    expect(fetch.mock.calls[0][1]).toBe(
+      '/admin/agent/sandboxes/sandbox%2Fone/delete?force=true&discard=true',
+    );
+  });
+
   it.each([
     ['archive', archiveAdminSandbox],
     ['restore', restoreAdminSandbox],

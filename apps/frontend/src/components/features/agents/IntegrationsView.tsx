@@ -3,15 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
+import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
-import { UserMemorySettings } from '@/components/features/settings/UserMemorySettings';
-import { ProjectMemorySettings } from '@/components/features/settings/ProjectMemorySettings';
+import { MemorySettings } from '@/components/features/settings/MemorySettings';
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
   getAgentIntegrations,
+  getAgentConfig,
 } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
+import { EnvironmentManager } from './environment/EnvironmentManager';
 import { SkillsSection } from './skills/SkillsSection';
 import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
@@ -233,8 +235,24 @@ export function IntegrationsView({
   mcpAuthorization?: McpAuthorizationResult;
 }) {
   const t = useT();
+  const [companion, setCompanion] = useState<{ userId: string; dataUrl?: string } | null>(null);
+  const updateCompanion = useCallback((userId: string, dataUrl?: string) => {
+    setCompanion({ userId, dataUrl });
+  }, []);
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
+  const [environmentsEnabled, setEnvironmentsEnabled] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void getAgentConfig()
+      .then((value) => {
+        if (active) setEnvironmentsEnabled(Boolean(value.environment_limits));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
@@ -334,14 +352,12 @@ export function IntegrationsView({
   const providersByName = new Map(providers.map((provider) => [provider.provider, provider]));
 
   return (
-    <section className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-10 lg:py-10">
-      <header className="border-b border-border pb-6">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+    <section className="mx-auto w-full max-w-5xl px-4 py-4 sm:px-5 lg:px-6">
+      <header className="border-b border-border pb-3">
+        <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {t('settings.title')}
         </h1>
-        <p className="mt-2 max-w-xl text-sm leading-6 text-muted sm:text-base">
-          {t('settings.description')}
-        </p>
+        <p className="mt-1 max-w-xl text-sm leading-5 text-muted">{t('settings.description')}</p>
       </header>
 
       {notice ? (
@@ -368,13 +384,15 @@ export function IntegrationsView({
         </div>
       ) : null}
 
+      <ProfileSettings companion={companion} />
+
       <section
         aria-labelledby="source-control-heading"
-        className="ui-card mt-6 rounded-2xl bg-surface px-4 sm:px-6"
+        className="ui-card mt-4 bg-surface px-3 sm:px-4"
       >
         <h2
           id="source-control-heading"
-          className="border-b border-border py-5 text-base font-semibold text-foreground"
+          className="border-b border-border py-3 text-sm font-semibold text-foreground"
         >
           Source Control
         </h2>
@@ -387,7 +405,7 @@ export function IntegrationsView({
             return (
               <div
                 key={provider}
-                className={`flex min-h-24 flex-col justify-center gap-4 py-5 lg:flex-row lg:items-center ${
+                className={`flex flex-col justify-center gap-3 py-3 lg:flex-row lg:items-center ${
                   index > 0 ? 'border-t border-border' : ''
                 }`}
               >
@@ -433,12 +451,12 @@ export function IntegrationsView({
         </div>
       </section>
 
-      <div className="ui-card mt-6 rounded-2xl bg-surface p-4 sm:p-6">
+      <div className="ui-card mt-4 bg-surface p-3 sm:p-4">
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
+      {environmentsEnabled && <EnvironmentManager />}
       <SkillsSection />
-      <UserMemorySettings />
-      <ProjectMemorySettings />
+      <MemorySettings onAvatarChange={updateCompanion} />
       <NotificationSettings />
       <GettingStartedSettings />
     </section>

@@ -221,6 +221,41 @@ def test_a_stream_that_breaks_still_reports_its_gathered_deltas(tmp_path):
     assert [text for _, _, text in _codex_deltas(_stored(events))] == ["a", "bc"]
 
 
+def test_a_subagents_merged_deltas_stay_the_subagents(tmp_path):
+    """A subagent thread's reasoning is merged as its own, never the conversation's.
+
+    The pinned app-server sends a subagent thread's notifications to this
+    client too, and the spawn names the thread before its own items arrive.
+    """
+    process, turn = _codex_turn(tmp_path)
+    spawn = {
+        "type": "collabAgentToolCall",
+        "id": "call-spawn",
+        "tool": "spawnAgent",
+        "receiverThreadIds": ["child-t"],
+    }
+    process.feed = _turn_lines(
+        {"method": "item/completed", "params": {"threadId": "thread-a", "item": spawn}},
+        *(
+            {"method": REASONING, "params": {"threadId": "child-t", "itemId": "r", "delta": piece}}
+            for piece in ("c1 ", "c2 ", "c3")
+        ),
+        _delta(REASONING, "r", "own"),
+        _turn_completed(),
+    )
+
+    rows = _stored(list(turn.iter_events()))
+
+    owner = {"agent_thread_id": "child-t", "parent_tool_use_id": "call-spawn"}
+    merged = []
+    for row in rows:
+        notification = row.payload.get("notification") or {}
+        if notification.get("method") == REASONING:
+            marks = {key: row.payload[key] for key in owner if key in row.payload}
+            merged.append((notification["params"]["delta"], marks))
+    assert merged == [("c1 ", owner), ("c2 c3", owner), ("own", {})]
+
+
 @pytest.mark.parametrize(
     ("driver", "runtime"), [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
 )

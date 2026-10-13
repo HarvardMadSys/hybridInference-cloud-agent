@@ -15,6 +15,7 @@ function WorkspaceTabs({ initialChats = [] }: { initialChats?: SideChatTab[] }) 
   return (
     <>
       <WorkspaceTabBar
+        environmentEnabled
         selected={selected}
         chats={chats}
         diffCount={3}
@@ -43,15 +44,15 @@ it('keeps one tab stop and moves selection with arrows, Home, and End', () => {
   expect(tabs[0]).toHaveAttribute('aria-controls', screen.getByRole('tabpanel').id);
 
   fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
-  expect(tabs[2]).toHaveFocus();
-  expect(tabs[2]).toHaveAttribute('aria-selected', 'true');
-  expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[2]]);
+  expect(tabs[3]).toHaveFocus();
+  expect(tabs[3]).toHaveAttribute('aria-selected', 'true');
+  expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[3]]);
 
-  fireEvent.keyDown(tabs[2], { key: 'ArrowRight' });
+  fireEvent.keyDown(tabs[3], { key: 'ArrowRight' });
   expect(tabs[0]).toHaveFocus();
   fireEvent.keyDown(tabs[0], { key: 'End' });
-  expect(tabs[2]).toHaveFocus();
-  fireEvent.keyDown(tabs[2], { key: 'Home' });
+  expect(tabs[3]).toHaveFocus();
+  fireEvent.keyDown(tabs[3], { key: 'Home' });
   expect(tabs[0]).toHaveFocus();
 });
 
@@ -66,4 +67,19 @@ it('focuses a newly opened chat and returns focus to a surviving tab when closed
   fireEvent.click(screen.getByRole('button', { name: /Close Side chat/i }));
   expect(screen.queryByRole('tab', { name: /Side chat/i })).not.toBeInTheDocument();
   expect(screen.getByRole('tab', { name: /Git/ })).toHaveFocus();
+});
+
+it('hides the environment entry when its deployment flag is off', () => {
+  render(
+    <WorkspaceTabBar
+      selected="git"
+      chats={[]}
+      diffCount={0}
+      onSelect={() => {}}
+      onAdd={() => 'git'}
+      onClose={() => 'git'}
+    />,
+  );
+  expect(screen.queryByRole('tab', { name: 'Environment' })).not.toBeInTheDocument();
+  expect(screen.getAllByRole('tab')).toHaveLength(3);
 });

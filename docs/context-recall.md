@@ -22,7 +22,7 @@ it. This check also covers API failures that settled normally. If a continuation
 reports a different ID, the turn fails before it can replace the durable
 locator.
 
-If launch omits the locator, the broker uses the retained member's saved value.
+If launch omits the locator, the sandbox manager uses the retained member's saved value.
 It rejects a conflict between the requested and observed locators, then checks
 the identity again when the turn settles. The runner also rejects any retained
 chat that has no resume locator.
@@ -72,7 +72,7 @@ and aborts an active native turn if that non-replayable stream is lost. It also
 extends autonomous permission replies for both OpenCode and Kilo to the Task
 child sessions the root turn explicitly reports, retries a failed one-shot
 permission reply, and aborts instead of leaving that request pending. Version 3
-added correlated native question replies. Deploy the broker/runner and sandbox
+added correlated native question replies. Deploy the sandbox_manager/runner and sandbox
 image together;
 an older helper image must not advertise readiness for the new host.
 
@@ -80,7 +80,7 @@ an older helper image must not advertise readiness for the new host.
 
 The implementation addresses the reproduced retry/flush history loss and keeps
 verifiably settled failures across all five CLIs. It also covers Pi error
-reporting, OpenCode/Kilo assistant-message ownership, and runner/broker session
+reporting, OpenCode/Kilo assistant-message ownership, and runner/sandbox_manager session
 identity. The same work corrected the local Responses fixtures and smoke checks.
 
 The documented investigation also left two separate findings:
@@ -100,10 +100,10 @@ shared-live membership.
 1. Require **CI Gate**, including the pinned native CLI request-history
    regressions. They compare exact user/assistant text, roles, order and repeated
    occurrences through live follow-ups, immediate close/restore, failed-call
-   retries, and successful internal retries followed by native restores. Broker
+   retries, and successful internal retries followed by native restores. Sandbox Manager
    and runner checks must also reject changed locators for successful and settled
    failed turns. The loopback fixture needs no inference credentials or charges.
-2. Verify the exact host/API SHA, reverse broker probe and fresh heartbeat using
+2. Verify the exact host/API SHA, reverse sandbox manager probe and fresh heartbeat using
    [deployment reliability](deployment-reliability.md). A working model call does
    not prove the intended host revision is serving jobs.
 3. Run the opt-in behavior preflight from the target checkout against the target
@@ -221,7 +221,7 @@ do not eliminate the failing cases or establish an upstream root cause.
   assertion after native restore: the initial `hi` was absent. With the driver
   fix enabled, all four real native CLI regressions passed (367.95 seconds).
   The protocol fixture made no remote inference requests.
-- New broker/driver identity tests failed before the changes (10 failures), as
+- New sandbox_manager/driver identity tests failed before the changes (10 failures), as
   did all ten shared runner cases for five runtime IDs and two settled outcomes.
   The combined focused suites now pass 162 tests.
 - Local Docker smoke and an independent request audit verified all five CLIs
@@ -248,7 +248,7 @@ do not eliminate the failing cases or establish an upstream root cause.
   treated as proof that Cloud Agent discarded context.
 - `make check` passed formatting, lint and 1,833 tests (194 external/database
   tests deselected). The four native regressions above ran separately. Local
-  broker and both runners matched all four changed production source hashes.
+  sandbox manager and both runners matched all four changed production source hashes.
   Temporary gateway overlays were removed after testing. No remote deployment,
   configuration, logs or web UI were accessed in this verification.
 

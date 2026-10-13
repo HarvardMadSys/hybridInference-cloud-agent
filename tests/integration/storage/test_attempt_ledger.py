@@ -762,7 +762,10 @@ async def test_queue_refresh_rechecks_a_claim_expiry_after_a_plain_row_lock(
     assert await asyncio.wait_for(queuing, timeout=2) == 1
     row = (await ledger.ledger_rows_for_job(job_id=job["id"]))[0]
     assert row["next_refresh_at"] is not None
-    assert row["refresh_lease_expires_at"] <= datetime.now(timezone.utc)
+    # The lease is minted by Postgres, which may run on a VM with a different clock.
+    async with db.acquire() as conn:
+        database_now = await conn.fetchval("SELECT clock_timestamp()")
+    assert row["refresh_lease_expires_at"] <= database_now
 
 
 async def test_failure_preserves_cached_snapshot_and_throttles_manual_retry(

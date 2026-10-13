@@ -219,11 +219,15 @@ _KEYS_WITH_A_MINIMUM = (
 
 
 @pytest.mark.parametrize("key", _KEYS_WITH_A_MINIMUM)
-def test_a_short_signing_key_or_credential_is_refused_wherever_it_enters(key, monkeypatch):
+def test_a_short_signing_key_or_credential_is_refused_when_new_and_reported_when_saved(
+    key, monkeypatch
+):
     """The HMAC key's tokens sit inside every sandbox, a ready offline oracle.
 
-    The editor, the API and the first-start import all refuse a value a person
-    could have typed; the editor reads the floor from the definition.
+    The editor and the API refuse a value a person could have typed; the editor
+    reads the floor from the definition. A value the environment supplied
+    before the floor existed still loads, as a saved one does, and is reported
+    by name until it is replaced.
     """
     definition = settings.SETTINGS_BY_KEY[key]
     assert definition.definition()["minimum_bytes"] == 32
@@ -232,8 +236,9 @@ def test_a_short_signing_key_or_credential_is_refused_wherever_it_enters(key, mo
     assert settings.encode_changes({key: "k" * 32})[key]
     assert definition.env
     monkeypatch.setenv(definition.env, "k" * 31)
-    with pytest.raises(ValueError, match=f"{definition.env}.*at least 32 bytes"):
-        settings.initial_settings()
+    settings.apply_settings(1, settings.initial_settings())
+    assert settings.text_setting(key) == "k" * 31
+    assert definition.env in settings.weak_credentials()
 
 
 def test_a_short_signing_key_saved_before_the_minimum_keeps_its_hosts_working():
@@ -487,8 +492,8 @@ def test_complete_required_setup_and_unused_optional_features_do_not_prompt():
                 "gateway_authorize_url": "https://gateway.example/authorize",
                 "session_redirect_uri": "https://agents.example/callback",
                 "web_base_url": "https://agents.example",
-                "control_signing_secret": "test-control-key-of-at-least-32-bytes",
-                "workspace_broker_token": "test-broker-key",
+                "control_signing_secret": "test-control-key-longer-than-thirty-two-bytes",
+                "sandbox_manager_token": "test-sandbox-manager-key",
                 "source_control_encryption_key": "test-user-credential-key-of-32-bytes",
             }
         )
@@ -527,7 +532,7 @@ def _moved(stored: dict[str, Any], **changes: Any) -> dict[str, Any]:
     "url",
     [
         "https://attacker.example",
-        "http://gateway.example",
+        "http://localhost:8080",
         "https://gateway.example:8443",
     ],
 )
@@ -550,9 +555,6 @@ def test_the_saved_dispatch_token_does_not_follow_the_gateway_url_to_another_ori
 
 def test_the_gateway_url_moves_when_its_token_is_reset_or_replaced_with_it():
     stored = _saved_gateway()
-    # The same origin keeps the token: a path, a default port, the host's case.
-    for url in ("https://gateway.example/v2", "https://GATEWAY.example:443"):
-        settings.validate_settings_update(stored, _moved(stored, gateway_base_url=url))
     for token in (None, "replacement-dispatch-token-of-32-bytes"):
         settings.validate_settings_update(
             stored,
@@ -605,3 +607,138 @@ def test_saved_grant_prefix_can_be_loaded_by_a_gateway_client(prefix):
     settings.apply_settings(1, settings.encode_changes({"gateway_grant_base_path": prefix}))
     client = GrantClient("https://gateway.example", "test-credential")
     assert client._base_path == prefix.rstrip("/")
+
+
+def test_a_new_control_signing_key_must_be_at_least_32_bytes():
+    """Every sandbox holds a worker token this key signed: a short one is guessable."""
+    definition = settings.SETTINGS_BY_KEY["control_signing_secret"].definition()
+    assert definition["minimum_bytes"] == settings.MINIMUM_CREDENTIAL_BYTES == 32
+    with pytest.raises(ValueError, match="Invalid value for") as cause:
+        settings.encode_changes({"control_signing_secret": "short-host-signing-key"})
+    assert "short-host-signing-key" not in str(cause.value)
+    assert settings.encode_changes({"control_signing_secret": "x" * 32})
+    # Clearing it is still a supported answer: hosts then cannot enroll at all.
+    assert settings.encode_changes({"control_signing_secret": None}) == {
+        "control_signing_secret": ""
+    }
+
+
+async def test_a_short_control_signing_key_saved_before_the_floor_still_loads_and_warns(
+    monkeypatch, caplog
+):
+    """An upgrade must not lock a deployment out of the page that would replace it."""
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "legacy-host-signing-key")
+    monkeypatch.setenv("ADMIN_TOKEN", "legacy-admin-token")
+    repository = Repository()
+    with caplog.at_level("WARNING", logger="cloud_agent.settings"):
+        await settings.initialize_settings(repository)
+    assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "legacy-host-signing-key"
+    # The saved value is decoded again on every synchronization.
+    settings.apply_settings(repository.revision + 1, repository.values)
+    warned = {
+        getattr(record, "credential", None)
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_weak_credential"
+    }
+    assert warned == {"AGENT_CONTROL_TOKEN_SECRET", "ADMIN_TOKEN"}
+    assert "legacy-host-signing-key" not in caplog.text
+    assert "legacy-admin-token" not in caplog.text
+
+
+async def test_credentials_at_the_floor_are_not_reported(monkeypatch, caplog):
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "c" * 32)
+    monkeypatch.setenv("ADMIN_TOKEN", "a" * 32)
+    with caplog.at_level("WARNING", logger="cloud_agent.settings"):
+        await settings.initialize_settings(Repository())
+    assert settings.weak_credentials() == []
+    assert "agent_weak_credential" not in caplog.text
+
+
+@pytest.mark.parametrize("key", ["gateway_base_url", "gateway_jwks_url", "gateway_authorize_url"])
+@pytest.mark.parametrize(
+    "url",
+    ["http://gateway.example", "http://10.0.0.5:8080", "http://gateway.example.localhost.evil"],
+)
+def test_a_new_gateway_trust_url_must_use_https(key, url):
+    """The dispatch token, the identity keys and sign-in itself travel to these."""
+    with pytest.raises(ValueError, match="Invalid value for") as cause:
+        settings.encode_changes({key: url})
+    assert url not in str(cause.value)
+    https = url.replace("http://", "https://", 1)
+    assert settings.encode_changes({key: https}) == {key: https}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080",
+        "http://gateway.localhost",
+        "http://127.0.0.1:8080/v1/identity/jwks",
+        "http://[::1]:8080",
+        "http://local-gateway:8080",
+    ],
+)
+def test_plain_http_stays_available_for_this_machine_and_compose_names(url):
+    assert settings.encode_changes({"gateway_base_url": url}) == {"gateway_base_url": url}
+
+
+def test_a_plain_http_gateway_url_saved_before_the_rule_still_loads(monkeypatch):
+    monkeypatch.setenv("GATEWAY_BASE_URL", "http://gateway.internal.example:8080")
+    encoded = settings.initial_settings()
+    settings.apply_settings(1, encoded)
+    assert settings.text_setting("gateway_base_url") == "http://gateway.internal.example:8080"
+    # And an unrelated change to the same snapshot is still accepted.
+    settings.validate_settings_update(
+        encoded, {**encoded, **settings.encode_changes({"publish_base_branch": "main"})}
+    )
+
+
+def _bound_gateway() -> dict[str, Any]:
+    return {
+        **settings.initial_settings(),
+        **settings.encode_changes(
+            {
+                "gateway_base_url": "https://gateway.example",
+                "gateway_dispatch_token": "test-dispatch-token-for-this-gateway",
+            }
+        ),
+    }
+
+
+def test_moving_the_gateway_url_requires_the_dispatch_token_again():
+    """A write-only token must not be readable by pointing its destination elsewhere."""
+    previous = _bound_gateway()
+    moved = {**previous, **settings.encode_changes({"gateway_base_url": "https://other.example"})}
+    with pytest.raises(ValueError, match="clear Gateway dispatch token first") as cause:
+        settings.validate_settings_update(previous, moved)
+    assert "other.example" not in str(cause.value)
+
+
+@pytest.mark.parametrize(
+    "token", ["test-dispatch-token-for-this-gateway", "test-dispatch-token-for-the-new-one", None]
+)
+def test_moving_the_gateway_url_with_the_token_supplied_or_cleared_is_accepted(token):
+    previous = _bound_gateway()
+    changes = settings.encode_changes(
+        {"gateway_base_url": "https://other.example", "gateway_dispatch_token": token}
+    )
+    settings.validate_settings_update(previous, {**previous, **changes})
+
+
+def test_clearing_the_gateway_url_or_changing_something_else_needs_no_token():
+    previous = _bound_gateway()
+    for change in ({"gateway_base_url": None}, {"gateway_request_timeout_s": 20.0}):
+        settings.validate_settings_update(previous, {**previous, **settings.encode_changes(change)})
+
+
+def test_the_settings_page_can_move_the_gateway_one_field_at_a_time():
+    """The page saves one field per request: clear, move, then enter the token again."""
+    current = _bound_gateway()
+    for change in (
+        {"gateway_dispatch_token": None},
+        {"gateway_base_url": "https://other.example"},
+        {"gateway_dispatch_token": "test-dispatch-token-for-the-new-one"},
+    ):
+        following = {**current, **settings.encode_changes(change)}
+        settings.validate_settings_update(current, following)
+        current = following

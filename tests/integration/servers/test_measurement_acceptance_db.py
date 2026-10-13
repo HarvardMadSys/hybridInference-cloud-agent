@@ -29,7 +29,7 @@ What that buys, stated as the properties under test:
   pending/in-flight/drop counts are the ones an operator reads;
 * profiling off is no tasks, no deliveries, no writes, and no new fields.
 
-Nothing here re-implements a producer: the broker stand-in answers the real
+Nothing here re-implements a producer: the sandbox manager stand-in answers the real
 fragment protocol (:mod:`cloud_agent_host.operation_call`), the writer is
 the application's own, and every row is read back through SQL and through the
 Admin routes a reader uses.
@@ -53,14 +53,14 @@ import pytest_asyncio
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
-from cloud_agent import broker_routing, measurement_writer, operation_measurement
+from cloud_agent import measurement_writer, operation_measurement, sandbox_manager_routing
 from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
 from cloud_agent.app import create_app
 from cloud_agent.identity import SESSION_COOKIE, mint_session
 from cloud_agent.operation_measurement import INTERACTION_HEADER
+from cloud_agent.sandbox_manager_client import SandboxManagerError, SandboxManagerStream
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError, WorkspaceBrokerStream
 from cloud_agent_host import operation_call, runner as runner_mod
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
@@ -161,20 +161,20 @@ class _UnusedClient:
         return None
 
 
-class _Broker:
-    """A workspace broker that answers the fragment protocol as the real one does.
+class _SandboxManager:
+    """A sandbox manager that answers the fragment protocol as the real one does.
 
-    It reuses the broker's own :func:`operation_call.open_call` and
-    :class:`operation_call.BrokerCall`, so the route under test validates a real
+    It reuses the sandbox manager's own :func:`operation_call.open_call` and
+    :class:`operation_call.SandboxManagerCall`, so the route under test validates a real
     selection and records a real answer. What is stated here rather than
     performed is the workspace's own content: this process has no container, so
     the read's ``kind`` is the one line a test supplies.
     """
 
     def __init__(self) -> None:
-        #: When set, the next broker call raises it, exactly as a broker that
+        #: When set, the next sandbox manager call raises it, exactly as a sandbox manager that
         #: could not reach the workspace does.
-        self.fail: WorkspaceBrokerError | None = None
+        self.fail: SandboxManagerError | None = None
         self.calls: list[dict[str, Any]] = []
         self.registered: list[dict[str, Any]] = []
         self._descriptor = {
@@ -187,8 +187,8 @@ class _Broker:
             "last_seq": 0,
         }
 
-    def _open(self, context: Any, *operations: str) -> operation_call.BrokerCall:
-        """Validate the inherited selection the way the broker's route does."""
+    def _open(self, context: Any, *operations: str) -> operation_call.SandboxManagerCall:
+        """Validate the inherited selection the way the sandbox manager's route does."""
         call = operation_call.open_call(context, operations=operations)
         with call.stage("admission"):
             pass
@@ -204,7 +204,7 @@ class _Broker:
         return "files.open" if path else "files.list"
 
     def _check(self) -> None:
-        """Raise the failure this broker was told to report, if any."""
+        """Raise the failure this sandbox manager was told to report, if any."""
         if self.fail is not None:
             raise self.fail
 
@@ -264,7 +264,7 @@ class _Broker:
         after: int,
         profiling: dict[str, Any] | None = None,
     ) -> Any:
-        """Answer a stream in headers, the way the broker's SSE route does.
+        """Answer a stream in headers, the way the sandbox manager's SSE route does.
 
         The body is the terminal's own bytes and is deliberately not consumed
         by the caller: the route must have persisted the attach before a single
@@ -281,7 +281,7 @@ class _Broker:
             headers=call.headers(),
             stream=httpx.ByteStream(b"data: hello\n\n"),
         )
-        return WorkspaceBrokerStream(
+        return SandboxManagerStream(
             _UnusedClient(),
             response,
             profiling_answer=operation_profiling.answer_from_headers(response.headers),
@@ -290,12 +290,12 @@ class _Broker:
 
 @dataclass
 class _Chain:
-    """One live chain: the real app over the real rows, and one broker."""
+    """One live chain: the real app over the real rows, and one sandbox manager."""
 
     pool: Any
     store: Storage
     base_url: str
-    broker: _Broker
+    sandbox_manager: _SandboxManager
     job: dict[str, Any]
     claim: dict[str, Any]
     sandbox: dict[str, Any]
@@ -471,7 +471,7 @@ async def _running_chain(
     monkeypatch.setenv("AGENT_SESSION_SECRET", "acceptance-session-secret-32-bytes!")
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "acceptance-broker-token")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "acceptance-sandbox-manager-token")
     sink = tmp_path / STARTUP_SINK_NAME
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
     if profiling:
@@ -500,8 +500,8 @@ async def _running_chain(
     # interactions it minted; a test must not inherit the previous one's.
     runner_mod.reset_delivery_state()
 
-    broker = _Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = create_app()
     # Only the two external collaborators are replaced. Storage is deliberately
     # not overridden: every route below reads and writes the real repository
@@ -515,7 +515,7 @@ async def _running_chain(
         pool=pool,
         store=store,
         base_url=base_url,
-        broker=broker,
+        sandbox_manager=sandbox_manager,
         job=job,
         claim=claim,
         sandbox=sandbox,
@@ -882,7 +882,7 @@ async def test_a_terminal_attach_is_stored_while_the_stream_is_still_open(chain:
 async def test_failed_file_and_terminal_requests_follow_the_classification_rules(chain: _Chain):
     """Two failures, two rules, and neither is a made-up operation.
 
-    A non-root read that fails before the broker reported a ``kind`` could be a
+    A non-root read that fails before the sandbox manager reported a ``kind`` could be a
     listing or an open, so filing it under either would corrupt that
     operation's failure rate. It is refused and counted instead. A terminal
     request that fails *after* its operation was selected is a real failed
@@ -890,7 +890,7 @@ async def test_failed_file_and_terminal_requests_follow_the_classification_rules
     """
     writer = measurement_writer.writer()
     async with httpx.AsyncClient(base_url=chain.base_url, cookies=chain.session_cookie()) as client:
-        chain.broker.fail = WorkspaceBrokerError(503, "workspace unavailable")
+        chain.sandbox_manager.fail = SandboxManagerError(503, "workspace unavailable")
 
         ambiguous = await client.get(
             f"/v1/agent/jobs/{chain.job_id}/files", params={"path": "README.md"}

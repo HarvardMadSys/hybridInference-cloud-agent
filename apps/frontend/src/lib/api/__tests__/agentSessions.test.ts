@@ -70,14 +70,14 @@ describe('session history API', () => {
       fetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            detail: { error: { type: 'session_active', message: 'Still running' } },
+            detail: { error: { type: 'fork_in_progress', message: 'Being forked' } },
           }),
           { status: 409 },
         ),
       );
       await expect(deleteAgentSessions(['thread-1'])).rejects.toMatchObject({
-        code: 'session_active',
-        message: 'Still running',
+        code: 'fork_in_progress',
+        message: 'Being forked',
         statusCode: 409,
       });
       expect(changed).toHaveBeenCalledTimes(1);

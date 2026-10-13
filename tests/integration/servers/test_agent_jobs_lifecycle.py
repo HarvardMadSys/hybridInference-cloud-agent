@@ -108,7 +108,7 @@ async def api(monkeypatch):
     import asyncpg
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "lifecycle-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "lifecycle-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "lifecycle-sandbox-manager-secret")
     # The allowlist is empty unless a deployment sets it, and an unentitled
     # repo is refused at creation, so declare the one repo these tests use.
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")

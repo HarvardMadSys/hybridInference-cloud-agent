@@ -25,7 +25,7 @@
 runner claim 请求前到 prompt 交给 supervisor，不包含 CP 队列等待、浏览器渲染或模型
 首输出，也捕获不到没有新 attempt 的文件/终端操作。因此 #258 的启动测量完成，
 不能解释为三类需求全部完成。文件 benchmark 也不等于真实用户请求的 profiling。
-文件/终端已实现 **CP 选择与 broker 阶段**（见 §9.2），但浏览器终点仍未接入：
+文件/终端已实现 **CP 选择与 sandbox manager 阶段**（见 §9.2），但浏览器终点仍未接入：
 交付口径是 server-only 片段，不能声称已覆盖“点击到可用”。完整状态、命名、前端接入、
 缓存/重试/就绪边界和整体验收详见
 [平台操作测量清单 §3–§5](2026-09-14-platform-operation-measurement-inventory.zh-CN.md)。
@@ -63,7 +63,7 @@ preflight/enrollment 与每个任务的启动分开测；若运行时发生镜�
 | `claim_rpc_ms` | runner 发出 claim 请求 → 解析出成功 claim 响应 | 本次领取请求多慢；CP 侧再拆 DB claim、grant、repo entitlement 和 clone credential |
 | `sandbox_prepare_ms` | runner 得到 claim → workspace、runtime 检查及最终 agent 网络验证通过 | 分配后多久具备平台定义的沙盒运行条件；**沙盒优化的主指标** |
 | `resident_prepare_ms` | runner 首次开始 resident 获取 → 获得最终 resident descriptor | CLI 复用/初始化多久；包含失败的复用尝试、重开 grant 和重试 |
-| `host_to_dispatch_observed_ms` | runner 得到 claim → 收到 broker 的 prompt dispatch 通知 | 平台多久把本轮任务送进 CLI；含通知返程开销 |
+| `host_to_dispatch_observed_ms` | runner 得到 claim → 收到 sandbox manager 的 prompt dispatch 通知 | 平台多久把本轮任务送进 CLI；含通知返程开销 |
 | `first_visible_ms` | 浏览器提交本轮操作 → 首个本轮 assistant 文本或工具活动被渲染 | 用户实际等多久；覆盖提交、排队、启动、模型和事件传输 |
 
 `sandbox_prepare_ms` 的终点放在 runner 的 `agent_network` 成功之后、
@@ -82,7 +82,7 @@ preflight/enrollment 与每个任务的启动分开测；若运行时发生镜�
 写入 pipe 或提交 HTTP prompt 后记录 `prompt_dispatched`，仅表示 transport 已发送，
 不能命名为“模型收到请求”。有原生 acceptance ack 时另记 `prompt_accepted`；无 ack 留空。
 
-补充两个诊断指标：broker 本地的 `dispatch_to_first_activity_ms` 与
+补充两个诊断指标：sandbox manager 本地的 `dispatch_to_first_activity_ms` 与
 `dispatch_to_first_text_ms`。前者允许工具活动，后者仅 assistant 非空文本；排除
 lifecycle、system init、heartbeat、usage、历史 replay 和原样回显的用户 prompt。
 两者都包含 CLI/工具/模型等待，不命名为 Gateway TTFT。真正模型请求的 TTFT 仅来自
@@ -110,7 +110,7 @@ flowchart LR
 
 ## 3. 埋点放在实际执行处
 
-runner 记录外层调用区间；broker、manager、driver 返回子区间。记录开始、结束、
+runner 记录外层调用区间；sandbox manager、manager、driver 返回子区间。记录开始、结束、
 结果与缺失情况，保留嵌套关系。每项等待本身就是 wall duration 的一部分。
 
 | 父阶段 | 子阶段 | 代码落点 |
@@ -177,7 +177,7 @@ Python producer 用 `time.monotonic_ns()` 求差，存储相对 offset 和 durat
 API/UI 展示毫秒。它不受系统 wall-clock 跳变影响；单位为纳秒不意味着实际精度为纳秒。
 wall clock 只用于按时间查询、关联和展示。[Python time 文档](https://docs.python.org/3/library/time.html#time.monotonic)
 
-每个 CP/runner/broker 进程实例有独立 `clock_domain_id`。不直接相减不同 domain 的
+每个 CP/runner/sandbox_manager 进程实例有独立 `clock_domain_id`。不直接相减不同 domain 的
 monotonic 数值，尤其不能减 host 与 Kata guest 的时间。RPC client 的包围区间与
 server 自己测得的处理区间都保留；二者差只能称为 transport/排队/调度余量，不能
 直接称为网络延迟。跨 domain 子区间在 UI 中使用独立相对时轴，由父 RPC 关联，
@@ -210,7 +210,7 @@ attempt_startup_measurements
   observed_at, received_at
 
 producer_fragment
-  producer: control_plane | runner | broker
+  producer: control_plane | runner | sandbox manager
   producer_instance_id, clock_domain_id, report_seq
   fragment_state: open | final
   spans: [{ span_id, parent_span_id?, linked_span_id?, name, ordinal,
@@ -245,11 +245,11 @@ exporter 或测量存储行；也不做计时后再丢弃。根操作选择结�
    claim 失败并撤回/删除 attempt 的现有路径，另留以 `claim_operation_id` 关联的
    有界诊断记录，不能制造成功启动样本或依赖仍存在的 attempt 外键。
 2. runner 持有轻量 collector，在 claim 返回后立即开始；启动过程内的计时只写内存。
-   runner→broker 请求透传 measurement/span correlation，不把 host credential 放入 guest。
-3. broker 的 acquire/resident 响应和错误响应附带有界 timing fragment。
-   `workspace_broker.run_shared_turn()` 当前先等待 `start_turn()` 返回再开始 stream：
+   runner→sandbox manager 请求透传 measurement/span correlation，不把 host credential 放入 guest。
+3. sandbox manager 的 acquire/resident 响应和错误响应附带有界 timing fragment。
+   `sandbox_manager.run_shared_turn()` 当前先等待 `start_turn()` 返回再开始 stream：
    实现时要在 driver 实际 prompt write 处记录 milestone，不能把首个 runtime event
-   当成 dispatch。broker 用独立可排队的 measurement frame 及时传给 runner；即使
+   当成 dispatch。sandbox manager 用独立可排队的 measurement frame 及时传给 runner；即使
    driver 还在等 turn ack，也不等到模型输出才发送。stream 生命周期仍由原有 admission
    和错误规则控制；measurement frame 本身不证明任务被接纳。
 4. 在 claim、sandbox-ready、dispatch 或提前失败时，非阻塞排入 exporter 队列，输出
@@ -263,7 +263,7 @@ exporter 或测量存储行；也不做计时后再丢弃。根操作选择结�
    v1 不开放绕过 fence 的历史补写；CP 将选中但缺失的记录标为 partial/incomplete。
    失败率与覆盖率的分母来自本 run 选中的实际 attempt/排队记录，不能只数成功上传的
    measurement；关闭/未选中的操作不当成丢失样本，也不新增全站 profiling 统计。
-7. 旧 broker/runner 的缺失字段降级为 unavailable。新 frame 需要 reader 显式支持、
+7. 旧 sandbox_manager/runner 的缺失字段降级为 unavailable。新 frame 需要 reader 显式支持、
    capability/version 协商及滚动升级测试，不能假定未知 frame 在旧 reader 中安全。
 
 不经过 guest 的第三个网络出口，不引入 SDK credential 到 sandbox，不改变 Kata、
@@ -282,7 +282,7 @@ Admin Runs 的 attempt 明细对采集过的实验显示 Startup 区域；未开
 让第一轮 benchmark 不依赖 UI 开发完成。
 
 - 顶部：启动路径、沙盒准备、发送 prompt、readiness source、startup outcome、覆盖率。
-- 时间线：runner 外层各阶段、可展开的 broker 子阶段、失败/重试/未闭合阶段。
+- 时间线：runner 外层各阶段、可展开的 sandbox manager 子阶段、失败/重试/未闭合阶段。
   跨时钟域单独显示来源；没有测到的步骤不画成零长度。
 - 汇总：每个 cohort 的样本数、成功/失败/取消/未完成数、P50/P95、慢样本链接和版本。
   足够样本后才解释 P99；始终显示样本量。
@@ -304,7 +304,7 @@ Admin Runs 的 attempt 明细对采集过的实验显示 Startup 区域；未开
 | 层 | 内容 | 用途 |
 | --- | --- | --- |
 | A：基础设施 | 固定 digest、无业务仓库/无 setup，通过真实 manager 创建、启动、切换网络、执行固定 probe | 隔离 Docker/Kata/network 成本；单独命名 `infrastructure_benchmark`，不冒充完整任务启动 |
-| B：平台完整启动 | 固定 repo commit、setup、runtime/model/MCP；通过正常 claim→broker→driver 到 dispatch | 主回归基准，包含真实 grant、源代码准备和 observer 开销 |
+| B：平台完整启动 | 固定 repo commit、setup、runtime/model/MCP；通过正常 claim→sandbox manager→driver 到 dispatch | 主回归基准，包含真实 grant、源代码准备和 observer 开销 |
 | C：用户体验 | 相同固定小任务，通过正常请求到首个可见活动/文本 | 验证启动变快是否实际改善等待；模型和外部服务波动单列 |
 
 A 使用真实隔离与网络约束；B/C 不绕过认证、admission 或 observer。fake transport
@@ -361,9 +361,9 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 按可独立验收的操作组织交付；下列是实现依赖，不强制逐项拆 PR。新增工作从 dev
 分支开展，PR 目标为 dev；既有 #258 的后续修订保持在该 PR：
 
-1. **启动测量切片（已实现）**：默认关闭的快路径、run、runner/broker 阶段、四路径动作、
+1. **启动测量切片（已实现）**：默认关闭的快路径、run、runner/sandbox_manager 阶段、四路径动作、
    call ID 片段协议、有界导出与持久化；见 §9.1。
-2. **文件/终端服务端切片（已实现）**：复用通用采集器并接入 CP/broker；浏览器
+2. **文件/终端服务端切片（已实现）**：复用通用采集器并接入 CP/sandbox_manager；浏览器
    点击与可见/可交互终点仍按平台清单 §3–§5 延期。
 3. **真实 benchmark 与基线报告（已实现）**：`scripts/bench_operation_overhead.py` 用真实
    HTTP + 真实 Postgres 跑文件与终端的六个服务端操作，`--startup` 段用真实 Docker 容器
@@ -410,13 +410,13 @@ child 不重新抽样、不重新认领预算，并在 prompt dispatch 冻结后
 
 动作由真正执行它的代码上报，不是事后从容器状态推断：先停后启的容器和从未停过的容器
 在跑起来之后完全一样。`create` 优先于紧随其后的 `start`，否则“这次付了创建代价”会被
-记成“这次发现它是停的”。动作**不依赖开关**——它是事实不是测量，所以即使 broker 没开
+记成“这次发现它是停的”。动作**不依赖开关**——它是事实不是测量，所以即使 sandbox manager 没开
 profiling，runner 仍能正确分类路径。反过来，动作缺失时不猜：`reuse` + 未上报的
 resident 动作返回 `unknown`，而不是默认成 `resume_running`。
 
 **关键内部阶段。** 跨进程的时长以 duration 形式挂在它所属的本地阶段下：
 
-- broker 侧经 lease/descriptor 返回：`container_create`、`container_start`、
+- sandbox manager 侧经 lease/descriptor 返回：`container_create`、`container_start`、
   `phase_network`、`service_hosts_sync`、`cli_spawn`。
 - runner 侧直接记入测量：`agent_network` 阶段的 `network_ensure`、
   `bootstrap_guest_stop`、`network_attach_detach`、`bootstrap_guest_start`、
@@ -425,11 +425,11 @@ resident 动作返回 `unknown`，而不是默认成 `resume_running`。
 子阶段带 `source`，不带 `start_offset_us`：另一个进程的单调时钟与本进程不可比，
 给它一个本地偏移会显得精确但毫无意义。
 
-**broker 继承本次选择，不自行决定。** broker 一次只看得到一个调用，不知道它属于哪个
+**sandbox manager 继承本次选择，不自行决定。** sandbox manager 一次只看得到一个调用，不知道它属于哪个
 attempt，所以无法自己判断该操作是否被选中。runner 把选中的测量上下文（run id、
-operation、以及**绝对墙钟**截止时间——两个进程没有共同的单调时钟）随请求发出，broker
+operation、以及**绝对墙钟**截止时间——两个进程没有共同的单调时钟）随请求发出，sandbox manager
 再用自己的开关、自己的 run descriptor 和继承的截止时间校验后才记录。因此 runner 已因
-过期停止后，broker 不会继续测量；过期、错 run、非选中 operation 一律拒绝，而容器动作
+过期停止后，sandbox manager 不会继续测量；过期、错 run、非选中 operation 一律拒绝，而容器动作
 照常上报。
 
 **测量配置不能让业务请求失败。** 该字段在 HTTP 模型上刻意不做类型与长度校验：任何
@@ -449,18 +449,18 @@ profiling 关闭并记一条 warning，而不是每次启动失败。acquire 与
 因此完整性按 **call id** 判断，而不是按阶段名或生产者：重试是**第二个片段**，必须各自
 交代，不能用后一次成功掩盖前一次；而正常复用 CLI 时 `cli_spawn` 本就不存在，
 `resident_action=reuse` + `stages=[]` + `profiling_recorded=true` 是**完整**片段，
-不是缺失。`missing_fragments` 形如 `["broker:c2:resident_start"]`，
-`measurement_complete=false`；broker 没开时两个调用都缺席。子阶段也带 `call_id`，
+不是缺失。`missing_fragments` 形如 `["sandbox manager:c2:resident_start"]`，
+`measurement_complete=false`；sandbox manager 没开时两个调用都缺席。子阶段也带 `call_id`，
 所以展开重试时能看出哪段属于哪次尝试。
 
-**空 `stages` 有两种含义，必须区分。** broker 的本地期限可能比 runner 的短：等待成员锁
+**空 `stages` 有两种含义，必须区分。** sandbox manager 的本地期限可能比 runner 的短：等待成员锁
 就把期限耗光，之后每个子阶段都被跳过，`stages=[]` 且没有任何截断痕迹。因此 recorder
 分别统计“被截止点截断”和“因已过期而根本没开始”，响应带 `profiling_truncated`。
 此时片段**已应答但被截断**：它测到的阶段照常保留，根记录标 `truncated=true` 与
-`truncated_fragments=["broker:c2"]`，`measurement_complete=false`——既不算缺失，也
+`truncated_fragments=["sandbox manager:c2"]`，`measurement_complete=false`——既不算缺失，也
 不算完整。
 
-**截断状态跨进程保留。** broker 在自己的截止点截断的子阶段带 `truncated=true` 回到
+**截断状态跨进程保留。** sandbox manager 在自己的截止点截断的子阶段带 `truncated=true` 回到
 runner，并置根记录 `truncated=true`；`measurement_complete` 要求边界齐全、**未被截断**、
 且没有缺失片段。一个被截断的区间是下界而不是真实耗时，所以不能算完整样本。
 
@@ -514,8 +514,8 @@ CPython 3.12.13 / macOS arm64：
 - 本基准测的是**埋点自身的开销**，不是端到端启动：没有 claim、容器、supervisor、
   CLI 或网络。合成速率（约 40k 记录/秒）下 exporter 会丢弃大部分记录，这是预期且有计数
   的；真实启动一次只产生一条记录。
-- **broker 侧未纳入本基准，已由业务实验覆盖**：`scripts/bench_operation_overhead.py`
-  在真实 HTTP 路由后接真实 collector 与真实 Postgres（broker 用真实片段协议的进程内替身），
+- **sandbox manager 侧未纳入本基准，已由业务实验覆盖**：`scripts/bench_operation_overhead.py`
+  在真实 HTTP 路由后接真实 collector 与真实 Postgres（sandbox manager 用真实片段协议的进程内替身），
   六个服务端操作在 `on-local`/`on-persist` 下的 Δp95 都远在 `max(10 ms, off_p95 × 1%)`
   预算内，两次独立运行都通过。结论不能更细：同一 `off` cohort 自己的 p95 在两次运行间
   就摆动 2.9 倍，任何小于该摆动的逐操作增量都不能归因于埋点；第一次运行里
@@ -527,7 +527,7 @@ CPython 3.12.13 / macOS arm64：
 与目标形态的差距，后续切片补齐：
 
 - **选择发生在 runner，不在 CP。** 因此 `max_operations` 是单进程预算，不是跨 replica 配额；
-  服务重启不续期这一条由 run descriptor 的绝对 `expires_at` 保证。broker 侧只校验开关与
+  服务重启不续期这一条由 run descriptor 的绝对 `expires_at` 保证。sandbox manager 侧只校验开关与
   有效期，不参与名额分配。
 - **持久化和 Admin 已实现**：启动记录不依赖 JSONL，按确切历史 attempt 归属并可从
   Admin 的实验目录、列表、详情和分布读取。
@@ -541,7 +541,7 @@ CPython 3.12.13 / macOS arm64：
 - Kata 新建记录 bootstrap stop 和第二次 start；resume/reuse 没有执行的阶段显示 skipped。
 - native resume 与同 PID 复用可区分；Claude 的 process-alive 不被渲染为 protocol ack。
 - 墙钟跳变、不同 producer 起点、并行 span、重试与 backoff 不产生负时长或双重累加。
-- setup 失败、claim 凭据失败、CLI 启动失败、取消、timeout、lease loss 和 broker/runner
+- setup 失败、claim 凭据失败、CLI 启动失败、取消、timeout、lease loss 和 sandbox_manager/runner
   被杀，均保留正确结果或明确缺失；缺失记录仍计入覆盖率分母。
 - 无模型输出时也及时收到 dispatch measurement；runtime 历史/system 事件不能触发首输出。
 - 重传不翻倍；并发 producer 不覆盖；旧 seq/fenced writer 不能修改最终结果或生命周期。
@@ -560,7 +560,7 @@ CPython 3.12.13 / macOS arm64：
 
 文件/终端的**服务端**接入已实现，前端终点尚未接入。交付内容是：
 `cloud_agent/operation_measurement.py` 做 CP 侧根操作选择，
-`apps/backend/cloud_agent_host/operation_call.py` 做 broker 侧片段校验与应答，
+`apps/backend/cloud_agent_host/operation_call.py` 做 sandbox manager 侧片段校验与应答，
 `apps/backend/cloud_agent_shared/operation_profiling.py` 通用化后可被不同 producer 调用。
 
 | 能力 | 落地位置 |
@@ -568,17 +568,17 @@ CPython 3.12.13 / macOS arm64：
 | schema v3 | `outcome` 为通用结果字段；带 boundary/coverage/完整性；`startup_outcome` 只对 `attempt.startup` 作为别名保留 |
 | 通用 producer | 记录带 `producer`（根操作归属）与 `producers`（应答过调用的生产者）；`timing_sources` 只列真正进入时间线的来源 |
 | CP 根操作选择 | 目标匹配走 collector 的 `bind()`：路由无法证明的 fact 不匹配，不匹配者归还名额 |
-| 名额 | 仍为单进程预算，由 CP 根操作消耗；broker 子调用不消耗。跨 replica 分配仍未实现 |
+| 名额 | 仍为单进程预算，由 CP 根操作消耗；sandbox manager 子调用不消耗。跨 replica 分配仍未实现 |
 | 交互关联 | `X-Agent-Interaction-Id` 关联交互；list/create/stream 各自有唯一 measurement_id |
 | 选择缓存 | 单进程有界（`MAX_SELECTIONS`）+ TTL（`SELECTION_TTL_S`），并受 run 截止时间约束 |
-| broker 阶段 | `files`：`admission`/`network_phase`/`exec`；`terminals`：`admission`/`network_phase`/`pty_spawn`/`list`/`stream_attach` |
+| sandbox manager 阶段 | `files`：`admission`/`network_phase`/`exec`；`terminals`：`admission`/`network_phase`/`pty_spawn`/`list`/`stream_attach` |
 | 流式应答 | 终端 SSE 的 body 是终端字节，片段的 `call_id`/`recorded`/`stages` 走响应头回传 |
 | 关闭路径不变 | 未选中时响应体与响应头与接入前逐字节一致（`profiling` 键不出现），不新增请求或监听 |
 
 **明确未交付。** 浏览器终点（点击、UI commit、xterm 可交互、本地导出与预领名额）、
 纯缓存命中不产生 HTTP 请求时的覆盖、跨 replica 的统一名额和三类线上操作基线
 仍未实现。因此当前只能声明 **server-only** 覆盖：不能把服务端耗时
-说成“点击到可用”，也不能用文件 helper 微基准代替 CP → broker → 前端整段采集的开销实测。
+说成“点击到可用”，也不能用文件 helper 微基准代替 CP → sandbox manager → 前端整段采集的开销实测。
 文件与终端的入参、成功终点、缓存/重试/就绪边界和验收矩阵以
 [平台操作测量清单 §3–§5](2026-09-14-platform-operation-measurement-inventory.zh-CN.md) 为准。
 
@@ -588,9 +588,9 @@ CPython 3.12.13 / macOS arm64：
 - [chat sandbox](../../apps/backend/cloud_agent_host/chat_sandbox.py)：容器及两阶段网络，Kata bootstrap restart。
 - [shared supervisor](../../apps/backend/cloud_agent_host/shared_session_supervisor.py)：group/member、锁和 turn 边界。
 - [resident transport](../../apps/backend/cloud_agent_host/resident_transport.py) / [drivers](../../apps/backend/cloud_agent_host/drivers.py)：实际 CLI readiness 与 prompt 协议。
-- [workspace broker](../../apps/backend/cloud_agent_host/workspace_broker.py)：RPC 和流式 frame。
+- [sandbox manager](../../apps/backend/cloud_agent_host/sandbox_manager.py)：RPC 和流式 frame。
 - [operation profiling](../../apps/backend/cloud_agent_shared/operation_profiling.py)：开关、run、collector、片段协议。
-- [operation call](../../apps/backend/cloud_agent_host/operation_call.py)：broker 侧一次调用的片段校验与应答。
+- [operation call](../../apps/backend/cloud_agent_host/operation_call.py)：sandbox manager 侧一次调用的片段校验与应答。
 - [operation measurement](../../cloud_agent/operation_measurement.py)：CP 侧根操作选择、名额与选择缓存。
 - [worker API](../../cloud_agent/api/worker.py) / [workspace API](../../cloud_agent/api/workspace.py)：启动入库与文件/终端根操作。
 - [measurement writer](../../cloud_agent/measurement_writer.py)：CP 有界异步持久化。

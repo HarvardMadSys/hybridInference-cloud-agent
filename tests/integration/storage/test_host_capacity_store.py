@@ -147,7 +147,10 @@ async def _enrol(store: Storage, host: str = "runner-a", *, credential: str | No
     """Register a host and return the credential hash it now holds."""
     digest = hash_secret(credential or f"cred-{host}")
     await store.host_pool.register_host(
-        host=host, credential_hash=digest, slots_total=3, broker_url="http://broker:8092"
+        host=host,
+        credential_hash=digest,
+        slots_total=3,
+        sandbox_manager_url="http://sandbox_manager:8092",
     )
     return digest
 

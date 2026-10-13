@@ -190,7 +190,7 @@ function host(over: Partial<Record<string, unknown>> = {}) {
     slots_desired: null,
     launch_error: '',
     runner_version: '1.2.3',
-    broker_url: 'http://runner-a:8092',
+    sandbox_manager_url: 'http://runner-a:8092',
     last_heartbeat_at: '2026-08-05T00:00:00Z',
     sandbox_runtime: 'io.containerd.kata.v2',
     sandbox_image_digest: 'freeinference-cloud-agent-job@sha256:abcdef0123456789',
@@ -808,6 +808,27 @@ describe('capacity columns', () => {
     const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
     expect(within(row).getByText('3 free · not claiming')).toBeInTheDocument();
     expect(await within(row).findByRole('alert')).toHaveTextContent('image is broken');
+  });
+
+  it('warns about a server running untrusted sandboxes without a disk quota', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({ host: 'unbounded', untrusted_without_disk_quota: true }),
+        host({ host: 'bounded', untrusted_without_disk_quota: false }),
+        // A control plane older than the warning sends no field at all.
+        host({ host: 'older' }),
+      ]),
+    );
+    renderPage();
+
+    const unbounded = (await screen.findByRole('rowheader', { name: 'unbounded' })).closest('tr')!;
+    const warning = within(unbounded).getByText('No container disk quota');
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(warning.getAttribute('title')).toContain('Set Container disk above 0');
+    for (const name of ['bounded', 'older']) {
+      const row = screen.getByRole('rowheader', { name }).closest('tr')!;
+      expect(within(row).queryByText('No container disk quota')).not.toBeInTheDocument();
+    }
   });
 
   it('names the reason a value is missing instead of printing zero', async () => {
@@ -1600,7 +1621,7 @@ describe('runtime settings', () => {
       default: 64,
       minimum: 1,
       maximum: 4096,
-      scope: 'broker',
+      scope: 'sandbox_manager',
     },
   ] as AgentRunnerHostPool['host_setting_definitions'];
 

@@ -14,12 +14,14 @@ export function ThreadActions({
   forking,
   onFork,
   onRename,
+  onEnvironment,
 }: {
   job: AgentJob;
   canFork: boolean;
   forking: boolean;
   onFork: () => void;
   onRename: (title: string) => void;
+  onEnvironment?: () => void;
 }) {
   const t = useT();
   const id = useId();
@@ -184,6 +186,20 @@ export function ThreadActions({
           >
             {t('taskActions.rename')}
           </button>
+          {onEnvironment && (
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              className={itemClass}
+              onClick={() => {
+                setOpen(false);
+                onEnvironment();
+              }}
+            >
+              {t('environment.editSaved')}
+            </button>
+          )}
           <button
             role="menuitem"
             tabIndex={-1}

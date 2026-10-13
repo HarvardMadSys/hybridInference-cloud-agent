@@ -20,9 +20,9 @@ import {
   recordedAt,
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
-import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
-import { parseToolActivity } from './toolActivity';
-import { ToolActivityDetails } from './ToolActivityDetails';
+import { isTruncatedPayload, STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
+import { parseToolActivity, recordedDelegationReply } from './toolActivity';
+import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';
 
 import type { ToolTab } from './trajectoryInspectorTabs';
 
@@ -246,6 +246,23 @@ export function ToolStepDetails({
 
   const resultText = step.result ? stripAnsi(resultEmptyText(step)).text : '';
   const activity = parseToolActivity(step.toolName ?? step.label, step.payloadValue);
+  const resultPayload = resultEvents[0]?.payload ?? {};
+  const reply = recordedDelegationReply({
+    tool: step.toolName ?? step.label,
+    input: step.payloadValue,
+    resultState:
+      step.ambiguity || step.status === 'unknown'
+        ? 'unknown'
+        : step.status === 'cancelled' || step.status === 'waiting' || step.status === 'failed'
+          ? step.status
+          : step.result
+            ? 'received'
+            : 'not_recorded',
+    output: step.result?.text,
+    isError: step.result?.isError,
+    structuredOutput: resultPayload.structured_output,
+    outputTruncated: isTruncatedPayload(resultPayload),
+  });
 
   return (
     <TabPanel idPrefix={idPrefix} tab="summary">
@@ -279,6 +296,7 @@ export function ToolStepDetails({
           isError={step.result?.isError}
         />
       ) : null}
+      {reply ? <DelegationReplyDetails reply={reply} /> : null}
       {delegatedSteps.length ? (
         <DetailSection title="Subagent activity">
           <ul className="space-y-1 border-l border-gray-200 pl-3 dark:border-white/10">

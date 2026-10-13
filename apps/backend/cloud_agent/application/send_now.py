@@ -16,10 +16,10 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent.broker_routing import broker_for_attempt
 from cloud_agent.domain.execution import RUNNING, TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_attempt
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_REFUSALS,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: A broker request is bounded at 30 seconds.  Keep the durable lease longer
+#: A sandbox manager request is bounded at 30 seconds.  Keep the durable lease longer
 #: than that so a second process never replays while the first request can
 #: still be accepted by the host.
 HAND_OVER_LEASE_S = 60.0
@@ -43,7 +43,7 @@ HAND_OVER_LEASE_S = 60.0
 HAND_OVER_WAIT_S = 600.0
 HAND_OVER_POLL_S = 0.5
 HAND_OVER_IDLE_S = 5.0
-#: Recovery runs beside the attempt-reaper loop. Broker calls are concurrent
+#: Recovery runs beside the attempt-reaper loop. Sandbox Manager calls are concurrent
 #: and each pass is bounded so shutdown and the next recovery pass stay prompt.
 HAND_OVER_RECOVERY_CONCURRENCY = 8
 HAND_OVER_RECOVERY_DEADLINE_S = 35.0
@@ -101,17 +101,17 @@ async def hand_over(
     store: SendNowStorage, *, thread_id: str, attempt_id: int, message: dict[str, Any]
 ) -> str | None:
     """Give the exact attempt's host the message, or return its refusal word."""
-    broker = await broker_for_attempt(store.host_pool, attempt_id)
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_attempt(store.host_pool, attempt_id)
+    if sandbox_manager is None:
         return INPUT_UNREACHABLE
     try:
-        answer = await broker.inject_shared_input(
+        answer = await sandbox_manager.inject_shared_input(
             thread_id,
             owner=f"attempt:{attempt_id}",
             message_id=str(message["id"]),
             text=str(message["prompt"]),
         )
-    except WorkspaceBrokerError:
+    except SandboxManagerError:
         logger.warning(
             "agent_send_now_outcome_uncertain",
             extra={"event": "agent_send_now_outcome_uncertain", "thread_id": thread_id},
@@ -127,7 +127,7 @@ async def hand_over(
     if answer.get("accepted") is False and refused in INPUT_REFUSALS:
         return str(refused)
     # A malformed response says nothing about whether the side effect happened.
-    raise WorkspaceBrokerError(502, "The shared chat supervisor returned invalid input status.")
+    raise SandboxManagerError(502, "The shared chat supervisor returned invalid input status.")
 
 
 async def deliver_handoff(
@@ -138,7 +138,7 @@ async def deliver_handoff(
     The host call deliberately happens outside the database transaction.  A
     later owner first increments ``revision``; therefore an expired owner can
     no longer acknowledge or requeue the row after the replacement claim.
-    The target attempt's own lease may expire during broker I/O too. In that
+    The target attempt's own lease may expire during sandbox manager I/O too. In that
     case neither acceptance nor refusal is authoritative: both acknowledgements
     leave this handoff leased, and recovery returns it as ``target_ended`` once
     the handoff lease is reclaimable. Work from an expired attempt is never a
@@ -174,7 +174,7 @@ async def deliver_handoff(
         attempt_id=attempt_id,
     )
     requeued = current is not None and current.get("state") == "queued"
-    # A still-sending row means this broker owner lost its fence (normally to
+    # A still-sending row means this sandbox manager owner lost its fence (normally to
     # a replacement attempt). Its answer says nothing about the new owner, so
     # leave the lease for recovery rather than reporting a durable refusal.
     durable_reason = None if current is not None and current.get("state") == "sending" else reason

@@ -97,7 +97,7 @@ def test_the_remote_compose_builds_from_files_that_exist() -> None:
 def test_the_remote_compose_invokes_host_modules() -> None:
     """The commands must name the moved package, not the gateway's."""
     text = (HOST / "docker-compose.sandbox.yml").read_text(encoding="utf-8")
-    assert "cloud_agent_host.workspace_broker" in text
+    assert "cloud_agent_host.sandbox_manager" in text
     assert "cloud_agent_host.runner" in text
 
 

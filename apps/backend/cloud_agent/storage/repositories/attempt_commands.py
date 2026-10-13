@@ -213,7 +213,7 @@ class PostgresAttemptCommands:
                 "sandbox_archive_settings_applied_revision, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
                 "AS credential_matches "
-                "FROM agent_runner_hosts WHERE host = $1",
+                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
                 host_credential_hash,
             )
@@ -362,8 +362,11 @@ class PostgresAttemptCommands:
                 SET slots_used = slots_used + 1
                 WHERE host = $1
                   AND status = '{HOST_ONLINE}'
-                  AND (slots_total IS NULL OR slots_used < slots_total)
-                  AND (slots_desired IS NULL OR slots_used < slots_desired)
+                  AND (slots_total IS NULL OR slots_used + (SELECT COUNT(*) FROM agent_environment_runs er WHERE er.host=$1 AND NOT er.cleanup_complete AND er.lease_expires_at>NOW() AND er.started_at>NOW()-INTERVAL '30 minutes') < slots_total)
+                  AND (slots_desired IS NULL OR slots_used + (SELECT COUNT(*) FROM agent_environment_runs er WHERE er.host=$1 AND NOT er.cleanup_complete AND er.lease_expires_at>NOW() AND er.started_at>NOW()-INTERVAL '30 minutes') < slots_desired)
+                  AND NOT EXISTS (SELECT 1 FROM agent_environment_runs er
+                      WHERE er.host=$1 AND NOT er.cleanup_complete
+                      AND (er.lease_expires_at<=NOW() OR er.started_at<=NOW()-INTERVAL '30 minutes'))
                   AND credential_hash = $2
                   AND (
                         $3::boolean
@@ -780,6 +783,9 @@ class PostgresAttemptCommands:
                                 WHEN m.last_settled_job_id = $1 THEN m.resident_state
                                 WHEN m.admitted_job_id = $1 OR g.container_id IS NULL
                                     THEN 'lost'
+                                WHEN m.native_session_id IS NULL
+                                     OR m.native_session_id !~ '[^[:space:]]'
+                                    THEN 'stopped'
                                 ELSE 'restarting'
                             END,
                             active_attempt_id = CASE

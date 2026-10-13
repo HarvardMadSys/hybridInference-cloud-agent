@@ -435,109 +435,83 @@ describe('McpSessionPanel', () => {
     expect(screen.getByText('Team wiki wants to use the prompt summarize')).toBeInTheDocument();
   });
 
-  it('always allows a tool once the approved call has started, keeping other rules', async () => {
-    let calls: McpInvocationApi[] = [invocation];
-    mockedInvocations.mockImplementation(({ pendingOnly }) =>
-      Promise.resolve({
-        invocations: pendingOnly ? calls.filter((call) => call.status === 'pending') : calls,
-      }),
+  it('records Always allow in the approval request before the page closes', async () => {
+    mockedInvocations.mockResolvedValue({ invocations: [invocation] });
+    let finish!: (value: McpInvocationApi) => void;
+    mockedDecide.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
     );
-    mockedBindings.mockResolvedValue({
-      bindings: [{ ...binding, tools: { other: 'deny' }, prompts: { summarize: 'allow' } }],
-    });
-    mockedDecide.mockImplementation(async () => {
-      calls = [{ ...invocation, status: 'approved' }];
-      return calls[0];
-    });
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
-
+    const { unmount } = render(
+      <McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />,
+    );
     fireEvent.click(await screen.findByRole('button', { name: 'Always allow' }));
-    await waitFor(() => expect(mockedDecide).toHaveBeenCalledWith(11, true));
-    expect(await screen.findByText('search · approved')).toBeInTheDocument();
-    // Saving now would expire the approved call before the relay starts it.
+    await waitFor(() => expect(mockedDecide).toHaveBeenCalledWith(11, true, true));
+    unmount();
+    await act(async () =>
+      finish({ ...invocation, status: 'approved', always_allow_status: 'pending' }),
+    );
     expect(mockedUpdate).not.toHaveBeenCalled();
-
-    calls = [{ ...invocation, status: 'completed' }];
-    receiveHint('mcp', 'job-1');
-
-    await waitFor(() =>
-      expect(mockedUpdate).toHaveBeenCalledWith('thread-1', {
-        connection_id: 3,
-        alias: 'wiki',
-        enabled: true,
-        use_defaults: true,
-        tools: { other: 'deny', search: 'allow' },
-        resources: {},
-        prompts: { summarize: 'allow' },
-      }),
-    );
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Team wiki can now call search without asking in this conversation.',
-    );
-    expect(mockedUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it('holds an always-allow rule while another call to the same server is waiting', async () => {
-    const other = { ...invocation, id: 12, capability_name: 'other' };
-    let calls: McpInvocationApi[] = [invocation, other];
-    mockedInvocations.mockImplementation(({ pendingOnly }) =>
-      Promise.resolve({
-        invocations: pendingOnly ? calls.filter((call) => call.status === 'pending') : calls,
-      }),
-    );
-    mockedDecide.mockImplementation(async (id: number, approve: boolean) => {
-      const status = approve ? 'approved' : 'denied';
-      calls = calls.map((call) => (call.id === id ? { ...call, status } : call));
-      return calls.find((call) => call.id === id);
+  it('shows the saved intent while the server waits for other held calls', async () => {
+    mockedInvocations.mockResolvedValue({ invocations: [invocation] });
+    mockedDecide.mockResolvedValue({
+      ...invocation,
+      status: 'approved',
+      always_allow_status: 'pending',
     });
     render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
-
-    await screen.findByText('Team wiki wants to call other');
-    fireEvent.click(screen.getAllByRole('button', { name: 'Always allow' })[1]);
-    await waitFor(() => expect(mockedDecide).toHaveBeenCalledWith(11, true));
-    calls = calls.map((call) => (call.id === 11 ? { ...call, status: 'completed' } : call));
-    receiveHint('mcp', 'job-1');
-    expect(await screen.findByText('search · completed')).toBeInTheDocument();
-    // The other call would be expired by the save, so the rule waits for it.
-    expect(mockedUpdate).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(1));
-    expect(mockedUpdate.mock.calls[0][1].tools).toEqual({ search: 'allow' });
-  });
-
-  it('keeps both rules when two always-allow saves for one server are ready together', async () => {
-    const other = { ...invocation, id: 12, capability_name: 'other' };
-    let calls: McpInvocationApi[] = [invocation, other];
-    mockedInvocations.mockImplementation(({ pendingOnly }) =>
-      Promise.resolve({
-        invocations: pendingOnly ? calls.filter((call) => call.status === 'pending') : calls,
-      }),
+    fireEvent.click(await screen.findByRole('button', { name: 'Always allow' }));
+    expect(await screen.findByText(/Always allow was recorded/)).toHaveTextContent(
+      'you can leave this page',
     );
-    mockedDecide.mockImplementation(async (id: number) => {
-      calls = calls.map((call) => (call.id === id ? { ...call, status: 'approved' } : call));
-      return calls.find((call) => call.id === id);
-    });
-    // The server's rules, as each save reads them and writes them back.
-    let stored: McpBindingApi = { ...binding, tools: {} };
-    mockedBindings.mockImplementation(async () => ({ bindings: [stored] }));
-    mockedUpdate.mockImplementation(async (_thread, request) => {
-      stored = { ...stored, tools: request.tools };
-      return { bindings: [stored] };
-    });
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
-
-    await screen.findByText('Team wiki wants to call other');
-    for (const id of [12, 11]) {
-      fireEvent.click(screen.getAllByRole('button', { name: 'Always allow' })[0]);
-      await waitFor(() => expect(mockedDecide).toHaveBeenCalledWith(id, true));
-    }
-    calls = calls.map((call) => ({ ...call, status: 'completed' }));
-    receiveHint('mcp', 'job-1');
-
-    await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(2));
-    expect(stored.tools).toEqual({ other: 'allow', search: 'allow' });
+    expect(mockedUpdate).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['applied', 'Always allow was saved for this conversation.'],
+    ['discarded', 'Always allow was not applied because the connection or permissions changed.'],
+  ] as const)(
+    'loads the server-owned %s permission outcome after reopening',
+    async (status, text) => {
+      const calls = [{ ...invocation, status: 'completed' as const, always_allow_status: status }];
+      mockedInvocations.mockImplementation(({ pendingOnly }) =>
+        Promise.resolve({ invocations: pendingOnly ? [] : calls }),
+      );
+      render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+      expect(await screen.findByText(text, { exact: false })).toBeInTheDocument();
+      expect(mockedUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['allow', 'deny'] as const)(
+    'refreshes the current %s rule after a saved intent while preserving other draft edits',
+    async (policy) => {
+      let calls: McpInvocationApi[] = [];
+      mockedInvocations.mockImplementation(({ pendingOnly }) =>
+        Promise.resolve({
+          invocations: pendingOnly ? [] : calls,
+        }),
+      );
+      render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+      const prompt = await screen.findByRole('radiogroup', { name: 'Policy for summarize' });
+      fireEvent.click(within(prompt).getByRole('radio', { name: 'Deny' }));
+      mockedBindings.mockResolvedValue({ bindings: [{ ...binding, tools: { search: policy } }] });
+      calls = [{ ...invocation, status: 'completed', always_allow_status: 'applied' }];
+      receiveHint('mcp', 'job-1');
+      await waitFor(() =>
+        expect(
+          within(screen.getByRole('radiogroup', { name: 'Policy for search' })).getByRole('radio', {
+            name: policy === 'allow' ? 'Allow' : 'Deny',
+          }),
+        ).toBeChecked(),
+      );
+      expect(within(prompt).getByRole('radio', { name: 'Deny' })).toBeChecked();
+    },
+  );
 
   it('keeps two simultaneous decisions busy independently', async () => {
     const other = { ...invocation, id: 12, capability_name: 'other' };

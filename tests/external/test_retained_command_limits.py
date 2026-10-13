@@ -30,8 +30,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatBackend,
 )
+from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
-from cloud_agent_host.workspace_broker import _run_sandbox
+from cloud_agent_host.sandbox_manager import _run_sandbox
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,12 +146,23 @@ def retained_command_container(tmp_path: Path):
         "--tmpfs",
         f"{ACTIVATION_TMPFS}:rw,noexec,nosuid,nodev,mode=0700,uid={outer.uid},gid={outer.gid}",
     ]
+    if json.loads(image.stdout)[0]["Config"].get("User") == "agent":
+        create.extend(["--cap-drop", "ALL", "--security-opt", "no-new-privileges"])
+    for uid in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+        create.extend(
+            [
+                "--tmpfs",
+                f"/run/agent-environments/{uid}:rw,noexec,nosuid,nodev,mode=0700,uid={uid},gid={outer.gid}",
+            ]
+        )
     # postgres:15 declares a data volume. Override every image volume with
     # tmpfs so the production retained mount check sees no bind/volume mounts.
     volumes = json.loads(image.stdout)[0]["Config"].get("Volumes") or {}
     for destination in volumes:
         if destination != ACTIVATION_TMPFS:
-            create.extend(["--tmpfs", f"{destination}:rw,noexec,nosuid,nodev"])
+            create.extend(
+                ["--tmpfs", f"{destination}:rw,noexec,nosuid,nodev,uid={outer.uid},gid={outer.gid}"]
+            )
     labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: outer.sandbox_namespace}
     for key, value in labels.items():
         create.extend(["--label", f"{key}={value}"])

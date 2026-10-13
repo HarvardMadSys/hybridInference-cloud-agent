@@ -1,6 +1,6 @@
 """Bounded background Docker resource observation for retained sandbox groups.
 
-The broker supplies exact container identities from its label-verified group
+The sandbox manager supplies exact container identities from its label-verified group
 inventory. Its inventory and the host heartbeat only read this collector's
 cache; neither waits for Docker stats. These measurements belong to the whole
 shared container and are never attributed to an individual member turn.
@@ -55,7 +55,7 @@ def _network_counter(networks: dict[str, Any], key: str) -> int | None:
 
 @dataclass(frozen=True)
 class DockerResourceReading:
-    """One daemon reading on the broker's monotonic clock."""
+    """One daemon reading on the sandbox manager's monotonic clock."""
 
     counters: Sample
     memory_limit_bytes: int | None = None
@@ -216,7 +216,7 @@ class SandboxResourceCollector:
         self._thread.start()
 
     def close(self) -> None:
-        """Stop the worker and release its client before broker shutdown."""
+        """Stop the worker and release its client before sandbox manager shutdown."""
         self._stop.set()
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():
@@ -228,7 +228,7 @@ class SandboxResourceCollector:
             self._samples.clear()
 
     def sync_targets(self, rows: Sequence[Mapping[str, Any]]) -> None:
-        """Publish running targets from the broker's label-verified group listing."""
+        """Publish running targets from the sandbox manager's label-verified group listing."""
         identities = dict.fromkeys(
             row["container_id"]
             for row in rows[:MAX_TARGETS]

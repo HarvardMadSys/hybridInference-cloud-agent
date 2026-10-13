@@ -27,8 +27,8 @@ from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
-_BEFORE = "0059_counter_constraints"
-_THIS = "0060_admin_job_listing_index"
+_BEFORE = "0065_environments"
+_THIS = "0066_admin_job_listing_index"
 _INDEX = "idx_agent_jobs_created"
 #: Enough history that reading all of it is the plan to avoid, one turn a minute.
 _TURNS = 5000

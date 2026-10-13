@@ -114,9 +114,34 @@ describe('agents api', () => {
       expect(fetchWithAuth).toHaveBeenCalledWith(
         expect.any(String),
         `/v1/agent/conversations?limit=50${pinned === undefined ? '' : `&pinned=${pinned}`}`,
+        { signal: undefined },
       );
     },
   );
+
+  it('forwards cancellation for conversation reads without changing query filters', async () => {
+    const controller = new AbortController();
+    fetchWithAuth.mockImplementation(
+      (_base: string, _path: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(controller.signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const request = listAgentConversations(
+      { q: 'fix bugs', repo: 'owner/repo', includeArchived: true, cursor: 'next', limit: 200 },
+      controller.signal,
+    );
+    const cancellation = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await cancellation;
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/conversations?limit=200&q=fix+bugs&repo=owner%2Frepo&include_archived=true&cursor=next',
+      { signal: controller.signal },
+    );
+  });
 
   it('pins legacy telemetry identity when fetching a snapshot', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ current_attempt_id: 10 }));
@@ -201,6 +226,69 @@ describe('agents api', () => {
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/thread/events?after=1000&limit=1000',
     );
+  });
+
+  it('publishes immutable activity snapshots and forwards cancellation to every page', async () => {
+    const first = Array.from({ length: 1000 }, (_, index) => ({ id: index + 1 }));
+    const last = { id: 1001 };
+    fetchWithAuth
+      .mockResolvedValueOnce(jsonResponse({ events: first, next_cursor: 1000 }))
+      .mockResolvedValueOnce(jsonResponse({ events: [last], next_cursor: 1001 }));
+    const controller = new AbortController();
+    const onPage = vi.fn();
+    const result = await listAllAgentThreadEvents('job/one', { signal: controller.signal, onPage });
+    expect(onPage).toHaveBeenCalledTimes(2);
+    expect(onPage.mock.calls[0][0]).toEqual(first);
+    expect(onPage.mock.calls[1][0]).toEqual([...first, last]);
+    expect(result).toEqual([...first, last]);
+    expect(onPage.mock.calls[0][0]).not.toBe(onPage.mock.calls[1][0]);
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      1,
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/thread/events?after=0&limit=1000',
+      { signal: controller.signal },
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/thread/events?after=1000&limit=1000',
+      { signal: controller.signal },
+    );
+  });
+
+  it('stops fetching further activity pages when the reader is cancelled', async () => {
+    const first = Array.from({ length: 1000 }, (_, index) => ({ id: index + 1 }));
+    fetchWithAuth.mockResolvedValue(jsonResponse({ events: first, next_cursor: 1000 }));
+    const controller = new AbortController();
+    const onPage = vi.fn(() => controller.abort());
+    await expect(
+      listAllAgentThreadEvents('job', { signal: controller.signal, onPage }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchWithAuth).toHaveBeenCalledOnce();
+    expect(onPage).toHaveBeenCalledOnce();
+  });
+
+  it('does not publish an in-flight page after cancellation even if transport ignores abort', async () => {
+    let answer!: (response: Response) => void;
+    fetchWithAuth.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    const controller = new AbortController();
+    const onPage = vi.fn();
+    const pending = listAllAgentThreadEvents('job', { signal: controller.signal, onPage });
+    const outcome = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    answer(jsonResponse({ events: [{ id: 1 }], next_cursor: 1 }));
+    await outcome;
+    expect(onPage).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenCalledOnce();
+  });
+
+  it('does not fetch history for an already cancelled reader', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      listAllAgentThreadEvents('job', { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchWithAuth).not.toHaveBeenCalled();
   });
 
   it('archives and restores a whole task conversation', async () => {
@@ -417,7 +505,7 @@ describe('agents api', () => {
     );
   });
 
-  it('can include the broker session limit without changing the legacy list result', async () => {
+  it('can include the sandbox manager session limit without changing the legacy list result', async () => {
     fetchWithAuth.mockResolvedValueOnce(jsonResponse({ terminals: [], max_sessions: 2 }));
     await expect(listAgentTerminals('job/one', { includeLimits: true })).resolves.toEqual({
       terminals: [],

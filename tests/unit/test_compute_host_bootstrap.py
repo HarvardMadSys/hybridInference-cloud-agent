@@ -92,7 +92,7 @@ def setup(tmp_path, *, unsafe_member=None):
             env[prefix + "_" + suffix] = "{deploy_root}/" + filename
             files[filename] = ref
             secrets[ref] = "DEDICATED TUNNEL KEY" if suffix == "SSH_KEY" else "verified-host-key"
-    env["AGENT_WORKSPACE_BROKER_TOKEN"] = "broker-secret-$literal"
+    env["AGENT_SANDBOX_MANAGER_TOKEN"] = "sandbox-manager-secret-$literal"
     secrets["deployment:env"] = "\n".join(f"{key}={value}" for key, value in env.items())
     profile = DeploymentProfile(
         id="pilot",
@@ -114,13 +114,21 @@ def setup(tmp_path, *, unsafe_member=None):
 
 
 @pytest.mark.asyncio
-async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_arguments(tmp_path):
-    bootstrap, profile, transport, _ = setup(tmp_path)
+@pytest.mark.parametrize("legacy_names", [False, True])
+async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_arguments(
+    tmp_path, legacy_names
+):
+    from cloud_agent_shared.sandbox_manager_compat import LEGACY_ENV_NAMES
+
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    if legacy_names:
+        for current, legacy in LEGACY_ENV_NAMES.items():
+            secrets["deployment:env"] = secrets["deployment:env"].replace(current, legacy)
     result = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("one-time-enrollment"))
     assert result.ready
     deploy_call = transport.run.call_args
     command = deploy_call.args[1]
-    assert "one-time-enrollment" not in command and "broker-secret" not in command
+    assert "one-time-enrollment" not in command and "sandbox-manager-secret" not in command
     assert "StrictHostKeyChecking=no" not in command
     assert "sandbox_host.sh" in command and "setup_kata_runtime.sh" in command
     assert deploy_call.kwargs["timeout"] == profile.timeout_seconds
@@ -131,7 +139,10 @@ async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_ar
         assert env["AGENT_ENROLL_TOKEN"] == "one-time-enrollment"
         assert env["AGENT_RUNNER_HOST"] == INTENT.host
         assert env["AGENT_SANDBOX_BACKEND"] == "kata"
-        assert env["AGENT_WORKSPACE_BROKER_TOKEN"] == "broker-secret-$literal"
+        assert env["AGENT_SANDBOX_MANAGER_TOKEN"] == "sandbox-manager-secret-$literal"
+        if legacy_names:
+            assert env["AGENT_WORKSPACE_BROKER_TOKEN"] == env["AGENT_SANDBOX_MANAGER_TOKEN"]
+            assert env["AGENT_BROKER_REVERSE_PORT"] == env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"]
         assert archive.getmember(".env").mode == 0o600
         assert b".compute-secrets" in archive.extractfile(".dockerignore").read()
         assert all(name.startswith(".compute-secrets/") for name in profile.files)
@@ -252,21 +263,16 @@ async def test_storage_preflight_uses_effective_disk_and_preserves_failure_codes
 async def test_remote_blocked_reasons_are_limited_to_our_vocabulary(tmp_path):
     """A node reports why it is not ready only in codes this control plane defines."""
     bootstrap, profile, transport, _ = setup(tmp_path)
-    remote = [
-        "kata_install_failed",
-        "<img src=x onerror=alert(1)>",
-        "y" * 10_000,
-        "kata_install_failed",
-    ]
+    remote = ["kata_install_failed", "<img src=x onerror=alert(1)>", "y" * 10_000]
     transport.run.side_effect = [
         json.dumps(PREFLIGHT),
         json.dumps({"ready": False, "blocked_reasons": remote}),
     ]
     deployed = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("token"))
-    assert deployed.blocked_reasons == ("kata_install_failed", "host_deployment_failed")
+    assert deployed.blocked_reasons == ("kata_install_failed",)
     transport.run.side_effect = [json.dumps({"ready": False, "blocked_reasons": remote})]
     checked = await bootstrap.readiness(NODE, profile, INTENT)
-    assert checked.blocked_reasons == ("kata_install_failed", "host_readiness_failed")
+    assert checked.blocked_reasons == ("kata_install_failed",)
     transport.run.side_effect = [
         json.dumps({"ready": False, "blocked_reasons": "host_deployment_failed"})
     ]
@@ -485,6 +491,88 @@ def test_remote_deployment_retry_identity_and_enrollment_cleanup(
     assert all(json.loads(line)["ready"] for line in capsys.readouterr().out.splitlines())
 
 
+def _release_payload() -> bytes:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        data = b"A='keep'\nAGENT_ENROLL_TOKEN='spent-token'\n"
+        member = tarfile.TarInfo(".env")
+        member.size, member.mode = len(data), 0o600
+        archive.addfile(member, io.BytesIO(data))
+    return payload.getvalue()
+
+
+def test_same_owner_advances_the_release_only_after_the_recipe_succeeds(
+    tmp_path, monkeypatch, capsys
+):
+    import subprocess
+    from types import SimpleNamespace
+
+    root = tmp_path / "managed"
+    root.mkdir()
+    old = {
+        "allocation_id": "alloc",
+        "node_id": "node",
+        "host": "managed",
+        "deployment_sha": "a" * 40,
+    }
+    (root / ".compute-identity.json").write_text(json.dumps(old))
+    new = {**old, "deployment_sha": "b" * 40}
+    params = {"root": str(root), "sha": "b" * 40, "install": False, "identity": new}
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(_release_payload())))
+    monkeypatch.setattr(
+        "subprocess.run", lambda args, **kwargs: subprocess.CompletedProcess(args, 0)
+    )
+    exec(_DEPLOY, {})
+    assert json.loads((root / ".compute-identity.json").read_text()) == new
+    assert (root / ".deployed-sha").read_text() == "b" * 40 + "\n"
+    assert json.loads(capsys.readouterr().out)["ready"] is True
+
+
+@pytest.mark.parametrize("still_advertising", [True, False])
+def test_failed_rollout_keeps_the_previous_marker(tmp_path, monkeypatch, capsys, still_advertising):
+    import subprocess
+    from types import SimpleNamespace
+
+    root = tmp_path / "managed"
+    root.mkdir()
+    old = {
+        "allocation_id": "alloc",
+        "node_id": "node",
+        "host": "managed",
+        "deployment_sha": "a" * 40,
+    }
+    (root / ".compute-identity.json").write_text(json.dumps(old))
+    if still_advertising:
+        (root / ".shared-live-ready").write_text("a" * 40 + "\n")
+    params = {
+        "root": str(root),
+        "sha": "b" * 40,
+        "install": False,
+        "identity": {**old, "deployment_sha": "b" * 40},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(_release_payload())))
+
+    def run(args, **kwargs):
+        code = 1 if args == ["bash", "deploy/host/sandbox_host.sh", "up"] else 0
+        return subprocess.CompletedProcess(args, code)
+
+    monkeypatch.setattr("subprocess.run", run)
+    try:
+        exec(_DEPLOY, {})
+    except SystemExit as exc:
+        assert exc.code in (0, None)
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "ready": False,
+        "blocked_reasons": ["host_deployment_failed"],
+        "advertising": still_advertising,
+    }
+    assert json.loads((root / ".compute-identity.json").read_text()) == old
+    assert not (root / ".deployed-sha").exists()
+
+
 def test_profile_rejects_system_root_or_traversal():
     kwargs = {
         "id": "id",
@@ -540,7 +628,7 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         assert env["AGENT_MCP_TUNNEL_REMOTE_PORT"] == "8001"
         assert env["AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT"] == "8000"
         assert env["AGENT_TUNNEL_SSH_KEY"] == "/opt/cloud-agent-pilot/.compute-secrets/gateway.key"
-        assert env["AGENT_BROKER_REVERSE_PORT"] == "19092"
+        assert env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
         assert len([m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]) == 6
 

@@ -230,3 +230,40 @@ def test_the_relay_listener_runs_no_background_work() -> None:
     assert "background" in inspect.signature(lifespan).parameters
     body = inspect.getsource(lifespan)
     assert "if background:" in body, "the flag is taken but never consulted"
+
+
+_DOCS_PATHS = ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+
+
+@pytest.mark.parametrize("path", _DOCS_PATHS)
+@pytest.mark.parametrize("enabled", [None, "true"])
+def test_the_mcp_listener_never_publishes_api_docs(monkeypatch, path: str, enabled) -> None:
+    """A sandbox's listener describes nothing, even where a developer turned docs on."""
+    from fastapi.testclient import TestClient
+
+    if enabled is None:
+        monkeypatch.delenv("AGENT_API_DOCS", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_API_DOCS", enabled)
+    assert TestClient(create_mcp_app()).get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", _DOCS_PATHS)
+def test_the_main_listener_publishes_no_api_docs_by_default(monkeypatch, path: str) -> None:
+    """The schema and the CDN-loaded pages are a developer's opt-in, not the default."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("AGENT_API_DOCS", raising=False)
+    app = create_app()
+    assert TestClient(app).get(path).status_code == 404
+    # The schema itself is still built, for the contract tests that read it.
+    assert "/healthz" in app.openapi()["paths"]
+
+
+def test_the_main_listener_publishes_api_docs_when_asked(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AGENT_API_DOCS", "true")
+    client = TestClient(create_app())
+    assert "/healthz" in client.get("/openapi.json").json()["paths"]
+    assert client.get("/docs").status_code == 200

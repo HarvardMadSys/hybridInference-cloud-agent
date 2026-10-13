@@ -84,7 +84,8 @@ def test_a_setup_flood_with_no_newline_is_never_held_whole(tmp_path):
     )
 
     assert result.exit_code == 7
-    assert result.detail == "x" * 500
+    # The failure detail is the tail of what setup printed, stderr last.
+    assert result.detail == "y" * 500
     assert peak < _PEAK_BYTES
     # The stderr drain kept a byte-bounded tail, not one endless line.
     assert len(backend.processes[0].stderr_text().encode()) <= STDERR_TAIL_BYTES

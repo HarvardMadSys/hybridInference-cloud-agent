@@ -26,15 +26,18 @@ from cloud_agent.execution_profiles import (
     RESERVED_EXECUTION_METADATA_KEYS,
     default_execution_profile,
 )
+from cloud_agent.github_app import CommitNotOnBranch
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
+    ONCALL_METADATA_KEY,
     PLATFORM_REASONING_EFFORTS,
     RESET_REASONING_EFFORT,
 )
+from cloud_agent.settings import setting_env
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
 from cloud_agent.visible_models import (
@@ -401,6 +404,44 @@ async def _resolve_attachment_selection(
         raise _attachment_selection_error(exc) from exc
 
 
+async def _require_base_on_branch(
+    app_credentials: Any, *, repo: str, base_sha: str, base_ref: str | None
+) -> None:
+    """Refuse a base commit outside the history of the branch it starts from.
+
+    The branch is ``base_ref`` when that names one, else the repository's
+    default branch (see ``GitHubAppCredentials.require_commit_on_branch``).
+    A refusal is the caller's to fix and says how; any other failure to check
+    answers like an unresolvable ``base_ref`` does.
+    """
+    try:
+        await app_credentials.require_commit_on_branch(repo, base_sha, branch=base_ref)
+    except CommitNotOnBranch as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request",
+                    "message": (
+                        f"{exc}. A job can only start from a commit in one of the "
+                        "repository's branches: name the branch as base_ref, alone to "
+                        "start from its tip or with a base_sha it contains."
+                    ),
+                }
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request",
+                    "message": f"could not verify base commit {base_sha[:12]} in {repo}: {exc}",
+                }
+            },
+        ) from exc
+
+
 async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
@@ -428,7 +469,15 @@ async def _create_job_as(
     fingerprint = (
         request_fingerprint(
             "create",
-            body.model_dump(mode="json"),
+            {
+                **body.model_dump(mode="json"),
+                **(
+                    {"environment_id_provided": True}
+                    if "environment_id" in body.model_fields_set
+                    else {}
+                ),
+            },
+            sensitive=bool(body.environment_overrides),
         )
         if client_request_id is not None
         else None
@@ -493,19 +542,9 @@ async def _create_job_as(
     # different tree by the time it ran, and the publisher applies its patch
     # onto a pinned commit.
     base_sha = body.base_sha
-    if body.base_ref and app_credentials is not None:
+    if base_sha is None and body.base_ref and app_credentials is not None:
         try:
-            if base_sha is None:
-                base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
-                on_branch = True
-            else:
-                # The caller pinned the commit, and base_ref is still what the
-                # draft PR will target: it has to be a branch that commit is
-                # on, or the PR either cannot be opened once the branch is
-                # pushed or shows commits the agent never made.
-                on_branch = await app_credentials.branch_contains(
-                    body.repo, body.base_ref, base_sha
-                )
+            base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
@@ -516,24 +555,26 @@ async def _create_job_as(
                     }
                 },
             ) from exc
-        if not on_branch:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"{body.base_ref!r} is not a branch of {body.repo} that "
-                            f"contains {base_sha}"
-                        ),
-                    }
-                },
-            )
+    # The publisher fetches the base by hash and pushes a branch built on it.
+    # GitHub serves any object of the repository's network by hash, a fork's
+    # pull request head included, and a ref resolves to whatever commit it
+    # names — so neither a named commit nor a resolved ref is, by itself, part
+    # of the repository's history. Checked once here: a job's base is fixed at
+    # creation (a host fills only an absent one, from its own checkout), and a
+    # follow-up builds on the branch the platform published.
+    if base_sha is not None and app_credentials is not None:
+        await _require_base_on_branch(
+            app_credentials, repo=body.repo, base_sha=base_sha, base_ref=body.base_ref
+        )
 
     metadata = dict(body.metadata or {})
     # Reserved display fact: caller metadata must not be able to claim the
     # job was pinned from a different branch than the one the API resolved.
     metadata.pop(BASE_REF_METADATA_KEY, None)
+    # Reserved provenance mark: only the on-call door stamps it, below through
+    # ``reserved_metadata``. An owner's copy would let their job pass for one
+    # the platform dispatched to whatever reads the mark.
+    metadata.pop(ONCALL_METADATA_KEY, None)
     # Execution policy and its evidence are server-owned facts. Opaque
     # metadata must not be able to manufacture a contradictory audit trail.
     for key in RESERVED_EXECUTION_METADATA_KEYS:
@@ -561,6 +602,13 @@ async def _create_job_as(
     attachments = await _resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
+    if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true" and (
+        body.environment_id
+        or body.environment_overrides
+        or body.environment_revision
+        or body.global_revision
+    ):
+        raise HTTPException(503, "Repository environments are disabled for new workspaces")
     try:
         job = await job_store.conversation_commands.create_job(
             user_id=user["user_id"],
@@ -572,6 +620,17 @@ async def _create_job_as(
             reasoning_effort=reasoning_effort,
             base_sha=base_sha,
             setup_script=body.setup_script,
+            environment_selection={
+                "environment_id": body.environment_id,
+                "environment_id_provided": "environment_id" in body.model_fields_set,
+                "environment_revision": body.environment_revision,
+                "global_revision": body.global_revision,
+                "overrides": [v.model_dump() for v in body.environment_overrides],
+                "has_setup_override": "setup_script" in body.model_fields_set,
+                "setup_override": body.setup_script,
+            }
+            if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") == "true"
+            else None,
             plugins=plugins,
             metadata=metadata or None,
             mcp_bindings=mcp_bindings,

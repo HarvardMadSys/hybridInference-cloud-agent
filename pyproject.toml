@@ -38,6 +38,7 @@ dependencies = [
     "google-re2>=1.1.20251105",
     "uritemplate>=4.2.0",
     "email-validator>=2.2",
+    "pillow>=12.3.0",
 ]
 
 [tool.setuptools]

@@ -11,6 +11,7 @@ and none of them is a route. The lease length travels with it.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,9 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import GrantRepository
+    from collections.abc import Iterable
+
+    from cloud_agent.ports import GrantRepository, HostPoolRepository
 
 #: The moved helper keeps logging under the module it came from: the
 #: deployment's log selection is on ``cloud_agent.api.hosts``.
@@ -30,6 +33,13 @@ logger = get_logger("cloud_agent.api.hosts")
 #: revoked together (retained-session design §§3 and 6), the cap on how long an idle resident
 #: process keeps a live credential after its host goes quiet.
 RESIDENCY_TTL_S = 1800.0
+
+#: How long a chat deletion waits on the gateway and hosts after its commit,
+#: and how many released residencies it closes at once. A sandbox manager
+#: call alone may take a minute to time out; the host's residency heartbeat
+#: finishes anything this leaves undone.
+RELEASED_RESIDENCY_CLOSE_TIMEOUT_S = 5.0
+RELEASED_RESIDENCY_CLOSE_CONCURRENCY = 16
 
 
 def residency_ttl_s() -> float:
@@ -93,3 +103,72 @@ async def _mint_residency_grant(
             await grants.revoke(grant_id)
         return None
     return token
+
+
+async def close_released_residencies(
+    host_pool: HostPoolRepository,
+    grants: Any,
+    released: Iterable[dict[str, Any]],
+    *,
+    timeout_s: float | None = None,
+) -> None:
+    """Revoke each released grant and close its member process, best-effort.
+
+    The release has already committed, so its generation authorizes nothing
+    more. Revoking ends the credential now rather than at its TTL, and the
+    sandbox manager call closes the process now rather than at the host's
+    next residency heartbeat, which retries the same close by itself.
+
+    The owner is waiting on this, so it is bounded: rows proceed concurrently,
+    a few at a time, and the whole step stops after ``timeout_s``. A host that
+    never answers delays only its own rows. What is cut off is left to that
+    heartbeat; a grant not revoked can no longer be renewed and ends at its TTL.
+    """
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+
+    rows = list(released)
+    if not rows:
+        return
+    # Separate limits: a revoke never queues behind a host that holds its
+    # close slot, so every grant is revoked even while hosts are silent.
+    revoking = asyncio.Semaphore(RELEASED_RESIDENCY_CLOSE_CONCURRENCY)
+    closing = asyncio.Semaphore(RELEASED_RESIDENCY_CLOSE_CONCURRENCY)
+
+    async def close_one(row: dict[str, Any]) -> None:
+        grant_id = str(row.get("grant_id") or "")
+        if grant_id and grants is not None:
+            async with revoking:
+                with contextlib.suppress(Exception):
+                    await grants.revoke(grant_id)
+        async with closing:
+            try:
+                host = await host_pool.get_host(host=str(row["host"]))
+                manager = sandbox_manager_for_host(host) if host is not None else None
+                if manager is not None:
+                    await manager.shared_residency_lost(
+                        str(row["thread_id"]), generation=int(row["generation"])
+                    )
+            except Exception:
+                logger.warning(
+                    "agent_released_residency_close_failed",
+                    exc_info=True,
+                    extra={
+                        "event": "agent_released_residency_close_failed",
+                        "thread_id": row.get("thread_id"),
+                        "generation": row.get("generation"),
+                    },
+                )
+
+    try:
+        async with asyncio.timeout(
+            RELEASED_RESIDENCY_CLOSE_TIMEOUT_S if timeout_s is None else timeout_s
+        ):
+            await asyncio.gather(*(close_one(row) for row in rows))
+    except TimeoutError:
+        logger.warning(
+            "agent_released_residency_close_timed_out",
+            extra={
+                "event": "agent_released_residency_close_timed_out",
+                "threads": [row.get("thread_id") for row in rows],
+            },
+        )

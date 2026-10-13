@@ -14,20 +14,18 @@ import {
 } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { APIError } from '@/lib/utils/errors';
-import { ARCHIVE_FOCUS, ArchiveDeleteDialog, ArchiveIcon } from './ArchiveControls';
+import {
+  ARCHIVE_FOCUS,
+  ArchiveDeleteDialog,
+  ArchiveIcon,
+  SESSION_ERROR_KEYS,
+} from './ArchiveControls';
 import { ArchiveAutoLoad } from './ArchiveAutoLoad';
 import { ArchiveProjectSection } from './ArchiveProjectSection';
 import { CONVERSATION_STATE_KEYS, type ConversationState } from './conversationState';
 
 const GROUPS_PER_PAGE = 6;
 const BULK_PAGE_SIZE = 100;
-const SESSION_ERROR_KEYS = {
-  session_active: 'archive.sessionActive',
-  fork_in_progress: 'archive.forkInProgress',
-  publication_pending: 'archive.publicationPending',
-  not_archived: 'archive.sessionNotArchived',
-  not_found: 'archive.sessionNotFound',
-} as const;
 const SOFT_BUTTON = `inline-flex items-center justify-center gap-1.5 rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10 ${ARCHIVE_FOCUS}`;
 const TEXT_BUTTON = `rounded px-1 py-1 text-xs font-medium text-crimson hover:underline disabled:opacity-50 dark:text-rose-300 ${ARCHIVE_FOCUS}`;
 
@@ -337,18 +335,18 @@ export function ArchivedTasksView() {
 
   return (
     <section
-      className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-7 lg:px-10 lg:py-10"
+      className="mx-auto w-full max-w-5xl px-4 py-4 sm:px-5 lg:px-6"
       aria-labelledby="archive-page-title"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1
             id="archive-page-title"
-            className="text-2xl font-medium tracking-tight text-gray-900 dark:text-gray-100"
+            className="text-lg font-medium tracking-tight text-gray-900 dark:text-gray-100"
           >
             {t('archive.title')}
           </h1>
-          <p className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+          <p className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
             {t('archive.subtitle')}
           </p>
         </div>

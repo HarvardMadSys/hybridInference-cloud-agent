@@ -148,6 +148,11 @@ class _FakeAppCredentials:
     async def resolve_ref(self, repo: str, ref: str) -> str:
         return "a" * 40
 
+    async def require_commit_on_branch(
+        self, repo: str, sha: str, *, branch: str | None = None
+    ) -> str:
+        return branch or "main"
+
 
 @pytest.fixture(autouse=True)
 def _oncall_env(monkeypatch):
@@ -225,12 +230,13 @@ async def test_wrong_token_is_refused(client):
     assert response.status_code == 401
 
 
-async def test_a_non_ascii_token_is_refused_rather_than_failing(client):
-    """Comparing a caller's token must not raise, whatever characters it holds."""
+async def test_a_non_ascii_token_is_refused_not_a_server_error(client, monkeypatch):
+    """Both comparisons take bytes, so a latin-1 header value is a plain 401."""
+    monkeypatch.setenv("ADMIN_TOKEN", _ADMIN_TOKEN)
     response = await client.post(
         "/v1/agent/service/oncall/jobs",
         json=_create_body(),
-        headers={"Authorization": b"Bearer caf\xe9"},
+        headers={"Authorization": b"Bearer oncall-dispatch-secret-\xe9"},
     )
     assert response.status_code == 401
 

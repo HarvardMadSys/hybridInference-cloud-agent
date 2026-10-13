@@ -17,7 +17,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AdminSandbox, AdminSandboxResourceUsage } from '@/lib/api/adminSandboxes';
-import { getAdminSandbox, getAdminSandboxes, stopAdminSandbox } from '@/lib/api/adminSandboxes';
+import {
+  archiveAdminSandbox,
+  deleteAdminSandbox,
+  getAdminSandbox,
+  getAdminSandboxes,
+  restoreAdminSandbox,
+  stopAdminSandbox,
+} from '@/lib/api/adminSandboxes';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 
@@ -29,8 +36,11 @@ vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: auth.id, agent_access: auth.access } } }),
 }));
 vi.mock('@/lib/api/adminSandboxes', () => ({
+  archiveAdminSandbox: vi.fn(),
+  deleteAdminSandbox: vi.fn(),
   getAdminSandboxes: vi.fn(),
   getAdminSandbox: vi.fn(),
+  restoreAdminSandbox: vi.fn(),
   stopAdminSandbox: vi.fn(),
 }));
 
@@ -110,9 +120,8 @@ function deferred<T>() {
 
 function inventoryTitles(): (string | null)[] {
   return within(screen.getByRole('table'))
-    .getAllByRole('link')
-    .filter((link) => link.getAttribute('href')?.startsWith('/admin/sessions/'))
-    .map((link) => link.textContent);
+    .getAllByRole('rowheader')
+    .map((header) => within(header).getByRole('button').textContent);
 }
 
 beforeEach(() => {
@@ -133,6 +142,161 @@ afterEach(() => {
 });
 
 describe('running sandbox inventory', () => {
+  it('selects and changes only visible rows after filtering out a previously selected sandbox', async () => {
+    const rows = ['target-one', 'target-two', 'hidden'].map((id) =>
+      sandbox({
+        id,
+        title: id === 'hidden' ? 'Unrelated session' : `Target ${id}`,
+        generation: 4,
+        member_count: 2,
+        active_attempt_count: 0,
+        active_operation_count: 0,
+        terminal_count: 0,
+        terminal_count_observed_at: observedAt,
+      }),
+    );
+    vi.mocked(getAdminSandboxes).mockResolvedValue(page(rows));
+    vi.mocked(getAdminSandbox).mockImplementation(async (id) => ({
+      sandbox: rows.find((row) => row.id === id)!,
+      members: [],
+      observed_at: observedAt,
+    }));
+    vi.mocked(stopAdminSandbox).mockImplementation(async (id) => ({
+      sandbox: { ...rows.find((row) => row.id === id)!, state: 'stopping' },
+      members: [],
+      observed_at: observedAt,
+    }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select sandbox hidden' }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search sandboxes' }), {
+      target: { value: 'target' },
+    });
+    expect(
+      screen.queryByRole('checkbox', { name: 'Select sandbox hidden' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all visible sandboxes' }));
+    expect(screen.getByRole('checkbox', { name: 'Select sandbox target-one' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Select sandbox target-two' })).toBeChecked();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Batch sandbox action' }), {
+      target: { value: 'stop' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Apply to 2 sandboxes' })).toBeEnabled(),
+    );
+    expect(getAdminSandbox).toHaveBeenCalledTimes(2);
+    expect(
+      vi
+        .mocked(getAdminSandbox)
+        .mock.calls.map(([id]) => id)
+        .sort(),
+    ).toEqual(['target-one', 'target-two']);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 2 sandboxes' }));
+    await waitFor(() => expect(stopAdminSandbox).toHaveBeenCalledTimes(2));
+    expect(
+      vi
+        .mocked(stopAdminSandbox)
+        .mock.calls.map(([id]) => id)
+        .sort(),
+    ).toEqual(['target-one', 'target-two']);
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/4 (member )?sessions/));
+    expect(deleteAdminSandbox).not.toHaveBeenCalled();
+    expect(archiveAdminSandbox).not.toHaveBeenCalled();
+    expect(restoreAdminSandbox).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Select sandbox target-one' })).not.toBeChecked(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByRole('checkbox', { name: 'Select sandbox hidden' })).not.toBeChecked();
+  });
+
+  it('locks selection during a batch review and clears private rows when review loses access', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof getAdminSandbox>>>();
+    vi.mocked(getAdminSandbox).mockReturnValue(pending.promise);
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select sandbox sandbox-one' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Select sandbox sandbox-one' })).toBeDisabled(),
+    );
+    expect(screen.getByRole('checkbox', { name: 'Select all visible sandboxes' })).toBeDisabled();
+    await act(async () =>
+      pending.resolve({
+        sandbox: sandbox(),
+        members: [],
+        observed_at: observedAt,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Select sandbox sandbox-one' })).toBeEnabled(),
+    );
+    vi.mocked(getAdminSandbox).mockRejectedValue(new APIError('FORBIDDEN', 'no', 403));
+    fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
+    expect(await screen.findByText('Admin access required')).toBeInTheDocument();
+    expect(screen.queryByText('owner-one')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: 'Select sandbox sandbox-one' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('retains failed and skipped rows selected after a partial batch succeeds and refreshes', async () => {
+    const rows = ['success', 'refused', 'busy'].map((id) =>
+      sandbox({
+        id,
+        title: `Session ${id}`,
+        generation: 4,
+        active_attempt_count: 0,
+        active_operation_count: 0,
+        terminal_count: 0,
+        terminal_count_observed_at: observedAt,
+      }),
+    );
+    vi.mocked(getAdminSandboxes).mockResolvedValue(page(rows));
+    vi.mocked(getAdminSandbox).mockImplementation(async (id) => ({
+      sandbox: {
+        ...rows.find((row) => row.id === id)!,
+        active_attempt_count: id === 'busy' ? 1 : 0,
+      },
+      members: [],
+      observed_at: observedAt,
+    }));
+    vi.mocked(stopAdminSandbox).mockImplementation(async (id) => {
+      if (id === 'refused') throw new APIError('CONFLICT', 'Sandbox activity changed', 409);
+      return {
+        sandbox: { ...rows.find((row) => row.id === id)!, state: 'stopping' },
+        members: [],
+        observed_at: observedAt,
+      };
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all visible sandboxes' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Batch sandbox action' }), {
+      target: { value: 'stop' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Apply to 2 sandboxes' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 2 sandboxes' }));
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Select sandbox success' })).not.toBeChecked(),
+    );
+    expect(screen.getByRole('checkbox', { name: 'Select sandbox refused' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Select sandbox busy' })).toBeChecked();
+    expect(screen.getByRole('list', { name: 'Sandbox batch results' })).toHaveTextContent(
+      'Sandbox activity changed',
+    );
+    expect(screen.getByRole('list', { name: 'Sandbox batch results' })).toHaveTextContent(
+      'Wait for all active turns to finish',
+    );
+    expect(getAdminSandbox).toHaveBeenCalledTimes(3);
+    expect(stopAdminSandbox).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(2));
+  });
+
   it('loads all lifecycle states without carrying over the previous filter snapshot', async () => {
     render(<AdminSandboxesPage />);
     await screen.findByText('sandbox-one');
@@ -233,7 +397,7 @@ describe('running sandbox inventory', () => {
     await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(3));
     expect(oldSignal?.aborted).toBe(true);
     await act(async () => oldRead.resolve(page([idle])));
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('stopping');
     expect(row).not.toHaveTextContent('Retained');
   });
@@ -309,7 +473,7 @@ describe('running sandbox inventory', () => {
     ).toHaveAttribute('href', '/admin/sandboxes/sandbox%2Fone');
   });
 
-  it('keeps sandbox groups separate and links the origin session and host', async () => {
+  it('opens each sandbox’s details from its title and keeps session and host links explicit', async () => {
     vi.mocked(getAdminSandboxes).mockResolvedValue(
       page([
         sandbox(),
@@ -317,15 +481,31 @@ describe('running sandbox inventory', () => {
       ]),
     );
     render(<AdminSandboxesPage />);
-    const sessions = await screen.findAllByRole('link', { name: 'Fix login' });
-    expect(sessions.map((link) => link.getAttribute('href'))).toEqual([
-      '/admin/sessions/thread%2Fone',
-      '/admin/sessions/thread-two',
-    ]);
+    const titles = await screen.findAllByRole('button', { name: 'Fix login' });
+    expect(screen.queryByRole('region', { name: 'Stats for Fix login' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Fix login' })).not.toBeInTheDocument();
+    for (const title of titles) {
+      expect(title).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(title);
+      expect(title).toHaveAttribute('aria-expanded', 'true');
+      const detailId = title.getAttribute('aria-controls')!;
+      expect(document.getElementById(detailId)).toBeInTheDocument();
+      expect(
+        within(document.getElementById(detailId)!).getByRole('region', {
+          name: 'Stats for Fix login',
+        }),
+      ).toBeInTheDocument();
+    }
+    expect(
+      screen
+        .getAllByRole('link', { name: 'View origin session for Fix login' })
+        .map((link) => link.getAttribute('href')),
+    ).toEqual(['/admin/sessions/thread%2Fone', '/admin/sessions/thread-two']);
+    await waitFor(() => expect(getAdminSandbox).toHaveBeenCalledTimes(2));
     const table = screen.getByRole('table');
     expect(within(table).getByText('sandbox-one')).toBeInTheDocument();
     expect(within(table).getByText('sandbox-two')).toBeInTheDocument();
-    const firstRow = sessions[0].closest('tr')!;
+    const firstRow = titles[0].closest('tr')!;
     expect(within(firstRow).getByRole('link', { name: 'host-one' })).toHaveAttribute(
       'href',
       '/admin/hosts',
@@ -370,7 +550,7 @@ describe('running sandbox inventory', () => {
     render(<AdminSandboxesPage />);
     await screen.findByText('sandbox-one');
     expect(screen.queryByText('Stale')).not.toBeInTheDocument();
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('just now');
     vi.setSystemTime(new Date('2056-10-10T10:00:00Z'));
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
@@ -403,8 +583,8 @@ describe('running sandbox inventory', () => {
         observed_at: laterObservation,
       }),
     );
-    const firstRow = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
-    const secondRow = screen.getByRole('link', { name: 'Second session' }).closest('tr')!;
+    const firstRow = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
+    const secondRow = screen.getByRole('button', { name: 'Second session' }).closest('tr')!;
     expect(within(firstRow).getByText('Stale')).toBeInTheDocument();
     expect(within(secondRow).queryByText('Stale')).not.toBeInTheDocument();
   });
@@ -561,7 +741,7 @@ describe('running sandbox inventory', () => {
     const button = await screen.findByRole('button', { name: 'Show details for Fix login' });
     expect(button).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('0.00 cores');
     expect(row).toHaveTextContent('0 B');
     expect(within(row).getByRole('meter', { name: 'CPU quota for Fix login' })).toHaveAttribute(
@@ -631,7 +811,7 @@ describe('running sandbox inventory', () => {
     expect(statValue('Active turns')).toHaveTextContent('3');
     expect(statValue('Sessions')).toHaveTextContent('9');
     expect(statValue('Hosts')).toHaveTextContent('2');
-    const oldRow = screen.getByRole('link', { name: 'Old sample' }).closest('tr')!;
+    const oldRow = screen.getByRole('button', { name: 'Old sample' }).closest('tr')!;
     expect(oldRow).toHaveTextContent('Stale sample');
   });
 
@@ -665,8 +845,8 @@ describe('running sandbox inventory', () => {
     expect(statValue('Measured CPU')).toHaveTextContent('0.00 cores');
     expect(statValue('Measured memory')).toHaveTextContent('0 B');
     expect(screen.getAllByText('1 / 2 sandboxes · fresh samples only')).toHaveLength(2);
-    const firstRow = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
-    const secondRow = screen.getByRole('link', { name: 'Second session' }).closest('tr')!;
+    const firstRow = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
+    const secondRow = screen.getByRole('button', { name: 'Second session' }).closest('tr')!;
     expect(firstRow).toHaveTextContent('Stale sample');
     expect(secondRow).not.toHaveTextContent('Stale sample');
   });
@@ -729,7 +909,7 @@ describe('running sandbox inventory', () => {
     expect(statValue('Measured CPU')).toHaveTextContent('Unavailable');
     expect(statValue('Measured memory')).toHaveTextContent('Unavailable');
     expect(screen.getAllByText('0 / 1 sandboxes · fresh samples only')).toHaveLength(2);
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('Stale sample');
     expect(row).toHaveTextContent('0.25 cores');
   });

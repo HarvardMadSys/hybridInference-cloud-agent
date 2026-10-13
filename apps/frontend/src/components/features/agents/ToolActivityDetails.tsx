@@ -1,10 +1,12 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
+import { Markdown } from '@/components/ui/Markdown';
 import {
   recordedAgentStates,
   recordedAgentTargets,
   recordedTasks,
+  type DelegationReply,
   type ToolActivity,
 } from './toolActivity';
 
@@ -183,11 +185,11 @@ export function ToolActivityDetails({
         </p>
       ) : null}
       {activity.prompt ? (
-        <details className="w-fit rounded-md border border-gray-100 text-xs dark:border-white/5">
+        <details className="w-fit max-w-full rounded-md border border-gray-100 text-xs dark:border-white/5">
           <summary className="cursor-pointer px-2 py-1 text-gray-500 dark:text-gray-400">
             {activity.promptLabel}
           </summary>
-          <p className="max-h-60 overflow-auto whitespace-pre-wrap break-words border-t border-gray-100 px-2 py-2 text-gray-600 dark:border-white/5 dark:text-gray-300">
+          <p className="max-h-60 overflow-auto whitespace-pre-wrap border-t border-gray-100 px-2 py-2 text-gray-600 [overflow-wrap:anywhere] dark:border-white/5 dark:text-gray-300">
             {activity.prompt}
           </p>
         </details>
@@ -195,24 +197,119 @@ export function ToolActivityDetails({
       {states.length ? (
         <ul className="space-y-1">
           {states.map((state) => (
-            <li key={state.id} className="min-w-0">
+            <li key={state.id} className="min-w-0 space-y-1.5">
               <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
                 <span className="min-w-0 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
                   {state.id}
                 </span>
                 <Status value={state.status} />
-                {state.message ? (
-                  <details className="text-xs text-gray-500 dark:text-gray-400">
-                    <summary className="cursor-pointer">Message</summary>
-                    <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words">
-                      {state.message}
-                    </p>
-                  </details>
-                ) : null}
               </div>
+              {state.message ? (
+                // Codex reports a finished agent's answer, or its error, as
+                // the message of the state it returns to the main agent.
+                <DelegationReplyDetails
+                  reply={{
+                    state: state.status === 'errored' ? 'failed' : 'received',
+                    text: state.message,
+                  }}
+                  showStatus={false}
+                />
+              ) : null}
             </li>
           ))}
         </ul>
+      ) : null}
+    </section>
+  );
+}
+
+const LONG_REPLY_CHARACTERS = 600;
+const LONG_REPLY_LINES = 8;
+
+function ReplyNote({ children }: { children: ReactNode }) {
+  return <p className="text-[11px] text-gray-400 dark:text-gray-500">{children}</p>;
+}
+
+/** What a delegating call returned to the main agent, read only from its recorded result. */
+export function DelegationReplyDetails({
+  reply,
+  showStatus = true,
+}: {
+  reply: DelegationReply;
+  /** Off where the agent's state is already shown beside the reply. */
+  showStatus?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const bodyId = useId();
+
+  if (reply.state === 'waiting') return <ReplyNote>Waiting for the agent&apos;s reply…</ReplyNote>;
+  if (reply.state === 'not_recorded') {
+    return <ReplyNote>The agent&apos;s reply was not recorded.</ReplyNote>;
+  }
+  if (reply.state === 'background') {
+    return (
+      <ReplyNote>
+        Started in the background. This call returned only a launch notice, not the agent&apos;s
+        reply.
+      </ReplyNote>
+    );
+  }
+  const status = !showStatus ? undefined : reply.state === 'received' ? reply.status : reply.state;
+  const { text } = reply;
+  if (!text && reply.state !== 'received') {
+    return (
+      <p className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400">
+        {status ? <Status value={status} /> : null}
+        {reply.state === 'failed'
+          ? 'The delegation call failed.'
+          : 'The delegation call was interrupted.'}
+      </p>
+    );
+  }
+  const long =
+    !!text && (text.length > LONG_REPLY_CHARACTERS || text.split('\n').length > LONG_REPLY_LINES);
+  const collapsed = long && !expanded;
+  return (
+    <section aria-label="Subagent reply" className="min-w-0 space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <h4 className="text-[11px] font-medium text-gray-500 dark:text-gray-400">
+          Returned to the main agent
+        </h4>
+        {status ? <Status value={status} /> : null}
+      </div>
+      {text ? (
+        <div
+          id={bodyId}
+          className={`min-w-0 [overflow-wrap:anywhere] ${
+            reply.state === 'failed'
+              ? 'text-rose-700 dark:text-rose-300'
+              : 'text-gray-700 dark:text-gray-200'
+          } ${
+            collapsed
+              ? 'max-h-40 overflow-hidden [mask-image:linear-gradient(to_bottom,black_60%,transparent)]'
+              : ''
+          }`}
+        >
+          <Markdown text={text} />
+        </div>
+      ) : (
+        <ReplyNote>No text was returned.</ReplyNote>
+      )}
+      {reply.truncated ? (
+        <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
+          The stored reply was cut short; this is not the whole answer.
+        </p>
+      ) : null}
+      {long ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded((value) => !value)}
+          className="rounded text-[11px] font-medium text-gray-500 hover:text-gray-800 focus-visible:outline-crimson dark:text-gray-400 dark:hover:text-gray-100"
+        >
+          {expanded ? 'Show less' : 'Show full reply'}
+        </button>
       ) : null}
     </section>
   );

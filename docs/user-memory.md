@@ -1,17 +1,28 @@
 # Avatars, user memory, and project memory
 
-The homepage displays an automatically generated illustrated portrait for your
-account. **Setting → User memory** manages your saved preferences, and
-**Setting → Project memory** manages memory for a selected repository. The
-avatar's face, hair, and skin stay recognizable across devices. Its backdrop,
-clothing colors, and illustrated work motifs evolve with your recent work
+The homepage displays an automatically generated Pokémon companion for your
+account, suggestions for improving your next request, and an expandable guide
+to the avatar's colors and badges. **Setting → User memory** manages your saved
+preferences, and **Setting → Project memory** manages memory for a selected
+repository. Your account is assigned Pikachu, Bulbasaur, Charmander, Squirtle,
+Eevee, Gengar, or Jigglypuff, with a consistent expression and pose across devices.
+Each companion is assembled from local vector layers: its silhouette, distinctive
+ears, tail, bulb or shell, and expressive facial details. Its habitat backdrop,
+halo, platform colors, and orbiting work badges evolve with your recent work
 areas, such as APIs, UI, testing, or data storage. The most-used work areas lead
 the theme; the same recent-work profile produces the same image. It is an
-assigned avatar and does not attempt to infer your appearance. No image service,
-inference quota, or uploaded photo is required to generate the avatar.
+assigned companion and does not attempt to infer your appearance or ability.
+No image service, inference quota, or uploaded photo is required to generate the avatar.
 
 Themes follow the work areas detected with English keywords. Requests without a
 recognized work area keep the default theme.
+
+The largest badge at the top right shows your most common work area. The left
+badge shows your second area, and smaller badges along the bottom show the rest
+of the ranked mix. The companion keeps its own colors as its habitat changes.
+With no recognized work area, it uses a consistent account palette and decorative
+sparkles. All shapes are generated locally as a standalone SVG; account
+identifiers and request text are never embedded in the artwork.
 
 Memory has two independently controlled scopes:
 
@@ -31,8 +42,9 @@ User memory and the account's work profile build from up to your 50 most recent
 eligible requests. Each project's memory builds from up to its own 50 most
 recent eligible requests, so activity in another project cannot displace those
 requests. Settings shows separate user and project memory sections alongside
-recent work areas, commonly used agent settings, and suggestions for future
-requests. Suggestions address concrete patterns such as requests without
+recent work areas and commonly used agent settings. User suggestions appear on
+the homepage; project suggestions stay in the selected project's memory settings.
+Suggestions address concrete patterns such as requests without
 verification, success checks, or failure reproduction steps. These keyword-based
 suggestions are guidance, rather than an assessment of your abilities.
 
@@ -80,7 +92,7 @@ scope is the default for project conventions and technical choices.
   open or no model is available.
 - Clearing user memory removes its saved preferences, task references,
   corrections, removals, the account's recent-work profile, and suggestions.
-  Its avatar returns to the default theme while keeping the same face. Project
+  Its avatar returns to the default habitat while keeping the same companion. Project
   memory keeps its own entries and setting.
 - Clearing project memory removes that project's saved entries, corrections,
   removals, overlays, and suggestions. User memory and other projects keep their

@@ -192,9 +192,88 @@ def test_archived_removal_rejects_start_at_second_identity_fence(monkeypatch):
         )
 
     monkeypatch.setattr(manager, "_run", run)
-    with pytest.raises(SandboxError, match="stopped container"):
+    with pytest.raises(SandboxError, match="stopped or dead container"):
         manager.remove_stopped_archived(spec, container_id="sha256:container-one")
     assert len(calls) == 2
+
+
+def test_dead_container_exports_and_removes_without_force(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+    removed = False
+
+    def run(argv, *, timeout):
+        nonlocal removed
+        calls.append(argv)
+        if argv[1:3] == ["container", "inspect"]:
+            if removed:
+                return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_inspect_payload(spec, status="dead", labels=labels, networks=()),
+                stderr="",
+            )
+        assert argv == [manager.backend.docker_binary, "container", "rm", "sha256:container-one"]
+        removed = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class ExportProcess:
+        returncode = 0
+
+        def __init__(self, argv, *, stdout, stderr):
+            calls.append(argv)
+            stdout.write(b"dead container filesystem")
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            raise AssertionError("export must finish")
+
+        def wait(self, timeout):
+            return 0
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
+    with (tmp_path / "rootfs.tar").open("wb") as output:
+        metadata = manager.export_stopped_archive(
+            spec, container_id="sha256:container-one", output=output, max_bytes=1024
+        )
+    assert metadata["Id"] == "sha256:container-one"
+    manager.remove_stopped_archived(spec, container_id="sha256:container-one")
+    assert [manager.backend.docker_binary, "container", "export", "sha256:container-one"] in calls
+    assert [manager.backend.docker_binary, "container", "rm", "sha256:container-one"] in calls
+    assert not any("--force" in argv or "stop" in argv for argv in calls)
+
+
+def test_stop_accepts_a_running_container_that_lands_dead(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "deployment-a"}
+    calls = []
+    inspections = {"count": 0}
+
+    def run(argv, *, timeout):
+        calls.append(list(argv))
+        if argv[1:3] == ["container", "inspect"]:
+            inspections["count"] += 1
+            running = inspections["count"] == 1
+            status = "running" if running else "dead"
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_inspect_payload(spec, status=status, running=running, labels=labels),
+                stderr="",
+            )
+        assert argv[1] == "stop"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(manager, "_run", run)
+    stopped = manager.stop(spec, release_networks=False)
+    assert stopped.status is ChatSandboxStatus.DEAD
+    assert stopped.running is False
+    assert not any("--force" in argv or argv[1:3] == ["container", "rm"] for argv in calls)
 
 
 def test_archive_export_rejects_oversize_and_changed_identity_after_export(monkeypatch, tmp_path):
@@ -720,7 +799,7 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
     assert marks.stat().st_mode & 0o777 == 0o660
 
 
-def test_foreign_namespace_is_not_inspected_during_broker_startup(monkeypatch) -> None:
+def test_foreign_namespace_is_not_inspected_during_sandbox_manager_startup(monkeypatch) -> None:
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="this-stack"))
 
     def run(argv, **_kwargs):
@@ -1539,9 +1618,14 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
     assert script.count("-path /agent-state/codex-members") == 2
     assert script.count("-path /agent-state/opencode-members") == 2
     assert script.count("-path /agent-state/kilo-members") == 2
+    # The trusted collections hold other members' 0700 homes; a traversal
+    # into them would fail on the first one it cannot open.
+    for runtime_id in ("codex", "opencode", "kilo"):
+        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == 2
     # A member's provider home is never widened, not even by its owner: the
     # pass no longer enters the collections at all.
     assert "-members/" not in script
+    assert "-homes/" not in script
     assert '"$member"' not in script
     assert calls[0][1]["user_uid"] == MEMBER_UID_BASE
 
@@ -1661,6 +1745,32 @@ def test_unsettled_reset_has_each_member_clear_its_private_homes_first(monkeypat
     assert [kwargs.get("user_uid") for _argv, kwargs in calls] == [None, 11001, 11003, None]
     assert calls[0][0] == calls[3][0], "the roots are cleared only once no member home is left"
     assert "-members" in calls[1][0][2] and '-uid "$uid"' in calls[1][0][2]
+    assert "/agent-state/codex-homes" in calls[0][0][2] and "-homes" in calls[1][0][2]
+
+
+def test_private_member_collections_are_secured_as_the_sandbox_user(monkeypatch):
+    spec = replace(_spec(), shared_live=True, resident_slot_capacity=4)
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    manager.ensure_private_member_collections(spec)
+
+    ((argv, kwargs),) = calls
+    # No user override: the sandbox user owns /agent-state and is no member.
+    assert kwargs.get("user_uid") is None and kwargs.get("user_gid") is None
+    assert argv[4:] == [
+        CHAT_STATE_DIR,
+        "/agent-state/codex-homes",
+        "/agent-state/opencode-homes",
+        "/agent-state/kilo-homes",
+    ]
+    assert 'chmod +t -- "$root"' in argv[2] and "mkdir -m 3770" in argv[2]
 
 
 @pytest.mark.parametrize("owners", [b"0\n", b"10001\n", b"11005\n", b"not-a-uid\n"])
@@ -1828,6 +1938,7 @@ def test_shared_writer_freeze_runs_as_each_owner_without_cap_kill(monkeypatch):
         resident_slot_capacity=3,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
     calls: list[tuple[list[str], dict]] = []
     receipts = {
         manager.backend.uid: b"31 10001 300\n",
@@ -1873,6 +1984,7 @@ def test_shared_writer_freeze_replacement_runs_exact_id_cleanup(monkeypatch):
         resident_slot_capacity=2,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
     exact_id = "sha256:original"
     exact_checks = 0
     calls: list[tuple[list[str], dict]] = []
@@ -1925,6 +2037,7 @@ def test_shared_writer_thaw_reads_manifest_and_resumes_as_each_owner(monkeypatch
         resident_slot_capacity=2,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
     calls: list[tuple[list[str], dict]] = []
     manifest = f"{ACTIVATION_TMPFS}/snapshot-{'b' * 32}.pids"
 
@@ -2003,6 +2116,7 @@ def _local_shared_writer_manager(monkeypatch, tmp_path, owned_processes):
             check=False,
         )
 
+    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
     monkeypatch.setattr(manager, "exec_capture", local_exec)
     return manager
 
@@ -2232,6 +2346,7 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
         resident_slot_capacity=2,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
     exact_id = "sha256:original"
     exact_checks = 0
     calls: list[tuple[list[str], dict]] = []
@@ -2587,7 +2702,7 @@ def test_killing_a_bounded_command_signals_only_its_own_process_group(monkeypatc
 
 
 def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkeypatch):
-    """The broker's own backends, and a turn whose broker did not say it checked."""
+    """The sandbox manager's own backends, and a turn whose sandbox manager did not say it checked."""
     backend, checks = _proving_backend(monkeypatch, proved_at=None)
 
     for _ in range(3):
@@ -2597,7 +2712,7 @@ def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkey
 
 
 def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
-    """The broker proved the bridge when it acquired the turn; repeating it adds nothing."""
+    """The sandbox manager proved the bridge when it acquired the turn; repeating it adds nothing."""
     clock = {"now": 1000.0}
     monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend, checks = _proving_backend(monkeypatch, proved_at=1000.0)

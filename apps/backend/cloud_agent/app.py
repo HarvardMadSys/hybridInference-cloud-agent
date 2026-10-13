@@ -11,7 +11,7 @@ store's policy. It never dies on an error, because a transient database blip
 must not permanently stop reaping — a stopped reaper is invisible until jobs
 start hanging.
 
-**The snapshot coordinator** asks an owning workspace broker for short,
+**The snapshot coordinator** asks an owning sandbox manager for short,
 quiescent Git captures. It has its own schedule so a slow Docker/Git operation
 cannot delay grant renewal or attempt recovery.
 
@@ -24,6 +24,9 @@ garbage-collect mid-run is a task that stops silently.
 """
 
 from __future__ import annotations
+
+import os
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
@@ -133,12 +136,29 @@ def install_admin_no_store(
 
 from cloud_agent.bootstrap.lifespan import lifespan
 
+#: Serves ``/docs``, ``/redoc`` and ``/openapi.json`` on the main listener when
+#: set to ``true``. Off by default: the schema describes every route to anyone
+#: who asks, and the two pages load their scripts from a CDN at a floating
+#: major version with no integrity check, on the origin the web app shares.
+ENV_API_DOCS = "AGENT_API_DOCS"
+
+#: What FastAPI needs to serve none of the three. ``app.openapi()`` still
+#: builds the schema; only the routes that publish it are left out.
+_NO_DOCS: dict[str, Any] = {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+def _api_docs() -> dict[str, Any]:
+    """Return the main listener's docs arguments: FastAPI's own only on request."""
+    enabled = (os.environ.get(ENV_API_DOCS) or "").strip().lower() in {"1", "true", "yes"}
+    return {} if enabled else _NO_DOCS
+
 
 def create_app() -> FastAPI:
     """Build the control plane application."""
     configure_process_logging()
 
     from cloud_agent.api import (
+        _cross_site,
         admin_audit,
         admin_compute,
         admin_conversations,
@@ -154,6 +174,7 @@ def create_app() -> FastAPI:
         admin_steps,
         admin_usage,
         compute_registration,
+        environments,
         host_profiling,
         hosts,
         mcp_connections,
@@ -165,6 +186,7 @@ def create_app() -> FastAPI:
         uploads,
         usage,
         user_memory,
+        user_profile,
     )
 
     app = FastAPI(
@@ -172,7 +194,12 @@ def create_app() -> FastAPI:
         description="Cloud coding agents on sandboxed hosts",
         version="0.1.0",
         lifespan=lifespan,
+        **_api_docs(),
     )
+    # Every browser-facing write carries the session cookie, and SameSite=Lax
+    # admits it from any page on the same site. Machine callers send bearers
+    # and pass untouched; see the module for the exact rule.
+    app.add_middleware(_cross_site.CrossSiteWriteGuard)
     app.include_router(routes.router)
     app.include_router(usage.router)
     # Owner-facing, and never on the relay's own listener: adding a connection
@@ -181,8 +208,38 @@ def create_app() -> FastAPI:
     # public edge, so a sandbox's ``mcp`` token carried out and replayed there
     # must find no tool route at all, not one that merely refuses it.
     app.include_router(skills.router)
+    from fastapi.responses import JSONResponse
+
+    from cloud_agent.environments import (
+        EnvironmentBusy,
+        EnvironmentConflict,
+        EnvironmentEncryptionError,
+        EnvironmentNotFound,
+    )
+
+    async def environment_failure(request: Request, exc: Exception) -> JSONResponse:
+        if isinstance(exc, EnvironmentNotFound):
+            code, detail = 404, "Environment not found"
+        elif isinstance(exc, EnvironmentEncryptionError):
+            code, detail = 503, "Environment encryption is unavailable"
+        else:
+            code, detail = 409, str(exc)
+        return JSONResponse(
+            status_code=code, content={"detail": detail}, headers={"Cache-Control": "no-store"}
+        )
+
+    for failure in (
+        EnvironmentNotFound,
+        EnvironmentConflict,
+        EnvironmentBusy,
+        EnvironmentEncryptionError,
+    ):
+        app.add_exception_handler(failure, environment_failure)
+
+    app.include_router(environments.router)
     app.include_router(user_memory.router)
     app.include_router(user_memory.project_router)
+    app.include_router(user_profile.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(hosts.router)
@@ -220,7 +277,12 @@ def create_app() -> FastAPI:
     app.include_router(admin_audit.router)
     install_admin_no_store(
         app,
-        prefixes=(*ADMIN_READ_PREFIXES, "/v1/agent/user-memory", "/v1/agent/project-memory"),
+        prefixes=(
+            *ADMIN_READ_PREFIXES,
+            "/v1/agent/user-memory",
+            "/v1/agent/project-memory",
+            "/v1/agent/profile",
+        ),
     )
     install_repository_access_errors(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
@@ -288,6 +350,9 @@ def create_mcp_app() -> FastAPI:
         # and a second copy would renew every grant twice and race the same
         # publish. This listener still maintains its own upstream MCP sockets.
         lifespan=lambda app: lifespan(app, background=False),
+        # Never, whatever the main listener does: a sandbox reaches this one,
+        # and its contract is the relay, not a description of it.
+        **_NO_DOCS,
     )
     app.include_router(mcp_relay.router)
 

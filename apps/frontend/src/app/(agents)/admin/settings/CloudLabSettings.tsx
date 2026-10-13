@@ -11,6 +11,7 @@ import {
 } from '@/lib/api/compute';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
+import { parseStringList } from '../hosts/compute-ui';
 import { SettingsSection } from '../SettingsSection';
 
 const SSH_PUBLIC_KEY_ALGORITHM =
@@ -61,6 +62,7 @@ export default function CloudLabSettings({
 function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unknown) => void }) {
   const [saved, setSaved] = useState<CloudLabDefaults | null>(null);
   const [draft, setDraft] = useState<CloudLabDefaults | null>(null);
+  const [nodeTypes, setNodeTypes] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [denied, setDenied] = useState(false);
@@ -92,6 +94,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
         if (signal?.aborted) return;
         setSaved(response.defaults);
         setDraft(response.defaults);
+        setNodeTypes(response.defaults.node_types.join('\n'));
         setError(null);
       } catch (cause) {
         if (!signal?.aborted) fail(cause);
@@ -133,7 +136,8 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
       const response = await saveCloudLabDefaults(draft);
       setSaved(response.defaults);
       setDraft(response.defaults);
-      setNotice('CloudLab defaults saved. New server forms use them immediately.');
+      setNodeTypes(response.defaults.node_types.join('\n'));
+      setNotice('CloudLab defaults saved. New allocations use the preferred order immediately.');
     } catch (cause) {
       if (cause instanceof APIError && cause.statusCode === 422) setAdvancedOpen(true);
       fail(cause);
@@ -152,8 +156,8 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
       <div className="mt-6">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">CloudLab defaults</h2>
         <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          Prefill new CloudLab server forms. An administrator can still change any value for an
-          individual allocation.
+          Set the defaults for new CloudLab allocations. An administrator can still change any value
+          for an individual allocation.
         </p>
       </div>
       {error && (
@@ -194,7 +198,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
           <fieldset disabled={busy} className="space-y-8">
             <SettingsSection
               title="Important"
-              description="Choose the project and initial lifetime for new CloudLab servers."
+              description="Choose the project, initial lifetime, and preferred hardware for new CloudLab servers."
             >
               <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
                 <h3
@@ -207,6 +211,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                   <label className="space-y-2 text-sm">
                     <span className="font-medium">CloudLab project</span>
                     <input
+                      id="cloudlab-setting-project"
                       aria-label="CloudLab project"
                       className={inputClass}
                       maxLength={128}
@@ -220,6 +225,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                   <label className="space-y-2 text-sm">
                     <span className="font-medium">Initial duration (hours)</span>
                     <input
+                      id="cloudlab-setting-duration"
                       aria-label="Initial duration (hours)"
                       className={inputClass}
                       type="number"
@@ -232,6 +238,26 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                     />
                   </label>
                 </div>
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">Preferred node types (top to bottom)</span>
+                  <textarea
+                    aria-label="Preferred node types (top to bottom)"
+                    className={`${inputClass} font-mono`}
+                    rows={6}
+                    spellCheck={false}
+                    value={nodeTypes}
+                    onChange={(event) => {
+                      setNodeTypes(event.target.value);
+                      updateDraft({ node_types: parseStringList(event.target.value) });
+                    }}
+                  />
+                  <span className="block text-xs text-gray-500 dark:text-gray-400">
+                    New allocations try each type from top to bottom. Put one type per line, or
+                    separate with commas. The curated defaults favor newer general-purpose types
+                    with more than 20 nodes in total. Leave blank to use the profile&apos;s
+                    hardware.
+                  </span>
+                </label>
               </section>
             </SettingsSection>
 
@@ -258,6 +284,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                   <label className="space-y-2 text-sm">
                     <span className="font-medium">Template project</span>
                     <input
+                      id="cloudlab-setting-profile_project"
                       aria-label="Template project"
                       className={inputClass}
                       maxLength={128}
@@ -271,6 +298,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                   <label className="space-y-2 text-sm">
                     <span className="font-medium">Template name</span>
                     <input
+                      id="cloudlab-setting-profile_name"
                       aria-label="Template name"
                       className={inputClass}
                       maxLength={128}
@@ -283,8 +311,25 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                   </label>
                 </div>
                 <label className="block max-w-xl space-y-2 text-sm">
+                  <span className="font-medium">Node type profile parameter</span>
+                  <input
+                    aria-label="Node type profile parameter"
+                    className={inputClass}
+                    maxLength={64}
+                    pattern="[A-Za-z][A-Za-z0-9_]{0,63}"
+                    required
+                    value={draft.node_type_binding}
+                    onChange={(event) => updateDraft({ node_type_binding: event.target.value })}
+                  />
+                  <span className="block text-xs text-gray-500 dark:text-gray-400">
+                    Profile parameter used to select hardware, usually phystype. An explicit value
+                    in an allocation&apos;s profile parameters pins that type.
+                  </span>
+                </label>
+                <label className="block max-w-xl space-y-2 text-sm">
                   <span className="font-medium">CloudLab SSH user</span>
                   <input
+                    id="cloudlab-setting-ssh_username"
                     aria-label="CloudLab SSH user"
                     className={inputClass}
                     maxLength={128}
@@ -296,6 +341,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
                 <label className="block space-y-2 text-sm">
                   <span className="font-medium">SSH public key</span>
                   <textarea
+                    id="cloudlab-setting-ssh_public_key"
                     aria-label="CloudLab SSH public key"
                     className={`${inputClass} font-mono`}
                     rows={3}

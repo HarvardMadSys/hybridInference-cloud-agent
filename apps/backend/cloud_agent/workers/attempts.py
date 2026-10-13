@@ -193,12 +193,15 @@ GRANT_RENEWAL_PASS_DEADLINE_S = (GRANT_TTL_S - RENEWAL_INTERVAL_S) / 2
 async def _reconcile_settled_terminals(store: _SettledTerminals) -> None:
     """Replay durable settled-terminal recovery markers after restarts.
 
-    The broker is resolved per job, because with a host pool there is no
-    "the" broker: each job's retained terminal lives on the machine that ran
+    The sandbox manager is resolved per job, because with a host pool there is no
+    "the" sandbox manager: each job's retained terminal lives on the machine that ran
     it. A single env-configured client here would resume one host's terminals
     and quietly report success for every other host's.
     """
-    from cloud_agent.broker_routing import broker_for_job, hydrate_shared_broker
+    from cloud_agent.sandbox_manager_routing import (
+        hydrate_shared_sandbox_manager,
+        sandbox_manager_for_job,
+    )
     from cloud_agent.terminal_coordination import resume_settled_terminal
 
     for job_id in await store.sandbox.list_terminal_resumes_pending():
@@ -210,11 +213,13 @@ async def _reconcile_settled_terminals(store: _SettledTerminals) -> None:
                 # external side effect behind it and can be retired.
                 await store.sandbox.mark_terminal_resume_complete(job_id=job_id)
                 continue
-            broker = await hydrate_shared_broker(job, await broker_for_job(store.host_pool, job_id))
+            sandbox_manager = await hydrate_shared_sandbox_manager(
+                job, await sandbox_manager_for_job(store.host_pool, job_id)
+            )
             if await resume_settled_terminal(
                 str(job["thread_id"]),
                 job_id=job_id,
-                broker=broker,
+                sandbox_manager=sandbox_manager,
             ):
                 await store.sandbox.mark_terminal_resume_complete(job_id=job_id)
         except Exception:
@@ -534,20 +539,20 @@ async def _cleanup_reaped_shared_residencies(
     if not cleanups:
         return
 
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
     for action, cleanup in cleanups:
         try:
-            broker = await broker_for_job(store, str(action["job_id"]))
-            if broker is not None:
-                await broker.shared_residency_lost(
+            sandbox_manager = await sandbox_manager_for_job(store, str(action["job_id"]))
+            if sandbox_manager is not None:
+                await sandbox_manager.shared_residency_lost(
                     str(cleanup["thread_id"]),
                     generation=int(cleanup["generation"]),
                 )
         except Exception:
             # The durable residency generation is already closed. A later
             # host heartbeat echoes the dead generation and retries local
-            # process cleanup, so broker reachability cannot block reaping.
+            # process cleanup, so sandbox manager reachability cannot block reaping.
             logger.warning(
                 "agent_reaped_shared_residency_cleanup_failed",
                 extra={
@@ -570,28 +575,28 @@ async def _cleanup_failed_session_fork(
 
     The store failed the operation and closed these residencies in its own
     commit, and it never returns that operation again, so this is the only
-    cleanup it gets. A broker that cannot be resolved or reached still leaves
+    cleanup it gets. A sandbox manager that cannot be resolved or reached still leaves
     the revocations to run: a later host heartbeat is told the residency was
     lost and stops its process, but nothing else would end its grant early.
     """
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
-    broker = None
+    sandbox_manager = None
     try:
-        broker = await broker_for_job(store, operation["source_job_id"])
+        sandbox_manager = await sandbox_manager_for_job(store, operation["source_job_id"])
     except Exception:
         logger.warning(
-            "agent_session_fork_cleanup_broker_unavailable",
+            "agent_session_fork_cleanup_sandbox_manager_unavailable",
             extra={
-                "event": "agent_session_fork_cleanup_broker_unavailable",
+                "event": "agent_session_fork_cleanup_sandbox_manager_unavailable",
                 "operation_id": operation.get("id"),
             },
             exc_info=True,
         )
     for residency in operation.get("cleanup_residencies") or []:
-        if broker is not None:
+        if sandbox_manager is not None:
             with contextlib.suppress(Exception):
-                await broker.shared_residency_lost(
+                await sandbox_manager.shared_residency_lost(
                     str(residency["thread_id"]),
                     generation=int(residency["generation"]),
                 )
@@ -694,6 +699,12 @@ async def _run_attempt_reaper(
                 )
         except Exception:
             logger.warning("Goal scheduling sweep failed", exc_info=True)
+        try:
+            environments = getattr(store, "environments", None)
+            if environments is not None:
+                await environments.maintain_environments()
+        except Exception:
+            logger.warning("Environment maintenance sweep failed", exc_info=True)
         try:
             actions = await store.attempt_commands.reap_expired(
                 max_attempts=(
@@ -826,8 +837,8 @@ async def _recover_send_now_handoffs(store: _Reaping, *, interval_seconds: float
 async def _replay_settled_terminals(store: _SettledTerminals, *, interval_seconds: float) -> None:
     """Replay settled-terminal markers without delaying attempt or grant safety passes.
 
-    Every marker is a round trip to the broker of the host that ran its turn,
-    and a marker stays set until that broker confirms. A host that stopped
+    Every marker is a round trip to the sandbox manager of the host that ran its turn,
+    and a marker stays set until that sandbox manager confirms. A host that stopped
     answering therefore costs each of its markers a full request timeout on
     every pass, and the turns the reaper ends because their host died are
     among the ones that leave markers behind. Inside the reaper's pass that
@@ -851,13 +862,13 @@ async def reap_expired_attempts(
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
 ) -> None:
-    """Run attempt maintenance alongside independently bounded broker recovery.
+    """Run attempt maintenance alongside independently bounded handoff recovery.
 
     Send-now handoff recovery and settled-terminal replay each run in an owned
-    task, once at startup and then on the same cadence, so a slow host broker
-    cannot hold up attempt reaping, queue settlement, or grant revocation and
-    renewal. Cancelling this worker also cancels and joins both tasks,
-    including any broker calls they currently own.
+    task, once at startup and then on the same cadence, so a slow host sandbox
+    manager cannot hold up attempt reaping, queue settlement, or grant
+    revocation and renewal. Cancelling this worker also cancels and joins both
+    tasks, including any sandbox manager calls they currently own.
     """
     # Created first, so a restarted control plane still replays settled
     # terminals before anything else, as it did when that replay ran ahead of

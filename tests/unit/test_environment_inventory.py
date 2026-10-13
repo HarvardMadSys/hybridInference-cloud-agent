@@ -1,10 +1,10 @@
 """Every environment variable the code reads is configurable and written down.
 
 ENVIRONMENT.md ends with "the PR checklist enforces this; a new variable
-without a row is a review stop". It did not: `AGENT_BROKER_URL_ALLOWED_HOSTS`
+without a row is a review stop". It did not: `AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS`
 and `AGENT_CONTROL_PLANE_URL` were both added without rows, and the first was
 worse than undocumented — it is the host allowlist that decides who receives
-the pool's shared broker token, and it was never wired into the control-plane
+the pool's shared sandbox manager token, and it was never wired into the control-plane
 compose file at all. The deployed stack could not turn it on. A checklist the
 author ticks for themselves is not a control over the author.
 

@@ -547,65 +547,6 @@ async def test_a_ref_to_resolve_can_only_ever_name_a_ref(config):
 
 
 @pytest.mark.parametrize(
-    ("branch_status", "compare_status", "expected"),
-    [
-        (200, "ahead", True),
-        (200, "identical", True),
-        (200, "behind", False),
-        (200, "diverged", False),
-        (404, None, False),
-        (301, None, False),
-    ],
-)
-async def test_a_pinned_commit_must_be_on_the_branch_its_pr_targets(
-    config, branch_status, compare_status, expected
-):
-    """A tag is no PR base, and a branch the commit is not on fills the PR with others' work."""
-    pinned, head = "a" * 40, "b" * 40
-    requested: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/o/n/installation":
-            return httpx.Response(200, json={"id": 9})
-        if request.url.path == "/app/installations/9/access_tokens":
-            return httpx.Response(
-                201, json={"token": "ghs_read", "expires_at": "2099-01-01T00:00:00Z"}
-            )
-        requested.append(request.url.path)
-        if request.url.path == "/repos/o/n/branches/release/1.2":
-            return httpx.Response(branch_status, json={"commit": {"sha": head}})
-        assert request.url.path == f"/repos/o/n/compare/{pinned}...{head}"
-        return httpx.Response(200, json={"status": compare_status})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        credentials = GitHubAppCredentials(config, client=client)
-        assert await credentials.branch_contains("o/n", "release/1.2", pinned) is expected
-        assert await credentials.branch_contains("o/n", "release/..", pinned) is False
-        assert await credentials.branch_contains("o/n", "release/1.2", "--upload-pack") is False
-
-    assert len(requested) == (2 if branch_status == 200 else 1)
-
-
-async def test_a_branch_github_cannot_read_is_an_error_not_a_refusal(config):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/o/n/installation":
-            return httpx.Response(200, json={"id": 9})
-        if request.url.path == "/app/installations/9/access_tokens":
-            return httpx.Response(
-                201, json={"token": "ghs_read", "expires_at": "2099-01-01T00:00:00Z"}
-            )
-        return httpx.Response(502, text="bad gateway")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(GitHubAppError) as raised:
-            await GitHubAppCredentials(config, client=client).branch_contains(
-                "o/n", "dev", "a" * 40
-            )
-
-    assert raised.value.status == 502
-
-
-@pytest.mark.parametrize(
     ("ref", "accepted"),
     [
         ("main", True),
@@ -1292,3 +1233,134 @@ async def test_repository_creation_malformed_success_is_uncertain_and_never_retr
     assert len(requests) == 1
     assert "secret-token" not in str(raised.value)
     assert "upstream body" not in str(raised.value)
+
+
+# ── a base commit has to be in a branch's history ─────────────────────
+
+_TIP = "1" * 40
+_OLDER = "2" * 40
+_FORK_HEAD = "3" * 40
+
+
+def _branch_history(
+    *,
+    branches: dict[str, str],
+    default: str = "main",
+    compare: dict[tuple[str, str], tuple[int, dict]] | None = None,
+    requests: list[httpx.Request],
+):
+    """Answer the three reads the base check makes, recording each request."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.path
+        prefix = "/repos/o/n"
+        if path == prefix:
+            return httpx.Response(200, json={"default_branch": default})
+        if path.startswith(f"{prefix}/branches/"):
+            name = path.removeprefix(f"{prefix}/branches/")
+            if name not in branches:
+                return httpx.Response(404, json={"message": "Branch not found"})
+            return httpx.Response(200, json={"name": name, "commit": {"sha": branches[name]}})
+        if path.startswith(f"{prefix}/compare/"):
+            base, _, head = path.removeprefix(f"{prefix}/compare/").partition("...")
+            status, body = (compare or {}).get((base, head), (404, {"message": "Not Found"}))
+            return httpx.Response(status, json=body)
+        return httpx.Response(500, json={"message": f"unexpected {path}"})
+
+    return respond
+
+
+async def _check(config, respond, sha: str, branch: str | None) -> str:
+    from unittest.mock import AsyncMock
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        credentials.token_for = AsyncMock(return_value="scoped-token")
+        try:
+            return await credentials.require_commit_on_branch("o/n", sha, branch=branch)
+        finally:
+            credentials.token_for.assert_awaited_with(
+                "o/n", permissions={"contents": "read"}, repository_scoped=True
+            )
+
+
+async def test_a_branch_tip_needs_no_comparison(config):
+    requests: list[httpx.Request] = []
+    respond = _branch_history(branches={"dev": _TIP}, requests=requests)
+
+    assert await _check(config, respond, _TIP, "dev") == "dev"
+    assert [request.url.path for request in requests] == ["/repos/o/n/branches/dev"]
+
+
+@pytest.mark.parametrize("status", ["behind", "identical"])
+async def test_an_ancestor_of_the_named_branch_is_accepted(config, status):
+    requests: list[httpx.Request] = []
+    respond = _branch_history(
+        branches={"release/x": _TIP},
+        compare={(_TIP, _OLDER): (200, {"status": status})},
+        requests=requests,
+    )
+
+    assert await _check(config, respond, _OLDER, "release/x") == "release/x"
+    # Compared from the tip's hash: the caller's text never names the base.
+    assert requests[-1].url.path == f"/repos/o/n/compare/{_TIP}...{_OLDER}"
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, {"status": "diverged"}),
+        (200, {"status": "ahead"}),
+        (200, {}),
+        (404, {"message": "Not Found"}),
+        (422, {"message": "No common ancestor"}),
+    ],
+)
+async def test_a_commit_outside_the_branch_history_is_refused(config, status, body):
+    """A fork's pull request head fetches by hash but is not the branch's history."""
+    from cloud_agent.github_app import CommitNotOnBranch
+
+    requests: list[httpx.Request] = []
+    respond = _branch_history(
+        branches={"dev": _TIP}, compare={(_TIP, _FORK_HEAD): (status, body)}, requests=requests
+    )
+
+    with pytest.raises(CommitNotOnBranch, match="not in the history of branch 'dev' in o/n"):
+        await _check(config, respond, _FORK_HEAD, "dev")
+
+
+@pytest.mark.parametrize("named", [None, _FORK_HEAD, "refs/pull/5/head", "fork-owner:main"])
+async def test_without_a_named_branch_the_default_branch_is_the_anchor(config, named):
+    """A tag, commit, pull ref or cross-repository name is not a branch of this repository."""
+    from cloud_agent.github_app import CommitNotOnBranch
+
+    requests: list[httpx.Request] = []
+    respond = _branch_history(
+        branches={"main": _TIP},
+        compare={(_TIP, _OLDER): (200, {"status": "behind"})},
+        requests=requests,
+    )
+
+    assert await _check(config, respond, _OLDER, named) == "main"
+    assert requests[-1].url.path == f"/repos/o/n/compare/{_TIP}...{_OLDER}"
+    with pytest.raises(CommitNotOnBranch, match="branch 'main'"):
+        await _check(config, respond, _FORK_HEAD, named)
+
+
+async def test_failing_to_read_the_branch_is_not_a_refusal(config):
+    """An outage must stay distinguishable from a settled 'not on this branch'."""
+    from cloud_agent.github_app import CommitNotOnBranch
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway")
+
+    with pytest.raises(GitHubAppError) as raised:
+        await _check(config, respond, _OLDER, "dev")
+    assert not isinstance(raised.value, CommitNotOnBranch)
+    assert raised.value.status == 502
+
+
+async def test_a_non_hash_base_is_refused_before_any_request(config):
+    with pytest.raises(GitHubAppError, match="commit sha"):
+        await GitHubAppCredentials(config).require_commit_on_branch("o/n", "--upload-pack=x")

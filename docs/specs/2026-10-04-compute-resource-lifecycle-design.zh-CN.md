@@ -128,7 +128,7 @@ SSH 是访问和部署通道；Provider 是资源取得与管理来源。CloudLa
 | 页面操作 | 用例及调用关系 | 完成条件 |
 | --- | --- | --- |
 | 接入已有服务器 | ExistingSSHProvider 接入 → 共用部署 → 既有 enrollment；已部署的 Host 可验证后采用 | 注册与 readiness 完成 |
-| 申请新服务器 | 指定 Provider 申请 → 观测节点 → 同一部署流程 → enrollment → readiness | 资源、Host、broker 和执行环境全部可用 |
+| 申请新服务器 | 指定 Provider 申请 → 观测节点 → 同一部署流程 → enrollment → readiness | 资源、Host、sandbox manager 和执行环境全部可用 |
 | 查找与详情 | ServerQueries 合并资源和 Host 的数据库观测 | 返回数据时间、来源与 freshness |
 | 统一选择 sandbox 运行位置 | SandboxPlacement 更新现有全局 active_host，claim 继续执行该限制 | 所有尚未分配的新 sandbox 统一使用目标；已有 group 保留原 Host |
 | 改并发、Drain | 原 HostCommands | 原有规则继续生效 |
@@ -416,7 +416,7 @@ ExistingSSHProvider 没有 release capability。其页面提供原来的“移�
 - 全部节点和执行环境的完整绑定范围，以及新的绑定已经被栅栏阻止。
 - 运行中的 attempts、正在 materialize 的 Fork、未决 prompt delivery 和相关 workspace 操作。
 - 保留的 sandbox group，包括 stopped 容器；归档聊天和停止容器都不等于放弃其状态。
-- 最新可核实的 Host/broker 容器观测与数据库依赖是否一致。离线、观测过期、未知容器或未覆盖的节点返回阻塞，不能把未知当作零。
+- 最新可核实的 Host/sandbox_manager 容器观测与数据库依赖是否一致。离线、观测过期、未知容器或未覆盖的节点返回阻塞，不能把未知当作零。
 - 全局新会话限制是否仍指向该资源。默认返回 `placement_pinned`；管理员明确修改或清除全局固定后才能继续，不自动悄悄切换。已经分配的 group 则由保留状态规则保护，不能通过改选位置绕过。
 
 保留状态由现有 sandbox 领域判断。当前没有跨机器恢复，也没有证明“归档即可安全丢弃”的生命周期契约，所以第一版对仍有保留 group 的资源返回 `retained_groups_present`。不增加通用 `force=true` 绕过这些条件。未来真正的销毁会话或迁移功能需另有明确用例、授权和验收。
@@ -433,7 +433,7 @@ ExistingSSHProvider 没有 release capability。其页面提供原来的“移�
 
 ### 申请到可接单
 
-两种新增方式共用一个 AddServer 流程：记录接入意图 → 对应 Provider 的 acquire → 观测实际节点 → HostBootstrap 部署 → 绑定的一次性 enrollment → heartbeat、broker 与安全环境 readiness → 允许新会话。SSH 子类完成已有机器核实后进入部署，云子类在新资源分配完成后进入同一个步骤。
+两种新增方式共用一个 AddServer 流程：记录接入意图 → 对应 Provider 的 acquire → 观测实际节点 → HostBootstrap 部署 → 绑定的一次性 enrollment → heartbeat、sandbox manager 与安全环境 readiness → 允许新会话。SSH 子类完成已有机器核实后进入部署，云子类在新资源分配完成后进入同一个步骤。
 
 HostBootstrap 是独立接口，首个实现可以复用现有部署脚本；创建云资源的适配器不负责 SSH、Docker 或 Kata。安全检查沿用目标部署批准的现有策略，不因 Provider 更换而放宽隔离、权限或网络边界。
 
@@ -540,7 +540,7 @@ CloudLab 的公开 API 将指定实验 UUID 的 `DELETE 204` 定义为已删除�
 | 无运行任务但有 stopped sandbox | 释放操作被保留状态阻塞 |
 | 释放与 claim、Fork、注册绑定竞争 | 新依赖被栅栏拒绝，或先完成并被检查计入 |
 | 一个 experiment 含多节点或未知用途 | 展示整体影响，管理范围不完整时拒绝释放 |
-| Provider ready 但 Kata 或 broker 未就绪 | 资源可见，Host 不接新会话 |
+| Provider ready 但 Kata 或 sandbox manager 未就绪 | 资源可见，Host 不接新会话 |
 | 创建请求结果未知或名称碰撞 | 不盲目重试、不收编或删除未经核实的资源 |
 | 释放请求结果未知 | 保持退出限制，查询确认，不自动恢复接单 |
 | 云端重新分配同名节点 | 使用新资源身份，不恢复旧 Host 的会话映射 |

@@ -174,12 +174,12 @@ async def measured_call(
     call_id: str | None = None,
     timing_parent: str | None = None,
 ) -> _T:
-    """Time one broker call and attach the answer to its unique call id."""
+    """Time one sandbox manager call and attach the answer to its unique call id."""
     if measure is None:
         return await call(None)
     if call_id is None:
         call_id = measure.begin_call(stage)
-    with measure.stage(timing_parent or stage, "broker_call"):
+    with measure.stage(timing_parent or stage, "sandbox_manager_call"):
         response = await call(measure.context(call_id))
     if record and isinstance(response, dict):
         measure.record_answer(stage, call_id, response)

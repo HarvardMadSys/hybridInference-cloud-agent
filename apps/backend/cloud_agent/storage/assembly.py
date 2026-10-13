@@ -53,8 +53,10 @@ from cloud_agent.storage.repositories import (
     PostgresSnapshotRepository,
     PostgresSourceControlRepository,
     PostgresUserMemoryRepository,
+    PostgresUserProfileRepository,
     PostgresWebSearchRepository,
 )
+from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 
 if TYPE_CHECKING:
     import asyncpg
@@ -89,8 +91,10 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
         UserMemoryRepository,
+        UserProfileRepository,
         WebSearchRepository,
     )
+    from cloud_agent.ports.environments import EnvironmentRepository
 
 
 class Storage:
@@ -108,6 +112,7 @@ class Storage:
         self.admin_sandboxes = AdminSandboxQueries(pool)
         self.admin_usage = AdminUsageQueries(pool)
 
+        self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
         self.audit: AuditRepository = PostgresAuditRepository(pool)
         self.audit_log: AuditLogQueries = PostgresAuditLogRepository(pool)
@@ -139,4 +144,5 @@ class Storage:
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.user_memory: UserMemoryRepository = PostgresUserMemoryRepository(pool)
+        self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)

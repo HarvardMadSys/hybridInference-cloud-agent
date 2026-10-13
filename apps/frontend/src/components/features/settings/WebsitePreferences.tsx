@@ -19,7 +19,7 @@ const THEME_LABEL_KEYS = {
 } as const;
 
 const SELECT =
-  'ui-focus-ring min-h-9 cursor-pointer rounded-lg border border-border bg-surface px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-border-strong [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring min-h-8 cursor-pointer rounded-md border border-border bg-surface px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-border-strong [@media(pointer:coarse)]:min-h-11';
 
 /** Website preferences stay within reach even when the task list is hidden. */
 export function WebsitePreferences({ compact = false }: { compact?: boolean }) {

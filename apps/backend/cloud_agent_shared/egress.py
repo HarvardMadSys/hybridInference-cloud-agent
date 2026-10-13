@@ -55,11 +55,21 @@ DNS_PORT = 53
 #: with it cloud metadata, IETF protocol assignments, documentation and
 #: benchmarking ranges, deprecated 6to4 relays, multicast, and reserved space up
 #: to broadcast. A block here is refused whatever port is asked for.
+#:
+#: One provider platform service sits on an ordinary public address instead:
+#: Azure's WireServer, ``168.63.129.16``, which serves a VM its extension and
+#: provisioning data and is reached from inside the VM, so a forwarded sandbox
+#: packet would reach it too. It is protected on every host, Azure or not; an
+#: Azure host that names it as the resolver still gets DNS, which is accepted
+#: before this set is consulted. The other providers' metadata services (AWS,
+#: GCP, Azure IMDS, Oracle and the rest at ``169.254.169.254`` and its
+#: neighbours) are link-local, and Alibaba's ``100.100.100.200`` is CGNAT.
 PROTECTED_IPV4: tuple[str, ...] = (
     "0.0.0.0/8",
     "10.0.0.0/8",
     "100.64.0.0/10",
     "127.0.0.0/8",
+    "168.63.129.16/32",
     "169.254.0.0/16",
     "172.16.0.0/12",
     "192.0.0.0/24",
