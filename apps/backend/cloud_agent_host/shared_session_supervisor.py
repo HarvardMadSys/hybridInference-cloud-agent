@@ -4025,17 +4025,23 @@ class SharedChatSessionSupervisor:
                     raise SessionLeaseLost("sandbox archive identity changed")
                 if group.archive_request_id not in (None, request_id):
                     raise SessionLeaseLost("sandbox archive request is stale")
-                self._require_deletion_lifecycle_admission(group)
-                if group.archive_request_id is None:
-                    self._require_mutation_admission(group)
-                if group.archive_request_id is None and not self._is_quiescent(group):
-                    raise SessionBusy("sandbox deletion requires an idle group")
-                group.archive_request_id = request_id
-                group.stopping = True
-                group.idle_deadline = None
             current = self._manager.inspect(spec.container_name)
             if current is not None:
+                if group is not None:
+                    self._require_deletion_lifecycle_admission(group)
+                    if group.archive_request_id is None:
+                        self._require_mutation_admission(group)
+                    if group.archive_request_id is None and not self._is_quiescent(group):
+                        raise SessionBusy("sandbox deletion requires an idle group")
+                    group.archive_request_id = request_id
+                    group.stopping = True
+                    group.idle_deadline = None
                 self._manager.remove_stopped_archived(spec, container_id=container_id)
+            # Removal may have succeeded before its response failed. A status
+            # read can then mark the group lost while the durable receipt is
+            # still pending. Complete that request only after proving both the
+            # stable name and exact original absent; lifecycle admission guards
+            # are still required whenever a container remains to be removed.
             if self._manager.inspect(container_id) is not None:
                 raise RetainedChatLost("archived sandbox identity changed during deletion")
             if group is not None:

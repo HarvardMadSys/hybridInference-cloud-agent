@@ -167,6 +167,64 @@ def test_discard_refuses_a_request_that_already_prepared_an_archive(archive_setu
     assert manager.exports == 1
 
 
+@pytest.mark.parametrize("discard", [False, True])
+@pytest.mark.parametrize("remaining", ["absent", "replacement", "renamed", "unavailable"])
+def test_deletion_retry_checks_absence_after_status_marks_container_lost(
+    archive_setup, monkeypatch, discard, remaining
+):
+    manager, supervisor, service, identity, _spec, _members = archive_setup
+    original = manager.current
+    if discard:
+        identity = replace(identity, request_id="discard-1", archive_key="")
+
+        def delete():
+            return service.discard(identity)
+
+    else:
+        receipt = service.prepare(identity)
+        _upload(service, identity, receipt, monkeypatch)
+
+        def delete():
+            return service.commit(
+                identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"]
+            )
+
+    remove = manager.remove_stopped_archived
+
+    def lost_removal_response(spec, *, container_id):
+        remove(spec, container_id=container_id)
+        raise SandboxError("Docker removal response was lost")
+
+    monkeypatch.setattr(manager, "remove_stopped_archived", lost_removal_response)
+    with pytest.raises(SandboxError, match="response was lost"):
+        delete()
+    assert manager.current is None
+    with pytest.raises(SandboxError, match="container is missing"):
+        supervisor.list_for_thread(identity.thread_id)
+
+    if remaining == "replacement":
+        manager.current = replace(original, container_id="replacement")
+    elif remaining == "renamed":
+        manager.current = replace(original, name="renamed-original")
+    elif remaining == "unavailable":
+
+        def unavailable(_container):
+            raise SandboxError("Docker inspection unavailable")
+
+        monkeypatch.setattr(manager, "inspect", unavailable)
+
+    if remaining == "absent":
+        assert delete()["deleted"] is True
+        assert not supervisor.owns("thread-origin")
+        assert not supervisor.owns("thread-peer")
+    else:
+        with pytest.raises(SandboxError):
+            delete()
+        assert supervisor.owns("thread-origin")
+        assert supervisor.owns("thread-peer")
+    assert manager.removals == 1
+
+
 def test_complete_native_backup_keeps_container_until_verified_commit(archive_setup, monkeypatch):
     manager, supervisor, service, identity, spec, members = archive_setup
     receipt = service.prepare(identity)
