@@ -178,9 +178,14 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   neither that entry nor a host credential-substitution relay is required.
   See the [decision and remaining boundaries](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
 - Long-lived account and service credentials never enter the sandbox. Each
-  member receives its own scoped inference and MCP credentials; sibling
-  members cannot read or reuse them. Spend remains governed by the gateway's
-  per-user quota. The runner also injects a separate short-lived GitHub App
+  member receives its own scoped inference and MCP credentials, which a
+  sibling member cannot read: members have distinct UIDs, private provider
+  homes and tmpfs, and no credential is passed as a process argument. That
+  stops reading, not writing: siblings share one writable workspace, `.git`
+  included, so code a member plants there — a Git hook or `core.fsmonitor`,
+  a build or test script — runs with the credentials of whichever member
+  executes it next. Spend remains governed by the gateway's per-user quota.
+  The runner also injects a separate short-lived GitHub App
   token as `GH_TOKEN` in the owning member's environment, restricted to
   `contents: write` and `pull_requests: write` on the job's repository. Account
   tokens, refresh tokens, and the App's private key remain outside. Direct

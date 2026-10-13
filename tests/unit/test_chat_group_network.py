@@ -569,6 +569,40 @@ def test_a_relay_rollout_swaps_the_endpoint_and_the_host_exception(monkeypatch):
     assert (old_ip, 8080) not in guard.relays[bridge] or old_ip == new_ip
 
 
+def test_one_relay_serving_both_services_gets_an_exception_for_each_port(monkeypatch):
+    """The configuration accepts one relay name for both services; so must the rules.
+
+    Keyed by name, the second port replaced the first, the in-guest check then
+    found the gateway port refused, and every wake of every group failed.
+    """
+    config = network_from_env(
+        {
+            "AGENT_SANDBOX_NAMESPACE": _NAMESPACE,
+            "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
+            "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
+            "AGENT_RELAY_NETWORK": "agent-relays",
+            "AGENT_GATEWAY_URL": "http://agent-relay:8080",
+            "AGENT_SANDBOX_MCP_URL": "http://agent-relay:8001",
+        }
+    )
+    backend = ContainerBackend(image="img", sandbox_network=config, sandbox_namespace=_NAMESPACE)
+    guard = FakeGuard()
+    backend._network_guard = guard  # type: ignore[assignment]
+    manager = ChatSandboxManager(backend)
+    docker = FakeDocker(config)
+    monkeypatch.setattr(manager, "_run", docker)
+    docker.add_container("relay-both", running=True)
+    docker.connect(docker.network("agent-relays")["Id"], "relay-both", ["agent-relay"])
+
+    name = manager._ensure_group_network(_spec())
+
+    address = docker.network(name)["endpoints"]["relay-both"]["ip"]
+    assert guard.relays[manager._network().bridge_name(name)] == {
+        (address, 8080),
+        (address, 8001),
+    }
+
+
 def test_relay_owners_are_read_in_one_inspect_and_must_be_unambiguous(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     assert manager._relay_owners() == {
@@ -694,6 +728,78 @@ def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(mon
     assert failed.value.inspection.container_id == "sandbox-container"
     assert docker.containers["sandbox-container"]["running"] is False
     assert docker.network(manager.network_for(spec)) is None
+
+
+def _check_that_times_out_once(monkeypatch, manager) -> list[str]:
+    """The in-guest check raises the first time it runs and passes after that."""
+    checks: list[str] = []
+
+    def capture(_spec, argv, **_kwargs):
+        checks.append(argv[3])
+        if len(checks) == 1:
+            raise SandboxError("chat sandbox exec failed: timed out after 45 seconds")
+        return subprocess.CompletedProcess(argv, 0, b"[]", b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture)
+    return checks
+
+
+def test_a_start_that_fails_before_its_check_passes_stops_its_guest(monkeypatch):
+    """No guest is left running unproven, so the next wake is a cold, checked one.
+
+    A check that raises (here, its exec timing out) used to leave the started
+    guest running; the next activation then took the reuse path, which never
+    ran the check, and repository code ran in a guest nothing had proved.
+    """
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    checks = _check_that_times_out_once(monkeypatch, manager)
+
+    with pytest.raises(RetainedChatFailStopped, match="timed out") as failed:
+        manager.start(spec)
+    assert failed.value.inspection.running is False
+    assert docker.containers["sandbox-container"]["running"] is False
+    assert docker.network(manager.network_for(spec)) is None
+
+    started = manager.start(spec)
+
+    assert started.running is True
+    assert checks == [_GUEST_NETWORK_CHECK, _GUEST_NETWORK_CHECK]
+
+
+def test_a_guest_that_could_not_be_stopped_is_proved_before_it_is_reused(monkeypatch):
+    """If the stop after a failed check fails too, the running guest stays unproven."""
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    checks = _check_that_times_out_once(monkeypatch, manager)
+    refuse_stop = True
+
+    def run(argv, **kwargs):
+        if refuse_stop and argv[1] == "stop":
+            return subprocess.CompletedProcess(argv, 1, "", "daemon busy")
+        return docker(argv, **kwargs)
+
+    monkeypatch.setattr(manager, "_run", run)
+
+    with pytest.raises(SandboxError, match="timed out") as failed:
+        manager.start(spec)
+    assert not isinstance(failed.value, RetainedChatFailStopped)
+    assert docker.containers["sandbox-container"]["running"] is True
+    # Nothing runs in it meanwhile: commands are refused until it is proved.
+    with pytest.raises(SandboxError, match="without passing its network check"):
+        manager.require_network(spec)
+
+    refuse_stop = False
+    reused = manager.start(spec)
+
+    assert reused.running is True
+    assert checks == [_GUEST_NETWORK_CHECK, _GUEST_NETWORK_CHECK]
+    manager.require_network(spec)
+    # Once proved, reuse is the ordinary cheap path again.
+    manager.start(spec)
+    assert len(checks) == 2
 
 
 def test_the_guest_check_expects_the_resolver_each_runtime_really_uses(monkeypatch):

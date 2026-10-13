@@ -34,6 +34,7 @@ from cloud_agent.storage._sql.goals import (
     SPENT_ROUNDS_SQL,
 )
 from cloud_agent.storage._sql.rows import thread_goal
+from cloud_agent.storage.repositories.goal_wakeups import _insert as _insert_wakeup
 
 if TYPE_CHECKING:
     import asyncpg
@@ -718,21 +719,11 @@ async def _arm(
     trigger_ref: str,
     waiting_job_id: str | None = None,
 ) -> str | None:
-    """Insert one scheduling obligation, or nothing when it already exists."""
-    return await conn.fetchval(
-        """
-        INSERT INTO agent_goal_wakeups
-            (id, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (thread_id, trigger, trigger_ref) WHERE state = 'pending'
-        DO NOTHING
-        RETURNING id
-        """,
-        uuid.uuid4().hex,
-        thread_id,
-        goal_id,
-        revision,
-        trigger,
-        trigger_ref,
-        waiting_job_id,
+    """Insert one scheduling obligation, or nothing when it already exists.
+
+    Through the wakeup queue's own INSERT, so the obligation a goal write arms
+    and the one the queue arms cannot drift apart.
+    """
+    return await _insert_wakeup(
+        conn, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id
     )

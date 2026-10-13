@@ -383,6 +383,109 @@ _DOCKER_CLIENT_ENV_PREFIXES = (
 )
 _PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY"})
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+#: Where retained chat state lives: only ever the container's writable layer.
+_CHAT_STATE_ROOTS = (CHAT_WORKDIR, CHAT_STATE_DIR)
+# ``AGENT_SANDBOX_EXTRA_ARGS`` follow the platform's own ``docker create``
+# flags, so a later spelling would win. These would undo what those flags
+# establish: the chat's identity and restart behaviour, a secret-free
+# environment, state in the writable layer, the unprivileged user and its
+# security profile, the one guarded network and resolver, or the limits.
+_REFUSED_EXTRA_ARGS = frozenset(
+    {
+        "--rm",
+        "--name",
+        "--label",
+        "--label-file",
+        "--restart",
+        "--entrypoint",
+        "--init",
+        "--env",
+        "--env-file",
+        "--mount",
+        "--volume",
+        "--volumes-from",
+        "--tmpfs",
+        "--storage-opt",
+        "--read-only",
+        "--user",
+        "--group-add",
+        "--privileged",
+        "--cap-add",
+        "--security-opt",
+        "--runtime",
+        "--userns",
+        "--cgroupns",
+        "--cgroup-parent",
+        "--sysctl",
+        "--device",
+        "--device-cgroup-rule",
+        "--gpus",
+        "--pid",
+        "--ipc",
+        "--uts",
+        "--network",
+        "--network-alias",
+        "--link",
+        "--ip",
+        "--ip6",
+        "--mac-address",
+        "--dns",
+        "--add-host",
+        "--publish",
+        "--publish-all",
+        "--memory",
+        "--memory-swap",
+        "--memory-reservation",
+        "--kernel-memory",
+        "--oom-kill-disable",
+        "--cpus",
+        "--cpu-period",
+        "--cpu-quota",
+        "--cpu-shares",
+        "--cpu-rt-period",
+        "--cpu-rt-runtime",
+        "--pids-limit",
+    }
+)
+# Docker's short flags, as the long options they spell, and the hidden aliases
+# it still accepts. A short flag that takes a value ends a combined group such
+# as ``-itu0``: the rest of the token is that value.
+_EXTRA_ARG_SHORT_FLAGS = {
+    "a": "--attach",
+    "c": "--cpu-shares",
+    "e": "--env",
+    "h": "--hostname",
+    "i": "--interactive",
+    "l": "--label",
+    "m": "--memory",
+    "p": "--publish",
+    "P": "--publish-all",
+    "t": "--tty",
+    "u": "--user",
+    "v": "--volume",
+    "w": "--workdir",
+}
+_EXTRA_ARG_SHORT_SWITCHES = frozenset("iPt")
+_EXTRA_ARG_ALIASES = {"--net": "--network", "--net-alias": "--network-alias"}
+
+
+def _extra_arg_options(token: str) -> list[str]:
+    """Name the options one extra-argument token sets, as Docker reads it.
+
+    A token that is not an option -- the value of the one before it -- sets
+    none.
+    """
+    if token.startswith("--"):
+        option = token.split("=", 1)[0]
+        return [_EXTRA_ARG_ALIASES.get(option, option)]
+    if not token.startswith("-") or token == "-":
+        return []
+    options: list[str] = []
+    for letter in token[1:]:
+        options.append(_EXTRA_ARG_SHORT_FLAGS.get(letter, f"-{letter}"))
+        if letter not in _EXTRA_ARG_SHORT_SWITCHES:
+            break
+    return options
 
 
 def _exec_env_by_name(key: str) -> bool:
@@ -609,6 +712,9 @@ class ChatSandboxInspection:
     networks: tuple[str, ...]
     network_ids: tuple[tuple[str, str], ...] = ()
     sandbox_runtime: str = ""
+    #: ``--tmpfs`` destinations, which Docker lists in ``HostConfig`` rather
+    #: than with the other mounts.
+    tmpfs: tuple[str, ...] = ()
 
 
 @dataclass
@@ -657,6 +763,12 @@ class ChatSandboxManager:
         # broker-wide critical section per manager.
         self._guest_observer_lock = threading.RLock()
         self._guest_observer_active: dict[str, dict[int, int]] = {}
+        # Containers this manager ran ``docker start`` on that have not since
+        # passed the in-guest network check. A start that fails in between
+        # stops its guest; if even that fails, the next activation finds the
+        # guest running and must prove it before reusing it.
+        self._unproven_guests: set[str] = set()
+        self._unproven_guests_lock = threading.Lock()
 
     # ── the group network ──────────────────────────────────────────────
     #
@@ -1218,14 +1330,21 @@ class ChatSandboxManager:
         return set(owners)
 
     def _sync_relay_exceptions(self, network: str, addresses: dict[str, str] | None = None) -> None:
-        """Make the host's relay exceptions for one bridge match its relays."""
+        """Make the host's relay exceptions for one bridge match its relays.
+
+        One exception per configured endpoint, not per relay name: a single
+        relay may serve both the gateway and the MCP port.
+        """
         config = self._network()
-        ports = {relay.host: relay.port for relay in config.relays}
         if addresses is None:
             addresses = self.relay_addresses(network)
         self.backend.network_guard().sync_relays(
             config.bridge_name(network),
-            {(address, ports[alias]) for alias, address in addresses.items()},
+            {
+                (addresses[relay.host], relay.port)
+                for relay in config.relays
+                if relay.host in addresses
+            },
         )
 
     def _drop_relay_exceptions(self, network_name: str) -> None:
@@ -2274,6 +2393,9 @@ class ChatSandboxManager:
                     )
                 ),
                 sandbox_runtime=str((raw.get("HostConfig") or {}).get("Runtime") or ""),
+                tmpfs=tuple(
+                    sorted(str(path) for path in (raw.get("HostConfig") or {}).get("Tmpfs") or {})
+                ),
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
@@ -2352,7 +2474,9 @@ class ChatSandboxManager:
 
         A cold start is also where the network is proved from inside: nothing
         from the repository runs in a guest that has not passed
-        :meth:`_verify_guest_network`.
+        :meth:`_verify_guest_network`. A start that fails after ``docker
+        start`` stops its guest again; a running guest whose proof never
+        finished is proved before it is reused.
         """
         current = self._require(spec)
         exact_container_id = expected_container_id or current.container_id
@@ -2366,6 +2490,19 @@ class ChatSandboxManager:
         if current.running:
             if facts is not None:
                 facts.note("reuse")
+            with self._unproven_guests_lock:
+                unproven = exact_container_id in self._unproven_guests
+            if unproven:
+                # A start of this exact container failed before its in-guest
+                # check and could not stop it either. Nothing has run in it
+                # since; prove it now, or stop it.
+                return self._prove_started_guest(
+                    spec,
+                    exact_container_id,
+                    observer=observer,
+                    defer_network_release=defer_network_release_on_fail_stop,
+                    addresses=network_snapshot.addresses,
+                )
             with substage(observer, "guest_network_sync"):
                 self._sync_kata_guest_network(spec, current, network_snapshot.addresses)
             return current
@@ -2378,6 +2515,11 @@ class ChatSandboxManager:
             # after the exact object has been re-inspected and proven stopped,
             # immediately before this method performs the Docker transition.
             before_stopped_start(current)
+        # Recorded before the Docker transition, and cleared only by a passed
+        # check: a start Docker completes after its client gave up is
+        # unproven too.
+        with self._unproven_guests_lock:
+            self._unproven_guests.add(exact_container_id)
         with substage(observer, "container_start"):
             result = self._run(
                 [self.backend.docker_binary, "start", current.container_id], timeout=120
@@ -2386,23 +2528,76 @@ class ChatSandboxManager:
             facts.note("start")
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be started: " + result.stderr.strip()[:300])
-        started = self._require(spec)
-        if started.container_id != exact_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during start")
-        if not started.running or started.status is not ChatSandboxStatus.RUNNING:
-            raise SandboxError(
-                f"chat sandbox started into unexpected state {started.status.value!r}"
-            )
-        with substage(observer, "guest_network_sync"):
-            self._sync_kata_guest_network(spec, started)
-        with substage(observer, "guest_network_check"):
-            self._verify_guest_network(
-                spec,
-                expected_container_id=exact_container_id,
-                defer_network_release=defer_network_release_on_fail_stop,
-            )
+        return self._prove_started_guest(
+            spec,
+            exact_container_id,
+            observer=observer,
+            defer_network_release=defer_network_release_on_fail_stop,
+        )
+
+    def _prove_started_guest(
+        self,
+        spec: ChatSandboxSpec,
+        container_id: str,
+        *,
+        observer: StageObserver | None,
+        defer_network_release: bool,
+        addresses: dict[str, str] | None = None,
+    ) -> ChatSandboxInspection:
+        """Sync and prove a guest Docker has started, or stop it trying.
+
+        Any failure on the way -- a relay rollout, a guest helper timing out,
+        the check itself not answering -- stops the exact container, keeping
+        its bridge when ``defer_network_release``, and raises
+        :class:`RetainedChatFailStopped`, as a failed check does. If the stop
+        fails too, the original error is raised and the guest stays recorded
+        as unproven, so :meth:`start` proves it before any reuse.
+        """
+        try:
+            started = self._require(spec)
+            if started.container_id != container_id:
+                raise RetainedChatLost("chat sandbox container identity changed during start")
+            if not started.running or started.status is not ChatSandboxStatus.RUNNING:
+                raise SandboxError(
+                    f"chat sandbox started into unexpected state {started.status.value!r}"
+                )
+            with substage(observer, "guest_network_sync"):
+                self._sync_kata_guest_network(spec, started, addresses)
+            with substage(observer, "guest_network_check"):
+                self._verify_guest_network(
+                    spec,
+                    expected_container_id=container_id,
+                    defer_network_release=defer_network_release,
+                )
+        except RetainedChatFailStopped:
+            raise
+        except Exception as exc:
+            stopped: ChatSandboxInspection | None = None
+            try:
+                stopped = self.stop(
+                    spec,
+                    expected_container_id=container_id,
+                    release_networks=not defer_network_release,
+                )
+            except Exception as stop_exc:
+                logger.warning(
+                    "chat_unproven_guest_left_running",
+                    extra={
+                        "sandbox_id": spec.sandbox_id,
+                        "detail": str(exc)[:300],
+                        "stop_detail": str(stop_exc)[:300],
+                    },
+                )
+            if stopped is None:
+                raise
+            raise RetainedChatFailStopped(
+                f"chat sandbox stopped before its network check passed: {exc}",
+                stopped,
+            ) from exc
+        with self._unproven_guests_lock:
+            self._unproven_guests.discard(container_id)
         verified = self._require(spec)
-        if verified.container_id != exact_container_id:
+        if verified.container_id != container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
         return verified
 
@@ -2486,6 +2681,8 @@ class ChatSandboxManager:
         turn's commands once its last proof is a minute old, so it is cheap: the
         guard's last verification is reused for a minute, and the relays and
         their host exceptions are reconciled against what Docker reports now.
+        A guest whose in-guest check never passed is refused until
+        :meth:`start` proves it.
         """
         snapshot = _GroupNetworkSnapshot()
         with substage(observer, "network_ensure"):
@@ -2495,6 +2692,13 @@ class ChatSandboxManager:
             raise SandboxError(
                 f"retained chat network is {list(current.networks)!r}, not its group "
                 f"bridge {expected!r}"
+            )
+        with self._unproven_guests_lock:
+            unproven = current.container_id in self._unproven_guests
+        if unproven:
+            raise SandboxError(
+                "retained chat started without passing its network check; it must be "
+                "activated again before anything runs in it"
             )
         with substage(observer, "guest_network_sync"):
             self._sync_kata_guest_network(spec, current, snapshot.addresses)
@@ -5102,16 +5306,24 @@ finally:
 
     @staticmethod
     def _verify_mounts(inspection: ChatSandboxInspection) -> None:
-        """Chat state must be in the writable layer, never a host/volume mount."""
-        for mount in inspection.mounts:
-            mount_type = str(mount.get("Type") or "")
-            destination = str(mount.get("Destination") or "")
+        """Chat state must be in the writable layer, never a host/volume mount.
+
+        Nor a tmpfs: one over the workspace or the agent state would empty it
+        at every stop without an error anywhere.
+        """
+        mounted = [
+            (str(mount.get("Type") or ""), str(mount.get("Destination") or ""))
+            for mount in inspection.mounts
+        ]
+        mounted += [("tmpfs", destination) for destination in inspection.tmpfs]
+        for mount_type, destination in mounted:
             if mount_type in {"bind", "volume"}:
                 raise SandboxError(
                     f"retained chat sandbox has forbidden {mount_type} mount at "
                     f"{destination or '<unknown>'}"
                 )
-            if destination in {CHAT_WORKDIR, CHAT_STATE_DIR}:
+            path = destination.rstrip("/")
+            if any(path == root or path.startswith(f"{root}/") for root in _CHAT_STATE_ROOTS):
                 raise SandboxError(
                     f"retained chat state path {destination!r} is mounted, not Docker-layer owned"
                 )
@@ -5151,47 +5363,19 @@ finally:
             )
 
     def _validate_extra_args(self) -> None:
-        """Reject options that would defeat retained ownership or secret rules."""
-        refused = {
-            "--rm",
-            "--name",
-            "--label",
-            "--mount",
-            "--volume",
-            "-v",
-            "--volumes-from",
-            "--env",
-            "-e",
-            "--env-file",
-            "--entrypoint",
-            "--user",
-            "--network",
-            "--privileged",
-            "--cap-add",
-            "--device",
-            "--pid",
-            "--ipc",
-            "--uts",
-            "--memory",
-            "-m",
-            "--memory-swap",
-            "--memory-reservation",
-            "--cpus",
-            "--cpu-period",
-            "--cpu-quota",
-            "--cpu-shares",
-            "-c",
-            "--storage-opt",
-        }
+        """Reject options that would defeat retained ownership, secret or isolation rules.
+
+        Options are read the way Docker reads them: a long option with or
+        without ``=value`` or through a hidden alias, a short flag alone or
+        inside a combined group. Only the option is named in the refusal,
+        never its value, which may be a secret.
+        """
         for token in self.backend.extra_args:
-            option = token.split("=", 1)[0]
-            short_override = not token.startswith("--") and any(
-                token.startswith(short) for short in ("-m", "-c", "-e", "-v")
-            )
-            if option in refused or short_override:
-                raise SandboxError(
-                    f"AGENT_SANDBOX_EXTRA_ARGS option {option!r} is unsafe for retained chats"
-                )
+            for option in _extra_arg_options(token):
+                if option in _REFUSED_EXTRA_ARGS:
+                    raise SandboxError(
+                        f"AGENT_SANDBOX_EXTRA_ARGS option {option!r} is unsafe for retained chats"
+                    )
 
     @staticmethod
     def _validate_container_path(path: str) -> None:

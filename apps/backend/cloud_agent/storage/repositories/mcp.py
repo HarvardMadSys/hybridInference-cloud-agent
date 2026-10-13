@@ -1254,21 +1254,6 @@ class PostgresMcpConnectionRepository:
                     bool(binding.get("selection_pending", False)),
                 )
 
-    async def bump_mcp_binding_policy_revision(self, *, thread_id: str, connection_id: int) -> int:
-        """Move a binding's policy revision, invalidating held approvals."""
-        async with self._pool.acquire() as conn:
-            revision = await conn.fetchval(
-                """
-                UPDATE agent_mcp_thread_bindings
-                SET policy_revision = nextval('agent_mcp_policy_revision_seq'), updated_at = NOW()
-                WHERE thread_id = $1 AND connection_id = $2
-                RETURNING policy_revision
-                """,
-                thread_id,
-                connection_id,
-            )
-        return int(revision or 0)
-
     async def create_mcp_invocation(
         self,
         *,
@@ -1666,16 +1651,6 @@ class PostgresMcpConnectionRepository:
                 UPDATE agent_mcp_invocations AS calls SET {self._EXPIRED}
                 FROM expired WHERE calls.id = expired.id RETURNING calls.id
                 """
-            )
-        return len(rows)
-
-    async def cancel_mcp_invocations_for_attempt(self, *, attempt_id: int) -> int:
-        """Expire a superseded attempt's undecided calls."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"UPDATE agent_mcp_invocations SET {self._EXPIRED} "
-                "WHERE attempt_id = $1 AND status IN ('pending', 'approved') RETURNING id",
-                attempt_id,
             )
         return len(rows)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import os
@@ -55,6 +56,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverSnapshot,
     GuestObserverStatus,
 )
+from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime, registered_runtimes
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError, SandboxSpec
 
 
@@ -840,6 +842,123 @@ def test_extra_args_cannot_override_the_configured_resource_limits(args):
         manager.build_create_command(_spec())
 
 
+@pytest.mark.parametrize(
+    ("args", "option"),
+    [
+        # Short and combined spellings of a refused long option.
+        (["-u", "0"], "--user"),
+        (["-u0"], "--user"),
+        (["-itu0"], "--user"),
+        (["-lorg.freeinference.chat-namespace=other"], "--label"),
+        (["-p", "8080:80"], "--publish"),
+        (["-P"], "--publish-all"),
+        # Docker's hidden alias.
+        (["--net", "host"], "--network"),
+        (["--net=host"], "--network"),
+        # Options that undo the profile, the state, the network or a limit.
+        (["--security-opt", "seccomp=unconfined"], "--security-opt"),
+        (["--security-opt=no-new-privileges=false"], "--security-opt"),
+        (["--tmpfs", "/workspace"], "--tmpfs"),
+        (["--read-only"], "--read-only"),
+        (["--runtime", "runc"], "--runtime"),
+        (["--userns=host"], "--userns"),
+        (["--cgroupns=host"], "--cgroupns"),
+        (["--sysctl", "net.ipv4.ip_forward=1"], "--sysctl"),
+        (["--group-add", "0"], "--group-add"),
+        (["--init=false"], "--init"),
+        (["--restart", "always"], "--restart"),
+        (["--label-file", "/etc/labels"], "--label-file"),
+        (["--dns", "8.8.8.8"], "--dns"),
+        (["--add-host", "agent-gateway:203.0.113.9"], "--add-host"),
+        (["--pids-limit", "-1"], "--pids-limit"),
+    ],
+)
+def test_extra_args_are_refused_in_every_spelling_docker_accepts(args, option):
+    """The arguments follow the platform's own, so whichever spelling came last would win."""
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=args))
+
+    with pytest.raises(SandboxError, match="unsafe for retained chats") as refused:
+        manager.build_create_command(_spec())
+    assert repr(option) in str(refused.value)
+
+
+def test_a_refused_extra_arg_is_named_without_its_value():
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=["-vsecret-host-dir:/x"]))
+
+    with pytest.raises(SandboxError, match="'--volume'") as refused:
+        manager.build_create_command(_spec())
+    assert "secret-host-dir" not in str(refused.value)
+
+
+def test_extra_args_that_only_tune_the_container_still_apply():
+    args = [
+        "--ulimit",
+        "nofile=1024:2048",
+        "--log-opt",
+        "max-size=10m",
+        "--shm-size=256m",
+        "--device-write-bps",
+        "/dev/sda:50mb",
+        "--blkio-weight",
+        "300",
+        "--oom-score-adj",
+        "-500",
+    ]
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=args))
+
+    command = manager.build_create_command(_spec())
+
+    entrypoint = command.index("--entrypoint")
+    assert command[entrypoint - len(args) : entrypoint] == args
+
+
+@pytest.mark.parametrize(
+    ("tmpfs", "mounts"),
+    [
+        ({CHAT_WORKDIR: "rw"}, []),
+        ({f"{CHAT_STATE_DIR}/": "rw"}, []),
+        ({}, [{"Type": "tmpfs", "Destination": f"{CHAT_WORKDIR}/node_modules"}]),
+    ],
+)
+def test_inspect_rejects_a_tmpfs_over_chat_state(monkeypatch, tmpfs, mounts):
+    """Docker lists ``--tmpfs`` in HostConfig, not Mounts; either one empties the state."""
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = json.loads(_inspect_payload(spec, mounts=mounts))
+    payload[0]["HostConfig"]["Tmpfs"] = {f"{ACTIVATION_TMPFS}": "rw,noexec", **tmpfs}
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    with pytest.raises(SandboxError, match="not Docker-layer owned"):
+        manager.inspect(spec.container_name)
+
+
+def test_inspect_accepts_the_platforms_own_tmpfs_mounts(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = json.loads(_inspect_payload(spec))
+    payload[0]["HostConfig"]["Tmpfs"] = {
+        ACTIVATION_TMPFS: "rw,noexec",
+        f"{MEMBER_TMPFS_ROOT}/0": "rw,noexec",
+        GUEST_OBSERVER_ROOT: "rw,noexec",
+    }
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    inspection = manager.inspect(spec.container_name)
+
+    assert inspection is not None
+    assert ACTIVATION_TMPFS in inspection.tmpfs
+
+
 def test_create_refuses_an_image_override_that_would_make_the_pin_a_lie():
     manager = ChatSandboxManager(ContainerBackend(image="registry/agent:latest"))
 
@@ -1305,6 +1424,83 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
     assert 'exec "$@"' in wrapper
     assert "shift 20" not in wrapper
     assert command[-4:] == [pidfile, "claude", "--model", "local-demo-model"]
+
+
+@pytest.mark.parametrize("name", registered_runtimes())
+def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypatch, name):
+    """Each runtime's live grant and MCP token stay off the resident client's argv.
+
+    A resident exec lives for the whole residency, and every host user can read
+    its argv. This drives each runtime's real live environment through
+    ``spawn``, so a credential handed over under a name the Docker client reads
+    for itself, which therefore still travels by value, fails here.
+    """
+    grant, token = "agr.grant-sentinel", "mcp-token-sentinel"
+    runtime = get_runtime(name)
+    arguments = {
+        "workdir": CHAT_WORKDIR,
+        "model": "glm-5.1",
+        "gateway_base_url": "http://agent-gateway:8080",
+        "credential": grant,
+        "provides_isolation": True,
+        "mcp_config": RuntimeMCPConfig(
+            server_ids=("server",), base_url="http://agent-mcp:8000", credential=token
+        ),
+        "session_state_dir": CHAT_STATE_DIR,
+        "activation_dir": f"{ACTIVATION_TMPFS}/{name}",
+    }
+    accepted = inspect.signature(runtime.prepare_live).parameters
+    _argv, env = runtime.prepare_live(
+        **{key: value for key, value in arguments.items() if key in accepted}
+    )
+    carrying = {key for key, value in env.items() if grant in value or token in value}
+    assert carrying, f"{name} handed over no credential at all"
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id=name,
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    popen_calls: list[tuple[list[str], dict]] = []
+
+    class Process:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
+    )
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((list(argv), kwargs))
+        return Process()
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+
+    manager.spawn(
+        spec,
+        ["agent-cli"],
+        env=env,
+        live_input=True,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+        process_pidfile=f"{MEMBER_TMPFS_ROOT}/0/resident-{'a' * 32}.pid",
+    )
+
+    command, kwargs = popen_calls[0]
+    assert not any(grant in part or token in part for part in command)
+    for key in carrying:
+        assert command[command.index(key) - 1] == "--env"
+        assert kwargs["env"][key] == env[key]
 
 
 def test_member_permission_normalization_prunes_platform_and_sibling_provider_homes(
@@ -2345,6 +2541,49 @@ def _proving_backend(
 
 def _git_probe() -> SandboxSpec:
     return SandboxSpec(argv=["git", "cat-file", "-e", "HEAD"], workdir=CHAT_WORKDIR)
+
+
+def test_killing_a_bounded_command_signals_only_its_own_process_group(monkeypatch):
+    """A setup script, patch build or owner command shares the group's container.
+
+    Killing it on a timeout or an oversized output must end that command's own
+    process group, found through its receipt: ``docker stop`` would end every
+    sibling member's turn in the same container.
+    """
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    docker: list[list[str]] = []
+    clients: list[SimpleNamespace] = []
+
+    def fake_run(argv, **_kwargs):
+        docker.append(list(argv))
+        if argv[1:3] == ["container", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=payload, stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def fake_popen(argv, **_kwargs):
+        docker.append(list(argv))
+        client = SimpleNamespace(
+            stdin=None, stdout=None, stderr=None, killed=False, poll=lambda: None
+        )
+        client.kill = lambda: setattr(client, "killed", True)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(manager, "require_network", lambda *_args, **_kwargs: None)
+    backend = RetainedChatBackend(manager, spec)
+
+    process = backend.spawn(SandboxSpec(argv=["/bin/sh", "-c", "sleep 30"], workdir=CHAT_WORKDIR))
+    process.kill()
+
+    receipt = next(part for part in docker[1] if part.startswith(f"{ACTIVATION_TMPFS}/command-"))
+    cleanup = docker[-1]
+    assert cleanup[:2] == ["docker", "exec"] and cleanup[-1] == receipt
+    assert not any(argv[1] in {"stop", "kill", "rm", "pause", "restart"} for argv in docker)
+    assert clients[0].killed is True
 
 
 def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkeypatch):
