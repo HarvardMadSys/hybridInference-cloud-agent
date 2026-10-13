@@ -369,8 +369,106 @@ def test_publishes_branch_with_applied_patch(origin):
     assert "patched" not in main_content
 
 
+def test_the_push_credential_stays_out_of_argv_and_git_config(origin, monkeypatch):
+    """Only the environment of the commands that reach the remote carries it.
+
+    In the clone URL, the token was written to the clone's `.git/config` and
+    passed as an argument to every `git-remote-https`, readable in `/proc`.
+    """
+    from pathlib import Path
+
+    from cloud_agent import publisher
+
+    clone_url, base_sha = origin
+    secret = "publish-token-" + "s" * 24
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {secret}",
+    }
+    commands: list[tuple[list[str], bool]] = []
+    real_run = subprocess.run
+
+    def recording_run(args, **kwargs):
+        env = kwargs.get("env") or {}
+        commands.append((list(args), secret in env.get("GIT_CONFIG_VALUE_0", "")))
+        return real_run(args, **kwargs)
+
+    configs: list[str] = []
+    real_rmtree = publisher.shutil.rmtree
+
+    def inspect_then_remove(path, **kwargs):
+        config = Path(path) / "repo" / ".git" / "config"
+        configs.append(config.read_text(encoding="utf-8"))
+        real_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(publisher.subprocess, "run", recording_run)
+    monkeypatch.setattr(publisher.shutil, "rmtree", inspect_then_remove)
+    publish_patch(
+        job_id="ajob_credential",
+        patch=(
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+            "@@ -1,2 +1,3 @@\n def main():\n+    pass\n     return 0\n"
+        ),
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: patch app.py",
+        auth_env=auth_env,
+    )
+
+    assert commands and all(secret not in " ".join(args) for args, _ in commands)
+    assert len(configs) == 1 and secret not in configs[0]
+    assert {args[1] for args, carried in commands if carried} == {"ls-remote", "fetch", "push"}
+    assert _branches(clone_url) == ["agent/ajob_credential", "main"]
+
+
+def test_a_retry_that_adopts_its_pushed_commit_still_authenticates_by_environment(
+    origin, monkeypatch
+):
+    """The reconciling fetch and compare-and-set push reach the remote too."""
+    from cloud_agent import publisher
+
+    clone_url, base_sha = origin
+    secret = "publish-token-" + "r" * 24
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {secret}",
+    }
+    commands: list[tuple[list[str], bool]] = []
+    real_run = subprocess.run
+
+    def recording_run(args, **kwargs):
+        env = kwargs.get("env") or {}
+        commands.append((list(args), secret in env.get("GIT_CONFIG_VALUE_0", "")))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(publisher.subprocess, "run", recording_run)
+    published = [
+        publish_patch(
+            job_id="ajob_credential_retry",
+            branch_id="athr_credential_retry",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message=f"agent: attempt {attempt}",
+            auth_env=auth_env,
+        )
+        for attempt in (1, 2)
+    ]
+
+    assert published[1].commit_sha == published[0].commit_sha
+    remote = [
+        (args, carried) for args, carried in commands if "origin" in args and args[1] != "remote"
+    ]
+    assert remote and all(carried for _, carried in remote)
+    assert all(secret not in " ".join(args) for args, _ in commands)
+    reconciled = {args[1] for args, _ in remote if any(a.startswith("refs/heads/") for a in args)}
+    assert reconciled == {"ls-remote", "fetch", "push"}
+
+
 def test_workflow_patch_is_refused_and_remote_untouched(origin):
-    """A .github/ patch never reaches the remote without human release."""
+    """A .github/ patch never reaches the remote."""
     clone_url, base_sha = origin
     patch = (
         "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
@@ -388,7 +486,7 @@ def test_workflow_patch_is_refused_and_remote_untouched(origin):
             base_sha=base_sha,
             commit_message="agent: sneak a workflow in",
         )
-    assert "human release" in str(excinfo.value)
+    assert "CI/workflow configuration" in str(excinfo.value)
     assert _branches(clone_url) == ["main"]
 
 
@@ -587,6 +685,54 @@ def test_the_post_apply_gate_catches_what_the_parser_would_miss(origin, monkeypa
 
     # And nothing reached the remote.
     assert "agent/ajob_postgate" not in _branches(clone_url)
+
+
+def _gitlink_patch(origin: tuple[str, str], tmp_path: Path) -> str:
+    """A real `git diff` adding `.gitmodules` and a submodule entry."""
+    clone_url, _ = origin
+    editor = tmp_path / "editor"
+    _git(["clone", "--quiet", clone_url, str(editor)], cwd=tmp_path)
+    (editor / ".gitmodules").write_text(
+        '[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = https://example.invalid/lib.git\n',
+        encoding="utf-8",
+    )
+    _git(["add", ".gitmodules"], cwd=editor)
+    _git(["update-index", "--add", "--cacheinfo", f"160000,{'d' * 40},vendor/lib"], cwd=editor)
+    patch = _git(["diff", "--cached", "--binary", "--full-index"], cwd=editor)
+    assert "new file mode 160000" in patch
+    return patch
+
+
+@pytest.mark.parametrize("parser_defeated", [False, True])
+def test_a_submodule_entry_never_reaches_the_remote(origin, tmp_path, monkeypatch, parser_defeated):
+    """A gitlink carries code no gate reads: both passes refuse it, and nothing is pushed.
+
+    `git apply --3way` writes such an entry into the index, so without the
+    post-apply check a parser that missed it pushed a commit whose tree held
+    `160000 commit <sha> vendor/lib`.
+    """
+    from cloud_agent import publisher
+    from cloud_agent_host.patch_gate import PatchGateResult
+
+    clone_url, base_sha = origin
+    patch = _gitlink_patch(origin, tmp_path)
+    if parser_defeated:
+        monkeypatch.setattr(
+            publisher,
+            "validate_patch",
+            lambda *_a, **_k: PatchGateResult(ok=True, changed_files=[".gitmodules"]),
+        )
+
+    with pytest.raises(PublishError, match="submodule entries: vendor/lib") as excinfo:
+        publish_patch(
+            job_id="ajob_gitlink",
+            patch=patch,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: vendor a library",
+        )
+    assert ("after apply" in str(excinfo.value)) is parser_defeated
+    assert _branches(clone_url) == ["main"]
 
 
 def test_the_post_apply_gate_reports_the_real_paths(origin):

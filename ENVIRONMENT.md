@@ -270,7 +270,7 @@ permissions, retention and verification requirements.
 | `AGENT_GITHUB_APP_PRIVATE_KEY_FILE` | existing | Host-side key file mounted read-only by control-plane Compose at `/etc/cloud-agent/github-app.pem`. Default `/dev/null` supplies no key. This differs from the in-container `_PATH` setting. |
 | `AGENT_GITHUB_APP_PRIVATE_KEY` | existing initial import | Inline PEM for a one-time import in deployments that already supply it. Compose does not forward this variable. Set or replace an inline key in Admin Settings, where it is encrypted and never returned to the browser. The mounted `_PATH` form remains available for deployment-managed keys. |
 | `AGENT_GITHUB_APP_INSTALL_URL` | existing | HTTPS GitHub authorization/installation URL used by the Connect GitHub flow. The App, OAuth credentials and this URL must all be configured for user connections. |
-| `AGENT_GITHUB_API` | existing | Defaults to `https://api.github.com`; override for GHE. |
+| `AGENT_GITHUB_API` | existing | Defaults to `https://api.github.com`. Publication pushes to the Git host paired with it (`github.com` for the default, otherwise this URL's own host), so a token goes back only to the host that minted it. GitHub Enterprise Server is not supported: the Connect GitHub flow's OAuth and installation URLs are GitHub.com's. |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` | existing | GitLab.com OAuth application client ID for user connections. |
 | `AGENT_GITLAB_OAUTH_CLIENT_SECRET` | existing | GitLab.com OAuth client secret; store outside Git. |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI` | existing | Public OAuth callback URI registered with GitLab. Must use HTTPS, except for localhost development; update the registration when the deployment URL changes. |

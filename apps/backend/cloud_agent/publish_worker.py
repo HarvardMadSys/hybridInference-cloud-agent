@@ -35,12 +35,14 @@ so an outage cannot block the lineage forever.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -100,6 +102,12 @@ _PUBLISH_HEARTBEAT_INTERVAL_S = 60.0
 # `workflows`, so a patch touching `.github/` cannot be pushed even if both
 # gates were bypassed — the credential itself would refuse.
 _PUBLISH_SCOPE = {"contents": "write", "pull_requests": "write"}
+#: How long the publishing token must still live when a publish starts. A
+#: cached installation token is otherwise served until five minutes before it
+#: expires, and one publish runs several network-bound commands and PR API
+#: calls: a token with minutes left could expire after the branch was pushed,
+#: and the PR call then fails with a 401, which is not retried.
+_PUBLISH_TOKEN_MIN_TTL_S = 1800.0
 
 _HTTP_STATUS_IN_DETAIL = re.compile(r"\((\d{3})\)|returned error:\s*(\d{3})\b")
 _GIT_DISCONNECT = re.compile(
@@ -165,16 +173,45 @@ class GitHubCredential:
 
     ``token`` is expected to be short-lived (a GitHub App installation token,
     which expires in an hour) and scoped to the repositories the user actually
-    installed the app on. It stays in this process: it is used to build the
-    push URL and the API call, and never reaches a sandbox.
+    installed the app on. It stays in this process: it is given to git through
+    the environment and to the API in a header, and never reaches a sandbox.
     """
 
     token: str
     api_base: str = field(default_factory=lambda: setting_env("AGENT_GITHUB_API") or GITHUB_API)
 
+    @property
+    def git_base(self) -> str:
+        """The Git host paired with ``api_base``, which minted the token.
+
+        ``api.github.com`` serves github.com's repositories; any other API URL
+        is answered for by its own host. The token goes back to that host
+        alone: pushing to github.com regardless sent a token another host
+        minted to github.com.
+        """
+        parts = urlsplit(self.api_base)
+        netloc = parts.netloc.rpartition("@")[2]
+        if parts.hostname == "api.github.com":
+            netloc = "github.com"
+        return f"{parts.scheme or 'https'}://{netloc}"
+
     def clone_url(self, repo: str) -> str:
-        """Return an authenticated clone URL for ``owner/name``."""
-        return f"https://x-access-token:{self.token}@github.com/{repo}.git"
+        """Return the credential-free clone URL for ``owner/name``."""
+        return f"{self.git_base}/{repo}.git"
+
+    def git_auth_env(self) -> dict[str, str]:
+        """Carry the token in git's environment, never in its arguments or config.
+
+        ``GIT_CONFIG_COUNT`` sets the header for one command, the way the
+        host's runner fetches. Scoped to the Git host's URL, so a request git
+        makes anywhere else does not carry it.
+        """
+        basic = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
+        return {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"http.{self.git_base}/.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        }
 
 
 async def create_draft_pull_request(
@@ -244,6 +281,11 @@ async def ensure_draft_pull_request(
     Look up the branch even on the first publication: a previous create may
     have reached GitHub before its URL could be recorded locally. Never infer
     that a saved URL still denotes an open PR.
+
+    Looked up by head alone, and refreshed without touching its base: a
+    reviewer who retargets the draft has decided where it merges, and filtering
+    by the job's base made the next snapshot open a second draft beside it.
+    ``base_branch`` is only for a draft this creates.
     """
     headers = _github_headers(credential)
     endpoint = f"{credential.api_base}/repos/{repo}/pulls"
@@ -251,11 +293,7 @@ async def ensure_draft_pull_request(
         response = await client.get(
             endpoint,
             headers=headers,
-            params={
-                "state": "open",
-                "head": f"{repo.split('/')[0]}:{head_branch}",
-                "base": base_branch,
-            },
+            params={"state": "open", "head": f"{repo.split('/')[0]}:{head_branch}"},
         )
         if response.status_code >= 400:
             raise _github_api_error("the PR lookup", response)
@@ -473,6 +511,7 @@ async def _retry_base_import(
                     snapshot["repo"],
                     permissions=_PUBLISH_SCOPE,
                     repository_scoped=True,
+                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
                 )
             )
         if credential is None:
@@ -482,6 +521,7 @@ async def _retry_base_import(
             fetch_base_bundle,
             clone_url=credential.clone_url(snapshot["repo"]),
             commit_sha=commit_sha,
+            auth_env=credential.git_auth_env(),
         )
         return await _import_snapshot_base(
             store,
@@ -689,8 +729,9 @@ async def _publish_claimed(
         )
     finally:
         heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        # Not `suppress(CancelledError)`: that would also swallow a shutdown
+        # cancelling this task while it waits for the heartbeat to stop.
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 async def _publish_claimed_owned(
@@ -764,7 +805,10 @@ async def _publish_claimed_owned(
             # ever do — against a repository the *user* named.
             credential = GitHubCredential(
                 await app_credentials.token_for(
-                    job["repo"], permissions=_PUBLISH_SCOPE, repository_scoped=True
+                    job["repo"],
+                    permissions=_PUBLISH_SCOPE,
+                    repository_scoped=True,
+                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
                 )
             )
         except Exception as exc:
@@ -794,6 +838,7 @@ async def _publish_claimed_owned(
             commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
             allow_workflow_changes=allow_workflow_changes,
             include_base_bundle=True,
+            auth_env=credential.git_auth_env(),
         )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
         pr_url = await ensure_draft_pull_request(
@@ -826,8 +871,9 @@ async def _publish_claimed_owned(
         commit_sha=result.commit_sha,
     )
     if not recorded:
-        # Someone recorded a PR while we worked. The branch we pushed is
-        # harmless (it is the same one), but say so rather than pretend.
+        # The claim was no longer ours: the stalled-publish reaper failed it,
+        # or another publisher settled it. The branch is the same one, but
+        # this PR is recorded nowhere, so say so rather than pretend.
         logger.warning(
             "agent_job_publish_raced",
             extra={"event": "agent_job_publish_raced", "job_id": job_id, "pr_url": pr_url},
