@@ -534,8 +534,8 @@ def history(tmp_path: Path) -> Path:
     return repository
 
 
-SELECTS_NOTHING = {"backend": "false", "web": "false", "docker": "false"}
-SELECTS_EVERYTHING = {"backend": "true", "web": "true", "docker": "true"}
+SELECTS_NOTHING = {"backend": "false", "web": "false", "docker": "false", "docs": "false"}
+SELECTS_EVERYTHING = {"backend": "true", "web": "true", "docker": "true", "docs": "true"}
 
 
 def test_a_push_is_checked_against_the_newest_release_not_the_previous_push(
@@ -561,7 +561,8 @@ def test_a_push_right_after_a_release_keeps_the_path_filter(history: Path) -> No
     released = _commit(history, "apps/backend/cloud_agent/feature.py")
     _release(history, released)
     docs = _commit(history, "docs/feature.md")
-    assert _classify_push(history, docs, before=released) == SELECTS_NOTHING
+    # A Markdown change builds the documentation site and nothing else.
+    assert _classify_push(history, docs, before=released) == {**SELECTS_NOTHING, "docs": "true"}
 
 
 def test_a_push_with_no_release_behind_it_runs_everything(history: Path) -> None:

@@ -147,6 +147,7 @@ make check
 | `make check` | `format`, `lint`, `typecheck`, then `test`. Review any automatic fixes before committing. |
 | `make test-db` | The PostgreSQL-backed `dbtest` tier. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
+| `make docs` | Build this documentation site into `docs/build/html`; any warning fails. |
 
 ### Run CI locally
 
@@ -350,6 +351,15 @@ Update the guide that owns any changed configuration, command, or behavior:
 | Operation and troubleshooting | [operations.md](operations.md) |
 | Local development stack | [Local-stack guide](../../deploy/local/README.md) |
 | Release artifacts and validation | [Release guide](../../deploy/release/README.md) |
+
+These guides form the developer documentation site, built with Sphinx and MyST
+from `docs/developer/`. Add a new guide there and list it in a table of contents
+in `docs/developer/index.md`. A root-level guide such as `ENVIRONMENT.md` is
+shown through a one-line `{include}` page registered in `INCLUDED_PAGES` in
+`docs/developer/conf.py`. Links to other repository files may stay relative:
+the build points them at GitHub, and fails for a path or heading that does not
+exist. Run `make docs` after changing any Markdown file; CI's Docs Build job
+runs the same target.
 
 Designs, completed migration checklists, and acceptance records document their
 own baseline. Preserve that history and update current-use guides when the

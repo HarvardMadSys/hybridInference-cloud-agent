@@ -894,7 +894,10 @@ def test_the_reference_sshd_policy_is_what_automatic_setup_writes(compose: dict)
     assert key_listens == {reverse[control]}, (
         "the control key line and its account must name the same single listener"
     )
-    assert "deploy/host/sshd-tunnels.conf.example" in (REPO_ROOT / "docs/developer/operations.md").read_text()
+    assert (
+        "deploy/host/sshd-tunnels.conf.example"
+        in (REPO_ROOT / "docs/developer/operations.md").read_text()
+    )
 
 
 def test_no_shipped_doc_or_config_offers_gateway_ports_yes():
