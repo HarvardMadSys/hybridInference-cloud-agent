@@ -32,6 +32,7 @@ from cloud_agent.ports.external.compute_provider import (
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     DeploymentProfile,
+    HostInventory,
     PreflightResult,
 )
 from cloud_agent.schemas_compute import RenewalPolicy
@@ -980,6 +981,84 @@ async def test_a_node_that_never_registers_blocks_instead_of_being_trusted(monke
     assert h.operation["state"] == "blocked"
     assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_expired"
     h.bootstrap.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_missed_registration_reopens_the_same_one(monkeypatch):
+    h = registering(monkeypatch)
+    h.repository.node_registration.return_value = {
+        "registered_at": None,
+        "expired": True,
+        "host_keys": [],
+    }
+    h.repository.reopen_node_registration = AsyncMock(return_value=True)
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_expired"
+    h.repository.reopen_node_registration.assert_not_awaited()
+    # The administrator retries: the node's own token gets another window.
+    await h.reconciler.execute(h.operation)
+    h.repository.reopen_node_registration.assert_awaited_once()
+    reopened = h.repository.reopen_node_registration.await_args.kwargs
+    assert reopened["allocation_id"] == h.allocation["id"]
+    assert (h.operation["state"], h.operation["step"]) == ("waiting", "waiting_for_registration")
+    assert h.operation["result"]["blocked_reasons"] == []
+    # Restarted, the node posts that token; no second experiment or token exists.
+    h.repository.node_registration.return_value = {
+        "registered_at": NOW,
+        "expired": False,
+        "host_keys": [REGISTERED_KEY],
+    }
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    h.provider.acquire.assert_awaited_once()
+    h.repository.create_node_registration.assert_awaited_once()
+    assert h.bootstrap.deploy.await_args.args[0].connection.host_key == REGISTERED_KEY
+
+
+@pytest.mark.asyncio
+async def test_a_node_that_never_registered_is_released_without_an_ssh_scan(monkeypatch):
+    """No Host ever ran there, and without a pinned key it cannot be reached."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    # The adapter echoes the full validated configuration in each observation.
+    ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
+    h.allocation["configuration"] = ref.config
+    h.provider.inspect.return_value = observed().model_copy(update={"ref": ref})
+    h.allocation["hosts"] = []
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("succeeded", "released")
+    h.bootstrap.inventory.assert_not_awaited()
+    recorded = h.repository.record_inventory.await_args.kwargs
+    assert recorded["verified_node_ids"] == ["node-id"] and recorded["hosts"] == []
+    h.repository.commit_release.assert_awaited_once()
+    h.provider.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reached", ["pinned_key", "bound_host"])
+async def test_a_registering_node_this_control_plane_reached_is_still_scanned(monkeypatch, reached):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
+    h.allocation["configuration"] = ref.config
+    h.provider.inspect.return_value = observed().model_copy(update={"ref": ref})
+    if reached == "pinned_key":
+        h.allocation["hosts"] = []
+        pinned = SshConnection(
+            address="node.example.org",
+            username="agent",
+            credential_ref="ssh-1",
+            host_key=REGISTERED_KEY,
+        )
+        node = NODE.model_copy(update={"connection": pinned})
+        h.provider.inspect.return_value = observed().model_copy(
+            update={"ref": ref, "nodes": (node,)}
+        )
+    else:
+        h.allocation["hosts"][0]["compute_node_id"] = "node-id"
+    h.bootstrap.inventory.return_value = HostInventory(complete=True)
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    h.bootstrap.inventory.assert_awaited_once()
 
 
 @pytest.mark.asyncio

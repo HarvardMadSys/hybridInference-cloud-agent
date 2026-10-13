@@ -291,8 +291,12 @@ membership.
 If an operation stays at `waiting_for_registration` and ends with
 `registration_expired`, inspect `/var/lib/cloud-agent-node/registration`
 through the CloudLab console and verify that the node can reach the registration
-URL. `registration_unavailable` means no public HTTPS control-plane address
-is configured.
+URL. After fixing the cause, retry the operation: the node's own token gets
+another two hours. Then restart the node from CloudLab so its boot script posts
+the token again; it stops trying after an hour or a refusal. Alternatively,
+release the server: nothing ran on a node that never registered, so its release
+needs no SSH inventory. `registration_unavailable` means no public HTTPS
+control-plane address is configured.
 
 ## Enable legacy file-backed profiles
 

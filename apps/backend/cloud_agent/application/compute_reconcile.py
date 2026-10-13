@@ -628,12 +628,35 @@ class ComputeReconciler:
         pinned = (node.get("connection") or {}).get("host_key")
         if not pinned:
             registration = await self.repository.node_registration(allocation_id=allocation["id"])
+            missed = (
+                registration is not None
+                and not registration.get("registered_at")
+                and registration.get("expired")
+            )
+            retried = any(
+                reason.get("code") == "registration_expired"
+                for reason in operation.get("result", {}).get("blocked_reasons") or []
+            )
+            # An administrator retried after the node missed its window. The
+            # node holds this token from its creation and posts it at every
+            # boot, so the same registration gets another window.
+            if (
+                missed
+                and retried
+                and await self.repository.reopen_node_registration(
+                    allocation_id=allocation["id"],
+                    ttl_seconds=_REGISTRATION_TTL_SECONDS,
+                    **self._fence(operation),
+                )
+            ):
+                registration = {**(registration or {}), "expired": False}
             if registration is None or (
                 not registration.get("registered_at") and registration.get("expired")
             ):
                 raise ProviderError(
                     "registration_expired",
-                    "The node did not register its SSH host keys in time",
+                    "The node did not register its SSH host keys in time. Retry to give it "
+                    "two more hours, then restart the node; or release the server.",
                 )
             if not registration.get("registered_at"):
                 await self._finish(
@@ -641,6 +664,7 @@ class ComputeReconciler:
                     "waiting",
                     "waiting_for_registration",
                     "Waiting for the node to register its SSH host keys.",
+                    result={"blocked_reasons": []},
                     retry=15,
                 )
                 return None
@@ -1050,7 +1074,18 @@ class ComputeReconciler:
                     )
             except WorkspaceBrokerError:
                 continue  # Never infer emptiness; require the full-node scan below.
+        bound = {host.get("compute_node_id") for host in allocation.get("hosts", [])}
         for node in allocation["nodes"]:
+            if (
+                self._registers_host_keys(allocation)
+                and not (node.get("connection") or {}).get("host_key")
+                and node["id"] not in bound
+            ):
+                # This control plane reaches a registering node only through
+                # the key it pinned, and binds a Host only after that. With
+                # neither, nothing of ours ever ran there, and without a
+                # trusted key there is no way to scan it.
+                continue
             proof = await self.bootstrap.inventory(
                 self._node(node), profile, self._bootstrap_intent(operation, allocation, node)
             )

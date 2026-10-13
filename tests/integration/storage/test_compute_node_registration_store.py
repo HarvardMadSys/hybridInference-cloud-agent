@@ -85,6 +85,57 @@ async def test_unknown_expired_and_superseded_tokens_are_all_simply_invalid(stor
     )
 
 
+async def test_a_missed_registration_reopens_for_the_same_token_only(store):
+    """The node holds the token it was created with; only its validity can move."""
+    allocation_id, _, _ = await resource(store, provision=True)
+    repo = store.compute_resources
+    token = await open_registration(store, allocation_id, ttl=0)
+    assert (
+        await repo.complete_node_registration(token_hash=hash_secret(token), host_keys=KEY_A)
+        == "invalid"
+    )
+    op = await operation(repo, allocation_id, kind="acquire")
+    assert await repo.reopen_node_registration(
+        allocation_id=allocation_id, ttl_seconds=3600, **fence(op)
+    )
+    assert (await repo.node_registration(allocation_id=allocation_id))["expired"] is False
+    assert (
+        await repo.complete_node_registration(token_hash=hash_secret(token), host_keys=KEY_A)
+        == "registered"
+    )
+    # A completed registration is never reopened or rewritten.
+    assert not await repo.reopen_node_registration(
+        allocation_id=allocation_id, ttl_seconds=3600, **fence(op)
+    )
+    assert (await repo.node_registration(allocation_id=allocation_id))["host_keys"] == KEY_A
+
+
+async def test_a_superseded_or_retiring_registration_is_not_reopened(store):
+    allocation_id, _, _ = await resource(store, provision=True)
+    repo = store.compute_resources
+    older = await open_registration(store, allocation_id, ttl=0)
+    newer = await open_registration(store, allocation_id, ttl=0)
+    op = await operation(repo, allocation_id, kind="acquire")
+    assert await repo.reopen_node_registration(
+        allocation_id=allocation_id, ttl_seconds=3600, **fence(op)
+    )
+    # Only the newest token came back to life.
+    assert (
+        await repo.complete_node_registration(token_hash=hash_secret(older), host_keys=KEY_A)
+        == "invalid"
+    )
+    assert await repo.finish_operation(**fence(op), state="succeeded", step="done")
+    retire = await operation(repo, allocation_id, kind="retire")
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+    assert not await repo.reopen_node_registration(
+        allocation_id=allocation_id, ttl_seconds=3600, **fence(retire)
+    )
+    assert (
+        await repo.complete_node_registration(token_hash=hash_secret(newer), host_keys=KEY_A)
+        == "invalid"
+    )
+
+
 async def test_a_retiring_allocation_accepts_no_registration(store):
     allocation_id, _, _ = await resource(store, provision=True)
     repo = store.compute_resources
