@@ -808,7 +808,8 @@ export const zhCN: Record<TranslationKey, string> = {
 
   'connect.title': '先连接 GitHub',
   'connect.titleUnavailable': 'GitHub 尚未开放配置',
-  'connect.body': '选择 Agent 可以工作的仓库。凭据不会进入沙箱。',
+  'connect.body':
+    '选择 Agent 可以工作的仓库。你的账号凭据不会进入沙箱；Agent 只会获得当前仓库的短期访问权限。',
   'connect.bodyUnavailable': '请联系管理员为 cloud agent 开通仓库访问。',
   'connect.action': '连接 GitHub',
   'connect.actionUnavailable': '查看集成',

@@ -862,7 +862,7 @@ export const en = {
   'connect.title': 'Connect GitHub to start',
   'connect.titleUnavailable': 'GitHub setup is not available yet',
   'connect.body':
-    'Choose the repositories the agent can work on. Credentials never enter the sandbox.',
+    'Choose the repositories the agent can work on. Your account credentials never enter the sandbox; the agent gets short-lived access to the current repository only.',
   'connect.bodyUnavailable':
     'Contact your administrator to enable repository access for cloud agents.',
   'connect.action': 'Connect GitHub',

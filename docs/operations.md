@@ -301,23 +301,34 @@ POST /v1/agent/jobs           owner queues work
       → native Agent CLI        one live process/session per member chat
       → normalized events       streamed to the owner over SSE
       → model calls             billed through the gateway into api_logs
-    → quiescent group snapshot  immutable diff; the agent never pushes
+      → optional direct push    member's GH_TOKEN; skips the publisher's checks
+    → quiescent group snapshot  immutable diff for the trusted publisher
   → publisher validates         .github/ block, secret scan, path escape, size
     → agent/<origin-chat-id>     one stable branch per workspace group
-      → draft PR                a human reviews before anything merges
+      → draft PR                merges follow the repository's GitHub rules
 ```
+
+The agent can also push and open pull requests itself, and **Watch PR and
+merge** asks it to merge once the PR satisfies its required checks and reviews.
+Branch protection and other GitHub rules on the repository decide what may
+merge without a person.
 
 Keep these credential boundaries intact:
 
-- **No repository credential ever enters the sandbox.** The host captures a
-  quiescent group diff; the control-plane publisher holds the GitHub token that
-  can write. The runner holds
+- **No long-lived repository credential enters the sandbox.** The host
+  captures a quiescent group diff; the control-plane publisher holds the
+  GitHub token it publishes with. The runner holds
   a clone credential, but it is read-only, scoped to the one repository, and
   deliberately never recorded in `.git/config`: the checkout adds no remote,
   the credential travels in git's environment rather than its argv, and the
   runner refuses to start the agent if it finds the token anywhere under
   `.git/`.
-- **The sandbox has two narrow, non-interchangeable credentials.** The
+- **The only repository credential in the sandbox is short-lived.** When the
+  GitHub App is configured, the owning member receives `GH_TOKEN`: an App
+  installation token limited to `contents: write` and `pull_requests: write`
+  on the job's repository, expiring after about one hour. Pushes made with it
+  skip the publisher's patch gate. See [credentials](#2-credentials).
+- **The sandbox also has two narrow, non-interchangeable credentials.** The
   gateway-issued `agr` grant buys inference as the chat owner: it names the
   allowed model, is scoped to one member residency, and is renewed only while
   that exact host/member generation keeps heartbeating. Spend lands against
