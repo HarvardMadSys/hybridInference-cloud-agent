@@ -847,13 +847,16 @@ async def reap_expired_attempts(
     renewal. Cancelling this worker also cancels and joins both tasks,
     including any broker calls they currently own.
     """
-    recovery = asyncio.create_task(
-        _recover_send_now_handoffs(store, interval_seconds=interval_seconds),
-        name="agent-send-now-recovery",
-    )
+    # Created first, so a restarted control plane still replays settled
+    # terminals before anything else, as it did when that replay ran ahead of
+    # the first pass.
     terminals = asyncio.create_task(
         _replay_settled_terminals(store, interval_seconds=interval_seconds),
         name="agent-settled-terminal-replay",
+    )
+    recovery = asyncio.create_task(
+        _recover_send_now_handoffs(store, interval_seconds=interval_seconds),
+        name="agent-send-now-recovery",
     )
     try:
         await _run_attempt_reaper(
