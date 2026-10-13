@@ -1,13 +1,13 @@
 # 可复用云端环境配置验收记录
 
-日期：2026-10-13。对应[设计](2026-10-12-repository-environment-design.zh-CN.md)；本轮实现及验证以 `dev` 的 `a4f4afc4` 为基线，同一个功能 PR 提交全部配置、执行、UI、安全和测试改动。
+日期：2026-10-13。对应[设计](2026-10-12-repository-environment-design.zh-CN.md)；本轮实现及验证以 `dev` 的 `466b4ac7` 为基线，同一个功能 PR 提交全部配置、执行、UI、安全和测试改动。
 
 ## 已运行的质量门禁
 
 | 检查 | 环境及结果 |
 | --- | --- |
 | `make check` | Linux、Python 3.12、Git/C 编译器/zstd；格式、lint、pydocstyle、mypy 通过，9,338 个测试通过、9 个跳过 |
-| `make ci-frontend` | Node.js 22；eslint、prettier、TypeScript、Vitest、server-only 和 runtime-config 全部通过，3,657 个测试通过 |
+| `make ci-frontend` | Node.js 22；eslint、prettier、TypeScript、Vitest、server-only 和 runtime-config 全部通过，3,674 个测试通过 |
 | `make ci-database` | 每次新建 PostgreSQL 15，1,380 个测试通过、0 个跳过 |
 | Docker 实际生命周期验收 | 10 个测试通过，无推理请求、无外部网络请求；见下文 |
 | 仓库检查 | `git diff --check`、提交内容的凭据扫描通过 |
