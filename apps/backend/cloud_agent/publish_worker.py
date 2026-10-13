@@ -149,6 +149,53 @@ def _github_api_error(operation: str, response: httpx.Response) -> PublishError:
     return error(f"GitHub refused {operation} ({response.status_code})")
 
 
+def _duplicate_pull_request_422(response: httpx.Response) -> bool:
+    """Recognize GitHub's specific duplicate-open-PR validation response."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    messages = [payload.get("message")]
+    errors = payload.get("errors")
+    if isinstance(errors, dict):
+        errors = [errors]
+    if isinstance(errors, list):
+        messages.extend(item.get("message") for item in errors if isinstance(item, dict))
+    return any(
+        isinstance(message, str) and "pull request already exists" in message.casefold()
+        for message in messages
+    )
+
+
+def _invalid_pr_request_error(response: httpx.Response) -> PublishError:
+    """Return a safe, actionable diagnostic for a permanent PR validation error."""
+    fields: set[str] = set()
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        errors = payload.get("errors")
+        if isinstance(errors, dict):
+            errors = [errors]
+        if isinstance(errors, list):
+            fields = set()
+            for item in errors:
+                field = item.get("field") if isinstance(item, dict) else None
+                if isinstance(field, str) and field in {"head", "base"}:
+                    fields.add(field)
+    if fields:
+        field = sorted(fields)[0]
+        return PublishError(
+            f"GitHub rejected the draft PR (422): the {field} branch is invalid or unavailable"
+        )
+    return PublishError(
+        "GitHub rejected the draft PR (422): request validation failed; check branch names and PR fields"
+    )
+
+
 def _pr_base_branch(job: dict[str, Any], fallback: str) -> str:
     """The branch this job's PR should target.
 
@@ -251,9 +298,14 @@ async def create_draft_pull_request(
         )
     if response.status_code == 422:
         # An earlier create can have committed while its response was lost,
-        # then remain briefly absent from the lookup. Re-enter the bounded
-        # lookup/create reconciliation instead of terminally failing it.
-        raise TransientPublishError("GitHub refused the draft PR (422); publication will reconcile")
+        # then remain briefly absent from the lookup. Only that known duplicate
+        # response is uncertain and should re-enter bounded reconciliation;
+        # other 422s are permanent validation failures.
+        if _duplicate_pull_request_422(response):
+            raise TransientPublishError(
+                "GitHub reports that a pull request already exists; publication will reconcile"
+            )
+        raise _invalid_pr_request_error(response)
     if response.status_code >= 400:
         raise _github_api_error("the draft PR", response)
     try:
