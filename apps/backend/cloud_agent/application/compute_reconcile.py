@@ -172,15 +172,14 @@ class ComputeReconciler:
                 allocation_id=row["id"], kinds=["extend", "rotate"]
             )
             trigger = self.rotation.due(row, policy, lifecycle, now, expires)
-            if trigger is not None:
-                await self.rotation.start(row, trigger, expires)
+            started = trigger is not None and await self.rotation.start(row, trigger, expires)
             await self.rotation.remind(row, lifecycle, now, expires)
-            stalled = any(
-                op["kind"] == "rotate" and op["state"] in {"blocked", "failed"} for op in lifecycle
-            )
-            if self.rotation.replaces_renewal(row, policy, now) and not stalled:
-                # A node at its maximum age is replaced rather than extended,
-                # unless its replacement is stuck: then time still helps.
+            if self.rotation.replaces_renewal(row, policy, now) and (
+                started or await self.rotation.replaces_in_time(lifecycle, now, expires)
+            ):
+                # A node at its maximum age is replaced rather than extended
+                # while its move can finish in time. A stuck, cancelled or late
+                # move, or none at all, still needs the lease.
                 continue
             request_id = f"renew:{row['id']}:{int(expires.timestamp())}:{row['revision']}"
             if any(op["request_id"] == request_id for op in operations):

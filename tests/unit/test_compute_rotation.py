@@ -253,6 +253,86 @@ async def test_scheduler_still_extends_when_the_move_is_stuck(monkeypatch):
     repository.create_operation.assert_not_awaited()
 
 
+def old_node_scheduler(operations, *, expires, existing=None):
+    """A scheduler for a node past its maximum age, with the given moves on record."""
+    old = row(created_at=NOW - timedelta(days=8), expires_at=expires)
+
+    async def create_operation(**kwargs):
+        # The store returns an earlier operation of the same request unchanged.
+        return existing or {"id": "new-move", "state": "pending", "result": {}, **kwargs}
+
+    repository = SimpleNamespace(
+        list_allocations=AsyncMock(return_value=[old]),
+        list_operations=AsyncMock(return_value=operations),
+        create_operation=AsyncMock(side_effect=create_operation),
+    )
+    commands = SimpleNamespace(
+        repository=repository,
+        configuration=SimpleNamespace(observation_seconds=120),
+        extend=AsyncMock(),
+        queue_inspection=AsyncMock(),
+    )
+    reconciler = ComputeReconciler(
+        commands=commands,  # type: ignore[arg-type]
+        # No configured turn limit: the default hour applies.
+        host_pool=SimpleNamespace(get_host=AsyncMock(return_value={})),  # type: ignore[arg-type]
+        bootstrap=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    return reconciler, commands
+
+
+def move(state: str, **result) -> dict:
+    return {
+        "id": "rotate-1",
+        "kind": "rotate",
+        "state": state,
+        "request_id": "r",
+        "step": "preparing_candidate",
+        "result": {"slot": {"host": "compute-a", "node_id": "node-a"}, **result},
+    }
+
+
+@pytest.mark.parametrize(
+    ("expires", "extended"),
+    [
+        # The drain deadline (a turn, the switch and a margin before expiry)
+        # is still ahead: the move is on time and replaces the extension.
+        (NOW + timedelta(hours=2), False),
+        # Past it, the replacement is late; the old node must outlive the move.
+        (NOW + timedelta(minutes=90), True),
+    ],
+)
+async def test_an_old_node_is_extended_once_its_move_runs_late(expires, extended):
+    reconciler, commands = old_node_scheduler([move("waiting", hold_set=True)], expires=expires)
+    await reconciler.schedule()
+    assert commands.extend.await_count == (1 if extended else 0)
+
+
+@pytest.mark.parametrize("state", ["unknown", "blocked", "failed"])
+async def test_an_old_node_is_extended_while_its_move_cannot_proceed(state):
+    reconciler, commands = old_node_scheduler([move(state)], expires=EXPIRES)
+    await reconciler.schedule()
+    commands.extend.assert_awaited_once()
+
+
+async def test_an_old_node_whose_move_was_cancelled_is_extended():
+    cancelled = move("cancelled")
+    reconciler, commands = old_node_scheduler([cancelled], expires=EXPIRES, existing=cancelled)
+    await reconciler.schedule()
+    # The cancelled move of this lease is not restarted, and the node keeps its lease.
+    commands.repository.create_operation.assert_awaited_once()
+    commands.extend.assert_awaited_once()
+
+
+async def test_an_old_node_whose_host_has_moved_is_not_extended():
+    # Past the drain deadline, but the Host already serves on its new node.
+    reconciler, commands = old_node_scheduler(
+        [move("waiting", hold_set=True, verified=True)], expires=NOW + timedelta(minutes=90)
+    )
+    await reconciler.schedule()
+    commands.extend.assert_not_awaited()
+
+
 async def test_an_unfinished_move_alerts_once_in_the_final_hour(monkeypatch):
     delivered = []
 

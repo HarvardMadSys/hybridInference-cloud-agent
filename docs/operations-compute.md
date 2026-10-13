@@ -445,7 +445,10 @@ Before enabling replacement:
    events remain in structured logs and operation status.
 
 Within the renewal window, extension is tried first. Refusal or unconfirmed
-extension starts replacement; maximum-age nodes move instead of extending.
+extension starts replacement; maximum-age nodes move instead of extending
+while the move is on time. A move still unfinished at its drain deadline, one
+that blocked, failed or was cancelled, keeps the old node extended so the
+move cannot outlast its lease.
 Failed candidates are released before trying the next type. Configuration or
 credential errors stop immediately; the same failure class across three types
 stops with an alert. Retry resumes the saved operation.

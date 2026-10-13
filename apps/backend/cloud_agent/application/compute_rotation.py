@@ -203,11 +203,15 @@ class ComputeRotation:
             return "renewal_unconfirmed"
         return None
 
-    async def start(self, row: dict[str, Any], trigger: str, expires: datetime) -> None:
-        """Queue one automatic move for this lease; duplicates are refused by the store."""
+    async def start(self, row: dict[str, Any], trigger: str, expires: datetime) -> bool:
+        """Queue one automatic move for this lease; duplicates are refused by the store.
+
+        Returns whether a move of this allocation is underway. A move of this
+        lease that an administrator cancelled is not started again.
+        """
         parameters = {"allocation_id": row["id"], "trigger": trigger}
         try:
-            await self.repository.create_operation(
+            operation = await self.repository.create_operation(
                 request_id=f"rotate:{row['id']}:{int(expires.timestamp())}",
                 fingerprint=fingerprint("rotate", parameters),
                 kind="rotate",
@@ -220,10 +224,37 @@ class ComputeRotation:
                 "compute_rotation_not_started",
                 extra={"allocation_id": row["id"], "reason": str(exc)},
             )
-            return
+            return str(exc) == "rotation_in_progress"
+        if operation.get("state") in {"succeeded", "failed", "cancelled"}:
+            # The store returned this lease's earlier, finished move.
+            return False
         logger.warning(
             "compute_rotation_started", extra={"allocation_id": row["id"], "trigger": trigger}
         )
+        return True
+
+    async def replaces_in_time(
+        self, operations: list[dict[str, Any]], now: datetime, expires: datetime
+    ) -> bool:
+        """Whether a move underway replaces this node without the lease being extended.
+
+        A node at its maximum age moves instead of being extended only until
+        that move reaches its drain deadline. A move still unfinished then, or
+        one that stopped, needs the old node to outlive it; a move that has
+        put the Host on its new node needs no more of the old node's lease.
+        """
+        for operation in operations:
+            if operation["kind"] != "rotate" or operation["state"] == "cancelled":
+                continue
+            result = operation.get("result") or {}
+            if operation["state"] == "succeeded" or result.get("verified"):
+                return True
+            if operation["state"] not in {"pending", "running", "waiting"}:
+                return False
+            slot = result.get("slot")
+            # A move that has not begun computes its own deadline when it does.
+            return not slot or now < await self._drain_deadline(slot["host"], expires)
+        return False
 
     async def remind(
         self,
