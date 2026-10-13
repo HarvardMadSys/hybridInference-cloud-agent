@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import functools
 import hashlib
 import json
 import logging
+import os
+import re
+import signal
+import subprocess
 import threading
 import time
+import tracemalloc
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -19,12 +26,23 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 from cloud_agent_host import workspace_broker as broker_mod
-from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.chat_sandbox import (
+    ACTIVATION_TMPFS,
+    ChatSandboxManager,
+    RetainedChatBackend,
+    _RetainedExecProcess,
+)
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
+from cloud_agent_host.sandbox import (
+    ContainerBackend,
+    ProcessBackend,
+    SandboxError,
+    SandboxSpec,
+    TerminalProcess,
+)
 from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
@@ -1708,6 +1726,366 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
     assert killed == [True]
 
 
+@pytest.mark.asyncio
+async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(monkeypatch):
+    """A flood of slow owner commands is refused, not queued ahead of turns.
+
+    Commands and Git inspection run on a pool of their own, bounded for each
+    workspace and for the broker; every lifecycle call keeps the loop's
+    default pool, so a turn's settle or acquire never waits behind them.
+    """
+    monkeypatch.setattr(broker_mod, "MAX_WORKSPACE_COMMANDS", 2)
+    monkeypatch.setattr(broker_mod, "MAX_WORKSPACE_COMMANDS_PER_WORKSPACE", 1)
+    supervisor = _SharedSupervisor()
+    supervisor.threads.add("athr_third")
+    release = threading.Event()
+
+    def spawn(_spec):
+        release.wait(10)
+        return SimpleNamespace(
+            lines=lambda: iter(()), kill=lambda: None, wait=lambda: 0, stderr_text=lambda: ""
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        commands = [
+            asyncio.create_task(
+                client.post(
+                    f"/workspaces/{workspace}/terminal",
+                    headers=headers,
+                    json={"command": "sleep 119"},
+                )
+            )
+            for workspace in ("athr_source", "athr_child", "athr_third")
+            for _ in range(4)
+        ]
+        try:
+            deadline = time.monotonic() + 5
+            while sum(task.done() for task in commands) < 10 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            refused = [task.result().status_code for task in commands if task.done()]
+            status = await asyncio.wait_for(
+                client.get("/shared-sandboxes/athr_source", headers=headers), 2
+            )
+        finally:
+            release.set()
+        answered = [response.status_code for response in await asyncio.gather(*commands)]
+        again = await client.post(
+            "/workspaces/athr_source/terminal", headers=headers, json={"command": "true"}
+        )
+
+    assert refused == [429] * 10
+    assert status.status_code == 200
+    assert sorted(answered) == [200, 200] + [429] * 10
+    assert again.status_code == 200, "a finished command gives its slot back"
+
+
+class _CommandReceiptManager:
+    """Stands in for the Docker manager behind a bounded retained command.
+
+    The command's process receipt names its own process group, as ``setsid``
+    makes it in the container, so honouring it stops exactly that group. The
+    container itself must never be stopped: siblings run in it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.processes: list[subprocess.Popen[str]] = []
+
+    def kill_member_process(self, _spec, *, pidfile: str, user_uid: int, user_gid: int) -> None:
+        self.calls.append(("kill_member_process", pidfile))
+        for process in self.processes:
+            if process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+    def stop(self, _spec) -> None:
+        self.calls.append(("stop", ""))
+
+
+class _LocalRetainedBackend:
+    """Run one bounded command as the retained exec production uses, on this host.
+
+    The pipes are opened exactly as ``ChatSandboxManager.spawn`` opens them for
+    ``docker exec``, so the broker reads the same text-mode pipe it reads in a
+    container; only the process runs here instead.
+    """
+
+    def __init__(self, workdir: str) -> None:
+        self.manager = _CommandReceiptManager()
+        self.spec = SimpleNamespace(container_name="freeinference-chat-local")
+        self.workdir = workdir
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8"}
+
+    def spawn(self, spec):
+        process = subprocess.Popen(
+            spec.argv,
+            cwd=self.workdir,
+            env=spec.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        self.manager.processes.append(process)
+        return _RetainedExecProcess(
+            process,
+            manager=self.manager,  # type: ignore[arg-type]
+            spec=self.spec,  # type: ignore[arg-type]
+            process_pidfile=f"{ACTIVATION_TMPFS}/command-{'0' * 32}.pid",
+            user_uid=10001,
+            user_gid=10001,
+        )
+
+
+def _finish_within(seconds: float, function):
+    """Run ``function`` on a thread, failing instead of hanging the suite."""
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = function()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"the call was still running after {seconds}s"
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["result"]
+
+
+def test_one_shot_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
+    """A stray byte is replaced; it must not drop the output or wedge the read.
+
+    Enough output follows it to fill a pipe: had the read stopped at the byte,
+    the command could never exit and the broker would wait on it forever.
+    """
+    backend = _LocalRetainedBackend(str(tmp_path))
+    request = TerminalRequest(
+        command="printf 'hello\\n\\377'; head -c 400000 /dev/zero | tr '\\000' y",
+        cwd=str(tmp_path),
+        timeout_seconds=20,
+    )
+
+    result = _finish_within(30, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
+
+    assert result["exit_code"] == 0
+    assert result["output"] == "hello\n\ufffd" + "y" * 400000
+    assert backend.manager.calls == []
+
+
+def test_one_shot_command_deadline_covers_a_command_that_closed_its_output(tmp_path):
+    backend = _LocalRetainedBackend(str(tmp_path))
+    request = TerminalRequest(
+        command="exec >/dev/null; sleep 10", cwd=str(tmp_path), timeout_seconds=1
+    )
+    started = time.monotonic()
+
+    with pytest.raises(HTTPException) as timed_out:
+        _finish_within(8, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
+
+    assert timed_out.value.status_code == 408
+    assert time.monotonic() - started < 5
+    # Only the command's own process group is stopped, never the container.
+    assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
+
+
+def test_oversized_output_without_newlines_is_refused_before_it_is_buffered(tmp_path):
+    """The limit holds for what the broker holds, not just for what it returns."""
+    backend = _LocalRetainedBackend(str(tmp_path))
+    limit = 1024 * 1024
+    request = TerminalRequest(
+        command="head -c 33554432 /dev/zero | tr '\\000' x",
+        cwd=str(tmp_path),
+        timeout_seconds=20,
+    )
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(HTTPException) as refused:
+            _finish_within(
+                30,
+                lambda: _run_terminal(
+                    backend,  # type: ignore[arg-type]
+                    str(tmp_path),
+                    request,
+                    max_output_bytes=limit,
+                ),
+            )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert refused.value.status_code == 413
+    assert peak < 8 * limit
+    assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
+
+
+class _ReceiptGoneManager(_CommandReceiptManager):
+    """The reaper reports failure, as when the command finished just before it.
+
+    Nothing of the command is left running afterwards, as in that case; only
+    the report differs.
+    """
+
+    def kill_member_process(self, _spec, *, pidfile: str, user_uid: int, user_gid: int) -> None:
+        super().kill_member_process(_spec, pidfile=pidfile, user_uid=user_uid, user_gid=user_gid)
+        raise SandboxError("resident process cleanup failed: ")
+
+
+@pytest.mark.parametrize(
+    ("command", "timeout_seconds", "status_code"),
+    [
+        # Just past the limit: the command can finish writing, and exit,
+        # before the broker has read far enough to stop it.
+        ("head -c 1100000 /dev/zero | tr '\\000' x", 20, 413),
+        ("sleep 10", 1, 408),
+    ],
+)
+def test_a_command_stopped_for_overrunning_answers_why_even_if_its_kill_fails(
+    tmp_path, command, timeout_seconds, status_code
+):
+    """A kill that finds nothing left to signal must not replace the answer.
+
+    The owner asked why the command was stopped; a cleanup error in its place
+    reads as a broken workspace. The Docker client is killed either way.
+    """
+    backend = _LocalRetainedBackend(str(tmp_path))
+    backend.manager = _ReceiptGoneManager()
+    request = TerminalRequest(command=command, cwd=str(tmp_path), timeout_seconds=timeout_seconds)
+
+    with pytest.raises(HTTPException) as stopped:
+        _finish_within(
+            30,
+            lambda: _run_terminal(
+                backend,  # type: ignore[arg-type]
+                str(tmp_path),
+                request,
+                max_output_bytes=1024 * 1024,
+            ),
+        )
+
+    assert stopped.value.status_code == status_code
+    assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
+    # The client was killed all the same; a kill is delivered, not awaited.
+    assert all(process.wait(timeout=5) is not None for process in backend.manager.processes)
+
+
+def test_a_broker_command_carries_its_own_process_receipt(monkeypatch):
+    """Stopping a timed-out or oversized command must never stop its group.
+
+    The group's container runs every sibling's turn, so a bounded command is
+    started under a process receipt of its own, and its kill is refused rather
+    than widened when there is none.
+    """
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    spawned: list[dict[str, object]] = []
+    monkeypatch.setattr(manager, "require_network", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manager, "spawn", lambda _spec, _argv, **kwargs: spawned.append(kwargs) or "process"
+    )
+    retained = RetainedChatBackend(manager, SimpleNamespace(sandbox_image_digest=None))  # type: ignore[arg-type]
+
+    retained.spawn(SandboxSpec(argv=["/bin/true"], workdir="/workspace"))
+
+    assert re.fullmatch(
+        rf"{re.escape(ACTIVATION_TMPFS)}/command-[0-9a-f]{{32}}\.pid",
+        str(spawned[0]["process_pidfile"]),
+    )
+    unreceipted_manager = _CommandReceiptManager()
+    client = subprocess.Popen(
+        ["sleep", "30"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    unreceipted = _RetainedExecProcess(
+        client,
+        manager=unreceipted_manager,  # type: ignore[arg-type]
+        spec=SimpleNamespace(container_name="freeinference-chat-local"),  # type: ignore[arg-type]
+        process_pidfile=None,
+        user_uid=None,
+        user_gid=None,
+    )
+    with pytest.raises(SandboxError, match="no process-scoped kill receipt"):
+        unreceipted.kill()
+    assert unreceipted_manager.calls == []
+    assert client.wait(timeout=5) != 0
+
+
+def _repository(root) -> None:
+    """A one-commit repository, committed with a hermetic Git identity."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(root),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "T",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+    for argv in (
+        ["git", "init", "--quiet"],
+        ["git", "add", "notes.txt"],
+        ["git", "commit", "--quiet", "-m", "base"],
+    ):
+        subprocess.run(argv, cwd=root, env=env, check=True, capture_output=True)
+
+
+def test_git_inspection_never_rewrites_the_shared_index(tmp_path, monkeypatch):
+    """The Git tab must not take index.lock from an agent's concurrent git add.
+
+    A tracked file whose cached stat no longer matches is what makes an
+    ordinary ``git status`` refresh the index and write it back.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("plain\n")
+    _repository(tmp_path)
+    os.utime(tmp_path / "notes.txt", (1_000_000_000, 1_000_000_000))
+    index = tmp_path / ".git" / "index"
+    before = (index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes())
+
+    inspected = _finish_within(
+        30,
+        lambda: broker_mod._run_git(
+            ProcessBackend(acknowledged_unsafe=True), str(tmp_path), timeout_s=20
+        ),
+    )
+
+    assert inspected["changes"] == []
+    assert (index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()) == before
+
+
+def test_git_inspection_shows_a_patch_that_is_not_utf8_but_never_captures_one(
+    tmp_path, monkeypatch
+):
+    """The Git tab may show a replacement character; a snapshot may not store one."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("plain\n")
+    _repository(tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"caf\xe9\n")
+    backend = ProcessBackend(acknowledged_unsafe=True)
+
+    shown = _finish_within(30, lambda: broker_mod._run_git(backend, str(tmp_path), timeout_s=20))
+    with pytest.raises(HTTPException) as refused:
+        _finish_within(
+            30,
+            lambda: broker_mod._run_git(backend, str(tmp_path), timeout_s=20, exact_patch=True),
+        )
+
+    assert "+caf\ufffd\n" in shown["patch"]
+    assert shown["changes"] == [{"code": " M", "path": "notes.txt"}]
+    assert refused.value.status_code == 502
+    assert refused.value.detail == "workspace patch is not exact UTF-8 text"
+
+
 def test_lower_terminal_total_output_limit_stops_the_process():
     class LoudTerminal(_TerminalProcess):
         def chunks(self):
@@ -1772,6 +2150,106 @@ def test_a_shortened_terminal_lifetime_closes_terminals_already_past_it():
     terminals.reap()
     assert "athr_source" not in terminals._sessions
     assert process.killed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/workspaces/athr_source/terminals", None),
+        ("POST", "/workspaces/athr_source/terminals/suspend", {"lease_generation": 1}),
+        ("POST", "/workspaces/athr_source/terminals/resume", {"lease_generation": 1}),
+        ("POST", "/workspaces/athr_source/terminals/resume-settled", {}),
+        ("GET", "/workspaces/athr_source/terminals/term_missing/stream", None),
+        ("POST", "/workspaces/athr_source/terminals/term_missing/input", {"data": "eA=="}),
+        ("POST", "/workspaces/athr_source/terminals/term_missing/resize", {"rows": 24, "cols": 80}),
+        ("DELETE", "/workspaces/athr_source/terminals/term_missing", None),
+        ("POST", "/workspaces/athr_source/terminals", {"rows": 24, "cols": 80}),
+    ],
+)
+async def test_terminal_routes_resolve_their_workspace_off_the_event_loop(method, path, body):
+    """A Docker inspect behind a keystroke must not stall every other request.
+
+    Resolving a member's terminal scope reads the container under the
+    supervisor's lock, and a busy daemon can take seconds to answer it.
+    """
+    supervisor = _SharedSupervisor()
+    status = supervisor.status
+    backend = supervisor.backend
+
+    def inspecting_status(thread_id: str):
+        time.sleep(0.5)
+        return status(thread_id)
+
+    def inspecting_backend(thread_id: str):
+        time.sleep(0.5)
+        return backend(thread_id)
+
+    supervisor.status = inspecting_status  # type: ignore[method-assign]
+    supervisor.backend = inspecting_backend  # type: ignore[method-assign]
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        started = time.monotonic()
+        tick = asyncio.create_task(asyncio.sleep(0.05))
+        answered = asyncio.create_task(client.request(method, path, headers=headers, json=body))
+        await tick
+        stalled_for = time.monotonic() - started
+        response = await answered
+        if path.endswith("/terminals") and method == "POST":
+            await client.delete(
+                f"/workspaces/athr_source/terminals/{response.json()['id']}", headers=headers
+            )
+
+    assert response.status_code in {200, 404}
+    assert stalled_for < 0.4
+
+
+@pytest.mark.parametrize("blocked", ["write", "suspend"])
+def test_a_blocked_terminal_write_or_signal_never_holds_up_its_viewers(blocked):
+    """Input into a shell that reads nothing must not freeze its output or viewers.
+
+    A PTY write blocks once the shell stops reading, and a suspension is a
+    Docker exec. The output pump and every viewer, on the event loop too,
+    take the session's condition, so neither may hold it while it waits.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Stuck(_SuspendableTerminalProcess):
+        def write(self, data: bytes) -> None:
+            entered.set()
+            release.wait(5)
+            super().write(data)
+
+        def suspend(self) -> None:
+            entered.set()
+            release.wait(5)
+            super().suspend()
+
+    session = _TerminalSession(
+        terminal_id="term_stuck", process=Stuck(), workdir=None, rows=24, cols=80, now=0
+    )
+    call = (
+        functools.partial(session.write, b"x", now=1.0) if blocked == "write" else session.suspend
+    )
+    caller = threading.Thread(target=call, daemon=True)
+    caller.start()
+    assert entered.wait(2)
+
+    def view() -> None:
+        session._append_output(b"output")
+        session.descriptor()
+
+    viewer = threading.Thread(target=view, daemon=True)
+    viewer.start()
+    viewer.join(1)
+    stuck = viewer.is_alive()
+    release.set()
+    caller.join(5)
+
+    assert not stuck, f"a blocked {blocked} held the session's viewers"
+    assert [event.data for event in session.events_after(0, wait_s=0)] == [b"output"]
 
 
 @pytest.mark.parametrize(
@@ -1847,6 +2325,109 @@ def test_partial_terminal_resume_refreezes_every_process(tmp_path):
     assert processes[0].suspend_calls == 2
     assert processes[1].suspend_calls == 2
     assert "athr_source" in terminals._suspended_workspaces
+
+
+class _SlowToStopTerminalProcess(_SuspendableTerminalProcess):
+    """A terminal whose STOP, a Docker exec in production, waits to be released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stopping = threading.Event()
+        self.release = threading.Event()
+
+    def suspend(self) -> None:
+        self.stopping.set()
+        assert self.release.wait(5)
+        super().suspend()
+
+
+def _listed_session(terminals: _TerminalManager, workspace_id: str, process, tmp_path):
+    session = _TerminalSession(
+        terminal_id=f"term_{len(terminals._sessions.get(workspace_id, {}))}_{workspace_id}",
+        process=process,
+        workdir=tmp_path,
+        rows=24,
+        cols=80,
+        now=time.monotonic(),
+    )
+    terminals._sessions.setdefault(workspace_id, {})[session.id] = session
+    return session
+
+
+def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
+    """Every terminal request on the broker takes the manager's lock.
+
+    Suspending a workspace signals each of its terminals through Docker, which
+    can take seconds; holding that lock meanwhile stalled every keystroke,
+    listing and attach in every other workspace on the host.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    slow = _SlowToStopTerminalProcess()
+    _listed_session(terminals, "athr_source", slow, tmp_path)
+    other = _listed_session(terminals, "athr_other", _TerminalProcess(), tmp_path)
+    suspension = threading.Thread(
+        target=functools.partial(
+            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
+        ),
+        daemon=True,
+    )
+    suspension.start()
+    assert slow.stopping.wait(2)
+
+    try:
+        controlled, listed = _finish_within(
+            1,
+            lambda: (
+                terminals.get_for_control("athr_other", other.id),
+                terminals.list("athr_other"),
+            ),
+        )
+    finally:
+        slow.release.set()
+        suspension.join(5)
+
+    assert controlled is other
+    assert [item["id"] for item in listed] == [other.id]
+    assert slow.suspended
+    assert terminals._workspace_locks == {}
+
+
+def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
+    """A workspace's freeze and thaw still run one at a time.
+
+    Releasing the turn's token mid-freeze would let a terminal the freeze had
+    not reached yet be stopped after the thaw, with no turn left to resume it.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    slow = _SlowToStopTerminalProcess()
+    processes = [slow, _SuspendableTerminalProcess()]
+    for process in processes:
+        _listed_session(terminals, "athr_source", process, tmp_path)
+    suspension = threading.Thread(
+        target=functools.partial(
+            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
+        ),
+        daemon=True,
+    )
+    suspension.start()
+    assert slow.stopping.wait(2)
+    resumption = threading.Thread(
+        target=functools.partial(
+            terminals.resume, "athr_source", lease_generation=1, job_id="job-parent"
+        ),
+        daemon=True,
+    )
+    resumption.start()
+    resumption.join(0.3)
+    tokens_mid_freeze = set(terminals._workspace_suspensions.get("athr_source", ()))
+    slow.release.set()
+    suspension.join(5)
+    resumption.join(5)
+
+    assert tokens_mid_freeze == {"job-parent"}
+    assert [process.suspended for process in processes] == [False, False]
+    assert "athr_source" not in terminals._suspended_workspaces
+    assert terminals._workspace_locks == {}
 
 
 def test_terminal_ring_is_bounded_and_reports_cursor_reset(tmp_path):

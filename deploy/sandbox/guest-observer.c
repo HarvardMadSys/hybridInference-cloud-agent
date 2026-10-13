@@ -42,6 +42,13 @@
 #define OBSERVER_BINARY_PATH "/usr/local/libexec/freeinference-guest-observer"
 #define BPF_OBJECT_PATH "/usr/local/libexec/freeinference-guest-observer.bpf.o"
 #define MAX_JOURNAL_BYTES (64ULL * 1024ULL * 1024ULL)
+/* Tool marks come through a socket and a helper every member can use, so they
+ * may fill the journal only this far; the rest is kept for the kernel's
+ * process records. A flood of optional marks must never be what makes a
+ * sibling's process census drop events. The host replaces an idle journal at
+ * this same size (GUEST_OBSERVER_ROTATE_BYTES), so one that marks have filled
+ * is replaced at the next idle turn rather than left refusing marks. */
+#define MAX_TOOL_MARK_JOURNAL_BYTES (48ULL * 1024ULL * 1024ULL)
 #define MAX_LINKS 8
 #define MAX_TOOL_MARKS_PER_POLL 1024
 #define SELF_TEST_TIMEOUT_MS 2000
@@ -644,7 +651,7 @@ static int journal_tool_mark(struct observer *observer,
         (long)credential->pid,
         mark->tool_use_id);
     if (length <= 0 || (size_t)length >= sizeof(line) ||
-        observer->journal_bytes + (uint64_t)length > MAX_JOURNAL_BYTES)
+        observer->journal_bytes + (uint64_t)length > MAX_TOOL_MARK_JOURNAL_BYTES)
         return -1;
     if (write_all(observer->events_fd, line, (size_t)length) < 0)
         return -1;
@@ -1511,10 +1518,15 @@ static uint32_t handle_window_request(struct observer *observer,
         struct window_census census = {0};
         struct fi_window_sample sample = {0};
         int status = run_census(observer, request->uid, &census, &sample);
+        bool pss_complete = census.pss_complete;
 
         if (status != FI_WINDOW_OK)
             return (uint32_t)status;
-        return census.pss_complete ? FI_WINDOW_OK : FI_WINDOW_ERR_IDENTITY;
+        /* A successful census leaves its task array to the caller, here as
+         * in every cycle: this loader is long-lived, and a probe that kept
+         * it would grow the guest for as long as probes arrive. */
+        free_census(&census);
+        return pss_complete ? FI_WINDOW_OK : FI_WINDOW_ERR_INCOMPLETE;
     }
     memcpy(identifier, request->measurement_id, sizeof(identifier));
     identifier[sizeof(identifier) - 1] = '\0';

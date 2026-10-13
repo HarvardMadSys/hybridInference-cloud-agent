@@ -364,6 +364,11 @@ additional environment names supply initial local values only:
 | `AGENT_TERMINAL_INPUT_MAX_KIB` | **NEW** | 64 KiB of input per terminal request. |
 | `AGENT_TERMINAL_MAX_STREAMS_PER_SESSION` | **NEW** | 4 concurrent viewers per terminal. |
 
+Workspace commands and Git inspection are also bounded in number, by the
+broker rather than by a setting: at most 16 run at once on one host and 4 for
+one chat, on a thread pool of their own, and one more is refused with 429
+rather than queued behind them.
+
 The values ride the heartbeat answer, so a host applies a change within one
 heartbeat (about 30 seconds) with no redeploy. Nothing running is interrupted:
 a turn keeps the time limit it started with, an existing sandbox keeps the

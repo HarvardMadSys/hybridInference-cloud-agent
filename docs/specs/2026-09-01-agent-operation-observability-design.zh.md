@@ -389,7 +389,7 @@ Kata guest kernel
 
 - Controller 只接收两个固定 exec seam，不接受 job argv；
 - Journal 为 root-only、append-only、UID 过滤，带 byte/event/inode fence；
-- 硬顶 64 MiB；retained/shared 在无 turn cursor 时于 48 MiB 轮转；单次 turn 最多读 4 MiB / 4096 进程 / 1000 marks；
+- 硬顶 64 MiB；retained/shared 在无 turn cursor 时于 48 MiB 轮转；任何成员都能发送的工具标记只写到这 48 MiB 为止，其余留给进程记录，标记洪泛不会让兄弟成员的进程普查丢事件；单次 turn 最多读 4 MiB / 4096 进程 / 1000 marks；
 - Ring-buffer 丢失、畸形记录、重启、截断都使结果 **partial**，从不渲染成“完整的零进程普查”或独占资源数；
 - `source` 固定为 `kata-guest-ebpf-v1`。
 
