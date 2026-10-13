@@ -6,9 +6,9 @@ a connection of its own, taking the rows in the order that writer's code does,
 or by pausing the real call -- runs another real repository call into it, and
 then lets the held writer go on: two orders over the same rows is a deadlock,
 and Postgres says so. The capture and attempt reapers are here too, for what a
-writer that ran in between leaves them to find, and so are the two writes that
-are tried again when Postgres picks them as a deadlock's victim: a rival
-closes a real cycle against each.
+writer that ran in between leaves them to find, and so is the event append that
+is tried again when Postgres picks it as a deadlock's victim: a rival closes a
+real cycle against it.
 """
 
 from __future__ import annotations
@@ -65,9 +65,12 @@ async def _run_turn(
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id=container_id, context_status=context_status
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-lock-order",
@@ -420,6 +423,7 @@ async def test_a_publication_record_takes_its_turns_before_their_group(pool, sto
                 publish = asyncio.create_task(
                     store.snapshot.record_snapshot_publish(
                         snapshot_id=publication["snapshot_id"],
+                        expected_publish_attempt_count=publication["publish_attempt_count"],
                         pr_url=pr_url,
                         commit_sha="b" * 40,
                     )
@@ -499,43 +503,6 @@ async def _close_a_cycle(rival, statement: str, *args) -> None:
     """
     await rival.execute("SET LOCAL deadlock_timeout = '60s'")
     await asyncio.wait_for(rival.execute(statement, *args), timeout=10)
-
-
-async def test_a_publication_record_picked_as_a_deadlock_victim_is_tried_again(
-    pool, store: Storage
-):
-    """The pull request exists, so a record Postgres aborted is tried again.
-
-    Left unrecorded, the snapshot stayed publishing until the stall reaper
-    failed it for manual review and marked its workspace dirty. The rival here
-    takes the group and then an included turn, the reverse of the lock order.
-    """
-    job, sandbox, publication = await _claimed_for_publication(store)
-    pr_url = "https://github.com/example-org/example-repo/pull/2"
-    publish = None
-    async with pool.acquire() as rival:
-        try:
-            async with rival.transaction():
-                await rival.execute(
-                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
-                    sandbox["sandbox_id"],
-                )
-                publish = asyncio.create_task(
-                    store.snapshot.record_snapshot_publish(
-                        snapshot_id=publication["snapshot_id"],
-                        pr_url=pr_url,
-                        commit_sha="c" * 40,
-                    )
-                )
-                await _blocked_by(pool, await rival.fetchval("SELECT pg_backend_pid()"))
-                await _close_a_cycle(
-                    rival, "SELECT id FROM agent_jobs WHERE id = $1 FOR UPDATE", job["id"]
-                )
-            assert await asyncio.wait_for(publish, timeout=10)
-        finally:
-            await _settle(publish)
-    published = await store.conversation_queries.get_job(job["id"])
-    assert published is not None and published["published_pr_url"] == pr_url
 
 
 async def test_an_event_append_picked_as_a_deadlock_victim_is_tried_again(pool, store: Storage):

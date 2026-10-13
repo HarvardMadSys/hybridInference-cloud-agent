@@ -5,11 +5,14 @@ import {
   extendComputeAllocation,
   createAutomaticComputeSetup,
   getComputeAutomaticSetup,
+  getCloudLabAutoscaling,
+  getCloudLabPreferredNodes,
   getComputeOperations,
   importComputeResource,
   rotateComputeAllocation,
   saveComputeConnection,
   setComputePolicy,
+  updateCloudLabAutoscaling,
   type RenewalPolicy,
   type ServerRequest,
 } from './compute';
@@ -37,6 +40,101 @@ function stub(status = 200, body: unknown = {}) {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('CloudLab auto-scaling API', () => {
+  it('reads CloudLab auto-scaling status without caching it', async () => {
+    const response = {
+      policy: { revision: 3 },
+      runtime: { generation: 9 },
+      members: [],
+      profile_reservations: [],
+    };
+    const fetch = stub(200, response);
+    const controller = new AbortController();
+
+    await expect(getCloudLabAutoscaling(controller.signal)).resolves.toEqual(response);
+
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/compute-autoscaling/cloudlab');
+    expect(fetch.mock.calls[0][2]).toMatchObject({
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  });
+
+  it('reads the live preferred-node shortlist without caching it', async () => {
+    const response = {
+      nodes: [
+        {
+          node_type: 'c6620',
+          site: 'Utah',
+          available: 54,
+          total: 132,
+          introduced_year: 2025,
+          physical_cores: 28,
+          logical_threads: 56,
+          memory_gib: 128,
+        },
+      ],
+      observed_at: '2026-10-11T12:00:00Z',
+    };
+    const fetch = stub(200, response);
+    const controller = new AbortController();
+
+    await expect(getCloudLabPreferredNodes(controller.signal)).resolves.toEqual(response);
+
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/compute-availability/cloudlab');
+    expect(fetch.mock.calls[0][2]).toMatchObject({
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  });
+
+  it('replaces the CloudLab auto-scaling policy at the revision read', async () => {
+    const fetch = stub();
+    const request = {
+      expected_revision: 3,
+      policy: {
+        enabled: true,
+        min_hosts: 1,
+        max_hosts: 2,
+        connection_id: 'cloudlab-account',
+        ssh_connection_id: 'ssh-key',
+        configuration: {
+          project: 'FAST25',
+          profile_project: 'CloudLab',
+          profile_name: 'cloud-agent',
+          duration: 8,
+          bindings: { phystype: 'm510' },
+          ssh_username: 'operator',
+          host_key_source: 'registration' as const,
+        },
+        deployment_profiles: ['profile-a', 'profile-b'],
+        sandbox_storage_path: '/mnt/cloud-agent',
+        renewal_policy: policy,
+        slot_policy: {
+          formula_version: 1 as const,
+          cpu_reservation_fraction: 0.75,
+          cpu_per_slot: 2,
+          memory_reserve_gib: 8,
+          memory_per_slot_gib: 4,
+          min_slots: 2,
+          max_slots: 128,
+        },
+        scale_up_sustain_seconds: 120,
+        scale_down_idle_seconds: 3600,
+        cooldown_seconds: 600,
+        scale_down_enabled: false,
+      },
+    };
+
+    await updateCloudLabAutoscaling(request);
+
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/compute-autoscaling/cloudlab');
+    expect(fetch.mock.calls[0][2]?.method).toBe('PUT');
+    expect(JSON.parse(String(fetch.mock.calls[0][2]?.body))).toEqual(request);
+    expect(JSON.stringify(fetch.mock.calls[0][2])).not.toContain('private-key');
+  });
+});
 
 describe('compute API contracts', () => {
   it('checks automatic setup availability without caching deployment readiness', async () => {

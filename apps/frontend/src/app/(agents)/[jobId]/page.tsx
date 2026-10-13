@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect } from 'react';
 import { useAuth } from '@/components/providers';
+import { useT } from '@/components/providers/LocaleProvider';
 import { markConversationRead } from '@/components/features/agents/useConversationReadState';
 import { usePathname } from 'next/navigation';
 import { JobDetail } from '@/components/features/agents/JobDetail';
@@ -20,6 +21,7 @@ export default function AgentJobPage() {
 }
 
 function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) {
+  const t = useT();
   const { job, events, threadJobs, loading, error, reload } = useAgentJob(jobId);
   useEffect(() => {
     if (!userId || !job || job.id !== jobId || loading || error) return;
@@ -39,13 +41,16 @@ function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) 
     );
   }
 
-  if (error) {
+  if (error && (!job || job.id !== jobId)) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
           Could not load this job
         </h1>
         <p className="text-sm text-gray-500 dark:text-gray-400">{error}</p>
+        <button type="button" onClick={reload} className="text-sm underline">
+          {t('common.retry')}
+        </button>
         <Link
           href="/"
           className="text-sm font-medium text-crimson dark:text-crimson-light hover:underline"
@@ -78,13 +83,23 @@ function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) 
   // moving to the next turn of a thread no longer throws away the view the
   // reader is looking at — including which tab they had open.
   return (
-    <JobDetail
-      key={job.threadId ?? job.id}
-      job={job}
-      userId={userId}
-      events={events}
-      threadJobs={threadJobs}
-      onReload={reload}
-    />
+    <>
+      {error && (
+        <p role="status" className="px-4 py-2 text-xs text-amber-700 dark:text-amber-300">
+          {t('common.refreshFailed')}
+          <button type="button" onClick={reload} className="ml-2 underline">
+            {t('common.retry')}
+          </button>
+        </p>
+      )}
+      <JobDetail
+        key={job.threadId ?? job.id}
+        job={job}
+        userId={userId}
+        events={events}
+        threadJobs={threadJobs}
+        onReload={reload}
+      />
+    </>
   );
 }

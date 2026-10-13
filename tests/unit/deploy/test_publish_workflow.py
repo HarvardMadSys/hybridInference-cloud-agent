@@ -10,6 +10,8 @@ a change to the workflow has to change a test.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -289,6 +291,89 @@ def test_cleanup_is_scoped_to_this_cell_and_always_runs() -> None:
         "GITHUB_RUN_ID" in naming
         and "GITHUB_RUN_ATTEMPT" in naming
         and "matrix.artifact.name" in naming
+    )
+
+
+_RECORDING_DOCKER = r"""#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+if [ "$1" = ps ]; then printf '%s\n' $EXISTING_CONTAINERS; fi
+exit 0
+"""
+
+
+def run_builder_step(tmp_path: Path, existing: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Execute the cell's builder step against a recording `docker`.
+
+    No daemon or registry is contacted. Returns what the step exported to
+    later steps and every docker invocation it made.
+    """
+    script = str(step("Make this job's own builder")["run"]).replace(
+        "${{ matrix.artifact.name }}", "sandbox"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(_RECORDING_DOCKER)
+    (bin_dir / "docker").chmod(0o755)
+    calls = tmp_path / "docker-calls"
+    github_env = tmp_path / "github-env"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "DOCKER_CALLS": str(calls),
+        "EXISTING_CONTAINERS": " ".join(existing),
+        "GITHUB_REPOSITORY": "HarvardMadSys/hybridInference-cloud-agent",
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_ENV": str(github_env),
+        "RUNNER_TEMP": str(tmp_path / "job-temp"),
+        "RUNNER_WORKSPACE": str(tmp_path / "persistent-runner" / "work"),
+        "RUNNER_NAME": "image-verify-x64-1",
+    }
+    subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, check=True)
+    outputs = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
+    return outputs, calls.read_text().splitlines()
+
+
+def test_each_cell_builds_through_a_fresh_builder_no_other_job_used(tmp_path: Path) -> None:
+    """A release must not consume layer or cache-mount state another job left.
+
+    CI's trusted cells keep a persistent `ci-<runner>` builder under `_work`
+    on these same runners, and that state outlives whoever wrote it. The
+    publisher therefore creates its own builder, configured under this job's
+    RUNNER_TEMP, and never reuses or self-heals into an existing one.
+    """
+    outputs, calls = run_builder_step(tmp_path, existing=[])
+    builder = "publish-harvardmadsys-hybridinference-cloud-agent-image-verify-x64-1-123-2-sandbox"
+    assert outputs["BUILDER"] == builder
+    assert outputs["BUILDX_CONFIG"] == str(tmp_path / "job-temp" / "buildx")
+    assert not (tmp_path / "persistent-runner").exists(), "touched the runner's _work state"
+    assert f"buildx create --name {builder} --driver docker-container --use" in calls
+    assert f"buildx inspect {builder} --bootstrap" in calls
+    assert not any("ci-" in call or call.startswith("buildx use") for call in calls), calls
+
+
+def test_a_cell_sweeps_only_its_own_runners_orphaned_publish_builders(tmp_path: Path) -> None:
+    prefix = "buildx_buildkit_publish-harvardmadsys-hybridinference-cloud-agent-image-verify-x64-1-"
+    orphan = f"{prefix}99-1-web-root0"
+    kept = [
+        "buildx_buildkit_ci-image-verify-x64-10",
+        "buildx_buildkit_publish-harvardmadsys-hybridinference-cloud-agent-image-verify-x64-2-7-1-tunnel0",
+        f"{prefix}b-7-1-tunnel0",
+    ]
+    _, calls = run_builder_step(tmp_path, existing=[orphan, *kept])
+    removed = {call.split()[-1] for call in calls if call.startswith(("rm ", "volume rm "))}
+    assert removed == {orphan, f"{orphan}_state"}
+
+
+def test_the_cells_builder_is_removed_whatever_happened() -> None:
+    """Its state volume goes with it, so the next job cannot read what it built."""
+    cleanup = step("Drop this job's builder")
+    assert cleanup["if"] == "always()"
+    assert 'docker buildx rm "${BUILDER}"' in str(cleanup["run"])
+    assert "--keep-state" not in str(cleanup["run"])
+    assert steps("artifacts")[-1] == cleanup
+    assert position("Make this job's own builder") < position(
+        "Build ${{ matrix.artifact.name }} and push it by digest"
     )
 
 

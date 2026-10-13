@@ -91,6 +91,7 @@ class PostgresConversationCommands:
         reasoning_effort: str | None = None,
         base_sha: str | None = None,
         setup_script: str | None = None,
+        plugins: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
         skills: list[dict[str, Any]] | None = None,
@@ -147,7 +148,7 @@ class PostgresConversationCommands:
                          setup_script, execution_profile,
                          goal_id, goal_objective, goal_state, goal_max_rounds,
                          goal_revision, goal_created_at, goal_updated_at,
-                         user_input_seq)
+                         user_input_seq, plugins)
                     VALUES ($1, $2, $3, $4, 'fallback', $5, $6,
                             CASE WHEN $7::text IS NULL THEN NULL ELSE $9 END,
                             $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'active' END,
@@ -159,7 +160,7 @@ class PostgresConversationCommands:
                             -- itself with: a thread that says one while its own
                             -- first turn says zero makes that turn look older
                             -- than the message that created it.
-                            $10)
+                            $10, $11::jsonb)
                     """,
                     thread_id,
                     user_id,
@@ -171,6 +172,7 @@ class PostgresConversationCommands:
                     goal.max_rounds if goal is not None else None,
                     new_goal_id(),
                     user_input_seq,
+                    json.dumps(plugins or []),
                 )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
@@ -598,19 +600,15 @@ class PostgresConversationCommands:
         if normalize_generated_title(title) is None:
             return False
         async with self._pool.acquire() as conn, conn.transaction():
-            # Attempt, then thread, then job. The attempt comes first because
-            # every reply its turn appends holds it while bumping this thread.
-            if (
-                await conn.fetchval(
-                    "SELECT id FROM agent_attempts WHERE id = $1 AND job_id = $2 FOR SHARE",
-                    attempt_id,
-                    job_id,
-                )
-                is None
-            ):
+            locked_attempt = await conn.fetchval(
+                "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 FOR SHARE",
+                attempt_id,
+                lease_generation,
+            )
+            if locked_attempt is None:
                 return False
-            # Locking the thread also makes a simultaneous manual rename win in
-            # either order.
+            # Match follow-up/fork lock ordering: thread before job. Locking the
+            # source also makes a simultaneous manual rename win in either order.
             thread = await conn.fetchrow(
                 """
                 SELECT t.id, t.title, t.title_source FROM agent_threads t
@@ -624,24 +622,29 @@ class PostgresConversationCommands:
                 thread["title_source"], thread["title"]
             ):
                 return False
-            live = await conn.fetchval(
+            authority = await conn.fetchrow(
                 """
-                SELECT a.id FROM agent_attempts a
+                SELECT j.state AS job_state, a.status AS attempt_status
+                FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 WHERE j.id = $1 AND j.current_attempt_id = a.id
                   AND a.id = $2 AND a.lease_generation = $3 AND NOT j.cancel_requested
                   AND (
-                      (j.state = 'running' AND a.status = 'running'
-                       AND a.lease_expires_at > clock_timestamp())
+                      (j.state = 'running' AND a.status = 'running')
                       OR (j.state = 'succeeded' AND a.status = 'finished')
                   )
-                FOR SHARE OF a, j
+                FOR SHARE OF j
                 """,
                 job_id,
                 attempt_id,
                 lease_generation,
             )
-            if live is None:
+            if authority is None:
+                return False
+            if authority["job_state"] == "running" and not await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
+                attempt_id,
+            ):
                 return False
             updated = await conn.fetchval(
                 """

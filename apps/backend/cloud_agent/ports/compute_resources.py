@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class ComputeResourceRepository(Protocol):
@@ -108,6 +111,77 @@ class ComputeResourceRepository(Protocol):
 
     async def server_inventory(self) -> dict[str, Any]:
         """Read global placement and resource/Host distribution in one snapshot."""
+        ...
+
+    async def get_cloudlab_autoscaling(self) -> dict[str, Any]:
+        """Read the singleton policy, fenced runtime, owned members and reservations."""
+        ...
+
+    async def update_cloudlab_autoscaling(
+        self,
+        *,
+        expected_revision: int,
+        policy: dict[str, Any],
+        profile_snapshots: dict[str, dict[str, Any]],
+        requested_by: str | None,
+    ) -> dict[str, Any]:
+        """Compare-and-swap policy and its profile reservations atomically."""
+        ...
+
+    async def list_reserved_deployment_profiles(self) -> list[str]:
+        """List profile IDs reserved from administrator-created allocations."""
+        ...
+
+    async def create_autoscale_allocation_operation(
+        self,
+        *,
+        expected_revision: int,
+        expected_generation: int,
+        request_id: str,
+        fingerprint: str,
+        allocation: dict[str, Any],
+        parameters: dict[str, Any],
+        requested_by: str | None,
+        decision: dict[str, Any],
+        cooldown_seconds: int,
+    ) -> dict[str, Any]:
+        """Reserve one free policy profile and atomically queue one owned acquire."""
+        ...
+
+    async def assert_autoscale_acquire_connections_verified(
+        self,
+        *,
+        allocation_id: str,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        """Fence the final credential-health check before an owned provider acquire."""
+        ...
+
+    async def queue_autoscale_retire(
+        self,
+        *,
+        expected_revision: int,
+        expected_generation: int,
+        allocation_id: str,
+        request_id: str,
+        fingerprint: str,
+        parameters: dict[str, Any],
+        requested_by: str | None,
+        decision: dict[str, Any],
+        cooldown_seconds: int,
+    ) -> dict[str, Any]:
+        """Queue retirement only for an owned allocation and advance runtime fencing."""
+        ...
+
+    async def update_cloudlab_autoscaling_runtime(
+        self,
+        *,
+        expected_generation: int,
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compare-and-swap hysteresis, observations and a non-action decision."""
         ...
 
     async def record_observation_error(
@@ -233,6 +307,9 @@ class ComputeResourceRepository(Protocol):
 
         An expired call retains its step/result for query recovery. The lease
         cannot cancel a remote request; adapters must never blindly replay it.
+        A waiting extension may coexist with recovery rotation: it only changes
+        the old resource's deadline, and no local provider call is still running.
+        Other mutations, especially retirement, still wait for confirmation.
         """
         ...
 
@@ -291,6 +368,24 @@ class ComputeResourceRepository(Protocol):
         worker_id: str | None = None,
     ) -> bool:
         """Open an exact ready binding without clearing other restrictions."""
+        ...
+
+    async def apply_cloudlab_autoscaling_slot_target(
+        self,
+        *,
+        expected_revision: int,
+        expected_generation: int,
+        allocation_id: str,
+        host: str | None,
+        target_slots: int | None,
+        capacity_sampled_at: datetime | None,
+        capacity_snapshot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Fence an owned Host's slot target and its all-claims admission hold.
+
+        Recheck exact policy/runtime, binding, readiness and capacity sample.
+        Refusals keep the sizing hold closed.
+        """
         ...
 
     async def set_admission_hold(

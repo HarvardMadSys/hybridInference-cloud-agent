@@ -85,19 +85,25 @@ class PostgresLedgerRepository:
 
     async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
         """Queue known references, sharing in-flight work and throttling retries."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetch(
+                "SELECT l.id FROM agent_attempt_ledger l "
+                "JOIN agent_attempts a ON a.id = l.attempt_id "
+                "WHERE a.job_id = $1 ORDER BY l.id FOR UPDATE OF l",
+                job_id,
+            )
             rows = await conn.fetch(
                 """
                 UPDATE agent_attempt_ledger l
                 SET next_refresh_at = GREATEST(
-                    NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
+                    clock_timestamp(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
                 )
                 FROM agent_attempts a
                 WHERE a.id = l.attempt_id AND a.job_id = $1
                   AND (l.refresh_lease_expires_at IS NULL
-                       OR l.refresh_lease_expires_at <= NOW())
+                       OR l.refresh_lease_expires_at <= clock_timestamp())
                   AND (l.next_refresh_at IS NULL OR l.next_refresh_at > GREATEST(
-                      NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
+                      clock_timestamp(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
                   ))
                 RETURNING l.id
                 """,
@@ -145,9 +151,9 @@ class PostgresLedgerRepository:
                     JOIN agent_attempts a ON a.id = l.attempt_id
                     JOIN agent_jobs j ON j.id = a.job_id
                     WHERE (l.refresh_lease_expires_at IS NULL
-                           OR l.refresh_lease_expires_at <= NOW())
-                      AND (l.next_refresh_at <= NOW()
-                           OR l.refresh_lease_expires_at <= NOW()
+                           OR l.refresh_lease_expires_at <= clock_timestamp())
+                      AND (l.next_refresh_at <= clock_timestamp()
+                           OR l.refresh_lease_expires_at <= clock_timestamp()
                            OR (a.status <> 'running' AND l.terminal_refresh_count = 0
                                AND l.next_refresh_at IS NULL))
                     ORDER BY COALESCE(l.next_refresh_at, l.refresh_lease_expires_at,
@@ -157,7 +163,7 @@ class PostgresLedgerRepository:
                 )
                 UPDATE agent_attempt_ledger l
                 SET refresh_generation = l.refresh_generation + 1,
-                    refresh_lease_expires_at = NOW() + make_interval(secs => $1),
+                    refresh_lease_expires_at = clock_timestamp() + make_interval(secs => $1),
                     last_refresh_attempt_at = NOW(), next_refresh_at = NULL
                 FROM due
                 WHERE l.id = due.id
@@ -193,7 +199,15 @@ class PostgresLedgerRepository:
         if (report is None) == (error_code is None):
             raise ValueError("a ledger refresh must have either a report or an error code")
         encoded = None if report is None else json.dumps(report)
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT id FROM agent_attempt_ledger "
+                "WHERE id = $1 AND refresh_generation = $2 FOR UPDATE",
+                ledger_id,
+                refresh_generation,
+            )
+            if locked is None:
+                return False
             return bool(
                 await conn.fetchval(
                     """
@@ -217,7 +231,7 @@ class PostgresLedgerRepository:
                         FROM agent_attempt_ledger l
                         JOIN agent_attempts a ON a.id = l.attempt_id
                         WHERE l.id = $1 AND l.refresh_generation = $2
-                          AND l.refresh_lease_expires_at > NOW()
+                          AND l.refresh_lease_expires_at > clock_timestamp()
                     )
                     UPDATE agent_attempt_ledger l
                     SET snapshot = CASE WHEN $4::jsonb IS NULL THEN l.snapshot ELSE $4 END,
@@ -230,13 +244,13 @@ class PostgresLedgerRepository:
                             -- for while this read ran: keep it for the next.
                             WHEN NOT $3 THEN l.next_refresh_at
                             WHEN refresh.next_stage = 1
-                                THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '30 seconds')
+                                THEN GREATEST(clock_timestamp(), refresh.finished_at + INTERVAL '30 seconds')
                             WHEN refresh.next_stage = 2
-                                THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '300 seconds')
+                                THEN GREATEST(clock_timestamp(), refresh.finished_at + INTERVAL '300 seconds')
                             ELSE NULL END
                     FROM refresh
                     WHERE l.id = refresh.id AND l.refresh_generation = $2
-                      AND l.refresh_lease_expires_at > NOW()
+                      AND l.refresh_lease_expires_at > clock_timestamp()
                     RETURNING l.id
                     """,
                     ledger_id,

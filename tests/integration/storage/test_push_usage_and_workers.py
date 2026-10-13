@@ -449,9 +449,12 @@ async def _ended_shared_turn(store) -> dict:
     assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-deferred", context_status="new"
     )
-    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
     assert await store.sandbox.settle_thread_sandbox(
         **fence,
+        residency_generation=sandbox["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id="native-deferred",
@@ -538,10 +541,12 @@ async def test_a_failed_base_import_waits_out_its_retry(store, pool):
         )
         == "captured"
     )
-    assert await store.snapshot.claim_for_publish() is not None
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None
     commit_sha = "b" * 40
     assert await store.snapshot.record_snapshot_publish(
         snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
         pr_url="https://example.test/pull/1",
         commit_sha=commit_sha,
     )
@@ -640,10 +645,12 @@ async def test_the_hints_and_wake_ups_go_with_a_downgrade_and_come_back(store, p
         return {row["proname"] for row in rows}
 
     assert len(await functions()) == 9
+    # Seed with the current writer before restoring the historical schema:
+    # newer thread columns need not exist at the revision under test.
+    job = await _create_job(store)
     try:
         downgrade_to(config, "0031_owner_change_notify")
         assert await functions() == set()
-        job = await _create_job(store)
         background = await _listen(BACKGROUND)
         try:
             async with pool.acquire() as conn:

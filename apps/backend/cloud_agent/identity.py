@@ -100,6 +100,10 @@ class IdentityNotConfigured(IdentityError):
     """This deployment cannot verify identity at all."""
 
 
+class IdentityUnavailable(IdentityError):
+    """Signing-key infrastructure is temporarily unreachable; no identity was verified."""
+
+
 _jwk_client: PyJWKClient | None = None
 _jwk_client_url: str = ""
 
@@ -171,6 +175,7 @@ def verify_identity_token(token: str) -> dict[str, Any]:
 
     Raises:
         IdentityNotConfigured: If this deployment has no JWKS URL or issuer.
+        IdentityUnavailable: If the signing-key service cannot be reached.
         IdentityError: If the token is missing, malformed, expired, signed by
             an unknown key, or issued by another issuer or for another audience.
     """
@@ -181,7 +186,14 @@ def verify_identity_token(token: str) -> dict[str, Any]:
         signing_key = _jwks_client().get_signing_key_from_jwt(token)
     except IdentityNotConfigured:
         raise
-    except (jwt.PyJWTError, httpx.HTTPError, Exception) as exc:
+    except (jwt.PyJWKClientConnectionError, httpx.HTTPError, OSError) as exc:
+        # A network failure says nothing about the credential's validity.
+        # Keep it distinct so the BFF can offer retry while still refusing
+        # to mint a session without a verified signing key.
+        raise IdentityUnavailable(
+            "cannot resolve the signing key: identity service unavailable"
+        ) from exc
+    except Exception as exc:
         # An unfetchable or unknown key is a refusal, never a pass. Failing
         # open here would accept any token during a gateway outage.
         raise IdentityError(f"cannot resolve the signing key: {exc}") from exc

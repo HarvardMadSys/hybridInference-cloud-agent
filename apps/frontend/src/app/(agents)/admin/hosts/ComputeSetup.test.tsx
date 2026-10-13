@@ -49,6 +49,10 @@ const savedParameters: Omit<AutomaticComputeSetupRequest, 'request_id'> = {
   protected_cidrs: ['203.0.113.0/24', '198.51.100.0/24', '192.0.2.0/24'],
   slots: 2,
 };
+const machineDefaults = {
+  gateway: { address: 'freeinference.org' },
+  control: { address: 'service-node.example.org' },
+};
 
 function fillAutomaticSetup() {
   fireEvent.change(screen.getByLabelText('Gateway host address'), {
@@ -99,6 +103,33 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Server setup', () => {
+  it('prefills deployment machine addresses and allows edits before configuring', async () => {
+    vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+      available: true,
+      deployment_sha: 'c'.repeat(40),
+      blocked_reasons: [],
+      machine_defaults: machineDefaults,
+    });
+    const saved = vi.fn();
+    render(<ComputeSetup connections={connections} onSaved={saved} />);
+    const configure = screen.getByRole('button', { name: 'Configure automatically' });
+    await waitFor(() => expect(configure).toBeEnabled());
+    expect(screen.getByLabelText('Gateway host address')).toHaveValue('freeinference.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue(
+      'service-node.example.org',
+    );
+    expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
+
+    fillAutomaticSetup();
+    fireEvent.click(configure);
+
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(api.createAutomaticComputeSetup).toHaveBeenCalledWith({
+      ...savedParameters,
+      request_id: expect.any(String),
+    });
+  });
+
   it('creates setup without release uploads or manual secrets and uses SSH connections only', async () => {
     const saved = vi.fn();
     render(<ComputeSetup connections={connections} onSaved={saved} />);
@@ -211,12 +242,14 @@ describe('Server setup', () => {
       available: true,
       deployment_sha: 'c'.repeat(40),
       blocked_reasons: [],
+      machine_defaults: machineDefaults,
       defaults: savedParameters,
       pending_request_id: 'setup-pending',
     });
     render(<ComputeSetup connections={connections} onSaved={vi.fn()} />);
     const retry = await screen.findByRole('button', { name: 'Retry automatic setup' });
     expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
     expect(screen.getByLabelText('Control-plane SSH connection')).toHaveValue('control-key');
     expect(screen.getByLabelText('Sandbox network pool')).toHaveValue('172.29.0.0/16');
     expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
@@ -242,6 +275,12 @@ describe('Server setup', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Connection timed out.');
     const original = vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0];
     initial.unmount();
+    vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+      available: true,
+      deployment_sha: 'c'.repeat(40),
+      blocked_reasons: [],
+      machine_defaults: machineDefaults,
+    });
 
     const saved = vi.fn();
     const restored = render(<ComputeSetup connections={connections} onSaved={saved} />);
@@ -266,6 +305,7 @@ describe('Server setup', () => {
       available: true,
       deployment_sha: 'c'.repeat(40),
       blocked_reasons: [],
+      machine_defaults: machineDefaults,
       defaults: savedParameters,
       pending_request_id: null,
     });

@@ -15,6 +15,28 @@ function view(tool: string, input: unknown, output?: string, isError?: boolean) 
 }
 
 describe('ToolActivityDetails', () => {
+  it.each([
+    { tool: 'spawn_agent', input: { prompt: 'Review' }, title: 'Start subagent' },
+    { tool: 'wait', input: { ids: ['a'] }, title: 'Wait for subagents' },
+    { tool: 'list_agents', input: {}, title: 'List subagents' },
+    {
+      tool: 'send_message',
+      input: { target: 'a', message: 'Review' },
+      title: 'Message subagent',
+    },
+    {
+      tool: 'Task',
+      input: { description: 'Delegate task', prompt: 'Review' },
+      title: 'Delegate task',
+    },
+  ])(
+    'renders the $tool heading once when there is no distinct description',
+    ({ tool, input, title }) => {
+      render(view(tool, input));
+      expect(screen.getByRole('heading', { level: 3, name: title })).toBeInTheDocument();
+    },
+  );
+
   it('shows unfamiliar status strings literally and returned agent identities without inventing a state', () => {
     const rendered = render(
       view('TodoWrite', { todos: [{ content: 'Review', status: 'constructor' }] }),
@@ -23,7 +45,7 @@ describe('ToolActivityDetails', () => {
     rendered.rerender(
       view('spawn_agent', { prompt: 'Review' }, JSON.stringify({ agent_id: 'new-child' })),
     );
-    expect(screen.getByText('new-child')).toBeInTheDocument();
+    expect(screen.getByText('Agent: new-child')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
     expect(screen.queryByText('Completed')).not.toBeInTheDocument();
   });
@@ -87,6 +109,9 @@ describe('ToolActivityDetails', () => {
       ),
     );
     expect(screen.getByText('Review API')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 3, name: 'Review API Delegate task' }),
+    ).toBeInTheDocument();
     expect(screen.getByText('Explore')).toBeInTheDocument();
     expect(screen.getByText('sonnet')).toBeInTheDocument();
     expect(screen.getByText('Background requested')).toBeInTheDocument();
@@ -111,12 +136,11 @@ describe('ToolActivityDetails', () => {
         }),
       ),
     );
-    expect(screen.getByText('a, b')).toBeInTheDocument();
-    expect(screen.getByText('Recorded agent states')).toBeInTheDocument();
+    expect(screen.getByText('Agents: a, b')).toBeInTheDocument();
     expect(screen.getByText('Completed')).toBeInTheDocument();
     expect(screen.getByText('Errored')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
-    expect(screen.getByText('Agent message').closest('details')).toHaveTextContent('Tests pass.');
+    expect(screen.getByText('Message').closest('details')).toHaveTextContent('Tests pass.');
   });
 
   it('does not turn failure text or missing task data into a completion', () => {

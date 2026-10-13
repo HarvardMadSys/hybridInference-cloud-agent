@@ -61,6 +61,7 @@ describe('the login page', () => {
       await screen.findByRole('link', { name: /sign in with gateway.example.org/i }),
     ).toBeInTheDocument();
     expect(screen.getByText('Cloud Agent')).toBeInTheDocument();
+    expect(screen.getByRole('main').closest('[lang]')).toHaveAttribute('lang', 'en');
   });
 
   it('carries the page the visitor was trying to reach', async () => {

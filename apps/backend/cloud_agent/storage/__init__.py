@@ -38,11 +38,11 @@ turns then -- the turn ahead of them is still running, or their group is being
 deleted -- and a claim, the one writer that holds a queued turn while it waits
 for a group and a host, takes neither kind. A publication's outcome event
 key-share-locks the attempt of its anchor turn last; that attempt has finished,
-and the one writer a finished attempt can still block, an event that arrives
-late, takes nothing after it.
+and every lock that conflicts with a key share is taken on running attempts
+only.
 
-A cycle is fixed by fixing the order. Two writes whose loss costs more than a
-second try, recording a publication and appending an event, are also run again
-when Postgres aborts one as a deadlock's victim; see
-:mod:`cloud_agent.storage.deadlocks`.
+A cycle is fixed by fixing the order. An event append, whose loss its runner
+takes for a lost turn, is also run again when Postgres aborts it as a
+deadlock's victim; see :mod:`cloud_agent.storage.deadlocks`. A publication
+record lost that way is left to the publisher's own retry.
 """
