@@ -31,6 +31,7 @@ from tests.support.storage import OneFake
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.mcp_proxy import canonical_request
 from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, SCOPE_MODEL, mint_worker_token
 
 pytestmark = pytest.mark.asyncio
@@ -689,6 +690,207 @@ async def test_an_allowed_tool_is_forwarded(client, upstream):
     assert len(upstream.requests) == 1
 
 
+# -- the body is decided once, and the decided body is what travels ----
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A byte that is not UTF-8, inside a string. This relay cannot decode
+        # it; a decoder that substitutes U+FFFD reads a call to create_issue.
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"create_issue","arguments":{"title":"\xff"}}}',
+        # No ``method`` here, but a case-insensitive decoder reads one.
+        b'{"jsonrpc":"2.0","id":1,"Method":"tools/call","params":{"name":"create_issue"}}',
+        # Here ``name`` is get_issue; a case-insensitive, last-wins decoder
+        # keeps create_issue.
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"get_issue","Name":"create_issue"}}',
+        # Python keeps the last of two members; a decoder that keeps the first
+        # runs the other tool.
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"create_issue","name":"get_issue"}}',
+        b"",
+    ],
+    ids=["invalid-utf8", "method-case", "name-case", "repeated-name", "empty"],
+)
+async def test_a_body_the_relay_cannot_decide_is_never_forwarded(
+    monkeypatch, store, upstream, body
+):
+    """An unparseable body is a call nothing decided, so it never leaves.
+
+    It used to be forwarded as it came, on the theory that a body this relay
+    cannot parse cannot be a ``tools/call``. That holds only if the upstream
+    parses the same way, and Node and Go do not: each of these reaches a
+    denied tool on an upstream that decodes it more leniently.
+    """
+    store.snapshot = _snapshot("get_issue", "create_issue")
+    store.bindings = [
+        _binding(
+            rules={
+                "get_issue": {"policy": "allow", "fingerprint": ""},
+                "create_issue": {"policy": "deny", "fingerprint": ""},
+            }
+        )
+    ]
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            content=body,
+            headers={**_auth(), "content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] in (-32700, -32600)
+    assert response.json()["id"] is None
+    assert upstream.requests == []
+    assert store.created_invocations == []
+
+
+async def test_the_upstream_receives_the_request_as_it_was_decided(client, upstream):
+    """What travels is this relay's encoding of the parsed call, not the bytes.
+
+    The two mean the same thing to a strict decoder. Sending the decided form
+    means they also mean the same thing to every other decoder.
+    """
+    raw = (
+        b'{ "jsonrpc" : "2.0", "id" : 1, "method" : "tools/call", "params" : '
+        b'{ "name" : "get_issue", "arguments" : { "title" : "caf\xc3\xa9", "n" : 1E2 } } }'
+    )
+    response = await client.post(
+        f"/v1/agent/mcp/{_ALIAS}",
+        content=raw,
+        headers={**_auth(), "content-type": "application/json; charset=utf-16"},
+    )
+
+    assert response.status_code == 200, response.text
+    sent = upstream.requests[0]
+    assert sent.content == canonical_request(json.loads(raw))
+    assert sent.content.isascii()
+    assert json.loads(sent.content)["params"]["arguments"] == {"title": "café", "n": 100.0}
+    assert sent.headers["content-type"] == "application/json"
+
+
+@pytest.mark.parametrize("number", ["9007199254740993.0", "0.12345678901234567890", "1e-400"])
+@pytest.mark.parametrize("location", ["argument", "id", "batch"])
+async def test_a_number_that_would_change_is_never_forwarded(
+    client, upstream, store, number: str, location: str
+):
+    """A lossy number refuses the whole request before any call is held or sent."""
+    body = (
+        b'{"jsonrpc":"2.0","id":REQUEST_ID,"method":"tools/call",'
+        b'"params":{"name":"get_issue","arguments":{"n":ARGUMENT}}}'
+    )
+    body = body.replace(b"REQUEST_ID", number.encode() if location == "id" else b"2")
+    body = body.replace(b"ARGUMENT", b"0" if location == "id" else number.encode())
+    if location == "batch":
+        body = b"[" + json.dumps(_rpc("tools/call", name="get_issue")).encode() + b"," + body + b"]"
+
+    response = await client.post(
+        f"/v1/agent/mcp/{_ALIAS}",
+        content=body,
+        headers={**_auth(), "content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32700
+    assert response.json()["id"] is None
+    assert "without changing its value" in response.json()["error"]["message"]
+    assert upstream.requests == []
+    assert store.created_invocations == []
+
+
+async def test_notifications_and_batches_still_travel(client, upstream):
+    """A batch is decided message by message and forwarded whole."""
+    batch = [
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "get_issue"}},
+    ]
+    response = await client.post(f"/v1/agent/mcp/{_ALIAS}", json=batch, headers=_auth())
+
+    assert response.status_code == 200, response.text
+    assert json.loads(upstream.requests[0].content) == batch
+
+
+async def test_an_oversized_body_is_refused_before_it_is_decided(monkeypatch, store, upstream):
+    """The per-connection route reads under the same bound as the merged one."""
+    monkeypatch.setattr(agent_mcp_router, "MAX_RELAY_BODY_BYTES", 64)
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            json=_rpc("tools/call", name="get_issue", arguments={"pad": "x" * 64}),
+            headers=_auth(),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == -32600
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize("policy", ["allow", "confirm"])
+async def test_a_body_that_outgrows_the_bound_when_encoded_is_refused(
+    monkeypatch, store, upstream, policy
+):
+    """A small UTF-8 body cannot become an oversized forwarded or held call."""
+    store.bindings = [_binding(rules={"get_issue": {"policy": policy, "fingerprint": ""}})]
+    document = _rpc("tools/call", name="get_issue", arguments={"pad": "é" * 50})
+    raw = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    limit = len(raw) + 1
+    assert len(raw) < limit < len(canonical_request(document))
+    monkeypatch.setattr(agent_mcp_router, "MAX_RELAY_BODY_BYTES", limit)
+
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            content=raw,
+            headers={**_auth(), "content-type": "application/json"},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == -32600
+    assert response.json()["id"] is None
+    assert (
+        response.json()["error"]["message"] == f"An MCP request body is limited to {limit} bytes."
+    )
+    assert upstream.requests == []
+    assert store.created_invocations == []
+    assert store.looked_up == []
+
+
+async def test_a_canonical_body_exactly_at_the_bound_is_forwarded(monkeypatch, store, upstream):
+    """The canonical byte bound includes its ceiling, even when escaping grows it."""
+    document = _rpc("tools/call", name="get_issue", arguments={"pad": "é" * 50})
+    raw = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    canonical = canonical_request(document)
+    assert len(raw) < len(canonical)
+    monkeypatch.setattr(agent_mcp_router, "MAX_RELAY_BODY_BYTES", len(canonical))
+
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            content=raw,
+            headers={**_auth(), "content-type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    assert upstream.requests[0].content == canonical
+    assert store.created_invocations == []
+
+
+async def test_a_batch_over_the_cap_is_never_forwarded(client, upstream, store):
+    """An oversized batch is refused whole rather than decided message by message."""
+    batch = [
+        {**_rpc("tools/call", name="get_issue"), "id": index}
+        for index in range(agent_mcp_router.MAX_RELAY_BATCH_MESSAGES + 1)
+    ]
+    response = await client.post(f"/v1/agent/mcp/{_ALIAS}", json=batch, headers=_auth())
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32600
+    assert upstream.requests == []
+    assert store.looked_up == []
+
+
 async def test_a_denied_tool_is_never_advertised(monkeypatch, store, upstream):
     """A model cannot be talked into a tool it was never offered."""
     upstream.body = _catalogue("get_issue", "create_issue")
@@ -746,6 +948,30 @@ async def test_a_confirmed_tool_is_advertised_but_held_for_its_owner(monkeypatch
     assert invocation["lease_generation"] == _FENCE["lease_generation"]
     assert invocation["authorization_epoch"] == 1
     assert invocation["arguments_digest"]
+
+
+async def test_a_call_too_large_to_review_is_refused_rather_than_held(monkeypatch, store, upstream):
+    """A held call's arguments are stored for its owner, so they are bounded.
+
+    The body is well inside the relay's request bound, and still far more than
+    a person reviews before approving; storing it would only grow a table every
+    tenant shares.
+    """
+    store.snapshot = _snapshot("create_issue")
+    store.bindings = [_binding(rules={"create_issue": {"policy": "confirm", "fingerprint": ""}})]
+    arguments = {"body": "x" * agent_mcp_router.MAX_HELD_ARGUMENTS_BYTES}
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            json=_rpc("tools/call", name="create_issue", arguments=arguments),
+            headers=_auth(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32602
+    assert "not held or sent" in response.json()["error"]["message"]
+    assert store.created_invocations == []
+    assert upstream.requests == []
 
 
 async def test_a_retry_matching_an_approval_is_dispatched(monkeypatch, store, upstream):

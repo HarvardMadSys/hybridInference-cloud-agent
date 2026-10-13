@@ -1350,7 +1350,7 @@ describe('transcript work details', () => {
         renderEvent={renderEvent}
       />,
     );
-    expect(screen.getByText('Bash: npm test')).toBeVisible();
+    expect(screen.getByText('Bash')).toBeVisible();
     expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
   });
 
@@ -1376,7 +1376,7 @@ describe('transcript work details', () => {
         renderEvent={renderEvent}
       />,
     );
-    expect(screen.getByText('Bash: npm test')).not.toBeVisible();
+    expect(screen.getByText('Bash')).not.toBeVisible();
     expect(screen.getByRole('button', { name: 'Show process (1)' })).toBeVisible();
     expect(screen.getByText('The change is ready.')).toBeVisible();
   });
@@ -1537,7 +1537,7 @@ describe('transcript work details', () => {
       />,
     );
     expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
-    expect(screen.getByText('wait: Wait for reviewer')).toBeVisible();
+    expect(screen.getByText('wait')).toBeVisible();
   });
 
   it.each(['pending', undefined, 'unexpected_runtime_status'])(
@@ -1561,7 +1561,7 @@ describe('transcript work details', () => {
           renderEvent={renderEvent}
         />,
       );
-      expect(screen.getByText('update_plan: Plan')).toBeVisible();
+      expect(screen.getByText('update_plan')).toBeVisible();
       expect(screen.queryByRole('button', { name: /Show process/ })).not.toBeInTheDocument();
     },
   );

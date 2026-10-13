@@ -10,6 +10,7 @@ from cloud_agent.compute_config import current_poll_seconds
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
+    from cloud_agent.application.compute_autoscale import CloudLabAutoscaler
     from cloud_agent.application.compute_reconcile import ComputeReconciler
 
 logger = get_logger(__name__)
@@ -18,9 +19,16 @@ logger = get_logger(__name__)
 class ComputeResourceWorker:
     """Bounded workers with durable per-allocation exclusion in Postgres."""
 
-    def __init__(self, reconciler: ComputeReconciler, *, concurrency: int = 4) -> None:
+    def __init__(
+        self,
+        reconciler: ComputeReconciler,
+        *,
+        autoscaler: CloudLabAutoscaler | None = None,
+        concurrency: int = 4,
+    ) -> None:
         self.reconciler = reconciler
         self.repository = reconciler.repository
+        self.autoscaler = autoscaler
         self.concurrency = concurrency
         self.identity = str(uuid4())
 
@@ -37,6 +45,14 @@ class ComputeResourceWorker:
                 await self.reconciler.schedule()
             except Exception as exc:
                 logger.error("compute_scheduler_failed", extra={"error_type": type(exc).__name__})
+            if self.autoscaler is not None:
+                try:
+                    await self.autoscaler.reconcile()
+                except Exception as exc:
+                    logger.error(
+                        "compute_autoscaler_failed",
+                        extra={"error_type": type(exc).__name__},
+                    )
             await asyncio.sleep(current_poll_seconds(self.reconciler.commands.configuration))
 
     async def _consume(self, worker_id: str) -> None:

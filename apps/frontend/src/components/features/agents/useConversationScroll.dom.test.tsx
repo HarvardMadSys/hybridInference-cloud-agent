@@ -390,6 +390,52 @@ describe('a viewport that shrinks', () => {
   });
 });
 
+describe('layout changes before the next scroll frame', () => {
+  it('keeps the latest manual position when output arrives before the next frame', async () => {
+    const region = renderConversation();
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'jump-first' }));
+    await settle();
+
+    fireEvent.wheel(region, { deltaY: 1000 });
+    region.scrollTop = 1000;
+    fireEvent.scroll(region);
+    // Streaming or composer layout can be reported before the queued frame
+    // has sampled the reader's new position.
+    layout = { ...layout, contentHeight: layout.contentHeight + 120 };
+    act(() => FakeResizeObserver.instances.forEach((observer) => observer.trigger()));
+
+    expect(region.scrollTop).toBe(1000);
+    await settle();
+    expect(screen.getByTestId('mode')).toHaveTextContent('reading');
+  });
+
+  it('keeps following when reaching the bottom shrinks the content', async () => {
+    const region = renderConversation();
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'jump-first' }));
+    await settle();
+
+    fireEvent.wheel(region, { deltaY: 1400 });
+    region.scrollTop = layout.contentHeight - layout.containerHeight;
+    fireEvent.scroll(region);
+    // Hiding the back-to-bottom control can shrink the sticky composer.
+    // Browsers clamp the scroll offset to the new maximum before notifying
+    // ResizeObserver, so it is now below the previous maximum.
+    layout = { ...layout, contentHeight: layout.contentHeight - 40 };
+    region.scrollTop = layout.contentHeight - layout.containerHeight;
+    act(() => FakeResizeObserver.instances.forEach((observer) => observer.trigger()));
+    await settle();
+
+    expect(screen.getByTestId('mode')).toHaveTextContent('following');
+    layout = { ...layout, contentHeight: layout.contentHeight + 120 };
+    act(() => FakeResizeObserver.instances.forEach((observer) => observer.trigger()));
+    await settle();
+    expect(region.scrollTop).toBe(layout.contentHeight - layout.containerHeight);
+    expect(screen.getByTestId('away')).toHaveTextContent('false');
+  });
+});
+
 describe('going back to the bottom', () => {
   it('returns to the end and resumes following', async () => {
     const region = renderConversation();

@@ -10,7 +10,13 @@ import binascii
 # model, so hiding this one behind TYPE_CHECKING leaves `AgentRunnerHost`
 # silently unbuilt and raises at the first request instead of at import.
 from datetime import datetime  # noqa: TC003
-from typing import Annotated, Any, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal
+from uuid import UUID
+
+if TYPE_CHECKING:
+    from pydantic import GetJsonSchemaHandler
+    from pydantic.json_schema import JsonSchemaValue
+    from pydantic_core import CoreSchema
 
 from pydantic import (
     BaseModel,
@@ -19,6 +25,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -63,6 +70,7 @@ from cloud_agent_shared.host_settings import (
     SettingUnit,
     validate_admin_change,
 )
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import (
     DEFAULT_MAX_ARCHIVE_BYTES,
     DEFAULT_MULTIPART_PART_BYTES,
@@ -101,6 +109,33 @@ MAX_LEASE_TTL_SECONDS = 900.0
 # the charset to lowercase/digits/underscore makes that structurally impossible
 # while still letting runtime adapters introduce new kinds.
 EVENT_TYPE_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
+
+# What a host may say about itself, bounded. A host is trusted to run turns,
+# not to size rows: these values are stored as JSONB that the admin pool view
+# and the owner's job view read back on every load. Each cap sits far above
+# anything a real runner sends — runtime and helper ids and their versions come
+# from image labels, capabilities from the shared protocol's own constants, the
+# worker id from a hostname — so only a machine that is misbehaving meets one.
+HOST_REPORT_KEY_MAX_CHARS = 64
+HOST_REPORT_VERSION_MAX_CHARS = 128
+HOST_CAPABILITY_MAX_CHARS = 256
+HOST_VERSION_MENU_MAX_ITEMS = 64
+HOST_LABELS_MAX_ITEMS = 32
+HOST_LABEL_VALUE_MAX_CHARS = 255
+WORKER_ID_MAX_CHARS = 512
+#: A worker's terminal explanation is trimmed to this rather than refused.
+#: Refusing it would refuse the finish, and a turn whose finish cannot land
+#: sits on its lease until the reaper takes it — a worse outcome for the owner
+#: than a long message cut short.
+WORKER_FINISH_DETAIL_MAX_CHARS = 4000
+
+_HostReportKey = Annotated[str, Field(max_length=HOST_REPORT_KEY_MAX_CHARS)]
+_HostReportVersion = Annotated[str, Field(max_length=HOST_REPORT_VERSION_MAX_CHARS)]
+_HostVersionMenu = Annotated[
+    list[_HostReportVersion], Field(max_length=HOST_VERSION_MENU_MAX_ITEMS)
+]
+_HostCapability = Annotated[str, Field(max_length=HOST_CAPABILITY_MAX_CHARS)]
+_HostLabelValue = Annotated[str, Field(max_length=HOST_LABEL_VALUE_MAX_CHARS)]
 
 # Where a job's `base_ref` lives once it is persisted. The column stores the
 # resolved `base_sha` — a branch moves — so the branch the owner actually
@@ -189,6 +224,11 @@ class AgentJobCreate(BaseModel):
         None,
         max_length=16,
         description="Owned skills for this chat. Omitted uses library defaults; [] selects none.",
+    )
+    plugins: list[SandboxPlugin] | None = Field(
+        None,
+        max_length=MAX_SANDBOX_PLUGINS,
+        description="Plugins installed for this chat during sandbox initialization.",
     )
     mcp_bindings: list[McpBindingInput] | None = Field(
         None,
@@ -703,6 +743,7 @@ class AgentJobResponse(BaseModel):
     #: are the single copy of the content, so a fork references the same
     #: immutable uploads rather than duplicating them.
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    plugins: list[SandboxPlugin] = Field(default_factory=list)
     mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -1214,6 +1255,9 @@ class AgentQuestion(BaseModel):
     multiple: bool = False
     options: list[AgentQuestionOption] = Field(default_factory=list)
     allow_custom: bool = True
+    #: ``plan_approval`` renders the question as the plan's Markdown and offers
+    #: feedback; plain questions carry no kind.
+    kind: Literal["plan_approval"] | None = None
 
 
 class AgentQuestionRequest(BaseModel):
@@ -1516,7 +1560,9 @@ class WorkerClaimAttestation(BaseModel):
 
     sandbox_runtime: str | None = Field(None, max_length=128)
     sandbox_image_digest: str | None = Field(None, max_length=512)
-    runtime_versions: dict[str, str] = Field(default_factory=dict, max_length=64)
+    runtime_versions: dict[_HostReportKey, _HostReportVersion] = Field(
+        default_factory=dict, max_length=64
+    )
     #: Every version this replica's image holds, keyed by runtime id — the menu
     #: a stored selection is checked against before the claim honours it.
     #:
@@ -1525,12 +1571,16 @@ class WorkerClaimAttestation(BaseModel):
     #: not name: the field went over the wire, Pydantic discarded it, the claim
     #: saw an empty menu and fell back to the image default. Every selection an
     #: admin made was a no-op, and the only sign was one log line.
-    runtime_versions_available: dict[str, list[str]] = Field(default_factory=dict, max_length=64)
+    runtime_versions_available: dict[_HostReportKey, _HostVersionMenu] = Field(
+        default_factory=dict, max_length=64
+    )
     #: Versions of in-image protocol helpers that are not Agent CLIs (for
     #: example the Claude SDK fork bridge). They ride the same attestation so
     #: the API cannot silently discard evidence used by capability gating.
-    helper_versions: dict[str, str] = Field(default_factory=dict, max_length=64)
-    runner_capabilities: list[str] = Field(default_factory=list, max_length=64)
+    helper_versions: dict[_HostReportKey, _HostReportVersion] = Field(
+        default_factory=dict, max_length=64
+    )
+    runner_capabilities: list[_HostCapability] = Field(default_factory=list, max_length=64)
     sandbox_archive_settings_applied_revision: StrictInt | None = Field(None, ge=0)
     host_kernel: str | None = Field(None, max_length=256)
     guest_kernel: str | None = Field(None, max_length=256)
@@ -1545,7 +1595,11 @@ class WorkerClaimRequest(BaseModel):
     # healthy while the server ignored what the client thought it requested.
     model_config = ConfigDict(extra="forbid")
 
-    worker_id: str = Field(..., description="Stable identifier of the claiming worker.")
+    worker_id: str = Field(
+        ...,
+        max_length=WORKER_ID_MAX_CHARS,
+        description="Stable identifier of the claiming worker.",
+    )
     lease_ttl_seconds: float = Field(
         120.0,
         gt=0,
@@ -1695,6 +1749,7 @@ class WorkerClaimResponse(BaseModel):
     base_sha: str | None = None
     task_prompt: str
     setup_script: str | None = None
+    plugins: list[SandboxPlugin] = Field(default_factory=list)
     runtime: str
     model: str
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
@@ -1745,6 +1800,16 @@ class WorkerClaimResponse(BaseModel):
             "Short-lived read-only credential for this one repository, for the runner to "
             "check it out with. Stays in the runner; never enters the sandbox. Null when "
             "no GitHub App is configured, which is enough for a public repository."
+        ),
+    )
+    github_token: str | None = Field(
+        None,
+        repr=False,
+        description=(
+            "Short-lived GitHub App token scoped to this repository with contents and "
+            "pull_requests write permissions. Injected as GH_TOKEN in the owning sandbox "
+            "member for pushing branches and creating pull requests. Null when no GitHub "
+            "App installation covers the repository."
         ),
     )
     mcp_bindings: list[str] = Field(
@@ -1872,6 +1937,7 @@ class WorkerSandboxProcessRequest(BaseModel):
 
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
+    residency_generation: int = Field(..., ge=1)
     process_generation: int = Field(..., ge=1)
 
 
@@ -1880,6 +1946,7 @@ class WorkerSandboxAdmissionRequest(BaseModel):
 
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
+    residency_generation: int = Field(..., ge=1)
 
 
 class WorkerSandboxSettleRequest(BaseModel):
@@ -1887,6 +1954,7 @@ class WorkerSandboxSettleRequest(BaseModel):
 
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
+    residency_generation: int = Field(..., ge=1)
     context_status: Literal["new", "live", "restored"]
     native_session_id: str | None = Field(None, max_length=512)
     base_sha: str | None = Field(None, min_length=7, max_length=64)
@@ -2151,7 +2219,14 @@ class WorkerFinishRequest(BaseModel):
     """Terminal transition reported by a worker."""
 
     state: str = Field(..., description="succeeded|failed|cancelled")
-    detail: str | None = None
+    detail: str | None = Field(
+        None,
+        description=(
+            "Why the turn ended as it did. Kept to the first "
+            f"{WORKER_FINISH_DETAIL_MAX_CHARS} characters; a longer one is trimmed, "
+            "not refused."
+        ),
+    )
     setup_script: str | None = Field(
         None,
         max_length=8000,
@@ -2180,6 +2255,14 @@ class WorkerFinishRequest(BaseModel):
             "knowing its base, and a job may be submitted without naming a commit."
         ),
     )
+
+    @field_validator("detail")
+    @classmethod
+    def _trim_detail(cls, value: str | None) -> str | None:
+        """Keep the stored explanation bounded without refusing the finish."""
+        if value is None or len(value) <= WORKER_FINISH_DETAIL_MAX_CHARS:
+            return value
+        return value[: WORKER_FINISH_DETAIL_MAX_CHARS - 1] + "\u2026"
 
 
 class WorkerAckResponse(BaseModel):
@@ -2288,6 +2371,10 @@ class AgentConfigResponse(BaseModel):
         description="Repositories this deployment is entitled to work on. Empty means none.",
     )
     runtimes: list[str] = Field(default_factory=list, description="Runtime ids that can run here.")
+    plugin_runtimes: list[str] = Field(
+        default_factory=list,
+        description="Runtime ids that support plugins installed at sandbox initialization.",
+    )
     models: list[str] = Field(
         default_factory=list,
         description=(
@@ -2472,10 +2559,11 @@ class RepoBranchesResponse(BaseModel):
 class AgentRunnerHost(BaseModel):
     """One machine in the agent runner pool.
 
-    Everything below ``seconds_since_seen`` arrived with the dynamic pool
-    (phase G) and every one of those fields has a default. A host that joined
-    by polling — the only way in before enrollment existed — has none of them
-    set, and it must still render on the admin page rather than 500 it.
+    Most fields below ``seconds_since_seen`` arrived with the dynamic pool
+    (phase G) and retain defaults for hosts that joined by polling. The drain
+    fence epoch is different: its migration backfills every host and the API
+    requires it so an automation client never mistakes a partial fence
+    contract for a safe compare-and-swap base.
     """
 
     host: str
@@ -2539,6 +2627,32 @@ class AgentRunnerHost(BaseModel):
         description="Where this host's workspace broker listens, as the control plane reaches it.",
     )
     last_heartbeat_at: datetime | None = None
+    drain_fence_token: UUID | None = Field(
+        None,
+        repr=False,
+        description=(
+            "Opaque owner of an automated deployment drain, retained after release "
+            "as an idempotency receipt."
+        ),
+    )
+    drain_fence_status_before: Literal["online", "draining"] | None = Field(
+        None,
+        description="Host status immediately before the current drain-fence token was acquired.",
+    )
+    drain_fence_active: bool = Field(
+        False,
+        description=(
+            "True only while the recorded deployment fence owns a draining host; "
+            "false for an absent fence or released receipt."
+        ),
+    )
+    drain_fence_epoch: UUID = Field(
+        ...,
+        description=(
+            "Opaque compare-and-swap generation for deployment drain state. It rotates "
+            "whenever host lifecycle, credential, placement, or drain ownership changes."
+        ),
+    )
     sandbox_runtime: str | None = Field(
         None,
         description=(
@@ -2615,6 +2729,41 @@ class AgentRunnerHost(BaseModel):
             "the host predates database-backed archive settings or has not synchronized yet."
         ),
     )
+
+
+class AcquireHostDrainFenceRequest(BaseModel):
+    """Atomically replace the expected drain owner with a new opaque owner."""
+
+    expected_fence_token: UUID | None = Field(..., repr=False)
+    expected_fence_epoch: UUID = Field(
+        ...,
+        repr=False,
+        description=(
+            "Canonical UUID copied from the latest host snapshot; the acquire is stale if "
+            "drain-relevant host state changed afterward."
+        ),
+    )
+    fence_token: UUID = Field(..., repr=False)
+
+    @field_validator("expected_fence_epoch", mode="before")
+    @classmethod
+    def expected_epoch_is_canonical(cls, value: object) -> object:
+        """Reject alternate UUID spellings so persisted CAS intent is byte-stable."""
+        if isinstance(value, UUID) or not isinstance(value, str):
+            return value
+        try:
+            parsed = UUID(value)
+        except ValueError:
+            return value  # Let Pydantic produce its ordinary UUID error.
+        if str(parsed) != value:
+            raise ValueError("expected_fence_epoch must be a canonical UUID")
+        return parsed
+
+
+class ReleaseHostDrainFenceRequest(BaseModel):
+    """Release only the automated drain owned by this opaque token."""
+
+    fence_token: UUID = Field(..., repr=False)
 
 
 class HostSettingDefinition(BaseModel):
@@ -2804,18 +2953,66 @@ class SetHostSettingsRequest(BaseModel):
 
 
 class SandboxArchiveSettingsResponse(BaseModel):
-    """The revisioned archive policy stored for every sandbox host."""
+    """The revisioned archive policy stored for every sandbox host.
+
+    The secret access key is write-only. ``aws_secret_access_key_configured``
+    tells the editor whether a blank secret keeps the stored one.
+    """
 
     enabled: bool = False
     s3_uri: Literal["s3://freeinference/cloud-agent/sandbox"] = SANDBOX_ARCHIVE_S3_URI
     region: str = ""
     kms_key_arn: str = ""
     expected_bucket_owner: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key_configured: bool = False
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
     multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
     multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
     revision: int = Field(0, ge=0)
     updated_at: datetime | None = None
+
+
+class HostSandboxArchiveSettings(SandboxArchiveSettingsResponse):
+    """Heartbeat copy. Includes the secret and omits empty credential fields.
+
+    Older brokers reject unknown policy keys. An unset access key must not
+    appear on the wire; a set key is delivered only to a broker that can
+    apply it. The admin configured flag is not part of this payload.
+    """
+
+    aws_secret_access_key: str = ""
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_credentials(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if not data.get("aws_access_key_id"):
+            data.pop("aws_access_key_id", None)
+        if not data.get("aws_secret_access_key"):
+            data.pop("aws_secret_access_key", None)
+        data.pop("aws_secret_access_key_configured", None)
+        return data
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        del core_schema, handler
+        schema = SandboxArchiveSettingsResponse.model_json_schema()
+        properties = dict(schema["properties"])
+        properties.pop("aws_secret_access_key_configured", None)
+        properties["aws_secret_access_key"] = {
+            "default": "",
+            "description": "Included only when an access key is configured.",
+            "title": "Aws Secret Access Key",
+            "type": "string",
+        }
+        return {
+            **schema,
+            "title": "HostSandboxArchiveSettings",
+            "description": "Archive policy delivered to a broker. Empty access-key fields are omitted.",
+            "properties": properties,
+        }
 
 
 class SetSandboxArchiveSettingsRequest(BaseModel):
@@ -2827,6 +3024,8 @@ class SetSandboxArchiveSettingsRequest(BaseModel):
     region: str = Field("", max_length=128)
     kms_key_arn: str = Field("", max_length=2048)
     expected_bucket_owner: str = Field("", max_length=12)
+    aws_access_key_id: str = Field("", max_length=128)
+    aws_secret_access_key: str = Field("", max_length=256)
     max_archive_bytes: StrictInt = Field(DEFAULT_MAX_ARCHIVE_BYTES, ge=1, le=MAX_ARCHIVE_BYTES)
     multipart_threshold_bytes: StrictInt = Field(
         DEFAULT_MULTIPART_THRESHOLD_BYTES, ge=1, le=MAX_SINGLE_UPLOAD_BYTES
@@ -2855,12 +3054,18 @@ class SetSandboxArchiveSettingsRequest(BaseModel):
 
     @model_validator(mode="after")
     def _safe_archive_policy(self) -> SetSandboxArchiveSettingsRequest:
+        # A blank secret can mean "keep the stored secret" when the access key
+        # id is unchanged. The route merges that secret and validates again.
+        if self.aws_access_key_id and not self.aws_secret_access_key:
+            return self
         try:
             SandboxArchivePolicy(
                 enabled=self.enabled,
                 region=self.region,
                 kms_key_arn=self.kms_key_arn,
                 expected_bucket_owner=self.expected_bucket_owner,
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
                 max_archive_bytes=self.max_archive_bytes,
                 multipart_threshold_bytes=self.multipart_threshold_bytes,
                 multipart_part_bytes=self.multipart_part_bytes,
@@ -2943,7 +3148,7 @@ class HostRegisterRequest(BaseModel):
             "register under a name an admin did not choose for it."
         ),
     )
-    capabilities: list[str] = Field(
+    capabilities: list[_HostCapability] = Field(
         default_factory=list,
         max_length=64,
         description=(
@@ -2969,7 +3174,9 @@ class HostRegisterRequest(BaseModel):
         ),
     )
     runner_version: str | None = Field(None, max_length=128)
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[_HostReportKey, _HostLabelValue] = Field(
+        default_factory=dict, max_length=HOST_LABELS_MAX_ITEMS
+    )
 
 
 class HostRegisterResponse(BaseModel):
@@ -3097,7 +3304,7 @@ class HostHeartbeatRequest(BaseModel):
     )
     runner_version: str | None = Field(None, max_length=128)
     broker_url: str | None = Field(None, max_length=2048)
-    capabilities: list[str] | None = Field(None, max_length=64)
+    capabilities: list[_HostCapability] | None = Field(None, max_length=64)
     sandbox_runtime: str | None = Field(
         None,
         max_length=128,
@@ -3120,7 +3327,7 @@ class HostHeartbeatRequest(BaseModel):
             "can know exactly what executed the original."
         ),
     )
-    runtime_versions: dict[str, str] | None = Field(
+    runtime_versions: dict[_HostReportKey, _HostReportVersion] | None = Field(
         None,
         max_length=64,
         description=(
@@ -3129,7 +3336,7 @@ class HostHeartbeatRequest(BaseModel):
             "means 'inspected, image carries no version labels'."
         ),
     )
-    runtime_versions_available: dict[str, list[str]] | None = Field(
+    runtime_versions_available: dict[_HostReportKey, _HostVersionMenu] | None = Field(
         None,
         max_length=64,
         description=(
@@ -3249,7 +3456,7 @@ class HostHeartbeatResponse(BaseModel):
             "override returns the next level's value, never a legacy environment value."
         ),
     )
-    sandbox_archive_settings: SandboxArchiveSettingsResponse
+    sandbox_archive_settings: HostSandboxArchiveSettings
     residencies_lost: list[ResidencyBeat] = Field(
         default_factory=list,
         description=(

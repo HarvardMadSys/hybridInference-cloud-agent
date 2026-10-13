@@ -48,6 +48,10 @@ class RepoNotAllowed(Exception):
     """Raised when a job names a repository this deployment will not work on."""
 
 
+class RepoAccessUnavailable(Exception):
+    """Repository access cannot currently be verified; retry without granting it."""
+
+
 class GitHubReconnectRequired(RepoNotAllowed):
     """The user connected GitHub, but GitHub can no longer be asked as them.
 
@@ -55,16 +59,6 @@ class GitHubReconnectRequired(RepoNotAllowed):
     GitHub has since refused. A refusal like any other — every caller that
     handles :class:`RepoNotAllowed` stays closed — with a message that says what
     fixes it.
-    """
-
-
-class EntitlementUnavailable(RepoNotAllowed):
-    """GitHub could not be asked, just now, whether the user may use the repository.
-
-    Still a refusal for every caller that handles :class:`RepoNotAllowed`, so
-    nothing opens while GitHub is unreachable. But not a settled one: asking
-    again later may succeed, so a caller with a queue — the publisher — waits
-    rather than giving up on its work.
     """
 
 
@@ -111,7 +105,7 @@ def require_allowed_repo(repo: str, env: dict[str, str] | None = None) -> None:
 async def _connected_repos(
     user_id: str, *, store: SourceControlRepository, app_credentials: Any
 ) -> tuple[set[str], bool, bool]:
-    """The repositories this user's connection reaches, whether to reconnect, and if complete.
+    """Return verified repositories, reconnection need and lookup completeness.
 
     For each installation the user connected, GitHub is asked *as the user*
     which of its repositories they can push to. It used to be asked with the
@@ -119,9 +113,6 @@ async def _connected_repos(
     installation covers: GitHub reports an organization's installation to
     anyone with access to one of its repositories, so an outside collaborator
     on one repository was offered all the others the App could see.
-
-    The answer is incomplete when an installation could not be read: a
-    repository missing from it may only be missing for now.
     """
     grants = await store.list_repo_grants(user_id=user_id)
     if not grants:
@@ -205,11 +196,7 @@ async def require_entitled_repo(
     app_credentials: Any = None,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Raise :class:`RepoNotAllowed` unless this user may target ``repo``.
-
-    :class:`EntitlementUnavailable` when the answer could not be had from
-    GitHub just now, rather than a settled no.
-    """
+    """Verify access, distinguishing a definitive refusal from temporary unavailability."""
     if not _REPO_RE.match(repo or ""):
         raise RepoNotAllowed(f"repo must be 'owner/name', got {repo!r}")
     # The allowlist half first, so an `owner/*` rule is honoured without needing
@@ -225,18 +212,15 @@ async def require_entitled_repo(
                 user_id, store=store, app_credentials=app_credentials
             )
         except Exception:
-            connected, complete = set(), False
+            raise RepoAccessUnavailable("Repository access is temporarily unavailable.") from None
     if any(entry.lower() == repo.lower() for entry in connected):
         return
+    if not complete:
+        raise RepoAccessUnavailable("Repository access is temporarily unavailable.")
     if reconnect:
         raise GitHubReconnectRequired(
             f"Reconnect GitHub to work on {repo!r}: repositories are now checked "
             "against your own GitHub access, which this connection cannot show."
-        )
-    if not complete:
-        raise EntitlementUnavailable(
-            f"GitHub could not be asked whether you may work on {repo!r} just now; "
-            "try again shortly."
         )
     raise RepoNotAllowed(
         f"You have not connected {repo!r} with access to push to it. Give the GitHub "
@@ -247,8 +231,8 @@ async def require_entitled_repo(
 
 __all__ = [
     "REPO_PATTERN",
-    "EntitlementUnavailable",
     "GitHubReconnectRequired",
+    "RepoAccessUnavailable",
     "RepoNotAllowed",
     "allowed_repos",
     "repo_is_allowed",

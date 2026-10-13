@@ -11,6 +11,8 @@ const settings = {
   region: 'us-east-1',
   kms_key_arn: 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000',
   expected_bucket_owner: '123456789012',
+  aws_access_key_id: '',
+  aws_secret_access_key_configured: false,
   max_archive_bytes: 2_147_483_648,
   multipart_threshold_bytes: 8_388_608,
   multipart_part_bytes: 8_388_608,
@@ -38,7 +40,7 @@ describe('admin sandbox archive settings client', () => {
     );
   });
 
-  it('atomically writes the seven configurable fields and revision without the fixed URI', async () => {
+  it('atomically writes the configurable fields and revision without the fixed URI', async () => {
     const fetch = vi.spyOn(client, 'fetchWithAuth').mockResolvedValue(
       new Response(JSON.stringify({ ...settings, enabled: true, revision: 4 }), {
         headers: { 'Content-Type': 'application/json' },
@@ -49,6 +51,8 @@ describe('admin sandbox archive settings client', () => {
       region: settings.region,
       kms_key_arn: settings.kms_key_arn,
       expected_bucket_owner: settings.expected_bucket_owner,
+      aws_access_key_id: '',
+      aws_secret_access_key: '',
       max_archive_bytes: settings.max_archive_bytes,
       multipart_threshold_bytes: settings.multipart_threshold_bytes,
       multipart_part_bytes: settings.multipart_part_bytes,

@@ -8,15 +8,19 @@ opening a PR that is not a draft.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 from tests.support.storage import AllCapabilities
 
 from cloud_agent import publish_worker
+from cloud_agent.entitlement import RepoAccessUnavailable
+from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.publish_worker import (
     GitHubCredential,
     create_draft_pull_request,
@@ -39,23 +43,10 @@ def _entitled(monkeypatch):
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "o/n")
 
 
-@pytest.fixture(autouse=True)
-def _no_retry_pause(monkeypatch):
-    """Keep the pauses before a passing failure is retried, but make them instant."""
-    monkeypatch.setattr(
-        publish_worker,
-        "_TRANSIENT_RETRY_DELAYS_S",
-        tuple(0.0 for _ in publish_worker._TRANSIENT_RETRY_DELAYS_S),
-    )
-
-
-#: How many times a step that keeps failing for a passing reason is tried.
-_TRIES = len(publish_worker._TRANSIENT_RETRY_DELAYS_S) + 1
-
-
 _JOB = {
     "publication_kind": "shared_snapshot",
     "snapshot_id": 9,
+    "publish_attempt_count": 0,
     "workspace_epoch": 4,
     "included_job_ids": ["ajob_1"],
     "anchor_job_id": "ajob_1",
@@ -79,9 +70,14 @@ class FakeStore(AllCapabilities):
         self.claims = 0
         self.snapshot_recorded: tuple[int, str, str] | None = None
         self.snapshot_failed: tuple[int, str] | None = None
+        self.snapshot_deferred: tuple[int, str] | None = None
+        self.record_expected_attempt: int | None = None
+        self.failed_expected_attempt: int | None = None
+        self.deferred_expected_attempt: int | None = None
+        self.renewed_expected_attempts: list[int] = []
+        self.renew_ok = True
         self.import_failed: tuple[int, str] | None = None
         self.import_completed: tuple[int, str] | None = None
-        self.touched: list[int] = []
         self._record_ok = record_ok
 
     async def claim_for_publish(self):
@@ -90,23 +86,40 @@ class FakeStore(AllCapabilities):
         return job
 
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
-        # The fixture user connected no GitHub installation: a repository is
-        # theirs through the allowlist alone. Without this the lookup raised,
-        # which now reads as GitHub being unavailable rather than as a refusal.
+        """The fixture has no connected installations beyond its allowlist."""
         return []
 
-    async def touch_snapshot_publish(self, *, snapshot_id: int) -> bool:
-        self.touched.append(snapshot_id)
-        return self.snapshot_recorded is None and self.snapshot_failed is None
+    async def renew_snapshot_publish_claim(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int
+    ) -> bool:
+        assert snapshot_id == 9
+        self.renewed_expected_attempts.append(expected_publish_attempt_count)
+        return self.renew_ok
 
     async def record_snapshot_publish(
-        self, *, snapshot_id: int, pr_url: str, commit_sha: str
+        self,
+        *,
+        snapshot_id: int,
+        expected_publish_attempt_count: int,
+        pr_url: str,
+        commit_sha: str,
     ) -> bool:
+        self.record_expected_attempt = expected_publish_attempt_count
         self.snapshot_recorded = (snapshot_id, pr_url, commit_sha)
         return self._record_ok
 
-    async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
+    async def fail_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> None:
+        self.failed_expected_attempt = expected_publish_attempt_count
         self.snapshot_failed = (snapshot_id, detail)
+
+    async def defer_snapshot_publish(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+    ) -> bool:
+        self.deferred_expected_attempt = expected_publish_attempt_count
+        self.snapshot_deferred = (snapshot_id, detail)
+        return True
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
         # No durable import is outstanding: these scenarios publish from a
@@ -170,6 +183,111 @@ async def test_successful_publish_records_the_pr(monkeypatch):
     assert "ajob_1" in captured["body"]
 
 
+async def test_slow_publication_keeps_renewing_its_fenced_claim(monkeypatch):
+    """The heartbeat spans provider waits, not merely claim and final write."""
+    store = FakeStore(dict(_JOB))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    monkeypatch.setattr(publish_worker, "_PUBLISH_HEARTBEAT_INTERVAL_S", 0.001)
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    _patch_pr(monkeypatch)
+
+    class App:
+        async def token_for(self, _repo: str, **_kwargs: Any) -> str:
+            started.set()
+            await release.wait()
+            return "t"
+
+    pending = asyncio.create_task(publish_one(store, app_credentials=App()))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    for _ in range(50):
+        if len(store.renewed_expected_attempts) >= 2:
+            break
+        await asyncio.sleep(0.002)
+
+    assert store.renewed_expected_attempts[:2] == [0, 0]
+    release.set()
+    assert await pending == "https://github.com/o/n/pull/7"
+    renewals = len(store.renewed_expected_attempts)
+    await asyncio.sleep(0.005)
+    assert len(store.renewed_expected_attempts) == renewals, "the heartbeat task leaked"
+
+
+async def test_a_stale_publisher_stops_before_any_remote_side_effect(monkeypatch):
+    """A reaper-owned replacement fences the old worker at its first renewal."""
+    store = FakeStore(dict(_JOB))
+    store.renew_ok = False
+    push = Mock()
+    pull_request = AsyncMock()
+    monkeypatch.setattr(publish_worker, "publish_patch", push)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+
+    assert store.renewed_expected_attempts == [0]
+    assert store.snapshot_recorded is None
+    assert store.snapshot_deferred is None
+    assert store.snapshot_failed is None
+    push.assert_not_called()
+    pull_request.assert_not_awaited()
+
+
+async def test_publishing_asks_for_a_token_that_outlives_the_publish(monkeypatch):
+    """A cached token is served until five minutes before expiry; a publish can take longer."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    )
+    _patch_pr(monkeypatch)
+    asked: dict[str, Any] = {}
+
+    class App:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            asked.update(kwargs)
+            return "ghs_fresh"
+
+    await publish_one(store, app_credentials=App())
+
+    assert asked["min_ttl_s"] >= 900
+
+
+async def test_cancelling_a_publish_while_its_heartbeat_stops_is_not_swallowed(monkeypatch):
+    """A shutdown that lands while the heartbeat winds down must still stop the publisher."""
+    beating = asyncio.Event()
+    stopping = asyncio.Event()
+    release = asyncio.Event()
+
+    async def heartbeat(_store: Any, **_fence: Any) -> None:
+        beating.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopping.set()
+            await release.wait()
+            raise
+
+    async def open_pr(**_kwargs: Any) -> str:
+        # Finish only once the heartbeat runs, as it does under any real push.
+        await beating.wait()
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "_heartbeat_snapshot_publish", heartbeat)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", open_pr)
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    )
+    task = asyncio.create_task(publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t")))
+    await stopping.wait()
+
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_default_publish_branch_uses_current_saved_setting(monkeypatch):
     values = {"AGENT_PUBLISH_BASE_BRANCH": "first"}
     monkeypatch.setattr(
@@ -219,6 +337,21 @@ async def test_default_publish_branch_uses_current_saved_setting(monkeypatch):
         (["\x1bmalformed\u202e title", None, {"title": "bad"}], "Update x"),
         (["(the agent finished without a closing message)"], "Update x"),
         (["Done."], "Update x"),
+        (
+            [
+                "I've implemented the feature. Here's a summary of what I did.\n\n"
+                "- Add a button to restart failed runs in a new session"
+            ],
+            "Add a button to restart failed runs in a new session",
+        ),
+        (["I've implemented the feature. Here's a summary of what I did."], "Update x"),
+        (
+            ["I've implemented the feature.\n\nAdded exponential retry backoff."],
+            "Added exponential retry backoff.",
+        ),
+        (["Implemented exponential retry backoff"], "Implemented exponential retry backoff"),
+        (["Changes.ts: add restart navigation"], "Changes.ts: add restart navigation"),
+        (["summary.py now preserves earlier turns"], "summary.py now preserves earlier turns"),
         (["⏳ The model is starting up — please wait"], "Update x"),
         ([], "Update x"),
         (None, "Update x"),
@@ -238,6 +371,26 @@ async def test_pr_title_uses_readable_closing_summaries(monkeypatch, summaries, 
     assert captured["title"] == f"[agent] {expected}"
     assert len(captured["title"]) <= 78
     assert "Please fix" not in captured["title"]
+
+
+async def test_title_generation_failure_publishes_a_meaningful_fallback(monkeypatch):
+    closing = (
+        "I've implemented the feature. Here's a summary of what I did.\n\n"
+        "- Add a button to restart failed runs in a new session"
+    )
+    store = FakeStore({**_JOB, "session_summaries": [closing]})
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    captured = _patch_pr(monkeypatch)
+    generated = AsyncMock(return_value=None)
+    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
+
+    url = await publish_one(store, credential=GitHubCredential("t"))
+
+    assert captured["title"] == "[agent] Add a button to restart failed runs in a new session"
+    assert store.snapshot_recorded == (9, url, "s")
+    generated.assert_awaited_once()
 
 
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
@@ -522,13 +675,117 @@ async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
     assert requests == ["GET", "PATCH", "POST"]
 
 
+@pytest.mark.parametrize(
+    "create_response",
+    [
+        pytest.param(httpx.Response(201, json={}), id="response-lost"),
+        pytest.param(
+            httpx.Response(422, json={"message": "A pull request already exists"}),
+            id="create-race",
+        ),
+    ],
+)
+async def test_retry_reconciles_an_uncertain_or_duplicate_pr_create(monkeypatch, create_response):
+    """A later lookup reconciles create uncertainty instead of duplicating it."""
+    requests: list[str] = []
+    lookup_count = 0
+    pr_url = "https://github.com/o/n/pull/7"
+
+    def handle(request):
+        nonlocal lookup_count
+        requests.append(request.method)
+        if request.method == "GET":
+            lookup_count += 1
+            if lookup_count == 1:
+                return httpx.Response(200, json=[])
+            return httpx.Response(
+                200,
+                json=[{"number": 7, "state": "open", "html_url": pr_url}],
+            )
+        if request.method == "POST":
+            return create_response
+        assert request.method == "PATCH"
+        return httpx.Response(200, json={"state": "open", "html_url": pr_url})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    _patch_publish(
+        monkeypatch,
+        PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"]),
+    )
+
+    first = FakeStore(dict(_JOB))
+    assert await publish_one(first, credential=GitHubCredential("t")) is None
+    assert first.snapshot_deferred is not None
+    assert first.snapshot_failed is None
+    assert first.deferred_expected_attempt == 0
+
+    restarted = FakeStore({**_JOB, "publish_attempt_count": 1})
+    assert await publish_one(restarted, credential=GitHubCredential("t")) == pr_url
+    assert restarted.snapshot_recorded == (9, pr_url, "next")
+    assert restarted.record_expected_attempt == 1
+    assert requests == ["GET", "POST", "GET", "PATCH"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(408, text="request timeout"),
+        httpx.Response(429, text="rate limited"),
+        httpx.Response(500, text="server error"),
+        httpx.Response(599, text="network connect timeout"),
+        httpx.Response(201, text="not json"),
+        httpx.ConnectError("create response lost"),
+    ],
+)
+async def test_pr_create_transient_failures_requeue(monkeypatch, response):
+    """An uncertain create outcome is reconciled by a later lookup."""
+    requests: list[str] = []
+
+    def handle(request):
+        requests.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        assert request.method == "POST"
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    _patch_publish(
+        monkeypatch,
+        PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"]),
+    )
+    store = FakeStore(dict(_JOB))
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_recorded is None
+    assert store.snapshot_failed is None
+    assert store.snapshot_deferred is not None
+    assert requests == ["GET", "POST"]
+
+
 @pytest.mark.parametrize("failure", ["lookup", "update"])
 @pytest.mark.parametrize(
     "response",
     [
         httpx.Response(404, json={"message": "Not Found"}),
+        httpx.Response(408, text="request timeout"),
+        httpx.Response(429, text="rate limited"),
+        httpx.Response(500, text="server error"),
         httpx.Response(502, text="bad gateway"),
         httpx.Response(503, text="unavailable"),
+        httpx.Response(504, text="gateway timeout"),
+        httpx.Response(599, text="network connect timeout"),
         httpx.Response(200, text="not json"),
         httpx.Response(200, json={"unexpected": "object"}),
         httpx.Response(200, json=["not", "a", "PR"]),
@@ -536,12 +793,7 @@ async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
     ],
 )
 async def test_pr_api_failure_does_not_record_the_stale_url(monkeypatch, failure, response):
-    """Unknown PR state must neither create duplicates nor record a stale link.
-
-    A server error or a dropped connection is tried again a bounded number of
-    times first (each try looks the PR up before writing); an answer about the
-    PR itself is not.
-    """
+    """Unknown PR state must neither create duplicates nor record a stale link."""
     requests = []
 
     def handle(request):
@@ -568,200 +820,112 @@ async def test_pr_api_failure_does_not_record_the_stale_url(monkeypatch, failure
     store = FakeStore({**_JOB, "parent_pr_url": "https://github.com/o/n/pull/7"})
     assert await publish_one(store, credential=GitHubCredential("t")) is None
     assert store.snapshot_recorded is None
-    assert store.snapshot_failed is not None
-    if isinstance(response, httpx.Response) and response.status_code >= 400:
-        assert str(response.status_code) in store.snapshot_failed[1]
-    passing = isinstance(response, Exception) or response.status_code >= 500
-    assert requests == (["GET", "PATCH"] if failure == "update" else ["GET"]) * (
-        _TRIES if passing else 1
+    retryable = not (isinstance(response, httpx.Response) and response.status_code == 404)
+    recorded = store.snapshot_deferred if retryable else store.snapshot_failed
+    assert recorded is not None
+    assert store.snapshot_failed is None if retryable else store.snapshot_deferred is None
+    if isinstance(response, httpx.ConnectError):
+        assert "unreachable" in recorded[1]
+    elif isinstance(response, httpx.Response) and response.status_code >= 400:
+        assert str(response.status_code) in recorded[1]
+    assert requests == (["GET", "PATCH"] if failure == "update" else ["GET"])
+
+
+@pytest.mark.parametrize("attempts", [4, 5])
+async def test_transient_publication_delegates_the_attempt_budget_to_storage(monkeypatch, attempts):
+    """Every transient failure uses the claim fence; storage decides exhaustion."""
+    store = FakeStore({**_JOB, "publish_attempt_count": attempts})
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
     )
+    monkeypatch.setattr(
+        publish_worker,
+        "ensure_draft_pull_request",
+        AsyncMock(side_effect=PublishError("GitHub refused the PR lookup (503)")),
+    )
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_recorded is None
+    assert store.snapshot_failed is None
+    assert store.snapshot_deferred == (9, "GitHub refused the PR lookup (503)")
+    assert store.deferred_expected_attempt == attempts
 
 
 @pytest.mark.parametrize(
-    "first_answer",
+    ("error", "retried"),
     [
-        httpx.Response(502, text="bad gateway"),
-        httpx.Response(429, headers={"retry-after": "1"}, json={"message": "slow down"}),
-        httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={"message": "limit"}),
-        httpx.ConnectError("unreachable"),
+        (httpx.ConnectError("connection reset"), True),
+        (httpx.ReadTimeout("timed out"), True),
+        (GitHubAppError("GitHub token mint failed (408)", status=408), True),
+        (GitHubAppError("GitHub token mint failed (429)", status=429), True),
+        (GitHubAppError("GitHub token mint failed (500)", status=500), True),
+        (GitHubAppError("GitHub token mint failed (502)", status=502), True),
+        (GitHubAppError("GitHub token mint failed (503)", status=503), True),
+        (GitHubAppError("GitHub token mint failed (504)", status=504), True),
+        (GitHubAppError("GitHub token mint failed (599)", status=599), True),
+        (GitHubAppError("GitHub token mint failed (401)", status=401), False),
+        (AppNotInstalled("no App installation covers o/n", status=404), False),
+        (GitHubAppError("could not sign the App JWT"), False),
     ],
 )
-async def test_a_passing_github_failure_after_the_push_opens_the_pr_on_a_retry(
-    monkeypatch, first_answer
-):
-    """One 502 after the push failed the snapshot, and the group's publication with it.
-
-    The PR call is repeated, never the push: each try looks the branch's PR
-    up before it writes, so a lost answer cannot become a second draft.
-    """
-    pushes: list[dict[str, Any]] = []
-
-    def fake_publish(**kwargs):
-        pushes.append(kwargs)
-        return PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
-
-    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
-    requests: list[str] = []
-
-    def handle(request):
-        requests.append(request.method)
-        if len(requests) == 1:
-            if isinstance(first_answer, Exception):
-                raise first_answer
-            return first_answer
-        if request.method == "GET":
-            return httpx.Response(200, json=[])
-        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
-
-    original_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        httpx,
-        "AsyncClient",
-        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
-    )
+async def test_credential_mint_retries_only_transient_github_failures(monkeypatch, error, retried):
+    """A GitHub blip while minting must not fail the snapshot; a refusal must."""
     store = FakeStore(dict(_JOB))
-
-    url = await publish_one(store, credential=GitHubCredential("t"))
-
-    assert url == "https://github.com/o/n/pull/8"
-    assert store.snapshot_failed is None
-    assert store.snapshot_recorded == (9, url, "next")
-    assert requests == ["GET", "GET", "POST"]
-    assert len(pushes) == 1
-
-
-async def test_a_refusal_that_is_not_about_load_is_not_retried(monkeypatch):
-    """A 403 without a rate limit is GitHub's answer, and asking again changes nothing."""
-    requests: list[str] = []
-
-    def handle(request):
-        requests.append(request.method)
-        return httpx.Response(403, json={"message": "Resource not accessible by integration"})
-
-    original_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        httpx,
-        "AsyncClient",
-        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
-    )
-    _patch_publish(
-        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
-    )
-    store = FakeStore(dict(_JOB))
-
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
-    assert store.snapshot_failed is not None and "403" in store.snapshot_failed[1]
-    assert requests == ["GET"]
-
-
-@pytest.mark.parametrize("step", ["entitlement", "credential", "remote"])
-async def test_a_step_github_could_not_answer_is_tried_again_before_anything_is_pushed(
-    monkeypatch, step
-):
-    """Entitlement, the token and reading the remote all come before the push."""
-    from cloud_agent.entitlement import EntitlementUnavailable
-    from cloud_agent.github_app import GitHubAppError
-    from cloud_agent.publisher import PublishUnavailable
-
-    calls = {"entitlement": 0, "credential": 0, "remote": 0}
-
-    async def entitled(*_args: Any, **_kwargs: Any) -> None:
-        calls["entitlement"] += 1
-        if step == "entitlement" and calls["entitlement"] == 1:
-            raise EntitlementUnavailable("GitHub could not be asked just now")
 
     class App:
         async def token_for(self, repo: str, **kwargs: Any) -> str:
-            calls["credential"] += 1
-            if step == "credential" and calls["credential"] == 1:
-                raise GitHubAppError("GitHub POST access_tokens failed (502)", status=502)
-            return "ghs_fresh"
+            raise error
 
-    def fake_publish(**kwargs):
-        calls["remote"] += 1
-        if step == "remote" and calls["remote"] == 1:
-            raise PublishUnavailable("git ls-remote failed: Could not resolve host: github.com")
-        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    def forbid_push(**kwargs):
+        raise AssertionError("a credential failure must not push")
 
-    monkeypatch.setattr(publish_worker, "require_entitled_repo", entitled)
-    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
-    _patch_pr(monkeypatch)
-    store = FakeStore(dict(_JOB))
-
-    assert await publish_one(store, app_credentials=App()) is not None
-    assert store.snapshot_failed is None
-    assert calls == {name: 2 if name == step else 1 for name in calls}
-
-
-@pytest.mark.parametrize("failure", ["not entitled", "not installed", "push", "gate"])
-async def test_a_settled_failure_is_recorded_without_asking_again(monkeypatch, failure):
-    """Only a passing failure is repeated: never a push whose outcome is unknown."""
-    from cloud_agent.entitlement import RepoNotAllowed
-    from cloud_agent.github_app import AppNotInstalled
-
-    calls: list[str] = []
-
-    async def entitled(*_args: Any, **_kwargs: Any) -> None:
-        calls.append("entitlement")
-        if failure == "not entitled":
-            raise RepoNotAllowed("You have not connected 'o/n'")
-
-    class App:
-        async def token_for(self, repo: str, **kwargs: Any) -> str:
-            calls.append("credential")
-            if failure == "not installed":
-                raise AppNotInstalled("no App installation covers o/n", status=404)
-            return "ghs_fresh"
-
-    def fake_publish(**kwargs):
-        calls.append("push")
-        raise PublishError(
-            "git push failed: the remote end hung up unexpectedly"
-            if failure == "push"
-            else "patch rejected: secret"
-        )
-
-    monkeypatch.setattr(publish_worker, "require_entitled_repo", entitled)
-    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
-    pr_called = _patch_pr(monkeypatch)
-    store = FakeStore(dict(_JOB))
-
+    monkeypatch.setattr(publish_worker, "publish_patch", forbid_push)
     assert await publish_one(store, app_credentials=App()) is None
-    assert store.snapshot_failed is not None
-    assert pr_called == {}
-    assert (
-        calls
-        == {
-            "not entitled": ["entitlement"],
-            "not installed": ["entitlement", "credential"],
-            "push": ["entitlement", "credential", "push"],
-            "gate": ["entitlement", "credential", "push"],
-        }[failure]
-    )
+    assert store.snapshot_recorded is None
+    recorded = store.snapshot_deferred if retried else store.snapshot_failed
+    assert recorded is not None and recorded[0] == 9
+    assert "could not obtain a GitHub credential" in recorded[1]
+    assert store.snapshot_failed is None if retried else store.snapshot_deferred is None
 
 
-async def test_a_passing_failure_that_outlasts_the_retries_is_recorded_for_what_it_is(
-    monkeypatch,
-):
-    """GitHub unreachable throughout is recorded, but not as a withdrawn entitlement."""
-    from cloud_agent.entitlement import EntitlementUnavailable
-
-    asked: list[int] = []
-
-    async def unavailable(*_args: Any, **_kwargs: Any) -> None:
-        asked.append(1)
-        raise EntitlementUnavailable("GitHub could not be asked whether you may work on 'o/n'")
-
-    monkeypatch.setattr(publish_worker, "require_entitled_repo", unavailable)
-    pr_called = _patch_pr(monkeypatch)
+@pytest.mark.parametrize(
+    ("detail", "retried"),
+    [
+        (
+            "git fetch failed: fatal: unable to access 'https://github.com/o/n.git/': "
+            "Recv failure: Connection reset by peer",
+            True,
+        ),
+        ("git fetch timed out after 120s", True),
+        (
+            "git push failed: fatal: unable to access 'https://github.com/o/n.git/': "
+            "The requested URL returned error: 503",
+            True,
+        ),
+        (
+            "git fetch failed: fatal: Authentication failed for 'https://github.com/o/n.git/'",
+            False,
+        ),
+        (
+            "branch agent/athr_1 has moved: its tip is abcdefabcdef "
+            "but this run built on 123456789abc",
+            False,
+        ),
+    ],
+)
+async def test_git_transport_failures_retry_and_rejections_do_not(monkeypatch, detail, retried):
+    """A disconnect while publishing is deferred; a real git refusal is not."""
     store = FakeStore(dict(_JOB))
+    _patch_publish(monkeypatch, PublishError(detail))
+    pr_called = _patch_pr(monkeypatch)
 
     assert await publish_one(store, credential=GitHubCredential("t")) is None
-    assert len(asked) == _TRIES
-    assert store.snapshot_failed is not None
-    assert "could not confirm" in store.snapshot_failed[1]
-    assert "no longer entitled" not in store.snapshot_failed[1]
     assert pr_called == {}
+    assert store.snapshot_recorded is None
+    recorded = store.snapshot_deferred if retried else store.snapshot_failed
+    assert recorded is not None and recorded[0] == 9
+    assert detail in recorded[1] or recorded[1] == detail
+    assert store.snapshot_failed is None if retried else store.snapshot_deferred is None
 
 
 async def test_gate_rejection_fails_the_job_and_never_pushes(monkeypatch):
@@ -800,84 +964,6 @@ async def test_lost_race_does_not_claim_success(monkeypatch):
     _patch_pr(monkeypatch)
 
     assert await publish_one(store, credential=GitHubCredential("t")) is None
-
-
-async def test_a_slow_publish_keeps_renewing_its_claim(monkeypatch):
-    """The reaper fails a claim unrenewed for 900s; a publish still working is not stopped."""
-    import asyncio
-    import time
-
-    monkeypatch.setattr(publish_worker, "_PUBLISH_HEARTBEAT_S", 0.01)
-    store = FakeStore(dict(_JOB))
-
-    def slow_publish(**kwargs):
-        time.sleep(0.2)
-        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
-
-    monkeypatch.setattr(publish_worker, "publish_patch", slow_publish)
-    _patch_pr(monkeypatch)
-
-    assert await publish_one(store, credential=GitHubCredential("t")) is not None
-    renewed = len(store.touched)
-    assert renewed >= 2 and set(store.touched) == {9}
-    await asyncio.sleep(0.05)
-    assert len(store.touched) == renewed, "the heartbeat must stop with the publish"
-
-
-async def test_cancelling_a_publish_while_its_heartbeat_stops_is_not_swallowed(monkeypatch):
-    """A shutdown that lands while the heartbeat winds down must still stop the publisher."""
-    import asyncio
-
-    beating = asyncio.Event()
-    stopping = asyncio.Event()
-    release = asyncio.Event()
-
-    async def heartbeat(_store: Any, _snapshot_id: int) -> None:
-        beating.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            stopping.set()
-            await release.wait()
-            raise
-
-    async def open_pr(**_kwargs: Any) -> str:
-        # Finish only once the heartbeat runs, as it does under any real push.
-        await beating.wait()
-        return "https://github.com/o/n/pull/7"
-
-    monkeypatch.setattr(publish_worker, "_keep_publish_claim", heartbeat)
-    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", open_pr)
-    _patch_publish(
-        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
-    )
-    task = asyncio.create_task(publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t")))
-    await stopping.wait()
-
-    task.cancel()
-    release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-async def test_publishing_asks_for_a_token_that_outlives_the_publish(monkeypatch):
-    """A cached token is served until five minutes before expiry; a publish can take longer."""
-    store = FakeStore(dict(_JOB))
-    _patch_publish(
-        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
-    )
-    _patch_pr(monkeypatch)
-    asked: dict[str, Any] = {}
-
-    class App:
-        async def token_for(self, repo: str, **kwargs: Any) -> str:
-            asked.update(kwargs)
-            return "ghs_fresh"
-
-    await publish_one(store, app_credentials=App())
-
-    assert asked["min_ttl_s"] >= 900
 
 
 async def test_unexpected_failure_is_recorded_not_swallowed(monkeypatch):
@@ -1181,6 +1267,50 @@ async def test_publishing_stops_when_the_entitlement_was_withdrawn(monkeypatch):
     assert "entitled" in store.snapshot_failed[1]
 
 
+async def test_entitlement_outage_defers_before_any_publication_effect(monkeypatch):
+    store = FakeStore(dict(_JOB))
+    monkeypatch.setattr(
+        publish_worker,
+        "require_entitled_repo",
+        AsyncMock(side_effect=RepoAccessUnavailable("GitHub lookup unavailable")),
+    )
+    mint = AsyncMock()
+    push = Mock()
+    pull_request = AsyncMock()
+    monkeypatch.setattr(publish_worker, "publish_patch", push)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
+
+    class App:
+        token_for = mint
+
+    assert await publish_one(store, app_credentials=App()) is None
+    assert store.snapshot_deferred == (
+        9,
+        "repository access check unavailable; publication will retry: GitHub lookup unavailable",
+    )
+    assert store.snapshot_failed is None
+    assert store.snapshot_recorded is None
+    mint.assert_not_awaited()
+    push.assert_not_called()
+    pull_request.assert_not_awaited()
+
+
+async def test_entitlement_error_after_publication_started_does_not_requeue(monkeypatch):
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    monkeypatch.setattr(
+        publish_worker,
+        "ensure_draft_pull_request",
+        AsyncMock(side_effect=RepoAccessUnavailable("unavailable after push")),
+    )
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_deferred is None
+    assert store.snapshot_failed is not None
+    assert "unavailable after push" in store.snapshot_failed[1]
+
+
 @pytest.mark.parametrize(
     ("payload", "why"),
     [
@@ -1191,7 +1321,7 @@ async def test_publishing_stops_when_the_entitlement_was_withdrawn(monkeypatch):
         ({"html_url": 7}, "not a string"),
     ],
 )
-async def test_a_created_pr_with_no_usable_url_fails_instead_of_recording(
+async def test_a_created_pr_with_no_usable_url_retries_instead_of_recording(
     monkeypatch, payload, why
 ):
     """**A success this worker cannot record must not be recorded.**
@@ -1222,8 +1352,9 @@ async def test_a_created_pr_with_no_usable_url_fails_instead_of_recording(
     await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert store.snapshot_recorded is None, f"an unusable url was recorded ({why})"
-    assert store.snapshot_failed is not None, f"the snapshot was not failed ({why})"
-    assert "html_url" in store.snapshot_failed[1]
+    assert store.snapshot_failed is None, f"the snapshot was terminal ({why})"
+    assert store.snapshot_deferred is not None, f"the snapshot was not retried ({why})"
+    assert "html_url" in store.snapshot_deferred[1]
 
 
 @pytest.mark.parametrize(

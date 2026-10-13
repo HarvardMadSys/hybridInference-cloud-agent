@@ -106,6 +106,28 @@ export interface AdminSandboxStopRequest {
   last_activity_at: string;
 }
 
+export interface AdminSandboxTrajectoryEvent {
+  id: number;
+  generation: number;
+  event_type: string;
+  from_state: string | null;
+  to_state: string | null;
+  source: 'system' | 'admin' | 'host' | 'migration';
+  actor_id: string | null;
+  created_at: string;
+  details: Record<string, unknown>;
+}
+
+export interface AdminSandboxTrajectory {
+  sandbox: AdminSandbox;
+  members: AdminSandboxMember[];
+  member_history_count: number;
+  member_history_truncated: boolean;
+  events: AdminSandboxTrajectoryEvent[];
+  observed_at: string;
+  next_cursor: string | null;
+}
+
 export interface AdminSandboxInventoryRequest {
   generation: number;
   container_id: string | null;
@@ -151,6 +173,22 @@ export function getAdminSandbox(
   }).then(jsonOrThrow<AdminSandboxDetail>);
 }
 
+export function getAdminSandboxTrajectory(
+  sandboxId: string,
+  filters: { cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AdminSandboxTrajectory> {
+  const params = new URLSearchParams();
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit));
+  if (filters.cursor) params.set('cursor', filters.cursor);
+  const query = params.size ? `?${params}` : '';
+  return fetchWithAuth(
+    config.apiBase,
+    `/admin/agent/sandboxes/${encodeURIComponent(sandboxId)}/trajectory${query}`,
+    { signal, cache: 'no-store' },
+  ).then(jsonOrThrow<AdminSandboxTrajectory>);
+}
+
 export function stopAdminSandbox(
   sandboxId: string,
   reviewed: AdminSandboxStopRequest,
@@ -169,12 +207,22 @@ export function stopAdminSandbox(
   ).then(jsonOrThrow<AdminSandboxDetail>);
 }
 
+export function deleteAdminSandbox(
+  sandboxId: string,
+  reviewed: AdminSandboxStopRequest,
+  signal?: AbortSignal,
+  force = false,
+): Promise<AdminSandboxDetail> {
+  return postSandboxAction(sandboxId, 'delete', reviewed, signal, force ? '?force=true' : '');
+}
+
 export function archiveAdminSandbox(
   sandboxId: string,
   reviewed: AdminSandboxInventoryRequest,
   signal?: AbortSignal,
+  stale = false,
 ): Promise<AdminSandboxDetail> {
-  return postSandboxAction(sandboxId, 'archive', reviewed, signal);
+  return postSandboxAction(sandboxId, 'archive', reviewed, signal, stale ? '?stale=true' : '');
 }
 
 export function restoreAdminSandbox(
@@ -185,23 +233,16 @@ export function restoreAdminSandbox(
   return postSandboxAction(sandboxId, 'restore', reviewed, signal);
 }
 
-export function deleteAdminSandbox(
-  sandboxId: string,
-  reviewed: AdminSandboxStopRequest,
-  signal?: AbortSignal,
-): Promise<AdminSandboxDetail> {
-  return postSandboxAction(sandboxId, 'delete', reviewed, signal);
-}
-
 function postSandboxAction(
   sandboxId: string,
   operation: 'archive' | 'restore' | 'delete',
   reviewed: AdminSandboxInventoryRequest,
   signal?: AbortSignal,
+  query = '',
 ): Promise<AdminSandboxDetail> {
   return fetchWithAuth(
     config.apiBase,
-    `/admin/agent/sandboxes/${encodeURIComponent(sandboxId)}/${operation}`,
+    `/admin/agent/sandboxes/${encodeURIComponent(sandboxId)}/${operation}${query}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -158,6 +158,22 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         scope="both",
     ),
     HostSetting(
+        key="storage_min_available_mib",
+        env="AGENT_STORAGE_MIN_AVAILABLE_MIB",
+        label="Storage reserve for new sandboxes",
+        description=(
+            "Decline new sandbox allocations when verified Docker writable-layer "
+            "storage has less available space than this reserve. Existing sessions "
+            "can resume. This admission guard is not a disk quota; unavailable "
+            "or unverified capacity remains reported as unmeasured."
+        ),
+        unit="MiB",
+        default=1024,
+        minimum=1,
+        maximum=1048576,
+        scope="runner",
+    ),
+    HostSetting(
         key="shared_resident_capacity",
         env="AGENT_SHARED_RESIDENT_CAPACITY",
         label="Sessions per sandbox",

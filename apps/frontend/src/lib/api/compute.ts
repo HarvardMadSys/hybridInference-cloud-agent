@@ -51,6 +51,7 @@ export interface CloudLabDefaults {
   profile_project: string;
   profile_name: string;
   ssh_username: string;
+  ssh_public_key: string;
 }
 
 export interface ComputeConnection {
@@ -173,6 +174,10 @@ export interface AutomaticComputeSetupStatus {
   available: boolean;
   deployment_sha: string | null;
   blocked_reasons: BlockedReason[];
+  machine_defaults?: {
+    gateway: { address: string };
+    control: { address: string };
+  };
   defaults?: Omit<AutomaticComputeSetupRequest, 'request_id'>;
   pending_request_id?: string | null;
 }
@@ -341,3 +346,146 @@ export const resolveComputeOperation = (id: string, externalId: string) =>
   write<{ operation: ComputeOperation }>(`/compute-operations/${encodeURIComponent(id)}/resolve`, {
     external_id: externalId,
   });
+
+export interface CloudLabAutoscalingConfiguration {
+  project?: string;
+  group?: string;
+  profile_project?: string;
+  profile_name?: string;
+  duration?: number;
+  bindings?: Record<string, unknown>;
+  ssh_username?: string;
+  ssh_public_key?: string;
+  /** Autoscaled nodes always pin the key registered by their first-boot script. */
+  host_key_source?: 'registration';
+}
+
+export interface CloudLabSlotPolicy {
+  cpu_reservation_fraction: number;
+  cpu_per_slot: number;
+  memory_reserve_gib: number;
+  memory_per_slot_gib: number;
+  min_slots: number;
+  max_slots: number;
+  formula_version: 1;
+}
+
+export interface CloudLabAutoscalingPolicy {
+  revision: number;
+  enabled: boolean;
+  min_hosts: number;
+  max_hosts: number;
+  connection_id: string | null;
+  ssh_connection_id: string | null;
+  configuration: CloudLabAutoscalingConfiguration;
+  deployment_profiles: string[];
+  sandbox_storage_path: string | null;
+  renewal_policy: RenewalPolicy;
+  slot_policy: CloudLabSlotPolicy;
+  scale_up_sustain_seconds: number;
+  scale_down_idle_seconds: number;
+  cooldown_seconds: number;
+  scale_down_enabled: boolean;
+}
+
+export interface CloudLabAutoscalingRuntime {
+  generation: number;
+  pressure_since: string | null;
+  idle_since: string | null;
+  cooldown_until: string | null;
+  last_decision: Record<string, unknown>;
+  last_decision_at: string | null;
+  blocker_code: string | null;
+  blocker_message: string | null;
+  updated_at: string | null;
+  observed_at: string | null;
+  queue_pressure: number;
+  slot_status: CloudLabAutoscalingSlotStatus[];
+}
+
+export interface CloudLabAutoscalingSlotStatus {
+  allocation_id: string;
+  host: string | null;
+  desired_slots: number | null;
+  applied_slots: number | null;
+  blocker_code: string | null;
+}
+
+export interface CloudLabAutoscalingMember {
+  allocation_id: string;
+  deployment_profile: string;
+  state: 'provisioning' | 'active' | 'retiring' | 'released' | 'blocked';
+  created_at: string;
+  updated_at: string;
+  host: string | null;
+  slots_total: number | null;
+  slots_desired: number | null;
+  latest_operation_id: string | null;
+  latest_operation_kind: string | null;
+  latest_operation_state:
+    | 'queued'
+    | 'running'
+    | 'retry_wait'
+    | 'blocked'
+    | 'unknown'
+    | 'failed'
+    | 'succeeded'
+    | 'cancelled'
+    | null;
+  latest_operation_message: string | null;
+  latest_acquire_operation_id: string | null;
+  latest_acquire_state: CloudLabAutoscalingMember['latest_operation_state'];
+  latest_acquire_message: string | null;
+}
+
+export interface CloudLabProfileReservation {
+  deployment_profile: string;
+  allocation_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CloudLabAutoscalingSnapshot {
+  policy: CloudLabAutoscalingPolicy;
+  runtime: CloudLabAutoscalingRuntime;
+  members: CloudLabAutoscalingMember[];
+  profile_reservations: CloudLabProfileReservation[];
+  observed_at?: string;
+}
+
+export interface CloudLabPreferredNode {
+  node_type: string;
+  site: string;
+  available: number;
+  total: number;
+  introduced_year: number;
+  physical_cores: number;
+  logical_threads: number;
+  memory_gib: number;
+}
+
+export interface CloudLabPreferredNodesSnapshot {
+  nodes: CloudLabPreferredNode[];
+  observed_at: string;
+  source: string;
+  filters: {
+    availability_greater_than: number;
+    minimum_introduced_year: number;
+    minimum_physical_cores: number;
+    minimum_memory_gib: number;
+    general_purpose_only: boolean;
+  };
+}
+
+export type CloudLabAutoscalingPolicyWrite = Omit<CloudLabAutoscalingPolicy, 'revision'>;
+
+export interface UpdateCloudLabAutoscalingRequest {
+  expected_revision: number;
+  policy: CloudLabAutoscalingPolicyWrite;
+}
+export const getCloudLabAutoscaling = (signal?: AbortSignal) =>
+  get<CloudLabAutoscalingSnapshot>('/compute-autoscaling/cloudlab', signal);
+export const getCloudLabPreferredNodes = (signal?: AbortSignal) =>
+  get<CloudLabPreferredNodesSnapshot>('/compute-availability/cloudlab', signal);
+export const updateCloudLabAutoscaling = (body: UpdateCloudLabAutoscalingRequest) =>
+  write<CloudLabAutoscalingSnapshot>('/compute-autoscaling/cloudlab', body, 'PUT');

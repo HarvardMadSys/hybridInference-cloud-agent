@@ -31,10 +31,10 @@ LEAST(
 #: completes can only be such a request, and completing keeps it.
 REQUEST_ATTEMPT_LEDGER_REFRESH_SQL = """
 UPDATE agent_attempt_ledger l
-SET next_refresh_at = GREATEST(NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds')
+SET next_refresh_at = GREATEST(clock_timestamp(), l.last_refresh_attempt_at + INTERVAL '5 seconds')
 WHERE l.attempt_id = $1
   AND (l.next_refresh_at IS NULL OR l.next_refresh_at > GREATEST(
-      NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
+      clock_timestamp(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
   ))
 """
 

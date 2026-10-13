@@ -221,6 +221,106 @@ class TestDiscovery:
         assert server.issuer == _ISSUER
         assert fetcher.requested == [f"{_ISSUER}/.well-known/oauth-authorization-server"]
 
+    async def test_google_drive_discovers_its_cross_origin_issuer_and_scopes(self) -> None:
+        """Drive's issuer has a trailing slash and advertises confidential clients."""
+        resource_url = "https://drivemcp.googleapis.com/mcp/v1"
+        scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+        fetcher = _Fetcher(
+            {
+                "https://drivemcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1": {
+                    "resource": resource_url,
+                    "authorization_servers": ["https://accounts.google.com/"],
+                    "scopes_supported": scopes,
+                },
+                "https://accounts.google.com/.well-known/oauth-authorization-server": {
+                    "issuer": "https://accounts.google.com",
+                    "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_endpoint": "https://oauth2.googleapis.com/token",
+                    "code_challenge_methods_supported": ["plain", "S256"],
+                    "token_endpoint_auth_methods_supported": [
+                        "client_secret_post",
+                        "client_secret_basic",
+                    ],
+                },
+            }
+        )
+        resource, server = await oauth.discover_authorization_server(
+            fetcher, resource_url=resource_url, policy=_policy()
+        )
+        identity = oauth.choose_registration(
+            server, preregistered_client_id="google-client", preregistered_client_secret="secret"
+        )
+        assert server.supports_pkce_s256()
+        assert identity.auth_method == "client_secret_basic"
+        assert oauth.default_scopes(resource, server) == tuple(scopes)
+
+    @pytest.mark.parametrize("from_challenge", [True, False])
+    async def test_slack_discovers_the_origin_resource_for_its_mcp_transport(
+        self, from_challenge: bool
+    ) -> None:
+        """Slack publishes root metadata and uses its origin as the token audience."""
+        resource_url = "https://mcp.slack.com/mcp"
+        announced = "https://mcp.slack.com/.well-known/oauth-protected-resource"
+        fetcher = _Fetcher(
+            {
+                announced: {
+                    "resource": "https://mcp.slack.com",
+                    "authorization_servers": ["https://mcp.slack.com"],
+                    "scopes_supported": ["search:read.public"],
+                },
+                "https://mcp.slack.com/.well-known/oauth-authorization-server": {
+                    "issuer": "https://mcp.slack.com",
+                    "authorization_endpoint": "https://slack.com/oauth/v2_user/authorize",
+                    "token_endpoint": "https://slack.com/api/oauth.v2.user.access",
+                    "code_challenge_methods_supported": ["S256"],
+                    "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                },
+            }
+        )
+        resource, server = await oauth.discover_authorization_server(
+            fetcher,
+            resource_url=resource_url,
+            policy=_policy(),
+            challenge_header=f'Bearer resource_metadata="{announced}"' if from_challenge else None,
+        )
+        assert resource is not None
+        assert resource.resource == "https://mcp.slack.com"
+        assert server.issuer == "https://mcp.slack.com"
+        assert oauth.default_scopes(resource, server) == ("search:read.public",)
+        if from_challenge:
+            assert fetcher.requested[0] == announced
+        else:
+            assert fetcher.requested[:2] == [
+                "https://mcp.slack.com/.well-known/oauth-protected-resource/mcp",
+                announced,
+            ]
+
+    @pytest.mark.parametrize(
+        ("resource", "endpoint"),
+        [
+            ("https://other.example.com", "https://mcp.slack.com/mcp"),
+            ("https://mcp.slack.com", "https://other.example.com/mcp"),
+            ("https://mcp.slack.com.example.com", "https://mcp.slack.com/mcp"),
+            ("http://mcp.slack.com", "https://mcp.slack.com/mcp"),
+            ("https://mcp.slack.com:8443", "https://mcp.slack.com/mcp"),
+            ("https://mcp.slack.com/other", "https://mcp.slack.com/mcp"),
+            ("https://mcp.slack.com", "https://mcp.slack.com/other"),
+            ("https://mcp.slack.com?tenant=other", "https://mcp.slack.com/mcp"),
+            ("https://mcp.slack.com#other", "https://mcp.slack.com/mcp"),
+            ("https://mcp.slack.com", "https://mcp.slack.com/mcp?tenant=other"),
+            ("https://mcp.example.com", "https://mcp.example.com/mcp"),
+        ],
+    )
+    def test_slacks_resource_alias_does_not_accept_other_origins_or_resources(
+        self, resource: str, endpoint: str
+    ) -> None:
+        """The compatibility rule cannot broaden generic resource identity checks."""
+        with pytest.raises(oauth.OAuthError, match="describes"):
+            oauth.parse_protected_resource_metadata(
+                {"resource": resource, "authorization_servers": ["https://mcp.slack.com"]},
+                expect=endpoint,
+            )
+
     async def test_metadata_describing_another_resource_is_refused(self) -> None:
         """A document at this address about somebody else's server is a
         misconfiguration at best, and a redirect at worst."""
@@ -324,12 +424,97 @@ class TestRegistration:
     async def test_a_preregistered_secret_makes_it_a_confidential_client(self) -> None:
         """The deployment's own client, which is not deleted on disconnect."""
         identity = oauth.choose_registration(
-            self._metadata(),
+            self._metadata(token_endpoint_auth_methods_supported=["client_secret_basic"]),
             preregistered_client_id="our-client",
             preregistered_client_secret="our-secret",
         )
         assert identity.auth_method == "client_secret_basic"
         assert identity.delete_on_disconnect is False
+
+    @pytest.mark.parametrize("method", ["client_secret_basic", "client_secret_post"])
+    def test_a_preregistered_confidential_client_needs_its_secret(self, method: str) -> None:
+        """Refuse a browser flow that cannot exchange the returned code."""
+        with pytest.raises(oauth.OAuthError, match="requires a client secret") as raised:
+            oauth.choose_registration(
+                self._metadata(token_endpoint_auth_methods_supported=[method]),
+                preregistered_client_id="our-client",
+            )
+        assert raised.value.kind == "client_registration_required"
+
+    @pytest.mark.parametrize("methods", [["private_key_jwt"], ["none"]])
+    def test_a_preregistered_secret_requires_a_supported_secret_method(
+        self, methods: list[str]
+    ) -> None:
+        """A provided secret does not imply permission to use Basic or POST."""
+        with pytest.raises(oauth.OAuthError, match="does not support") as raised:
+            oauth.choose_registration(
+                self._metadata(token_endpoint_auth_methods_supported=methods),
+                preregistered_client_id="our-client",
+                preregistered_client_secret="our-secret",
+            )
+        assert raised.value.kind == "client_registration_required"
+
+    def test_a_preregistered_public_client_uses_none_when_advertised(self) -> None:
+        """Metadata can support a client without a secret."""
+        identity = oauth.choose_registration(self._metadata(), preregistered_client_id="public")
+        assert identity.auth_method == "none"
+        assert identity.client_secret is None
+
+    def test_a_confidential_server_without_registration_requests_both_credentials(self) -> None:
+        """Slack and Google expect an existing app's client id and secret."""
+        with pytest.raises(oauth.OAuthError, match="client id and secret") as raised:
+            oauth.choose_registration(
+                self._metadata(token_endpoint_auth_methods_supported=["client_secret_post"])
+            )
+        assert raised.value.kind == "client_registration_required"
+
+    def test_slack_uses_post_client_authentication_for_code_exchange_and_refresh(self) -> None:
+        """Slack's metadata allows POST secrets, so both token requests use it."""
+        metadata = oauth.parse_authorization_server_metadata(
+            {
+                "issuer": "https://mcp.slack.com",
+                "authorization_endpoint": "https://slack.com/oauth/v2_user/authorize",
+                "token_endpoint": "https://slack.com/api/oauth.v2.user.access",
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            },
+            expected_issuer="https://mcp.slack.com",
+        )
+        client = oauth.choose_registration(
+            metadata,
+            preregistered_client_id="slack-client",
+            preregistered_client_secret="slack-secret",
+        )
+        flow = oauth.OAuthFlow(
+            versions=oauth.FlowVersions("7", 1, 1, 1),
+            state="state",
+            pkce=oauth.PkcePair.generate(),
+            client=client,
+            metadata=metadata,
+            resource="https://mcp.slack.com",
+            redirect_uri="https://agent.example.com/callback",
+        )
+        exchange = flow.token_request("code")
+        refresh = oauth.refresh_request(
+            metadata=metadata,
+            client=client,
+            refresh_token="refresh",
+            resource=flow.resource,
+        )
+        assert client.auth_method == "client_secret_post"
+        assert parse_qs(urlsplit(flow.authorization_url()).query)["resource"] == [
+            "https://mcp.slack.com"
+        ]
+        for request in (exchange, refresh):
+            assert request.url == "https://slack.com/api/oauth.v2.user.access"
+            assert request.form()["client_id"] == "slack-client"
+            assert request.form()["client_secret"] == "slack-secret"
+            assert request.form()["resource"] == "https://mcp.slack.com"
+            assert "authorization" not in request.headers()
+        assert exchange.form()["code_verifier"] == flow.pkce.verifier
+        assert refresh.form()["refresh_token"] == "refresh"
+        assert oauth.build_profile(flow, client).client_auth_method == "client_secret_post"
+        assert oauth.build_profile(flow, client).resource == "https://mcp.slack.com"
 
     def test_a_registration_response_without_a_client_id_is_refused(self) -> None:
         """There is nothing to authorize as, so the flow cannot start."""
@@ -467,6 +652,42 @@ class TestScopesAndRevocation:
             _server_metadata(), expected_issuer=_ISSUER
         )
         assert oauth.default_scopes(None, server) == ()
+
+    @pytest.mark.parametrize(
+        ("issuer", "expects_offline"),
+        [
+            ("https://accounts.google.com", True),
+            ("https://accounts.google.com/", True),
+            ("https://auth.example.com", False),
+            ("https://accounts.google.com.example.com", False),
+        ],
+    )
+    def test_google_authorization_requests_a_refresh_token(
+        self, issuer: str, expects_offline: bool
+    ) -> None:
+        """Google requires offline access and renewed consent for persistent grants."""
+        flow = oauth.OAuthFlow(
+            versions=oauth.FlowVersions("7", 1, 1, 1),
+            state="state",
+            pkce=oauth.PkcePair.generate(),
+            client=oauth.ClientIdentity(client_id="client", registration="preregistered"),
+            metadata=oauth.AuthorizationServerMetadata(
+                issuer=issuer,
+                authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+                token_endpoint="https://oauth2.googleapis.com/token",
+            ),
+            resource="https://drivemcp.googleapis.com/mcp/v1",
+            redirect_uri="https://agent.example.com/callback",
+        )
+        params = parse_qs(urlsplit(flow.authorization_url()).query)
+        assert params["code_challenge_method"] == ["S256"]
+        assert params["resource"] == [flow.resource]
+        if expects_offline:
+            assert params["access_type"] == ["offline"]
+            assert params["prompt"] == ["consent"]
+        else:
+            assert "access_type" not in params
+            assert "prompt" not in params
 
     def test_a_server_without_a_revocation_endpoint_gets_no_call(self) -> None:
         """Best effort by design: the token is dropped locally either way, and

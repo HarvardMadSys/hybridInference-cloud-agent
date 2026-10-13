@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 from xml.etree import ElementTree
 
 import httpx
 from pydantic import Field, ValidationError, field_validator
 
+from cloud_agent.domain.compute import normalize_user_public_key
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     AcquisitionResolution,
@@ -52,6 +53,8 @@ class CloudLabConfig(ComputeValue):
     duration: int = Field(default=4, ge=1, le=168)
     bindings: dict[str, Any] = Field(default_factory=dict)
     ssh_username: str | None = Field(default=None, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+    # Extra public key CloudLab installs for this experiment's SSH user.
+    ssh_public_key: str | None = Field(default=None, max_length=8192)
     ssh_credential_ref: str | None = None
     ssh_known_hosts_ref: str | None = None
     # "known_hosts": every node key must already be in the administrator's
@@ -59,6 +62,14 @@ class CloudLabConfig(ComputeValue):
     # with a reserved reference for explicitly unchecked CloudLab SSH.
     # "registration" pins the key supplied by the node's first-boot script.
     host_key_source: Literal["known_hosts", "registration"] = "known_hosts"
+
+    @field_validator("ssh_public_key")
+    @classmethod
+    def validate_ssh_public_key(cls, value: str | None) -> str | None:
+        """Keep a blank key out of the persisted configuration."""
+        if value is None or not value.strip():
+            return None
+        return normalize_user_public_key(value.strip())
 
     @field_validator("external_id")
     @classmethod
@@ -70,6 +81,23 @@ class CloudLabConfig(ComputeValue):
 # Parameters of deploy/cloudlab/cloud-agent-node.py the boot script reads.
 REGISTRATION_URL_BINDING = "registrationUrl"
 REGISTRATION_TOKEN_BINDING = "registrationToken"
+
+
+def _error_text(response: httpx.Response) -> str:
+    """Return a short portal error, never a body that could echo a credential."""
+    try:
+        value = response.json()
+    except (ValueError, UnicodeError):
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    error = value.get("error")
+    if not isinstance(error, str):
+        return ""
+    text = " ".join(error.split())
+    if not text or text == "Internal server error" or len(text) > 300:
+        return ""
+    return text
 
 
 def _wire_bindings(bindings: dict[str, Any]) -> dict[str, Any]:
@@ -234,9 +262,21 @@ class CloudLabProvider(ComputeProvider):
                 "capacity_unavailable", "CloudLab capacity or request limit reached", retryable=True
             )
         if status >= 500:
+            # A finished HTTP 500 on create is not a lost request: the portal
+            # answered. Acquire looks up the experiment name and, when it is
+            # absent, reports a rejection that can be corrected and retried.
+            # Timeouts stay result_unknown and are never posted again.
+            code = (
+                "temporarily_unavailable"
+                if method == "GET"
+                else "server_error"
+                if method == "POST" and path.split("?", 1)[0].rstrip("/") == "/experiments"
+                else "result_unknown"
+            )
+            detail = _error_text(response)
             raise ProviderError(
-                "temporarily_unavailable" if method == "GET" else "result_unknown",
-                "CloudLab could not confirm the request",
+                code,
+                detail or "CloudLab could not confirm the request",
                 retryable=method == "GET",
             )
         if status >= 300:
@@ -254,6 +294,56 @@ class CloudLabProvider(ComputeProvider):
         if not isinstance(value, dict):
             raise ProviderError("invalid_response", "CloudLab returned an invalid object")
         return value
+
+    async def _require_profile(self, config: CloudLabConfig) -> None:
+        """Reject a missing profile before create. A 500 from that create is not recoverable."""
+        query = urlencode(
+            {"project": config.profile_project or "", "profile_name": config.profile_name or ""}
+        )
+        data = self._json(await self._request("GET", "/profiles/?" + query, config.credential_ref))
+        profiles = data.get("profiles")
+        if not isinstance(profiles, list):
+            raise ProviderError(
+                "invalid_response", "CloudLab API endpoint did not return a profile list"
+            )
+        if any(
+            isinstance(item, dict)
+            and item.get("name") == config.profile_name
+            and item.get("project") == config.profile_project
+            for item in profiles
+        ):
+            return
+        raise ProviderError(
+            "request_rejected",
+            f"CloudLab project {config.profile_project} has no profile {config.profile_name}.",
+        )
+
+    async def _created_experiment(self, name: str, config: CloudLabConfig) -> str | None:
+        """Return the id of the experiment this create would have named, if it exists."""
+        query = urlencode({"project": config.project})
+        data = self._json(
+            await self._request("GET", "/experiments/?" + query, config.credential_ref)
+        )
+        experiments = data.get("experiments")
+        if not isinstance(experiments, list):
+            raise ProviderError(
+                "invalid_response", "CloudLab API endpoint did not return an experiment list"
+            )
+        matches = [
+            item.get("id")
+            for item in experiments
+            if isinstance(item, dict)
+            and item.get("name") == name
+            and item.get("project") == config.project
+            and item.get("id")
+        ]
+        if len(matches) > 1:
+            raise ProviderError(
+                "result_unknown", "CloudLab returned more than one experiment with this name"
+            )
+        if not matches:
+            return None
+        return str(UUID(str(matches[0])))
 
     async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:
         """Execute the persisted acquisition intent and return its acknowledgement."""
@@ -289,6 +379,9 @@ class CloudLabProvider(ComputeProvider):
         }
         if config.group:
             payload["group"] = config.group
+        if config.ssh_public_key:
+            payload["sshpubkey"] = config.ssh_public_key
+        await self._require_profile(config)
         try:
             response = await self._request(
                 "POST", "/experiments/", config.credential_ref, payload=payload
@@ -296,9 +389,22 @@ class CloudLabProvider(ComputeProvider):
             data = self._json(response)
             external_id = str(UUID(str(data["id"])))
         except ProviderError as exc:
-            if exc.code in {"result_unknown", "invalid_response"}:
+            if exc.code == "server_error":
+                try:
+                    created = await self._created_experiment(name, config)
+                except ProviderError:
+                    return ProviderReceipt(outcome="unknown")
+                if created is None:
+                    raise ProviderError(
+                        "request_rejected",
+                        "CloudLab did not create the experiment. "
+                        "Check the profile name and its parameters.",
+                    ) from None
+                external_id = created
+            elif exc.code in {"result_unknown", "invalid_response"}:
                 return ProviderReceipt(outcome="unknown")
-            raise
+            else:
+                raise
         except (KeyError, ValueError):
             return ProviderReceipt(outcome="unknown")
         ref = ResourceRef(

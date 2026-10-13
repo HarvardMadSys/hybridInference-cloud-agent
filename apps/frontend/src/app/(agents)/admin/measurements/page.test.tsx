@@ -267,6 +267,7 @@ function control(overrides: Partial<ProfilingControlSnapshot> = {}): ProfilingCo
 
 function host(overrides: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
+    drain_fence_epoch: '00000000-0000-0000-0000-000000000001',
     host: 'host-a',
     active: true,
     last_worker_id: 'worker-1',

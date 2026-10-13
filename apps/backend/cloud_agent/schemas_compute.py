@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from cloud_agent.domain.compute import normalize_user_public_key
 from cloud_agent.ports.external.host_bootstrap import validate_sandbox_storage_path
 
 
@@ -39,6 +40,15 @@ class CloudLabDefaults(ComputeRequest):
     ssh_username: str = Field(
         default="", max_length=128, pattern=r"^(?:[a-zA-Z_][a-zA-Z0-9_.-]*)?$"
     )
+    ssh_public_key: str = Field(default="", max_length=8192)
+
+    @field_validator("ssh_public_key")
+    @classmethod
+    def validate_ssh_public_key(cls, value: str) -> str:
+        """Accept one OpenSSH public key, or blank when the account keys are enough."""
+        if not value:
+            return ""
+        return normalize_user_public_key(value)
 
 
 class RenewalPolicy(ComputeRequest):
@@ -81,6 +91,73 @@ class RenewalPolicy(ComputeRequest):
         if len(set(self.node_types)) != len(self.node_types):
             raise ValueError("candidate node types must be distinct")
         return self
+
+
+class CloudLabAutoscalingSlotPolicy(ComputeRequest):
+    """Versioned slot-sizing formula applied to fresh Host capacity telemetry."""
+
+    formula_version: Literal[1] = 1
+    cpu_reservation_fraction: float = Field(default=0.75, ge=0.75, le=0.75)
+    cpu_per_slot: Literal[2] = 2
+    memory_reserve_gib: Literal[8] = 8
+    memory_per_slot_gib: Literal[4] = 4
+    min_slots: Literal[2] = 2
+    max_slots: Literal[128] = 128
+
+
+class CloudLabAutoscalingPolicy(ComputeRequest):
+    """Desired singleton policy; provider secrets remain connection references."""
+
+    enabled: bool = False
+    min_hosts: int = Field(default=0, ge=0, le=8)
+    max_hosts: int = Field(default=0, ge=0, le=8)
+    connection_id: str | None = Field(default=None, min_length=1, max_length=128)
+    ssh_connection_id: str | None = Field(default=None, min_length=1, max_length=128)
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    deployment_profiles: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")]] = Field(
+        default_factory=list, max_length=8
+    )
+    sandbox_storage_path: str | None = Field(default=None, max_length=4096)
+    renewal_policy: RenewalPolicy = Field(default_factory=RenewalPolicy)
+    slot_policy: CloudLabAutoscalingSlotPolicy = Field(
+        default_factory=CloudLabAutoscalingSlotPolicy
+    )
+    scale_up_sustain_seconds: int = Field(default=120, ge=0, le=86400)
+    scale_down_idle_seconds: int = Field(default=3600, ge=60, le=604800)
+    cooldown_seconds: int = Field(default=600, ge=0, le=86400)
+    scale_down_enabled: bool = False
+
+    @field_validator("sandbox_storage_path")
+    @classmethod
+    def validate_storage_path(cls, value: str | None) -> str | None:
+        """Accept only the shared absolute sandbox-storage path grammar."""
+        return None if value is None else validate_sandbox_storage_path(value)
+
+    @model_validator(mode="after")
+    def validate_capacity(self) -> Self:
+        """Keep capacity, profile reservations and v1 renewal features coherent."""
+        if self.min_hosts > self.max_hosts:
+            raise ValueError("minimum hosts cannot exceed maximum hosts")
+        if len(set(self.deployment_profiles)) != len(self.deployment_profiles):
+            raise ValueError("deployment profiles must be distinct")
+        if self.renewal_policy.rotation_enabled:
+            raise ValueError("automatic node rotation is not supported by CloudLab autoscaling v1")
+        if self.max_hosts > len(self.deployment_profiles):
+            raise ValueError("maximum hosts exceeds reserved deployment profiles")
+        if self.enabled and (
+            self.max_hosts < 1 or self.connection_id is None or self.ssh_connection_id is None
+        ):
+            raise ValueError(
+                "enabled autoscaling requires capacity and CloudLab and SSH connections"
+            )
+        return self
+
+
+class UpdateCloudLabAutoscaling(ComputeRequest):
+    """Compare and replace the autoscaling policy observed by an administrator."""
+
+    expected_revision: int = Field(ge=0)
+    policy: CloudLabAutoscalingPolicy
 
 
 class AddComputeConnection(ComputeRequest):

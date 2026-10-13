@@ -102,7 +102,7 @@ class PostgresPrArchiveRepository:
                 WHERE checks.state = 'pending'
                   AND checks.next_check_at <= NOW()
                   AND (checks.lease_expires_at IS NULL
-                       OR checks.lease_expires_at <= NOW())
+                       OR checks.lease_expires_at <= clock_timestamp())
                   AND t.archived_at IS NULL AND t.deleted_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_pending_messages waiting WHERE waiting.thread_id = t.id
@@ -154,7 +154,17 @@ class PostgresPrArchiveRepository:
             raise ValueError("delay_s must be finite and nonnegative")
         if error_code is not None and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", error_code) is None:
             raise ValueError("error_code must be a safe lowercase identifier")
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT thread_id FROM agent_pr_archive_checks "
+                "WHERE thread_id = $1 AND pr_url = $2 AND claim_token = $3 "
+                "AND state = 'pending' FOR UPDATE",
+                thread_id,
+                pr_url,
+                claim_token,
+            )
+            if locked is None:
+                return False
             result = await conn.fetchval(
                 """
                 UPDATE agent_pr_archive_checks
@@ -217,12 +227,17 @@ class PostgresPrArchiveRepository:
             check = await conn.fetchval(
                 "SELECT job_id FROM agent_pr_archive_checks "
                 "WHERE thread_id = $1 AND pr_url = $2 AND claim_token = $3 "
-                "AND state = 'pending' AND lease_expires_at > clock_timestamp() FOR UPDATE",
+                "AND state = 'pending' FOR UPDATE",
                 thread_id,
                 pr_url,
                 claim_token,
             )
-            if check != job_id:
+            if check != job_id or not await conn.fetchval(
+                "SELECT lease_expires_at > clock_timestamp() "
+                "FROM agent_pr_archive_checks WHERE thread_id = $1 AND pr_url = $2",
+                thread_id,
+                pr_url,
+            ):
                 return None
             # Lock the job as well: a publisher cannot replace its recorded
             # association while this transaction commits an archive receipt.

@@ -891,9 +891,11 @@ async def test_renewing_spends_the_refresh_token_with_the_app_s_own_secret(confi
     from cloud_agent.github_app import UserAuthorizationRevoked
 
     sent = []
+    request_timeouts = []
 
     def respond(request):
         sent.append(parse_qs(request.content.decode()))
+        request_timeouts.append(request.extensions["timeout"]["read"])
         if sent[-1]["refresh_token"] == ["ghr_spent"]:
             return httpx.Response(200, json={"error": "bad_refresh_token"})
         return httpx.Response(
@@ -902,7 +904,7 @@ async def test_renewing_spends_the_refresh_token_with_the_app_s_own_secret(confi
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         credentials = GitHubAppCredentials(_oauth(config), client=client)
-        tokens = await credentials.refresh_user_token("ghr_a")
+        tokens = await credentials.refresh_user_token("ghr_a", timeout_s=17)
         with pytest.raises(UserAuthorizationRevoked):
             await credentials.refresh_user_token("ghr_spent")
 
@@ -913,6 +915,7 @@ async def test_renewing_spends_the_refresh_token_with_the_app_s_own_secret(confi
         "grant_type": ["refresh_token"],
         "refresh_token": ["ghr_a"],
     }
+    assert request_timeouts[0] == 17
 
 
 async def test_github_down_while_renewing_is_not_a_revoked_authorization(config):

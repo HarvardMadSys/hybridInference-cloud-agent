@@ -15,7 +15,7 @@ import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import toast from 'react-hot-toast';
 
-import { Markdown, WorkspaceLinkProvider } from '@/components/ui/Markdown';
+import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
@@ -109,6 +109,7 @@ import {
   copyMessage,
   MessageActionButton,
   MessageActions,
+  MessageContent,
   ThreadTurn,
   EventRow,
   EventList,
@@ -1794,8 +1795,8 @@ export function JobDetail({
   // The workspace and inspector share the right-hand region.
   const panelOpen = workspaceOpen || inspector !== null;
   const content = (
-    <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
-      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-4 sm:px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+    <section className="flex h-full min-h-0 flex-col bg-surface">
+      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-border bg-surface px-4 sm:px-6">
         {isArchived ? (
           <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
             <Link
@@ -1813,11 +1814,11 @@ export function JobDetail({
             <div className="min-w-0 flex-1">
               <h1
                 title={title}
-                className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50"
+                className="truncate text-base font-semibold tracking-[-0.01em] text-foreground"
               >
                 {title}
               </h1>
-              <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <div className="mt-1 flex items-center gap-2 text-xs text-muted">
                 <svg
                   aria-hidden="true"
                   className="h-3.5 w-3.5"
@@ -1847,7 +1848,7 @@ export function JobDetail({
           <div className="agent-conversation-controls flex flex-wrap items-center gap-x-3 gap-y-2 pb-3">
             <nav
               aria-label="Run views"
-              className="flex shrink-0 items-center gap-1 rounded-xl border border-gray-200/70 bg-gray-50 p-1 text-[13px] dark:border-white/10 dark:bg-white/[0.03]"
+              className="flex shrink-0 items-center gap-1 rounded-xl bg-surface-muted p-1 text-xs"
             >
               {(['chat', 'trajectory'] as const).map((view) => (
                 <button
@@ -1857,8 +1858,8 @@ export function JobDetail({
                   aria-current={tab === view ? 'page' : undefined}
                   className={`ui-focus-ring min-h-9 rounded-lg px-3 py-1.5 capitalize transition-colors [@media(pointer:coarse)]:min-h-11 ${
                     tab === view
-                      ? 'bg-white font-semibold text-crimson-dark shadow-sm ring-1 ring-gray-200/80 dark:bg-gray-800 dark:text-crimson-light dark:ring-white/10'
-                      : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                      ? 'bg-surface font-semibold text-foreground shadow-sm ring-1 ring-border'
+                      : 'text-muted hover:bg-surface-hover hover:text-foreground'
                   }`}
                 >
                   {view}
@@ -1976,7 +1977,7 @@ export function JobDetail({
             // and the one thing this feature must never do is move a reader
             // who is looking somewhere else.
             tabIndex={0}
-            className={`min-w-0 flex-1 flex-col overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40 ${
+            className={`min-w-0 flex-1 flex-col overflow-y-auto overscroll-y-none [overflow-anchor:none] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40 ${
               panelOpen ? 'hidden lg:flex' : 'flex'
             }`}
           >
@@ -1995,6 +1996,7 @@ export function JobDetail({
                 <div className="flex-1">
                   <TrajectoryView
                     events={events}
+                    jobs={threadJobs}
                     steps={trajectorySteps}
                     query={trajectoryQuery}
                     onQueryChange={setTrajectoryQuery}
@@ -2057,6 +2059,7 @@ export function JobDetail({
                           key={message.id}
                           message={message}
                           goalTurn={currentTurn.goalTurn}
+                          presentation={presentation}
                           blockKey={messageBlockKey(message.jobId, message.id)}
                           footer={
                             lastVisibleMessageIndex < 0 && message.id === currentReplyId
@@ -2086,28 +2089,35 @@ export function JobDetail({
                         data-block-key={`${job.id}:prompt`}
                         className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle"
                       >
-                        <Markdown text={job.prompt || job.title} />
-                        <MessageActions align="end">
-                          <MessageActionButton
-                            label="Copy message"
-                            onClick={() => void copyMessage(job.prompt || job.title)}
-                          >
-                            <CopyIcon />
-                            Copy
-                          </MessageActionButton>
-                          {currentRewindAnchor && canForkWorkspace ? (
-                            <MessageActionButton
-                              label="Edit & rewind"
-                              onClick={() =>
-                                void forkFrom(currentRewindAnchor, job.prompt || job.title)
-                              }
-                              disabled={forking}
-                            >
-                              <RewindIcon />
-                              Edit & rewind
-                            </MessageActionButton>
-                          ) : null}
-                        </MessageActions>
+                        <MessageContent
+                          text={job.prompt || job.title}
+                          presentation={presentation}
+                        />
+                        {presentation !== 'compact' || (currentRewindAnchor && canForkWorkspace) ? (
+                          <MessageActions align="end">
+                            {presentation !== 'compact' ? (
+                              <MessageActionButton
+                                label="Copy message"
+                                onClick={() => void copyMessage(job.prompt || job.title)}
+                              >
+                                <CopyIcon />
+                                Copy
+                              </MessageActionButton>
+                            ) : null}
+                            {currentRewindAnchor && canForkWorkspace ? (
+                              <MessageActionButton
+                                label="Edit & rewind"
+                                onClick={() =>
+                                  void forkFrom(currentRewindAnchor, job.prompt || job.title)
+                                }
+                                disabled={forking}
+                              >
+                                <RewindIcon />
+                                Edit & rewind
+                              </MessageActionButton>
+                            ) : null}
+                          </MessageActions>
+                        ) : null}
                       </div>
                     )}
 
@@ -2240,7 +2250,7 @@ export function JobDetail({
               {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
               <div
                 ref={scroll.composerRef}
-                className="sticky bottom-0 z-10 -mx-2 mt-8 bg-gray-50 px-2 pb-2 pt-5 dark:bg-gray-950"
+                className="sticky bottom-0 z-10 -mx-2 mt-4 bg-gray-50 px-2 pb-2 pt-3 dark:bg-gray-950"
               >
                 <LiveAgentStatus job={job} />
                 {/* `/goal` on its own is not an objective. It is consumed
@@ -2272,7 +2282,7 @@ export function JobDetail({
                   className={
                     isArchived
                       ? undefined
-                      : `relative rounded-xl border bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05] ${dropping ? 'border-crimson/40 ring-4 ring-crimson/[0.08]' : 'border-gray-200/90 dark:border-white/10'}`
+                      : `ui-composer ${dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''}`
                   }
                 >
                   {job.goal ? (
@@ -2407,27 +2417,14 @@ export function JobDetail({
                             : 'Message or run a task, / commands, @ files or sessions'
                         }
                         aria-label="Add a follow-up"
-                        className="max-h-[30vh] min-h-[76px] w-full resize-y rounded-xl border-0 bg-transparent px-4 pb-3 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                        className="block max-h-[30vh] min-h-16 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
                       />
                       <AttachmentStrip
                         entries={attachments.entries}
                         onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
-                      <PromptRewrite
-                        key={threadId}
-                        value={followUp}
-                        model={model}
-                        disabled={
-                          contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
-                        }
-                        onActiveChange={setRewriting}
-                        onApply={(prompt) => {
-                          setFollowUp(prompt);
-                          followUpBox.current?.focus();
-                        }}
-                      />
-                      <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center gap-1 border-t border-border px-3 py-2">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
@@ -2442,7 +2439,7 @@ export function JobDetail({
                           mcpBlockedReason={mcpBlockedReason}
                           disabled={contextLost || submitting}
                         />
-                        <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+                        <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
                         {modelOptions.length > 0 ? (
                           <>
                             {/* The harness stays the thread's; the model is offered
@@ -2463,6 +2460,21 @@ export function JobDetail({
                             />
                           </>
                         ) : null}
+                        <PromptRewrite
+                          key={threadId}
+                          compact
+                          inline
+                          value={followUp}
+                          model={model}
+                          disabled={
+                            contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
+                          }
+                          onActiveChange={setRewriting}
+                          onApply={(prompt) => {
+                            setFollowUp(prompt);
+                            followUpBox.current?.focus();
+                          }}
+                        />
                         <ComposerMessageActions
                           label={t(isActive ? 'composer.queue' : 'composer.send')}
                           title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
@@ -2486,7 +2498,7 @@ export function JobDetail({
                           busy={submitting || goalCommand.busy}
                         />
                       </div>
-                      <p className="px-4 pb-3 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+                      <p className="px-4 pb-3 text-[11px] leading-4 text-muted">
                         {contextLost
                           ? `Start a new chat · ${job.runtime}`
                           : job.state === 'cancelled'

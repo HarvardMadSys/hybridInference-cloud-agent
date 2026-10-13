@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listMcpInvocations, type McpInvocationsApi } from '@/lib/api/mcp';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
+import { LocaleProvider } from '@/components/providers/LocaleProvider';
+import { ThemeProvider } from '@/components/providers/ThemeProvider';
+import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
@@ -236,6 +239,15 @@ describe('AgentsLayout mobile task list', () => {
       changeListeners.forEach((listener) => listener());
     });
   }
+
+  it('keeps website preferences in the header while the mobile task list is open', () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand task list' }));
+
+    const header = screen.getByRole('banner');
+    expect(header).toContainElement(screen.getByRole('combobox', { name: 'Theme' }));
+    expect(header).toContainElement(screen.getByRole('combobox', { name: 'Display language' }));
+  });
 
   it('skips the task list and focuses the workspace when the mobile list is open', async () => {
     renderLayout();
@@ -481,6 +493,28 @@ describe('AgentsLayout product navigation', () => {
       </AgentsLayout>,
     );
   }
+
+  it('changes website preferences in the header when the task list is collapsed', () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, '1');
+    render(
+      <ThemeProvider>
+        <LocaleProvider>
+          <AgentsLayout>
+            <p>job</p>
+          </AgentsLayout>
+        </LocaleProvider>
+      </ThemeProvider>,
+    );
+
+    const theme = screen.getByRole('combobox', { name: 'Theme' });
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('banner')).toContainElement(theme);
+    expect(nav()).not.toContainElement(theme);
+
+    fireEvent.change(theme, { target: { value: 'dark' } });
+    expect(document.documentElement).toHaveClass(DARK_CLASS);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+  });
 
   it('links Status at the configured status page', () => {
     statusUrl = 'https://status.example.test/';

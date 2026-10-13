@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp import mcp_binding_row
 
 if TYPE_CHECKING:
@@ -34,13 +35,22 @@ class PostgresCredentialQueries:
         """Resolve Agent-owned job metadata for the MCP relay's live fence.
 
         Return the job's owner, model and MCP binding scope only while its
-        current attempt has a live lease and the job is running or publishing.
-        The relay uses that owner to resolve stored MCP connections and checks
-        the admitted binding before forwarding a request.
+        current attempt has a live lease, its job is running and has not been
+        asked to stop, and the machine it runs on is still enrolled. The relay
+        uses that owner to resolve stored MCP connections and checks the
+        admitted binding before forwarding a request.
 
-        Only Agent job and attempt tables participate. Gateway account roles
-        and status do not belong to this database. Inference authorization
-        uses Gateway-issued grants separately from this MCP lookup.
+        The last two are what make Stop and host removal take effect here.
+        Neither changes the attempt's lease or the job's state at once — a
+        stopped turn settles on the lease it holds, and a removed machine's
+        worker tokens still verify — so without them the relay would keep
+        serving tools to a turn its owner had stopped, or to a machine that
+        was taken out of the pool, until the lease ran out.
+
+        Only Agent job, attempt and host tables participate. Gateway account
+        roles and status do not belong to this database. Inference
+        authorization uses Gateway-issued grants separately from this MCP
+        lookup.
 
         The bindings are read fresh on every call rather than carried on the
         job, so narrowing a session takes effect on its next tool call instead
@@ -54,17 +64,19 @@ class PostgresCredentialQueries:
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT j.user_id, j.id AS job_id, j.model, j.state, j.thread_id
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 WHERE a.id = $1
                   AND a.lease_generation = $2
                   AND a.status = 'running'
-                  AND a.lease_expires_at > NOW()
+                  AND a.lease_expires_at > clock_timestamp()
                   AND j.id = $3
                   AND j.current_attempt_id = a.id
                   AND j.state = 'running'
+                  AND NOT j.cancel_requested
+                  AND {LIVE_ATTEMPT_HOST}
                 """,
                 attempt_id,
                 lease_generation,

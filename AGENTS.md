@@ -75,6 +75,14 @@ make check       # format + lint + type-check + test — must be green before ev
 Database-backed tests are opt-in: `make test-db` (needs Postgres; see
 [ENVIRONMENT.md](ENVIRONMENT.md)).
 
+For frontend changes, use Node.js 22 and run `make ci-frontend`. It installs the
+locked dependencies with `npm ci`, then checks lint, formatting, types, tests,
+and build guards. `make setup-dev` installs backend dependencies only.
+
+If `apps/frontend/node_modules` is absent, install it before reporting checks
+as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
+`npm test`; `vitest` and `tsc` come from the project's development dependencies.
+
 ## 4. Workflow
 
 - Branch off `dev` as `<user>/<scope>/<name>`. Pull requests target `dev`.
@@ -172,7 +180,12 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
 - Long-lived account and service credentials never enter the sandbox. Each
   member receives its own scoped inference and MCP credentials; sibling
   members cannot read or reuse them. Spend remains governed by the gateway's
-  per-user quota.
+  per-user quota. The runner also injects a separate short-lived GitHub App
+  token as `GH_TOKEN` in the owning member's environment, restricted to
+  `contents: write` and `pull_requests: write` on the job's repository. Account
+  tokens, refresh tokens, and the App's private key remain outside. Direct
+  sandbox publication does not pass through the trusted publisher's patch
+  gate; repository branch protection and GitHub rules still apply.
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.

@@ -16,7 +16,12 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
+from cloud_agent.publisher import (
+    PublishError,
+    TransientPublishError,
+    fetch_base_bundle,
+    publish_patch,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -741,6 +746,142 @@ def test_follow_up_fast_forwards_its_own_branch(origin):
     assert second.branch == first.branch == "agent/athr_thread1"
 
 
+def test_retry_adopts_the_matching_commit_already_pushed_before_a_crash(origin):
+    """A lost DB/PR write reuses the exact remote commit, not a rebuilt one."""
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_lost_result",
+        branch_id="athr_lost_result",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: first process",
+        include_base_bundle=True,
+    )
+    retry = publish_patch(
+        job_id="ajob_lost_result",
+        branch_id="athr_lost_result",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: a rebuilt commit would differ",
+        include_base_bundle=True,
+    )
+
+    assert retry.commit_sha == first.commit_sha
+    assert retry.changed_files == first.changed_files
+    assert retry.base_bundle is not None
+
+
+def test_retry_rejects_matching_tree_hidden_in_a_merge_commit(origin, tmp_path):
+    """Matching tree and first parent are insufficient: publisher commits never merge."""
+    clone_url, base_sha = origin
+    human = tmp_path / "merge"
+    _git(["clone", "--quiet", clone_url, str(human)], cwd=tmp_path)
+    _git(["checkout", "--quiet", "--detach", base_sha], cwd=human)
+
+    # The second parent contains work that the matching tree deliberately hides.
+    _git(["checkout", "--quiet", "-b", "hidden", base_sha], cwd=human)
+    (human / "HIDDEN.md").write_text("human work\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    _git(["commit", "--quiet", "-m", "human: hidden parent"], cwd=human)
+    hidden_parent = _git(["rev-parse", "HEAD"], cwd=human).strip()
+
+    _git(["checkout", "--quiet", "--detach", base_sha], cwd=human)
+    (human / "app.py").write_text("def main():\n    x = 1\n    return 0\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    expected_tree = _git(["write-tree"], cwd=human).strip()
+    forged_merge = _git(
+        [
+            "commit-tree",
+            expected_tree,
+            "-p",
+            base_sha,
+            "-p",
+            hidden_parent,
+            "-m",
+            "human: forged matching merge",
+        ],
+        cwd=human,
+    ).strip()
+    _git(
+        ["push", "--quiet", "origin", f"{forged_merge}:refs/heads/agent/athr_merge"],
+        cwd=human,
+    )
+
+    with pytest.raises(PublishError, match="has moved") as refused:
+        publish_patch(
+            job_id="ajob_merge",
+            branch_id="athr_merge",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: must not adopt a merge",
+        )
+    assert not isinstance(refused.value, TransientPublishError)
+
+
+def test_retry_fences_a_branch_advance_after_recovered_tip_validation(
+    origin, tmp_path, monkeypatch
+):
+    """The final ordinary push prevents recording an old reconciled tip."""
+    from cloud_agent import publisher as publisher_module
+
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_reconcile_race",
+        branch_id="athr_reconcile_race",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: first process",
+    )
+
+    human = tmp_path / "reconcile-racer"
+    _git(["clone", "--quiet", clone_url, str(human)], cwd=tmp_path)
+    _git(
+        ["checkout", "--quiet", "-b", "agent/athr_reconcile_race", first.commit_sha],
+        cwd=human,
+    )
+    (human / "HOTFIX.md").write_text("human edit\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    _git(["commit", "--quiet", "-m", "human: advance during reconciliation"], cwd=human)
+    human_tip = _git(["rev-parse", "HEAD"], cwd=human).strip()
+
+    real_run_git = publisher_module._run_git
+    advanced = False
+
+    def race_on_fence(args, **kwargs):
+        nonlocal advanced
+        expected_refspec = f"{first.commit_sha}:refs/heads/agent/athr_reconcile_race"
+        if args[0] == "push" and args[-1] == expected_refspec and not advanced:
+            advanced = True
+            _git(
+                ["push", "--quiet", "origin", f"{human_tip}:refs/heads/agent/athr_reconcile_race"],
+                cwd=human,
+            )
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(publisher_module, "_run_git", race_on_fence)
+    with pytest.raises(TransientPublishError, match="git push failed"):
+        publish_patch(
+            job_id="ajob_reconcile_race",
+            branch_id="athr_reconcile_race",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: retry after lost result",
+        )
+
+    assert advanced
+    assert (
+        _git(
+            ["rev-parse", "refs/heads/agent/athr_reconcile_race"], cwd=tmp_path / "origin.git"
+        ).strip()
+        == human_tip
+    )
+
+
 def _prerequisites(bundle: bytes) -> list[str]:
     """The commits a bundle requires the receiving repository to hold."""
     header = bundle.split(b"\n\n", 1)[0].decode()
@@ -785,6 +926,41 @@ def test_base_bundle_carries_only_what_the_published_commit_adds(origin, tmp_pat
         _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
     _git(["cat-file", "-e", f"{result.commit_sha}^{{commit}}"], cwd=workspace)
     assert _git(["rev-parse", "HEAD"], cwd=workspace).strip() == base_sha
+
+
+def test_republishing_the_same_patch_reuses_the_commit_already_pushed(origin):
+    """A retry after the push, and before the PR is recorded, must not refuse.
+
+    The second commit object differs because its timestamps do, but it is the
+    same change on the same base. The branch already has that change, and the
+    platform does not force-push, so the retry keeps the existing tip.
+    """
+    clone_url, base_sha = origin
+    kwargs = {
+        "job_id": "ajob_retry",
+        "branch_id": "athr_retry",
+        "patch": _PATCH_APP,
+        "clone_url": clone_url,
+        "base_sha": base_sha,
+        "commit_message": "agent: turn 1",
+        "include_base_bundle": True,
+    }
+    first = publish_patch(**kwargs)
+    second = publish_patch(**kwargs)
+
+    assert second.commit_sha == first.commit_sha
+    assert second.branch == first.branch
+    assert second.changed_files == first.changed_files
+    assert second.base_bundle is not None
+    tip = subprocess.run(
+        ["git", "rev-parse", "refs/heads/agent/athr_retry"],
+        cwd=clone_url,
+        env=_GIT_ENV,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert tip == first.commit_sha
 
 
 def test_branch_moved_by_someone_else_is_refused_with_the_reason(origin, tmp_path):
@@ -836,3 +1012,40 @@ def test_branch_moved_by_someone_else_is_refused_with_the_reason(origin, tmp_pat
         check=True,
     ).stdout.strip()
     assert out == moved_tip
+
+
+def test_non_fast_forward_race_retries_once_then_reports_divergence(origin, tmp_path, monkeypatch):
+    """An uncertain push retries; the next read makes human movement permanent."""
+    from cloud_agent import publisher as publisher_module
+
+    clone_url, base_sha = origin
+    human = tmp_path / "racer"
+    _git(["clone", "--quiet", clone_url, str(human)], cwd=tmp_path)
+    _git(["checkout", "--quiet", "-b", "agent/athr_race", base_sha], cwd=human)
+    (human / "HOTFIX.md").write_text("human edit\n", encoding="utf-8")
+    _git(["add", "--all"], cwd=human)
+    _git(["commit", "--quiet", "-m", "human: win push race"], cwd=human)
+    _git(["push", "--quiet", "origin", "agent/athr_race"], cwd=human)
+
+    monkeypatch.setattr(publisher_module, "_remote_branch_tip", lambda *_args: None)
+    with pytest.raises(TransientPublishError, match="git push failed"):
+        publish_patch(
+            job_id="ajob_race",
+            branch_id="athr_race",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: lost race",
+        )
+
+    monkeypatch.undo()
+    with pytest.raises(PublishError, match="has moved") as refused:
+        publish_patch(
+            job_id="ajob_race",
+            branch_id="athr_race",
+            patch=_PATCH_APP,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: retry after race",
+        )
+    assert not isinstance(refused.value, TransientPublishError)

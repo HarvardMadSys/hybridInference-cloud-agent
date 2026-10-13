@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
 
+SHARED_SESSION_FORK_TIMEOUT_S = 180.0
+# A new member can install its selected plugins before opening the native CLI.
+SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
+
+
 @dataclass
 class WorkspaceBrokerError(RuntimeError):
     """A bounded, owner-safe failure returned by the internal broker."""
@@ -202,14 +207,20 @@ class WorkspaceBrokerClient:
         if response.is_error:
             raise self._response_error(response)
 
-    async def list_sandboxes(self, *, timeout: float = 10) -> list[dict[str, Any]]:
-        """Read the complete retained-container inventory, including stopped groups."""
+    async def list_sandboxes(
+        self, *, timeout: float = 10, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read retained-container inventory, optionally scoped to one shared group."""
+        selection: dict[str, Any] = (
+            {"params": {"thread_id": thread_id}} if thread_id is not None else {}
+        )
         try:
             async with self._http(timeout) as client:
                 response = await client.get(
                     f"{self._base_url}/sandboxes",
                     headers=self._headers,
                     timeout=timeout,
+                    **selection,
                 )
         except httpx.HTTPError:
             raise WorkspaceBrokerError(
@@ -404,9 +415,11 @@ class WorkspaceBrokerClient:
         params = {"base_sha": base_sha} if base_sha else None
         return await self._request("GET", workspace_id, "git", params=params, timeout=70)
 
-    async def shared_chat_sandbox_status(self, thread_id: str) -> dict[str, Any]:
+    async def shared_chat_sandbox_status(
+        self, thread_id: str, *, timeout: float = 60
+    ) -> dict[str, Any]:
         """Inspect one membership in its shared retained container."""
-        return await self._shared_sandbox_request("GET", thread_id)
+        return await self._shared_sandbox_request("GET", thread_id, timeout=timeout)
 
     async def prepare_sandbox_deletion(
         self, thread_id: str, payload: dict[str, Any]
@@ -599,7 +612,11 @@ class WorkspaceBrokerClient:
                 "source_launch": source_launch,
                 "target_launch": target_launch,
             },
-            timeout=180,
+            timeout=(
+                SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S
+                if source_launch.get("plugins") or target_launch.get("plugins")
+                else SHARED_SESSION_FORK_TIMEOUT_S
+            ),
         )
 
     @staticmethod

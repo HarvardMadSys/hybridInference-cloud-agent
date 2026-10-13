@@ -179,6 +179,14 @@ export interface AgentRunnerHost {
    * host, not fail on it.
    */
   status: AgentHostStatus;
+  /** Opaque automated-drain owner or its released idempotency receipt. */
+  drain_fence_token?: string | null;
+  /** Host state immediately before the current automated owner acquired it. */
+  drain_fence_status_before?: 'online' | 'draining' | null;
+  /** True while the automated owner keeps this host draining. */
+  drain_fence_active?: boolean;
+  /** Required V2 CAS generation, rotated whenever drain-relevant host state changes. */
+  drain_fence_epoch: string;
   /**
    * True when the host redeemed an enrollment token, which is the difference
    * between a name that is a scheduling label and a name that is an identity.
@@ -523,9 +531,9 @@ export async function setAgentRunnerHostSettings(
  * Revoke this host's credential and take it out of the pool.
  *
  * `force` is refused-by-default for a reason worth repeating at the call site:
- * attempts still running on that host are **not** stopped — nothing on this
- * side can reach them — they are left to their leases, which expire and requeue
- * the work exactly once.
+ * attempts still running on that host are ended. Their leases expire at once,
+ * and the work is requeued exactly once, or a chat whose turn may already have
+ * run is marked lost.
  */
 export async function removeAgentRunnerHost(
   host: string,

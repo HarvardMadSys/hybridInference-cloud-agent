@@ -14,6 +14,7 @@ venv/
 .coverage
 coverage.xml
 htmlcov/
+.local-ci/
 
 # Environment — never commit secrets; see ENVIRONMENT.md
 .env

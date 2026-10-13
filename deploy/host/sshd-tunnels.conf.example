@@ -1,0 +1,107 @@
+# Reference sshd policy for hand-provisioned tunnel accounts.
+#
+# Prefer automatic setup (Admin → Servers → Server setup, described in
+# docs/operations-compute.md). It creates one account per relay, writes this
+# policy for each into /etc/ssh/sshd_config.d, reads it back with `sshd -T`,
+# and refuses an existing policy that would widen it. This file mirrors what
+# that setup writes, for a tunnel authorized by hand; a unit test keeps the two
+# identical.
+#
+# One dedicated account per relay, used by nothing else. sshd applies these
+# rules per account, so two relays sharing one would share the wider policy:
+#
+#   cloud-agent-inference  gateway machine        -L to the inference port
+#   cloud-agent-mcp        control-plane machine  -L to the MCP-only listener
+#   cloud-agent-control    control-plane machine  -L to the main API, and one
+#                                                 -R for the broker route back
+#
+# Each account's ~/.ssh/authorized_keys holds exactly one line. `port-forwarding`
+# re-enables remote as well as local forwarding after `restrict`, and
+# `permitopen` limits only the local destination. The two relay accounts are
+# refused remote forwarding by their blocks below:
+#
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... inference
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8001" ssh-ed25519 AAAA... mcp
+#
+# The control key also names its single reverse listener: the control-plane
+# machine's Docker bridge gateway and this host's own reverse port. A bind
+# must satisfy both that and the account's PermitListen:
+#
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8000",permitlisten="172.24.0.1:18092" ssh-ed25519 AAAA... control
+#
+# Install on each machine only the blocks for the accounts that live there,
+# e.g. as /etc/ssh/sshd_config.d/00-cloud-agent-tunnels.conf, with your account
+# names, ports and bridge address. sshd keeps the first value it reads for a
+# keyword, so nothing that also matches these accounts may come earlier.
+# Validate, confirm the effective policy, then reload:
+#
+#   sshd -t
+#   sshd -T -C user=cloud-agent-control,host=localhost,addr=127.0.0.1 \
+#     | grep -E '^(allowtcpforwarding|permitopen|permitlisten|gatewayports) '
+#
+# On the control-plane machine, also let the reverse ports answer only on that
+# Docker bridge interface. Linux accepts a packet for any local address on any
+# interface, so the bind address alone does not keep LAN neighbours out.
+
+# Inference relay: one local forward to the gateway's inference listener.
+Match User cloud-agent-inference
+    AllowTcpForwarding local
+    DisableForwarding no
+    AllowStreamLocalForwarding no
+    PermitOpen 127.0.0.1:8080
+    PermitListen none
+    GatewayPorts no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+    AuthorizedKeysFile .ssh/authorized_keys
+    ForceCommand /usr/sbin/nologin
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTTY no
+    PermitUserRC no
+    PermitTunnel no
+
+# MCP relay: one local forward to the MCP-only listener, never the main API.
+Match User cloud-agent-mcp
+    AllowTcpForwarding local
+    DisableForwarding no
+    AllowStreamLocalForwarding no
+    PermitOpen 127.0.0.1:8001
+    PermitListen none
+    GatewayPorts no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+    AuthorizedKeysFile .ssh/authorized_keys
+    ForceCommand /usr/sbin/nologin
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTTY no
+    PermitUserRC no
+    PermitTunnel no
+
+# Host control: the main API, plus the one reverse listener for the broker.
+# `clientspecified` binds exactly the requested address; PermitListen and the
+# key's permitlisten both hold that to the bridge gateway and this host's port.
+Match User cloud-agent-control
+    AllowTcpForwarding yes
+    DisableForwarding no
+    AllowStreamLocalForwarding no
+    PermitOpen 127.0.0.1:8000
+    PermitListen 172.24.0.1:18092
+    GatewayPorts clientspecified
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+    AuthorizedKeysFile .ssh/authorized_keys
+    ForceCommand /usr/sbin/nologin
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTTY no
+    PermitUserRC no
+    PermitTunnel no
+Match all

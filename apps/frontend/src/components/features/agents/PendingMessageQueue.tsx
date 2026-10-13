@@ -256,7 +256,8 @@ export function PendingMessageQueue({
     return () => clearTimeout(timer);
   }, [notes]);
 
-  if (!queue.messages.length && !orphans.length && !queue.pausedReason) return null;
+  if (!queue.messages.length && !orphans.length && !queue.pausedReason && !queue.refreshError)
+    return null;
 
   const count = queue.messages.length;
   const listed = count > 0 || orphans.length > 0;
@@ -267,6 +268,14 @@ export function PendingMessageQueue({
       data-testid="pending-message-queue"
       className="mb-2 overflow-hidden rounded-xl border border-gray-200/80 bg-white shadow-[0_8px_24px_-20px_rgba(17,24,39,0.35)] dark:border-white/10 dark:bg-gray-900"
     >
+      {queue.refreshError && (
+        <p role="status" className="px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          {queue.loaded ? t('common.refreshFailed') : queue.refreshError}
+          <button type="button" onClick={() => void queue.refresh()} className="ml-2 underline">
+            {t('common.retry')}
+          </button>
+        </p>
+      )}
       <div className="flex min-h-[30px] items-center gap-2 px-3 pt-1">
         {listed ? (
           <button

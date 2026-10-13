@@ -304,9 +304,69 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness
 
 
 @pytest.mark.asyncio
-async def test_failed_provisioning_stays_unavailable_and_restart_reuses_persisted_keys(
-    harness: Harness,
+async def test_initial_machine_defaults_use_saved_gateway_and_service_node_without_provisioning(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("GATEWAY_BASE_URL", "https://old-gateway.example.org")
+    monkeypatch.setenv("AGENT_CONTROL_PLANE_SSH_HOST", "service-node.example.org")
+    monkeypatch.delenv("AGENT_GATEWAY_SSH_HOST", raising=False)
+    settings.apply_settings(
+        2,
+        settings.encode_changes(
+            {
+                "gateway_base_url": "https://freeinference.org",
+                "workspace_broker_token": BROKER_TOKEN,
+            }
+        ),
+    )
+
+    status = await harness.commands().automatic_setup_status()
+
+    assert status["machine_defaults"] == {
+        "gateway": {"address": "freeinference.org"},
+        "control": {"address": "service-node.example.org"},
+    }
+    assert "defaults" not in status
+    assert "pending_request_id" not in status
+    assert harness.tunnels.calls == []
+    assert harness.repository.profiles == {}
+    assert harness.repository.defaults == {}
+    assert BROKER_TOKEN not in json.dumps(status)
+
+
+@pytest.mark.asyncio
+async def test_initial_machine_defaults_allow_a_separate_gateway_ssh_address(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_GATEWAY_SSH_HOST", "gateway-ssh.example.org")
+    monkeypatch.setenv("AGENT_CONTROL_PLANE_SSH_HOST", "control-ssh.example.org")
+
+    status = await harness.commands().automatic_setup_status()
+
+    assert status["machine_defaults"] == {
+        "gateway": {"address": "gateway-ssh.example.org"},
+        "control": {"address": "control-ssh.example.org"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_missing_service_node_address_does_not_use_a_container_hostname(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AGENT_CONTROL_PLANE_SSH_HOST", raising=False)
+    monkeypatch.setenv("HOSTNAME", "api-container")
+
+    status = await harness.commands().automatic_setup_status()
+
+    assert status["machine_defaults"]["control"]["address"] == ""
+
+
+@pytest.mark.asyncio
+async def test_failed_provisioning_stays_unavailable_and_restart_reuses_persisted_keys(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_GATEWAY_SSH_HOST", "new-gateway.example.org")
+    monkeypatch.setenv("AGENT_CONTROL_PLANE_SSH_HOST", "new-control.example.org")
     harness.tunnels.fail_control_once = True
     with pytest.raises(ProviderError, match="temporarily unavailable"):
         await harness.restart().create(request())
@@ -323,6 +383,7 @@ async def test_failed_provisioning_stays_unavailable_and_restart_reuses_persiste
     assert interrupted_status["defaults"] == request().model_dump(
         mode="json", exclude={"request_id"}
     )
+    assert "machine_defaults" not in interrupted_status
 
     result = await harness.restart().create(request())
     assert {profile["id"] for profile in result["profiles"]} == set(ciphertexts)

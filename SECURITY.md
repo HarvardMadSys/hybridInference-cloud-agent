@@ -2,29 +2,29 @@
 
 ## Reporting a vulnerability
 
-Use GitHub's private vulnerability reporting for this repository
-("Report a vulnerability" under the Security tab). Please do not open a public
-issue for anything you believe is exploitable.
+Report vulnerabilities through GitHub's private vulnerability reporting for
+this repository. Select "Report a vulnerability" under the Security tab. Do
+not open a public issue for anything you believe is exploitable.
 
-You can expect an acknowledgement within a few days. We will tell you what we
-found, what we changed, and when it shipped.
+Expect an acknowledgement within a few days. We will tell you what we found,
+what we changed, and when the change shipped.
 
 ## What is in scope
 
-- The control plane, the web app, the runner host and the sandbox image in
-  this repository.
-- The HTTP contracts under `gateway_contracts/` as this service consumes them.
+- The control plane, web app, runner host, and sandbox image in this repository.
+- The HTTP contracts under `gateway_contracts/`, as consumed by this service.
 
-The gateway this service authenticates against is a separate project
-(HybridInference); report gateway issues there.
+The gateway that this service authenticates against is a separate project:
+HybridInference. Report gateway issues there.
 
 ## What a deployment must not assume
 
-The threat model this service is built to is described in `AGENTS.md` and
-`docs/operations.md`. Two points bear repeating for anyone deploying it:
+`AGENTS.md` and `docs/operations.md` describe the threat model for this service.
+Two deployment requirements bear repeating:
 
 - The plain Docker runner profile isolates trusted repositories from each
-  other, not hostile code from the host. Do not offer it to untrusted users.
-- The sandbox never holds a long-lived gateway credential; it receives a
-  short-lived, job-scoped grant. A deployment that puts an admin token into
-  a sandbox has removed the property this design rests on.
+  other. It does not isolate hostile code from the host. Do not offer it to
+  untrusted users.
+- The sandbox never holds a long-lived gateway credential. It receives a
+  short-lived, job-scoped grant. Putting an admin token into a sandbox removes
+  the security property that this design rests on.

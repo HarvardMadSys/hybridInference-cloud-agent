@@ -1,14 +1,16 @@
 # Environment inventory
 
-Configuration for the control plane, host agent, sandbox image and web app,
-grouped by the component that reads it. Defaults below distinguish application
-behavior from the supported Compose deployment where they differ.
+Use this inventory to find a configuration value, see which component reads it,
+and learn where to set it. When application defaults differ from the supported
+Compose deployment, both are listed.
 
-For local setup, see the [developer guide](docs/development.md). For deployment
-files, start with [control-plane configuration](deploy/control-plane/.env.example)
-and [host configuration](deploy/host/.env.example). The [release contract](deploy/release/README.md)
-describes packaged artifacts. Names inherited from HybridInference remain in
-use; **NEW** and **MOVED** labels record earlier changes, not provisioning status.
+For local setup, start with the [developer guide](docs/development.md). For a
+deployment, start with the
+[control-plane configuration](deploy/control-plane/.env.example) and
+[host configuration](deploy/host/.env.example). The
+[release contract](deploy/release/README.md) describes packaged artifacts.
+Names inherited from HybridInference remain in use; **NEW** and **MOVED** mark
+earlier changes, not provisioning status.
 
 > **Keep deployment values outside this public repository.**
 >
@@ -20,60 +22,96 @@ use; **NEW** and **MOVED** labels record earlier changes, not provisioning statu
 
 ## Settings and bootstrap configuration
 
-Use **Admin → Settings** for application behavior, integration URLs and
-credentials, publication, web appearance, operational intervals, upload and
-skill limits, task titles, and sandbox/workspace limits. Saved application
-settings live in the Agent database and are authoritative across restarts.
-The inventory below records defaults and the environment names used for an
-initial import; registered settings are no longer continuously read from `.env`.
+Choose the configuration location by what the value controls:
 
-Run `alembic upgrade head` (through `0042_sandbox_archive_settings`) before starting
-this release. The main control-plane listener initializes the settings document
-once from its existing environment. The MCP-only listener waits for that document and uses the same
-saved values. Later environment edits do not overwrite it. **Reset** restores
-the setting's built-in default, including an empty default for a credential;
-it does not restore an old environment value. Listeners synchronize changes
-every five seconds, and the web server reads saved appearance settings for each
-request without rebuilding or restarting the web image.
+- Use **Admin → Settings** for application behavior, integration URLs and
+  credentials, publication, web appearance, operational intervals, upload and
+  skill limits, task titles, and global sandbox/workspace limits.
+- Use a server's **Servers** page for sandbox and workspace values that should
+  apply only to that server.
+- Keep bootstrap configuration in deployment files. This includes database
+  access, encryption roots, recovery access, host provisioning, networking,
+  isolation, image/build routing, and mounted paths.
 
-Host sandbox and workspace values use per-server overrides, then global admin
-values, then built-in defaults. Migration `0036_host_settings_import` preserves
-valid nondefault legacy host values as saved per-server overrides when an admin
-has not already configured them. Unreported values are imported through initial
-heartbeats, including the broker's report. Admin edits and resets exclude only
-the changed keys from pending imports, preserving unrelated legacy values.
-Global exclusions also apply to newly enrolled hosts. Later environment changes
-are ignored; clearing an override never reactivates an old environment value.
+Saved application settings live in the Agent database and remain authoritative
+across restarts. The inventory below records built-in defaults and the
+environment names used for an initial import. Once a setting is registered, the
+service no longer reads it continuously from `.env`.
 
-Sandbox archives are configured only in **Admin → Settings → Sandbox** and are
-stored as one revisioned policy in the Agent database. There is deliberately no
+Run `alembic upgrade head` (through `0051_host_drain_fence_epoch`) before
+starting this release. The updated worker claim query requires
+`agent_jobs.claim_retry_at`, and chat plugin selections require
+`agent_threads.plugins`; existing queued jobs remain immediately eligible and
+existing chats default to no plugins after the migrations. Migration 0049
+starts every existing host without a deployment drain owner or release receipt;
+0051 backfills a non-null drain-fence epoch for every host. The database rotates
+that epoch whenever drain-relevant lifecycle, credential, placement, or
+ownership state changes. Once the V2 control plane is activated, 0051 and
+`AGENT_DEPLOY_DRAIN_FENCE_V2` are the application and schema rollback floor.
+The V1 marker remains only so an older orchestrator can perform the bridge
+upgrade; it is not a post-activation rollback target. Rebuild the sandbox image
+to load selected plugins with the updated CLI wrappers. The main control-plane
+listener then initializes the settings document once from its existing
+environment. The
+MCP-only listener
+waits for that document and uses the same saved values.
+
+After the initial import, edit values in **Admin → Settings**. Later
+environment edits do not overwrite saved values. **Reset** restores a setting's
+built-in default, including an empty default for a credential; it does not
+restore an old environment value. Listeners synchronize changes every five
+seconds, and the web server reads saved appearance settings for every request
+without rebuilding or restarting the web image.
+
+For each host sandbox or workspace setting, the service uses the first available
+value in this order:
+
+1. the override saved for that server;
+2. the global value saved by an administrator;
+3. the built-in default.
+
+Migration `0036_host_settings_import` preserves valid nondefault legacy host
+values as per-server overrides when an administrator has not already configured
+them. Hosts without a complete report finish this import through their initial
+heartbeats. An admin edit or reset excludes only the changed keys from pending
+imports, so unrelated legacy values are preserved. Global exclusions
+also apply to newly enrolled hosts. Later environment changes are ignored.
+Clearing an override falls through to the global value or built-in default; it
+never reactivates an old environment value.
+
+Configure sandbox archives only in **Admin → Settings → Sandbox**. Cloud
+Agent stores them as one revisioned policy in the Agent database. There is no
 `AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
-`s3://freeinference/cloud-agent/sandbox`; the saved policy contains enablement,
-region, KMS key ARN, expected bucket owner, and bounded upload sizes, but no AWS
-credential. Workspace brokers authenticate with their deployment workload
-identity through the standard AWS SDK credential chain. See
-[Sandbox archives](docs/operations.md#sandbox-archives) for IAM, bucket
-versioning, rollout, and lifecycle semantics.
+`s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
+region, bounded upload sizes, and either an AWS access key or the workload
+identity fields (customer-managed KMS key ARN and expected bucket owner). The
+secret access key is encrypted with the settings encryption key and is not
+returned by the admin API. With no access key, workspace brokers authenticate
+with their deployment workload identity through the standard AWS SDK credential
+chain. See [Sandbox archives](docs/operations.md#sandbox-archives) for IAM,
+bucket versioning, rollout, and lifecycle semantics.
 
-Control-plane runtime identity, signing/encryption keys, broker credentials,
-cookie/proxy policy, MCP target policy and the default execution profile are also
-saved in the database. On an upgrade, the main listener imports only missing
-newly migrated fields; it never overwrites an existing value, including an empty
-reset. The relay waits for that import. The identity issuer stays pinned to this
-database, and existing user/compute encryption keys cannot be replaced or reset
-through the settings editor without a separate re-encryption procedure.
+The database also stores the control-plane runtime identity, signing/encryption
+keys, broker credentials, cookie/proxy policy, MCP target policy, and default
+execution profile. During an upgrade, the main listener imports only newly
+migrated fields that are missing. It never overwrites an existing value,
+including an empty reset, and the relay waits for the import to finish. The
+identity issuer stays pinned to this database. Existing user/compute encryption
+keys cannot be replaced or reset through the settings editor without a separate
+re-encryption procedure.
 
-The Settings page reports missing required fields and incomplete optional
-integrations. Administrators can open `<web base path>/setup` with `ADMIN_TOKEN`
-before Gateway sign-in works. Setup uses the same authenticated, audited settings
-API; the recovery token stays in page memory and is never saved in browser storage.
+The Settings page identifies missing required fields and incomplete optional
+integrations. If Gateway sign-in is not ready, an administrator can open
+`<web base path>/setup` with `ADMIN_TOKEN`. Setup uses the same authenticated,
+audited settings API. The recovery token stays in page memory and is never saved
+in browser storage.
 
-Bootstrap configuration stays in deployment files: database access, the settings
+Keep bootstrap configuration in deployment files: database access; the settings
 encryption root (`AGENT_SETTINGS_ENCRYPTION_KEY`, with the legacy environment
-`AGENT_SESSION_SECRET` fallback), administrator recovery access (`ADMIN_TOKEN`),
-host enrollment/broker provisioning, networking, tunnels/listeners, actual host
-isolation, image/build routing, mounted paths and trusted compute deployment
-profiles. These establish access to the database or configure processes outside
+`AGENT_SESSION_SECRET` fallback); administrator recovery access (`ADMIN_TOKEN`);
+host enrollment/broker provisioning; networking; tunnels/listeners; actual host
+isolation; image/build routing; mounted paths; and trusted compute deployment
+profiles. These values establish database access or configure processes outside
 the control plane. Their names appear on the Settings page with hidden values.
 
 ## The one rule
@@ -83,17 +121,26 @@ the control plane. Their names appear on the Settings page with hidden values.
 
 The gateway mints and verifies inference grants. Cloud Agent verifies identity
 tokens with public JWKS keys and signs its own tokens with independent secrets.
-A request to place either gateway signing secret here requires a design review.
+Any proposal to place either gateway signing secret here requires a design
+review.
 
 ## Provisioning status
 
 The original extraction provisioned staging on 2026-08-06 and production on
 2026-08-07; [the cutover record](docs/cutover.md) documents that history. Those
-dates do not establish the state of a current deployment.
+dates do not show whether a current deployment is ready.
 
-This repository publishes neutral releases. Each downstream operator owns its
-configuration, provisioning status, rollout record and recovery evidence. Keep
-secret material outside Git and back it up with the data it protects.
+This repository publishes neutral releases. As a downstream operator, you own
+your configuration, provisioning status, rollout record, and recovery evidence.
+Keep secret material outside Git and back it up with the data it protects.
+
+## Local development tools
+
+These values are read by local tooling and are not saved application settings.
+
+| Variable | New? | Value / who provisions |
+|---|---|---|
+| `CI_LOG_DIR` | **NEW** | Optional output directory set by the developer invoking `scripts/ci-local.sh`. Defaults to a fresh gitignored `.local-ci/<tier>.XXXXXX` directory in the checkout for each run. Contains gate logs and the database JUnit report; no application secret is required. |
 
 ## Control plane (`cloud_agent`)
 
@@ -209,7 +256,7 @@ permissions, retention and verification requirements.
 | `AGENT_EDGE_CONFIG_FILE` | existing | Host-side nginx configuration mounted read-only by the edge service. Default `./edge.nginx.conf`, relative to the Compose file. |
 | `AGENT_NETWORK_NAME` | existing | Control-plane Compose network name, default `cloud-agent`. Use distinct names for independent stacks. |
 | `AGENT_SESSION_COOKIE_SECURE` | **NEW** | Defaults to on. Set to `false` **only** for a developer running the whole stack on plain `http://localhost`; a session cookie without `Secure` is one anyone on the path can take. |
-| `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls overwrites `X-Forwarded-For`; otherwise the admin audit trail records whatever address the caller typed. |
+| `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls overwrites `X-Forwarded-For`, as both shipped nginx configurations do; otherwise the admin audit trail records whatever address the caller typed. |
 | `AGENT_DEPLOYMENT_SHA` | **NEW** | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
 
 ### Source control
@@ -253,6 +300,7 @@ relay reachability and connection target policy.
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | **NEW** | Runner-only SSH tunnel to the main API. Required suffixes: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`: `22` / `127.0.0.1` / `8000` / `8000`. It joins only the runner network and is unreachable from sandboxes. Use a key distinct from the MCP and inference keys. |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | **NEW** | That tunnel's alias, on the runner network only. Defaults to `agent-control-plane`. |
 | `AGENT_MCP_PUBLIC_BASE_URL` | optional override | The public API base URL used to register and receive MCP OAuth callbacks, including the API prefix — for example `https://example.com/agents/api`. The callback is `<base>/v1/agent/mcp/oauth/callback/<connection-id>`. After processing it, the service returns the browser to `<AGENT_WEB_BASE_URL>/integrations`; the web and API bases may differ. When unset, reuse `AGENT_SESSION_REDIRECT_URI` with its exact `/v1/session/callback` suffix removed, preserving the public API origin and proxy prefix. This works with the existing required sign-in configuration; use the override only if MCP callbacks have a separate public address. Never derived from request headers. If neither setting supplies a callback address, browser authorization is unavailable; static credentials still work. |
+| `AGENT_MCP_GITHUB_CLIENT_ID` / `AGENT_MCP_GITHUB_CLIENT_SECRET` | optional legacy import | Configure GitHub MCP browser sign-in in Admin Settings → MCP. Register a service-owned GitHub OAuth App or GitHub App with callback `<public API base>/v1/agent/mcp/oauth/callback/github` (including the API proxy prefix). Both client values and a public callback base are required. The preset then defaults to browser sign-in; each user authorizes their own account without registering an app or pasting a token. The client secret stays in encrypted settings and pending OAuth flows, while user tokens remain in separate MCP connections. Prefer a GitHub App limited to the required repositories and permissions, including Contents and Pull requests read and write access when agents publish changes; OAuth Apps request `repo` and `read:org` scopes (GitHub's `repo` scope permits writes). A personal access token remains available for narrower repository access. |
 | `AGENT_MCP_ALLOW_PRIVATE_TARGETS` | **NEW** | Whether a user-added MCP connection may dial private and loopback addresses. Off by default: a remote connection that reaches loopback reaches **this** service, and a user who needs a private network should run a connector instead. Turning it on still refuses the ranges this platform never dials, so it cannot be used to reach the cloud metadata service. |
 | `AGENT_MCP_ALLOW_PLAIN_HTTP` | **NEW** | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
 | `AGENT_MCP_SERVERS` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
@@ -336,6 +384,8 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections and Admin-managed deployment profiles. The supported deployer generates and persists a random value in `.env` when blank. Preserve it with database backups. |
 | `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
+| `AGENT_CONTROL_PLANE_SSH_HOST` | Editable first-time Server setup address for the service node. The supported deployer defaults to the node's FQDN, falling back to its hostname; set an SSH address explicitly when using another deployment system or a different SSH alias. Saved setups take precedence. |
+| `AGENT_GATEWAY_SSH_HOST` | Optional first-time Server setup gateway address override. Defaults to the hostname of the saved Gateway API URL, such as `freeinference.org`; use an override when SSH uses a different address. |
 | `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base. Leave unset to disable the CloudLab adapter. |
 | `AGENT_COMPUTE_REGISTRATION_URL` | Optional. The HTTPS address new CloudLab nodes post their SSH host keys to, ending in `/v1/compute/node-registrations`. When unset it is derived from `AGENT_SESSION_REDIRECT_URI` (its `/v1/session/callback` suffix replaced), like MCP callbacks. Only HTTPS is used: a node checks the control plane's certificate before sending its one-time token. Without either, nodes set to register their keys cannot be created. |
 
@@ -496,6 +546,7 @@ Existing host credentials and retained sandboxes stay in place.
 | `AGENT_RELAY_NETWORK` | **NEW** | The route-less network the two relays are discovered on; no sandbox joins it. Group lifecycle attaches the relays found here, under their aliases, to each group's bridge. The host stack derives `<COMPOSE_PROJECT>-agent-relays`, so sibling stacks never find each other's relays; set it only to name an existing network. |
 | ~~`AGENT_EGRESS_SETUP_TIER`, `AGENT_EGRESS_AGENT_TIER`, `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK`, `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`~~ | **removed** | Retired with the network tiers and the Squid proxy when sandboxes moved to one network ([design](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md)). Nothing reads them: there is no tier to select, no proxy to point at and no open-network switch. Delete them from `.env`; setting one changes nothing. |
 | `AGENT_LIVE_SESSION_ID` / `AGENT_LIVE_WORKDIR` | **NEW (internal)** | Generated by the runtime adapter for the private OpenCode/Kilo stdio bridge. Operators must not set these. They select the already-authorized native session and fixed `/workspace` path inside one member process; neither is a credential or host path. |
+| `AGENT_PLUGIN_PATHS` | **NEW (internal)** | Generated by the host plugin installer for pi, OpenCode, and Kilo. A JSON array of absolute paths to the selected plugins installed in the member's private home; defaults to `[]`. CLI wrappers load these paths explicitly while retaining disabled project plugin discovery. Operators must not set this; each chat's saved selections determine it. |
 
 ### Kata runtime qualification generation
 
