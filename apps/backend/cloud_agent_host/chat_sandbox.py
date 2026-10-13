@@ -383,6 +383,109 @@ _DOCKER_CLIENT_ENV_PREFIXES = (
 )
 _PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY"})
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+#: Where retained chat state lives: only ever the container's writable layer.
+_CHAT_STATE_ROOTS = (CHAT_WORKDIR, CHAT_STATE_DIR)
+# ``AGENT_SANDBOX_EXTRA_ARGS`` follow the platform's own ``docker create``
+# flags, so a later spelling would win. These would undo what those flags
+# establish: the chat's identity and restart behaviour, a secret-free
+# environment, state in the writable layer, the unprivileged user and its
+# security profile, the one guarded network and resolver, or the limits.
+_REFUSED_EXTRA_ARGS = frozenset(
+    {
+        "--rm",
+        "--name",
+        "--label",
+        "--label-file",
+        "--restart",
+        "--entrypoint",
+        "--init",
+        "--env",
+        "--env-file",
+        "--mount",
+        "--volume",
+        "--volumes-from",
+        "--tmpfs",
+        "--storage-opt",
+        "--read-only",
+        "--user",
+        "--group-add",
+        "--privileged",
+        "--cap-add",
+        "--security-opt",
+        "--runtime",
+        "--userns",
+        "--cgroupns",
+        "--cgroup-parent",
+        "--sysctl",
+        "--device",
+        "--device-cgroup-rule",
+        "--gpus",
+        "--pid",
+        "--ipc",
+        "--uts",
+        "--network",
+        "--network-alias",
+        "--link",
+        "--ip",
+        "--ip6",
+        "--mac-address",
+        "--dns",
+        "--add-host",
+        "--publish",
+        "--publish-all",
+        "--memory",
+        "--memory-swap",
+        "--memory-reservation",
+        "--kernel-memory",
+        "--oom-kill-disable",
+        "--cpus",
+        "--cpu-period",
+        "--cpu-quota",
+        "--cpu-shares",
+        "--cpu-rt-period",
+        "--cpu-rt-runtime",
+        "--pids-limit",
+    }
+)
+# Docker's short flags, as the long options they spell, and the hidden aliases
+# it still accepts. A short flag that takes a value ends a combined group such
+# as ``-itu0``: the rest of the token is that value.
+_EXTRA_ARG_SHORT_FLAGS = {
+    "a": "--attach",
+    "c": "--cpu-shares",
+    "e": "--env",
+    "h": "--hostname",
+    "i": "--interactive",
+    "l": "--label",
+    "m": "--memory",
+    "p": "--publish",
+    "P": "--publish-all",
+    "t": "--tty",
+    "u": "--user",
+    "v": "--volume",
+    "w": "--workdir",
+}
+_EXTRA_ARG_SHORT_SWITCHES = frozenset("iPt")
+_EXTRA_ARG_ALIASES = {"--net": "--network", "--net-alias": "--network-alias"}
+
+
+def _extra_arg_options(token: str) -> list[str]:
+    """Name the options one extra-argument token sets, as Docker reads it.
+
+    A token that is not an option -- the value of the one before it -- sets
+    none.
+    """
+    if token.startswith("--"):
+        option = token.split("=", 1)[0]
+        return [_EXTRA_ARG_ALIASES.get(option, option)]
+    if not token.startswith("-") or token == "-":
+        return []
+    options: list[str] = []
+    for letter in token[1:]:
+        options.append(_EXTRA_ARG_SHORT_FLAGS.get(letter, f"-{letter}"))
+        if letter not in _EXTRA_ARG_SHORT_SWITCHES:
+            break
+    return options
 
 
 def _exec_env_by_name(key: str) -> bool:
@@ -609,6 +712,9 @@ class ChatSandboxInspection:
     networks: tuple[str, ...]
     network_ids: tuple[tuple[str, str], ...] = ()
     sandbox_runtime: str = ""
+    #: ``--tmpfs`` destinations, which Docker lists in ``HostConfig`` rather
+    #: than with the other mounts.
+    tmpfs: tuple[str, ...] = ()
 
 
 @dataclass
@@ -2287,6 +2393,9 @@ class ChatSandboxManager:
                     )
                 ),
                 sandbox_runtime=str((raw.get("HostConfig") or {}).get("Runtime") or ""),
+                tmpfs=tuple(
+                    sorted(str(path) for path in (raw.get("HostConfig") or {}).get("Tmpfs") or {})
+                ),
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
@@ -5197,16 +5306,24 @@ finally:
 
     @staticmethod
     def _verify_mounts(inspection: ChatSandboxInspection) -> None:
-        """Chat state must be in the writable layer, never a host/volume mount."""
-        for mount in inspection.mounts:
-            mount_type = str(mount.get("Type") or "")
-            destination = str(mount.get("Destination") or "")
+        """Chat state must be in the writable layer, never a host/volume mount.
+
+        Nor a tmpfs: one over the workspace or the agent state would empty it
+        at every stop without an error anywhere.
+        """
+        mounted = [
+            (str(mount.get("Type") or ""), str(mount.get("Destination") or ""))
+            for mount in inspection.mounts
+        ]
+        mounted += [("tmpfs", destination) for destination in inspection.tmpfs]
+        for mount_type, destination in mounted:
             if mount_type in {"bind", "volume"}:
                 raise SandboxError(
                     f"retained chat sandbox has forbidden {mount_type} mount at "
                     f"{destination or '<unknown>'}"
                 )
-            if destination in {CHAT_WORKDIR, CHAT_STATE_DIR}:
+            path = destination.rstrip("/")
+            if any(path == root or path.startswith(f"{root}/") for root in _CHAT_STATE_ROOTS):
                 raise SandboxError(
                     f"retained chat state path {destination!r} is mounted, not Docker-layer owned"
                 )
@@ -5246,47 +5363,19 @@ finally:
             )
 
     def _validate_extra_args(self) -> None:
-        """Reject options that would defeat retained ownership or secret rules."""
-        refused = {
-            "--rm",
-            "--name",
-            "--label",
-            "--mount",
-            "--volume",
-            "-v",
-            "--volumes-from",
-            "--env",
-            "-e",
-            "--env-file",
-            "--entrypoint",
-            "--user",
-            "--network",
-            "--privileged",
-            "--cap-add",
-            "--device",
-            "--pid",
-            "--ipc",
-            "--uts",
-            "--memory",
-            "-m",
-            "--memory-swap",
-            "--memory-reservation",
-            "--cpus",
-            "--cpu-period",
-            "--cpu-quota",
-            "--cpu-shares",
-            "-c",
-            "--storage-opt",
-        }
+        """Reject options that would defeat retained ownership, secret or isolation rules.
+
+        Options are read the way Docker reads them: a long option with or
+        without ``=value`` or through a hidden alias, a short flag alone or
+        inside a combined group. Only the option is named in the refusal,
+        never its value, which may be a secret.
+        """
         for token in self.backend.extra_args:
-            option = token.split("=", 1)[0]
-            short_override = not token.startswith("--") and any(
-                token.startswith(short) for short in ("-m", "-c", "-e", "-v")
-            )
-            if option in refused or short_override:
-                raise SandboxError(
-                    f"AGENT_SANDBOX_EXTRA_ARGS option {option!r} is unsafe for retained chats"
-                )
+            for option in _extra_arg_options(token):
+                if option in _REFUSED_EXTRA_ARGS:
+                    raise SandboxError(
+                        f"AGENT_SANDBOX_EXTRA_ARGS option {option!r} is unsafe for retained chats"
+                    )
 
     @staticmethod
     def _validate_container_path(path: str) -> None:

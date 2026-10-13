@@ -842,6 +842,123 @@ def test_extra_args_cannot_override_the_configured_resource_limits(args):
         manager.build_create_command(_spec())
 
 
+@pytest.mark.parametrize(
+    ("args", "option"),
+    [
+        # Short and combined spellings of a refused long option.
+        (["-u", "0"], "--user"),
+        (["-u0"], "--user"),
+        (["-itu0"], "--user"),
+        (["-lorg.freeinference.chat-namespace=other"], "--label"),
+        (["-p", "8080:80"], "--publish"),
+        (["-P"], "--publish-all"),
+        # Docker's hidden alias.
+        (["--net", "host"], "--network"),
+        (["--net=host"], "--network"),
+        # Options that undo the profile, the state, the network or a limit.
+        (["--security-opt", "seccomp=unconfined"], "--security-opt"),
+        (["--security-opt=no-new-privileges=false"], "--security-opt"),
+        (["--tmpfs", "/workspace"], "--tmpfs"),
+        (["--read-only"], "--read-only"),
+        (["--runtime", "runc"], "--runtime"),
+        (["--userns=host"], "--userns"),
+        (["--cgroupns=host"], "--cgroupns"),
+        (["--sysctl", "net.ipv4.ip_forward=1"], "--sysctl"),
+        (["--group-add", "0"], "--group-add"),
+        (["--init=false"], "--init"),
+        (["--restart", "always"], "--restart"),
+        (["--label-file", "/etc/labels"], "--label-file"),
+        (["--dns", "8.8.8.8"], "--dns"),
+        (["--add-host", "agent-gateway:203.0.113.9"], "--add-host"),
+        (["--pids-limit", "-1"], "--pids-limit"),
+    ],
+)
+def test_extra_args_are_refused_in_every_spelling_docker_accepts(args, option):
+    """The arguments follow the platform's own, so whichever spelling came last would win."""
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=args))
+
+    with pytest.raises(SandboxError, match="unsafe for retained chats") as refused:
+        manager.build_create_command(_spec())
+    assert repr(option) in str(refused.value)
+
+
+def test_a_refused_extra_arg_is_named_without_its_value():
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=["-vsecret-host-dir:/x"]))
+
+    with pytest.raises(SandboxError, match="'--volume'") as refused:
+        manager.build_create_command(_spec())
+    assert "secret-host-dir" not in str(refused.value)
+
+
+def test_extra_args_that_only_tune_the_container_still_apply():
+    args = [
+        "--ulimit",
+        "nofile=1024:2048",
+        "--log-opt",
+        "max-size=10m",
+        "--shm-size=256m",
+        "--device-write-bps",
+        "/dev/sda:50mb",
+        "--blkio-weight",
+        "300",
+        "--oom-score-adj",
+        "-500",
+    ]
+    manager = ChatSandboxManager(ContainerBackend(image="img", extra_args=args))
+
+    command = manager.build_create_command(_spec())
+
+    entrypoint = command.index("--entrypoint")
+    assert command[entrypoint - len(args) : entrypoint] == args
+
+
+@pytest.mark.parametrize(
+    ("tmpfs", "mounts"),
+    [
+        ({CHAT_WORKDIR: "rw"}, []),
+        ({f"{CHAT_STATE_DIR}/": "rw"}, []),
+        ({}, [{"Type": "tmpfs", "Destination": f"{CHAT_WORKDIR}/node_modules"}]),
+    ],
+)
+def test_inspect_rejects_a_tmpfs_over_chat_state(monkeypatch, tmpfs, mounts):
+    """Docker lists ``--tmpfs`` in HostConfig, not Mounts; either one empties the state."""
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = json.loads(_inspect_payload(spec, mounts=mounts))
+    payload[0]["HostConfig"]["Tmpfs"] = {f"{ACTIVATION_TMPFS}": "rw,noexec", **tmpfs}
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    with pytest.raises(SandboxError, match="not Docker-layer owned"):
+        manager.inspect(spec.container_name)
+
+
+def test_inspect_accepts_the_platforms_own_tmpfs_mounts(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    payload = json.loads(_inspect_payload(spec))
+    payload[0]["HostConfig"]["Tmpfs"] = {
+        ACTIVATION_TMPFS: "rw,noexec",
+        f"{MEMBER_TMPFS_ROOT}/0": "rw,noexec",
+        GUEST_OBSERVER_ROOT: "rw,noexec",
+    }
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    inspection = manager.inspect(spec.container_name)
+
+    assert inspection is not None
+    assert ACTIVATION_TMPFS in inspection.tmpfs
+
+
 def test_create_refuses_an_image_override_that_would_make_the_pin_a_lie():
     manager = ChatSandboxManager(ContainerBackend(image="registry/agent:latest"))
 
