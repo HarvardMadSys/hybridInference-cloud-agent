@@ -7,20 +7,83 @@ they were; only the class holding them changed.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from typing import Any
 
     import asyncpg
+
+    from cloud_agent.ports.source_control import GitHubAccountSession, GitLabAccountSession
 
 
 class PostgresSourceControlRepository:
     """Repository authorization and the GitLab credentials behind it."""
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(
+        self, pool: asyncpg.Pool, *, _bound_connection: asyncpg.Connection | None = None
+    ) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+        self._bound_connection = _bound_connection
+
+    @asynccontextmanager
+    async def _acquire(self) -> AsyncIterator[asyncpg.Connection]:
+        """Reuse the advisory-lock connection inside a scoped account session."""
+        if self._bound_connection is not None:
+            yield self._bound_connection
+            return
+        async with self._pool.acquire() as conn:
+            yield conn
+
+    @staticmethod
+    async def _unlock_or_reset(conn: asyncpg.Connection, lock_key: str) -> None:
+        """Never return a session-lock-holding connection to the pool."""
+        unlocked = False
+        with suppress(BaseException):
+            unlocked = bool(
+                await conn.fetchval(
+                    "SELECT pg_advisory_unlock(hashtextextended($1::text, 0))",
+                    lock_key,
+                )
+            )
+        if unlocked:
+            return
+        try:
+            await conn.reset()
+        except BaseException:
+            await conn.close()
+
+    @classmethod
+    async def _finish_lock_cleanup(cls, conn: asyncpg.Connection, lock_key: str) -> None:
+        cleanup = asyncio.create_task(cls._unlock_or_reset(conn, lock_key))
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        await cleanup
+        if cancelled:
+            raise asyncio.CancelledError
+
+    @asynccontextmanager
+    async def _serialize_account(
+        self, *, provider: str, user_id: str
+    ) -> AsyncIterator[PostgresSourceControlRepository]:
+        lock_key = f"cloud-agent:{provider}-account:{user_id}"
+        async with self._pool.acquire() as conn:
+            try:
+                await conn.execute(
+                    "SELECT pg_advisory_lock(hashtextextended($1::text, 0))",
+                    lock_key,
+                )
+                yield PostgresSourceControlRepository(self._pool, _bound_connection=conn)
+            finally:
+                await self._finish_lock_cleanup(conn, lock_key)
 
     async def record_repo_grant(
         self, *, user_id: str, installation_id: int, account_login: str | None = None
@@ -63,6 +126,38 @@ class PostgresSourceControlRepository:
             )
         return deleted is not None
 
+    @asynccontextmanager
+    async def serialize_github_account(
+        self, *, user_id: str
+    ) -> AsyncIterator[GitHubAccountSession]:
+        """Serialize whole-grant GitHub authorization changes for one user.
+
+        GitHub's revoke endpoint withdraws the complete user authorization, not
+        merely one access token. The OAuth callback therefore takes this lock
+        before exchanging its code, while disconnect holds it until the remote
+        revoke finishes. A session advisory lock is shared across every control-plane
+        process while each bound database mutation commits before its provider call.
+
+        This orders live callers; it cannot make GitHub's external revoke
+        atomic with the database across a process crash, so revocation retains
+        the endpoint's documented best-effort failure semantics.
+        """
+        async with self._serialize_account(provider="github", user_id=user_id) as session:
+            yield session
+
+    @asynccontextmanager
+    async def serialize_gitlab_account(
+        self, *, user_id: str
+    ) -> AsyncIterator[GitLabAccountSession]:
+        """Serialize one user's GitLab callback and disconnect across replicas.
+
+        The lock spans token exchange/revocation as well as the local mutation,
+        so whichever operation enters first completes before the other starts.
+        Refresh rotation takes the same lock for claim, provider I/O and store.
+        """
+        async with self._serialize_account(provider="gitlab", user_id=user_id) as session:
+            yield session
+
     async def connect_github_account(
         self,
         *,
@@ -83,7 +178,7 @@ class PostgresSourceControlRepository:
         # hand. Replacing them is what makes a reconnect mean what GitHub says
         # today, including when the user reconnects as another GitHub account.
         installation_ids = [int(item["installation_id"]) for item in installations]
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with self._acquire() as conn, conn.transaction():
             # A new token pair replaces the old outright, and any refresh in
             # flight for the old one loses its lease: the generation moves.
             await conn.execute(
@@ -132,7 +227,7 @@ class PostgresSourceControlRepository:
 
     async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
         """Return the GitHub account this user connected, if any."""
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT github_user_id, login, access_token_ciphertext, access_expires_at,
@@ -151,18 +246,24 @@ class PostgresSourceControlRepository:
         # Only a token that still needs it, and only while nobody else holds a
         # live lease: a caller that lost the race reads the row again and finds
         # either the new token or one still valid for a few more minutes.
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT 1 FROM agent_github_accounts WHERE user_id = $1 FOR UPDATE", user_id
+            )
+            if locked is None:
+                return None
             row = await conn.fetchrow(
                 """
                 UPDATE agent_github_accounts SET
                     refresh_generation = refresh_generation + 1,
-                    refresh_lease_expires_at = NOW() + make_interval(secs => $2)
+                    refresh_lease_expires_at = clock_timestamp() + make_interval(secs => $2)
                 WHERE user_id = $1
                   AND refresh_token_ciphertext IS NOT NULL
                   AND access_expires_at IS NOT NULL
-                  AND access_expires_at <= NOW() + make_interval(secs => $3)
-                  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= NOW())
-                RETURNING refresh_generation, refresh_token_ciphertext
+                  AND access_expires_at <= clock_timestamp() + make_interval(secs => $3)
+                  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= clock_timestamp())
+                RETURNING refresh_generation, refresh_token_ciphertext,
+                          access_token_ciphertext
                 """,
                 user_id,
                 lease_seconds,
@@ -180,8 +281,13 @@ class PostgresSourceControlRepository:
         refresh_token_ciphertext: str | None,
         refresh_expires_at: Any,
     ) -> bool:
-        """Write a refreshed token pair while the lease is still ours, and release it."""
-        async with self._pool.acquire() as conn:
+        """Write only while this generation's lease is live, then release it."""
+        async with self._acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT 1 FROM agent_github_accounts WHERE user_id = $1 FOR UPDATE", user_id
+            )
+            if locked is None:
+                return False
             written = await conn.fetchval(
                 """
                 UPDATE agent_github_accounts SET
@@ -192,6 +298,7 @@ class PostgresSourceControlRepository:
                     refresh_lease_expires_at = NULL,
                     updated_at = NOW()
                 WHERE user_id = $1 AND refresh_generation = $2
+                  AND refresh_lease_expires_at > clock_timestamp()
                 RETURNING user_id
                 """,
                 user_id,
@@ -207,7 +314,7 @@ class PostgresSourceControlRepository:
         """Forget a token GitHub no longer honours, unless it was replaced meanwhile."""
         # Matched on the ciphertext that failed: a reconnect or a refresh that
         # landed in between wrote a different one, which must survive this.
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn, conn.transaction():
             cleared = await conn.fetchval(
                 """
                 UPDATE agent_github_accounts SET
@@ -226,11 +333,29 @@ class PostgresSourceControlRepository:
             )
         return cleared is not None
 
-    async def disconnect_github_account(self, *, user_id: str) -> None:
-        """Forget the GitHub account, its tokens, and every installation grant."""
-        async with self._pool.acquire() as conn, conn.transaction():
+    async def disconnect_github_account(
+        self,
+        *,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Lock, return and forget the current GitHub account and all grants."""
+        async with self._acquire() as conn, conn.transaction():
+            account = await conn.fetchrow(
+                """
+                SELECT github_user_id, login, access_token_ciphertext, access_expires_at,
+                       refresh_token_ciphertext, refresh_expires_at, refresh_generation,
+                       refresh_lease_expires_at, connected_at, updated_at
+                FROM agent_github_accounts
+                WHERE user_id = $1
+                FOR UPDATE
+                """,
+                user_id,
+            )
+            if account is None:
+                return None
             await conn.execute("DELETE FROM agent_repo_grants WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM agent_github_accounts WHERE user_id = $1", user_id)
+        return dict(account)
 
     async def create_oauth_state(
         self,
@@ -244,7 +369,7 @@ class PostgresSourceControlRepository:
         """Persist a short-lived state without retaining the bearer value."""
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "DELETE FROM agent_oauth_states WHERE expires_at < NOW() - INTERVAL '1 day'"
+                "DELETE FROM agent_oauth_states WHERE expires_at < clock_timestamp() - INTERVAL '1 day'"
             )
             await conn.execute(
                 """
@@ -263,13 +388,25 @@ class PostgresSourceControlRepository:
         self, *, state_hash: str, user_id: str, provider: str
     ) -> dict[str, Any] | None:
         """Consume one live state exactly once for its owning user/provider."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                """
+                SELECT 1 FROM agent_oauth_states
+                WHERE state_hash = $1 AND user_id = $2 AND provider = $3
+                FOR UPDATE
+                """,
+                state_hash,
+                user_id,
+                provider,
+            )
+            if locked is None:
+                return None
             row = await conn.fetchrow(
                 """
                 UPDATE agent_oauth_states
-                SET consumed_at = NOW()
+                SET consumed_at = clock_timestamp()
                 WHERE state_hash = $1 AND user_id = $2 AND provider = $3
-                  AND consumed_at IS NULL AND expires_at > NOW()
+                  AND consumed_at IS NULL AND expires_at > clock_timestamp()
                 RETURNING code_verifier_ciphertext
                 """,
                 state_hash,
@@ -291,7 +428,9 @@ class PostgresSourceControlRepository:
         expires_at: Any,
     ) -> int:
         """Store one GitLab.com identity per platform user."""
-        async with self._pool.acquire() as conn:
+        # Reconnecting replaces the account, and a refresh in flight for the
+        # previous one loses its lease: the generation moves.
+        async with self._acquire() as conn, conn.transaction():
             connection_id = await conn.fetchval(
                 """
                 INSERT INTO agent_gitlab_connections
@@ -306,6 +445,8 @@ class PostgresSourceControlRepository:
                     access_token_ciphertext = EXCLUDED.access_token_ciphertext,
                     refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
                     expires_at = EXCLUDED.expires_at,
+                    refresh_generation = agent_gitlab_connections.refresh_generation + 1,
+                    refresh_lease_expires_at = NULL,
                     updated_at = NOW()
                 RETURNING id
                 """,
@@ -322,14 +463,49 @@ class PostgresSourceControlRepository:
 
     async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
         """Return the owning user's connection, including encrypted tokens."""
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT id, user_id, external_user_id, username, display_name, web_url,
-                       access_token_ciphertext, refresh_token_ciphertext, expires_at
+                       access_token_ciphertext, refresh_token_ciphertext, expires_at,
+                       refresh_generation, refresh_lease_expires_at
                 FROM agent_gitlab_connections WHERE user_id = $1
                 """,
                 user_id,
+            )
+        return dict(row) if row else None
+
+    async def claim_gitlab_token_refresh(
+        self,
+        *,
+        connection_id: int,
+        user_id: str,
+        lease_seconds: int,
+        margin_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Exclusively claim rotation of the current connection's expiring token."""
+        async with self._acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT 1 FROM agent_gitlab_connections WHERE id = $1 AND user_id = $2 FOR UPDATE",
+                connection_id,
+                user_id,
+            )
+            if locked is None:
+                return None
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_gitlab_connections SET
+                    refresh_generation = refresh_generation + 1,
+                    refresh_lease_expires_at = clock_timestamp() + make_interval(secs => $3)
+                WHERE id = $1 AND user_id = $2
+                  AND expires_at <= clock_timestamp() + make_interval(secs => $4)
+                  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= clock_timestamp())
+                RETURNING refresh_generation, refresh_token_ciphertext
+                """,
+                connection_id,
+                user_id,
+                lease_seconds,
+                margin_seconds,
             )
         return dict(row) if row else None
 
@@ -338,36 +514,62 @@ class PostgresSourceControlRepository:
         *,
         connection_id: int,
         user_id: str,
+        refresh_generation: int,
         access_token_ciphertext: str,
         refresh_token_ciphertext: str,
         expires_at: Any,
     ) -> bool:
-        """Rotate encrypted OAuth tokens without crossing user ownership."""
-        async with self._pool.acquire() as conn:
+        """Rotate only while this owner holds the generation and its live lease."""
+        async with self._acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT 1 FROM agent_gitlab_connections WHERE id = $1 AND user_id = $2 FOR UPDATE",
+                connection_id,
+                user_id,
+            )
+            if locked is None:
+                return False
             updated = await conn.fetchval(
                 """
                 UPDATE agent_gitlab_connections SET
-                    access_token_ciphertext = $3,
-                    refresh_token_ciphertext = $4,
-                    expires_at = $5,
+                    access_token_ciphertext = $4,
+                    refresh_token_ciphertext = $5,
+                    expires_at = $6,
+                    refresh_lease_expires_at = NULL,
                     updated_at = NOW()
-                WHERE id = $1 AND user_id = $2
+                WHERE id = $1 AND user_id = $2 AND refresh_generation = $3
+                  AND refresh_lease_expires_at > clock_timestamp()
                 RETURNING id
                 """,
                 connection_id,
                 user_id,
+                refresh_generation,
                 access_token_ciphertext,
                 refresh_token_ciphertext,
                 expires_at,
             )
         return updated is not None
 
-    async def delete_gitlab_connection(self, *, user_id: str, connection_id: int) -> bool:
-        """Delete only a connection owned by the authenticated user."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.fetchval(
-                "DELETE FROM agent_gitlab_connections WHERE user_id = $1 AND id = $2 RETURNING id",
+    async def delete_gitlab_connection(
+        self,
+        *,
+        user_id: str,
+        connection_id: int,
+    ) -> dict[str, Any] | None:
+        """Lock, return and delete the user's current connection when its id matches."""
+        async with self._acquire() as conn, conn.transaction():
+            connection = await conn.fetchrow(
+                """
+                SELECT id, user_id, external_user_id, username, display_name, web_url,
+                       access_token_ciphertext, refresh_token_ciphertext, expires_at,
+                       refresh_generation, refresh_lease_expires_at
+                FROM agent_gitlab_connections
+                WHERE user_id = $1 AND id = $2
+                FOR UPDATE
+                """,
                 user_id,
                 connection_id,
             )
-        return deleted is not None
+            if connection is None:
+                return None
+            await conn.execute("DELETE FROM agent_gitlab_connections WHERE id = $1", connection_id)
+            return dict(connection)

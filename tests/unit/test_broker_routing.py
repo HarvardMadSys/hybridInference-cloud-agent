@@ -43,6 +43,7 @@ def _base_url(client: Any) -> str:
 @pytest.fixture(autouse=True)
 def _broker_env(monkeypatch):
     monkeypatch.setenv(BROKER_TOKEN_ENV, "shared-broker-token")
+    monkeypatch.delenv(broker_routing.ENV_BROKER_HOSTS, raising=False)
 
 
 async def test_two_hosts_two_brokers():
@@ -146,6 +147,42 @@ async def test_every_broker_shares_the_one_token_today():
     second = await broker_for_attempt(store, 2)
 
     assert first._headers == second._headers
+
+
+@pytest.mark.parametrize("route", ["job", "attempt", "host", "probe"])
+async def test_live_broker_policy_blocks_stored_urls_and_retires_cached_pools(monkeypatch, route):
+    """A retained host address must not outlive the policy allowing its credential."""
+    row = {"host": "runner-policy", "broker_url": "https://excluded.example:8092"}
+    store = FakeRoutingStore({1: row}, **{"job-policy": row})
+    health_calls: list[str] = []
+
+    async def health(self, *, timeout=3):
+        health_calls.append(self._base_url)
+
+    monkeypatch.setattr(broker_routing.WorkspaceBrokerClient, "health", health)
+    try:
+        assert await broker_routing.probe_broker(row["host"], row["broker_url"]) is None
+        pool = broker_routing._POOLS[row["host"]][1]
+        assert row["host"] in broker_routing._PROBE_CACHE
+        monkeypatch.setenv(broker_routing.ENV_BROKER_HOSTS, "approved.example")
+
+        if route == "job":
+            assert await broker_for_job(store, "job-policy") is None
+        elif route == "attempt":
+            assert await broker_for_attempt(store, 1) is None
+        elif route == "host":
+            assert broker_routing.broker_for_host(row) is None
+        else:
+            assert await broker_routing.probe_broker(row["host"], row["broker_url"]) == (
+                "workspace broker is unavailable under the current configuration"
+            )
+        assert row["host"] not in broker_routing._POOLS
+        assert row["host"] not in broker_routing._PROBE_CACHE
+        assert health_calls == [row["broker_url"]]
+        await broker_routing.close_broker_clients()
+        assert pool.is_closed
+    finally:
+        await broker_routing.close_broker_clients()
 
 
 class TestAdvertisedBrokerUrl:

@@ -10,10 +10,11 @@ control plane.
 
 # Cloud agent sandbox — operations
 
-Use this runbook to provision hosts, deploy Cloud Agent, protect retained
-workspaces, and diagnose job or network failures. The control plane owns the job
-API, database, publisher, MCP relay, and admin settings. The gateway provides
-inference and identity over HTTP.
+This is a task-based runbook; you do not need to read it from beginning to end.
+Use it to provision hosts, deploy Cloud Agent, protect retained workspaces, and
+diagnose job or network failures. The control plane owns the job API, database,
+publisher, MCP relay, and admin settings. The gateway provides inference and
+identity over HTTP.
 
 Start with the task you need:
 
@@ -40,23 +41,26 @@ Start with the task you need:
 [compute-resource runbook](operations-compute.md) covers administrator-managed
 SSH and CloudLab hosts. For pre-drain checks, migration regression, failed peers,
 and queue alerts, use [deployment reliability](deployment-reliability.md).
-Historical measurements below describe the runs that were recorded; consult the
-deployment's own records for its current readiness. Replace `<...>` placeholders
-with deployment values before running commands.
+The historical measurements below describe the recorded runs, not the current
+state of your deployment. Check the deployment's own records for current
+readiness, and replace every `<...>` placeholder before running a command.
 
 ## Admin Settings
 
-Open **Admin → Settings** to manage application and integration configuration,
+Use **Admin → Settings** to manage application and integration configuration,
 publication, web appearance, operational intervals, upload and skill limits,
-task-title generation, sandbox/workspace limits, and sandbox archives. Application settings are
-persisted in the Agent database. The application API is
-`GET /admin/agent/settings` and `PUT /admin/agent/settings` with a partial body
-such as `{"settings": {"max_attempts": 3}}`; omitted keys retain their values.
-Writes use the existing administrator guard and record changes in the Audit
-log. Credential fields show only whether a value is configured. Enter and save
-a replacement to change one; **Reset** restores its built-in default. Missing
-required fields and partially configured optional integrations produce an
-**Administrator setup required** prompt with links to the fields to complete.
+task-title generation, sandbox/workspace limits, and sandbox archives. These
+settings are stored in the Agent database.
+
+The application API uses `GET /admin/agent/settings` and
+`PUT /admin/agent/settings`. Send a partial body such as
+`{"settings": {"max_attempts": 3}}`; omitted keys keep their current values.
+Writes use the existing administrator guard and appear in the Audit log.
+Credential fields show only whether a value is configured. To change one, enter
+and save a replacement. **Reset** restores the built-in default. If a required
+field is missing or an optional integration is only partly configured, the
+**Administrator setup required** prompt links to the fields that still need
+attention.
 
 Admin Settings is operator access, and `agent.admin` should be granted only to
 people trusted to operate the deployment. It edits the session and host
@@ -68,16 +72,20 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0042_sandbox_archive_settings`, then start the main control-plane listener with its
-existing complete environment. It imports registered environment settings once.
-The MCP-only listener waits for initialization and reads the same settings.
-Newly migrated runtime identity, service keys, broker credentials and policy
-fields are imported only when absent, under the same atomic preservation rule.
-Subsequent deployments preserve admin values, and resetting a field never
+`0051_host_drain_fence_epoch`. Existing hosts begin without a deployment drain
+owner or release receipt, and 0051 backfills each one with a non-null fence
+epoch. Rebuild the sandbox image for explicit plugin loading. Then start the
+main control-plane listener with its existing complete environment. It
+imports registered environment settings once,
+while the MCP-only listener waits for initialization and then reads the same
+settings. Newly migrated runtime identity, service keys, broker credentials,
+and policy fields are imported only when absent, under the same atomic
+preservation rule.
+
+Later deployments keep the saved admin values, and resetting a field never
 restores an old `.env` value. Listeners synchronize saved changes every five
-seconds; web appearance uses the saved public fields on each request. Apply
-changes to subsequent operations according to the description beside each
-setting.
+seconds. The web server reads saved public appearance fields on every request.
+Apply changes to subsequent operations as described beside each setting.
 
 That import refuses a `GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`,
 `AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` shorter
@@ -155,6 +163,13 @@ S3-compatible endpoint and object prefix. The matching
 `AGENT_SANDBOX_ARCHIVE_S3_*` environment variables import once when these fields
 are first introduced; later environment changes do not override saved settings.
 An empty bucket leaves deletion unavailable.
+
+The bucket field also accepts an S3 URI in the browser. Saving
+`s3://freeinference/cloud-agent/sandbox` sets the bucket to `freeinference` and
+the prefix to `cloud-agent/sandbox` in one update. A bucket-root URI clears the
+prefix; entering only a bucket name leaves the prefix unchanged. Direct API
+updates and initial environment imports require the bucket name and prefix in
+their separate settings.
 
 Provision the main control plane's AWS SDK credential chain, preferably with an
 IAM workload role. Its archive role needs `s3:PutObject` and `s3:GetObject` on the
@@ -507,12 +522,16 @@ publication work, or a group with open terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
 When the terminal report is zero, missing, or older than 90 seconds, opening or
-refreshing details queries the owning workspace broker directly. Stop requests
-also verify terminal activity before closing admission: older brokers may report
-only the origin session's terminals even when another member is active. This also
-supports runners that omit terminal counts from their heartbeats. The report
-must match the reviewed container and generation; an unavailable broker or
-unknown activity keeps stopping disabled and shows the required recovery step.
+refreshing details queries the owning workspace broker for that group's census
+directly. This inspects only the selected container and counts terminals across
+all its members; unrelated containers and host-wide reconciliation do not delay
+the check. Full inventory reconciliation remains on the host heartbeat path.
+Stop requests also verify terminal activity before closing admission: older
+brokers may report only the origin session's terminals even when another member
+is active. This also supports runners that omit terminal counts from their
+heartbeats. The report must match the reviewed container and generation; an
+unavailable broker or unknown activity keeps stopping disabled and shows the
+required recovery step.
 Resource-stat failures do not discard an otherwise valid terminal report.
 The page shows the pending request until a host observation confirms the stop;
 an offline host cannot complete it. New turns wait while the stop is pending.
@@ -534,6 +553,30 @@ Upload failures retain the container. Once an archive is verified, uncertain
 deletion acknowledgements keep admission blocked and retry the same request.
 The broker stores its deletion receipts on its own persistent volume so an
 acknowledgement can survive a broker restart.
+
+**Verify stopped and force delete** recovers a sandbox still recorded as running
+only when the owning broker confirms that the exact reviewed container is
+stopped and idle. It does not stop a running container or bypass unavailable
+host proof. If verification fails, the error identifies missing host registration,
+an absent or refused advertised URL, a missing or rejected broker credential,
+a connection failure, a timeout, or unavailable sandbox status. Check the
+indicated configuration or broker readiness before retrying. For a connection
+failure, verify the [reverse broker route](#the-way-back-the-control-plane-reaching-this-hosts-broker).
+Control-plane logs record `agent_sandbox_delete_verification_failed` with the
+sandbox, owning host, status code, and failure type without raw broker errors.
+
+**Remove stale entry** is available when the owning host has no heartbeat or
+has not reported for more than 90 seconds. It removes the entry from the default
+admin inventory without contacting the broker, so a retired or unreachable host
+does not leave an entry that can never be cleared. The server rechecks host
+freshness and the reviewed identity, and refuses active turns, workspace
+operations, snapshots, or a pending deletion. The action is audited and
+reversible through **Include removed** and **Restore to inventory**. It preserves
+the recorded lifecycle state, container identity, native state, and chat history,
+without deleting any retained container or files, creating an S3 archive, or
+reclaiming host disk. A matching running host
+observation or new admitted work makes the entry visible again. Restore the
+broker connection to complete S3 archival and physical deletion.
 
 The details show progress, archive location, checksum, size, and any failure.
 Chat history, memberships, execution records, and audit receipts remain in the
@@ -563,6 +606,7 @@ control-plane and host releases. Apply `alembic upgrade head` before starting
 the updated API. Inventory removal additionally requires
 `0044_admin_sandbox_archive`, and S3-backed container deletion requires
 `0045_admin_sandbox_deletion` plus the matching workspace broker release.
+The append-only admin trajectory requires `0057_admin_sandbox_trajectory`.
 Resource persistence requires migration
 `0034_sandbox_resource_usage` and a host running the updated workspace broker.
 Older hosts still appear in the inventory with resource usage unavailable.
@@ -1095,16 +1139,40 @@ user with no installation looping through authorization.
 The same App also supplies the runner's clone credential, and the two are
 _not_ the same token. An installation token inherits every permission the App
 holds unless it asks for less, so the clone token is requested as
-`contents: read` on the single repository being worked on. Getting that wrong
-would put a push-capable credential on the host that executes untrusted
-repository code.
+`contents: read` on the single repository being worked on. Checkout does not
+inherit the publisher's broader authority.
+
+The claim separately mints a single-repository installation token with
+`contents: write` and `pull_requests: write`, injected as `GH_TOKEN` in the
+owning sandbox member's Agent CLI environment. `GH_REPO` selects the job's
+repository and `GH_HOST` selects `github.com`; `gh` authenticates as the App
+installation, rather than as the user's account. The token is not written to
+Git or GitHub CLI configuration, shared workspace files, or the image. Setup
+scripts and standalone terminal sessions do not receive it. Git uses the
+`gh auth git-credential` helper through invocation-only environment settings,
+so `git push` and `gh pr create` can authenticate without an interactive login.
+The host clone credential stays read-only; user account/refresh tokens and
+the App's private key remain outside the sandbox.
+
+Direct sandbox pushes bypass the trusted publisher's patch gate, including
+its workflow-file and secret checks. Repository branch protection and GitHub
+rules still apply. The App installation must grant Contents and Pull requests
+write access; token issuance failures return the claim to the queue.
+
+Each claim obtains a live token from the App's expiry-aware cache. When that
+token changes, the member resumes its native session in a replacement process
+so subsequent commands inherit the new credential. Installation tokens expire
+after about one hour; there is no in-turn renewal, so `gh` calls in a longer
+turn may require a new turn to obtain a fresh token.
 
 With no App configured the claim returns no clone token and the runner clones
 anonymously, which is enough for a public repository. A private repository
 needs the App.
 
-A static `AGENT_GITHUB_TOKEN` still works as a fallback, but it is a
-long-lived credential someone has to create and rotate; prefer the App.
+A static `AGENT_GITHUB_TOKEN` still works as a fallback for the trusted
+publisher, but it is a long-lived credential someone has to create and
+rotate; prefer the App. Sandbox GitHub authentication requires the App and
+never falls back to this static token.
 With neither, the publisher loop idles and says so — jobs still run and still
 produce patches, they just never become PRs.
 
@@ -1203,6 +1271,7 @@ with no leader and no sharding.
 | `AGENT_HOST_SLOTS` | `3` | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read |
 | `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
+| `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Every admitted user may have the platform clone and publish to the listed repositories. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
@@ -1223,9 +1292,16 @@ disconnect.
 
 GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
-tokens. New draft PR titles use a short excerpt from the included turns' closing
-summaries, with Markdown removed, and fall back to the changed files when no
-usable closing summary exists. The original task remains in the PR body.
+tokens. Draft PR titles summarize the captured user and assistant messages across
+the shared session through a bounded inference request under a separate,
+owner-scoped grant. Generic completion text is rejected and retried. If inference
+is unavailable, the publisher uses the first concrete line from each included
+turn's closing summary, skipping headings and generic completion preambles. It
+falls back to the changed files when no usable summary exists. The
+`agent_pr_title_generation_failed` log records the snapshot ID and fallback
+reason as structured fields, plus the exception type and HTTP status when
+available, without logging conversation text or credentials. Enable JSON logging
+in Admin Settings to see these fields. The original task remains in the PR body.
 A conversation keeps one draft PR across its turns while that PR is open; once
 someone closes or merges it, the next published snapshot opens a new draft PR
 from the same `agent/…` branch.
@@ -1558,11 +1634,14 @@ Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to st
 the deployment-wide archive policy in the Agent database. The destination is
 fixed at `s3://freeinference/cloud-agent/sandbox`; it is displayed read-only and
 is never accepted from the browser. An administrator atomically saves the
-enabled state, AWS region, customer-managed KMS key ARN, expected 12-digit
-bucket owner, maximum compressed archive size, multipart threshold, and part
-size. Updates use the revision returned by the last read, so two administrators
-cannot silently overwrite each other. Every change is recorded in the Audit
-log.
+enabled state, AWS region, maximum compressed archive size, multipart
+threshold, and part size. Authentication is either an AWS access key or the
+workload-identity pair: a customer-managed KMS key ARN and the expected
+12-digit bucket owner. An access key makes that pair optional; uploads then
+use SSE-S3 unless a KMS key is also set. The secret is write-only, encrypted
+at rest, and omitted from the audit row. Updates use the revision returned by
+the last read, so two administrators cannot silently overwrite each other.
+Every change is recorded in the Audit log.
 
 The dashboard uses admin-only `GET` and `PUT`
 `/admin/agent/sandbox-archive-settings`. To inspect the same policy and host
@@ -1581,13 +1660,19 @@ FROM agent_runner_hosts
 ORDER BY host;
 ```
 
-Do not put AWS access keys, archive policy, or the destination in `.env`. The
-workspace broker uses the host's AWS workload identity and the ordinary SDK
-credential chain. That identity needs the narrow S3 multipart/write and exact
-object-metadata permissions for the fixed prefix, plus encrypt access to the
-configured KMS key. The bucket must have versioning enabled. Configure lifecycle
-retention and access logging on the bucket itself; neither the runner nor a
-sandbox receives AWS credentials.
+Do not put archive policy, the destination, or an AWS access key in `.env`.
+Enter an access key on the Sandbox archives card when the broker has no
+workload identity. The control plane encrypts the secret before storing it
+and sends it to the broker on the authenticated heartbeat channel. The broker
+keeps it in memory for S3. Sandbox markers do not contain it, so it does not
+enter the container. A broker that predates access-key support rejects that
+heartbeat payload and does not confirm the revision; upgrade those brokers
+before relying on the key. With no access key, the workspace broker uses the
+host's AWS workload identity and the ordinary SDK credential chain. That
+identity needs the narrow S3 multipart/write and exact object-metadata
+permissions for the fixed prefix, plus encrypt access to the configured KMS
+key. The bucket must have versioning enabled. Configure lifecycle retention
+and access logging on the bucket itself.
 
 Concretely, grant the broker role `s3:GetBucketVersioning` on
 `arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
@@ -1596,7 +1681,8 @@ missing immutable initial object from an authorization failure); and
 `s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
 `arn:aws:s3:::freeinference/cloud-agent/sandbox/*`. The configured KMS key
 policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
-multipart uploads. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
+multipart uploads. An access key needs those same S3 actions; SSE-S3 uploads
+do not call KMS. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
 rule as defense in depth for a host that disappears before its bounded abort
 request completes.
 
@@ -1715,6 +1801,13 @@ deactivate a healthy group:
 - no workspace-cleanup TTL addresses chat data. This phase never removes a
   retained sandbox; operators monitor Docker storage separately.
 
+A bounded workspace command's timeout or output overflow kills its own verified
+process group and preserves the sandbox's other resident sessions and terminals.
+Host output readers use fixed-size chunks, byte-bounded diagnostic tails, and
+bounded queues; oversized native CLI records stop the affected member. Resource
+checkpoints continue to reach the control plane while CLI output is silent. See
+[Host execution limits](host-execution-limits.md) for the limits and boundaries.
+
 #### Resume, Fork, and publication
 
 There is no retained/shared feature flag or runtime allowlist switch. Claude
@@ -1780,23 +1873,25 @@ in parallel under the exact-SHA readiness fence described here. See
 The host prepares the replacement sandbox/runner artifacts and proves Kata
 before invalidating its ready marker. It resolves the old runner's exact
 Compose container IDs, then asks Docker Engine for an unbounded graceful stop.
-The runner stops claiming and waits for every admitted turn; the broker and
-tunnels remain available until those turns settle. Only then does activation
-replace the broker and runner. After the isolation, tunnel, runtime and
-retained Docker-root checks pass, it records `.deployed-sha` and only then
+The runner stops claiming and waits for every admitted turn. Graceful shutdown
+does not signal its turn children: each child finishes its one turn and exits
+naturally, including a child whose acceptance handover is still uncertain. The
+broker and tunnels remain available until those turns settle. Only then does
+activation replace the broker and runner. After the isolation, tunnel, runtime
+and retained Docker-root checks pass, it records `.deployed-sha` and only then
 publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
-the control-plane
-deployment prepares its artifacts and migrates, then waits for a heartbeat newer than the start of that
-check and reverse-probes every new-chat placement broker before `compose up`
-can replace a running API. The claim route enforces that same exact deployment
+the control-plane deployment prepares its artifacts and runs migrations. Before
+`compose up` can replace a running API, the deployment waits for a heartbeat
+newer than the start of its readiness check and reverse-probes every broker
+eligible for new-chat placement. The claim route enforces that same exact deployment
 capability. A pending runner registers and heartbeats its base protocol so the
 host checks can inspect them, but does not poll; this also prevents the previous
 API from assigning work before it knows the new claim field. A runner with a
 pending/failed marker therefore cannot take work even during a cold-start API
-bootstrap. When placement was moved between hosts,
-it also probes every online host that still owns a retained group; changing the
-pin must not make old chats disappear from rollout safety. `SHARED_READY_TIMEOUT`
-controls that wait and defaults to 900 seconds.
+bootstrap. When placement has moved between hosts, the check also probes every
+online host that still owns a retained group; changing the pin must not make old
+chats disappear from rollout safety. `SHARED_READY_TIMEOUT` controls that wait
+and defaults to 900 seconds.
 
 The deploy user writes `.shared-live-ready` in the deployment checkout, separate
 from the container-owned enrollment directory. Runners mount only that file
@@ -1807,9 +1902,9 @@ No credential ownership or permission changes are needed for a rollout.
 
 #### Rollback compatibility
 
-The deployment orchestrator runs separately from the target checkout. In an
-Actions deployment, it comes from the workflow commit. Online rollback cannot execute a
-pre-fence target's old scripts; commits without the current
+The deployment orchestrator runs separately from the target checkout. In a
+GitHub Actions deployment, it comes from the workflow commit. An online rollback
+cannot execute a pre-fence target's old scripts; commits without the current
 `deploy/DEPLOY_PROTOCOL`, or with an incompatible protocol value, are refused
 before changing Docker state. The current protocol,
 `shared-live-exact-sha-v4`, marks the one sandbox network: a v3 deployer cannot
@@ -1827,6 +1922,79 @@ For downstream Actions triggered by `workflow_run`, the workflow definition
 comes from that repository's default branch. Synchronize orchestrator changes
 there before relying on a new rollback fence, and do not dispatch an older
 default-branch workflow against an environment during that rollout window.
+
+Migration `0049_host_drain_fence` introduced durable drain ownership and its V1
+recipe marker. Additive migration `0051_host_drain_fence_epoch` establishes the
+current permanent compatibility floor. Before activating the V2 control plane,
+the deployment orchestrator must reject every candidate whose control-plane
+recipe lacks `AGENT_DEPLOY_DRAIN_FENCE_V2`; after activation, do not downgrade
+the application or schema below that release. The recipe retains
+`AGENT_DEPLOY_DRAIN_FENCE_V1` only so an older orchestrator can perform the
+bridge upgrade. V1 alone is not a valid rollback target once V2 has run.
+
+Every host now has a non-null `drain_fence_epoch`. The API returns its canonical
+UUID spelling and requires the same value, together with the expected owner
+token, when acquiring or transferring a fence. A successful state change
+rotates the epoch. An exact requested-token retry is checked first, so a lost
+success response remains idempotent even though that success changed the epoch;
+a different token carrying the old epoch is stale.
+
+The database enforces the generation outside the API as well. Its `BEFORE
+UPDATE` trigger rotates the epoch when `status`, `credential_hash`,
+`drain_fence_token`, `drain_fence_status_before`, `drain_fence_active`, or
+`compute_node_id` changes, and ignores an attempt to assign the epoch directly.
+Its `BEFORE DELETE` guard rejects deletion while a drain fence is active. This
+means an operator, reaper, old writer, or placement change invalidates every
+previous snapshot rather than recreating a token-only ABA state. An older V1
+control plane does not compare the epoch and is therefore not operationally
+compatible, even though its writes still cause rotation.
+
+Inspect fence state before rollback or recovery:
+
+```sql
+SELECT host, status, slots_used, drain_fence_token,
+       drain_fence_status_before, drain_fence_active, drain_fence_epoch
+FROM agent_runner_hosts
+WHERE drain_fence_token IS NOT NULL;
+```
+
+The compatibility floor remains even when this query is empty: the current
+control plane may create a receipt on its next automated deployment. If an
+active fence is abandoned, redeploy the V2 fence-capable release and use its
+token-conditional release (or the audited force override). If that is
+impossible, stop the control plane and every deployment workflow, begin a
+transaction, lock exactly one host row, and verify the expected token, epoch,
+and `slots_used = 0`. Only then may an operator clear that one active fence:
+
+```sql
+BEGIN;
+SELECT host, status, slots_used, drain_fence_token, drain_fence_active,
+       drain_fence_epoch
+FROM agent_runner_hosts
+WHERE host = '<exact-host>'
+FOR UPDATE;
+
+UPDATE agent_runner_hosts
+SET status = 'online',
+    drain_fence_token = NULL,
+    drain_fence_status_before = NULL,
+    drain_fence_active = FALSE
+WHERE host = '<exact-host>'
+  AND status = 'draining'
+  AND slots_used = 0
+  AND drain_fence_token = '<expected-token>'::uuid
+  AND drain_fence_epoch = '<expected-epoch>'::uuid
+  AND drain_fence_active
+RETURNING host, drain_fence_epoch;
+COMMIT;
+```
+
+Require exactly one returned row. The returned epoch is the newly rotated
+value; do not try to assign it yourself. To clear only an inactive receipt, use
+the same exact host, token, and epoch predicates with `NOT drain_fence_active`;
+change status only when the separately verified recovery requires it. Never
+bulk-clear fence fields. If the owner, token, or epoch is uncertain, leave the
+host draining and restore the V2 fence-capable control plane.
 
 #### Cold starts and failed deployments
 
@@ -2103,6 +2271,20 @@ actual source and target versions before choosing a rolling deploy.
   `0011_mcp_rolling_compat` restores inert compatibility columns on databases
   upgraded by the original `0008`, which dropped/renamed them. Apply through
   head before starting the updated control plane and MCP relay.
+- `0058_mcp_connector_invariant` repairs the singular connector route for MCP
+  connections and adds a unique constraint on each connection's authorization
+  mapping. Treat this revision as a stopped-writer boundary. Older binaries can
+  recreate a missing mapping, leave a stale mapping after disconnect, or retain
+  connector authority after changing a connection away from
+  `user-connector`. Do not use a mixed-version rolling deploy for this
+  revision. Instead:
+
+  1. stop every control-plane, MCP relay and web-tier database writer;
+  2. run `alembic upgrade 0058_mcp_connector_invariant` (or upgrade through
+     `0058` to the intended later revision);
+  3. deploy the invariant-aware control-plane, MCP relay and web-tier release;
+     and
+  4. resume writers only after every old binary has been replaced.
 
 The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier
@@ -2217,6 +2399,19 @@ containers are retained, not how much disk they hold — and it observes one
 filesystem, not one chat: a repository, its dependencies, uncommitted changes
 and the native CLI session all live in a container's writable layer, and
 stopping a container does not release it.
+
+**Storage reserve for new sandboxes** is a runtime setting in Admin Settings and
+each server's configuration. Its default is 1024 MiB. The runner uses a fresh
+attested reading before accepting a turn that would create a sandbox. Below the
+reserve it declines the handover, returns the untouched turn to the queue, and
+reports a launch error with the available space and suggested remedies. Existing
+retained sessions can resume and cleanup stays available. Free Docker storage or
+adjust the reserve to restore new allocation.
+
+The check does not reserve space or impose per-container quotas: existing or
+concurrent writers can consume space afterward. Disabled or unverified storage
+measurement remains explicitly unmeasured and does not block allocation; never
+substitute another filesystem's available space for Docker writable-layer capacity.
 
 #### What the reading measures
 
@@ -2431,7 +2626,7 @@ This is the supported standalone topology. It does not start a gateway
 | `AGENT_TUNNEL_*` | Inference relay destination, key, known-hosts file and ports; remote default `127.0.0.1:8080` |
 | `AGENT_MCP_TUNNEL_*` | MCP-only relay's independent destination and SSH material; remote default `127.0.0.1:8001`. Do not point it at the full control API on 8000 |
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | Runner-only control API relay; remote default `127.0.0.1:8000`. It is deliberately absent from sandbox networks |
-| `AGENT_*_TUNNEL_SSH_KEY` | Private key, mounted read-only. Use a separate restricted key per relay with `command="",restrict,port-forwarding,permitopen="127.0.0.1:<that relay's port>"`; no relay needs a shell or permission to open another relay's port |
+| `AGENT_*_TUNNEL_SSH_KEY` | Private key, mounted read-only. Each relay has its own key and its own account on the far machine, restricted as [described below](#authorizing-the-tunnels-on-the-far-machines); no relay needs a shell or permission to open another relay's port |
 | `AGENT_*_TUNNEL_SSH_KNOWN_HOSTS` | Required host-key file for each relay. Host checking is not disableable: an unverified hop would hand scoped tokens and tunnel traffic to whatever answers there |
 | `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on its group bridge, `agent-gateway` and `agent-mcp` by default. Do not replace them with service addresses: a relay named by IP is refused at startup |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | Runner-only control relay name, `agent-control-plane` by default |
@@ -2442,6 +2637,41 @@ record for the service host:
 ```bash
 ssh-keyscan -p 22 "<gateway-host>" > /etc/agent-tunnel/known_hosts
 ```
+
+#### Authorizing the tunnels on the far machines
+
+Prefer **Admin → Servers → Server setup → Automatic setup**
+([compute runbook](operations-compute.md#automatic-setup)). It creates the
+accounts below, writes and reads back their sshd policy, and refuses an
+existing policy that would widen it. Authorize a tunnel by hand only when that
+is not available, and then reproduce exactly what it generates.
+
+Give each relay a dedicated account with no shell: the inference account on the
+gateway machine, the MCP and control accounts on the control-plane machine.
+Each account's `authorized_keys` holds one line:
+
+```text
+# gateway machine, inference account
+command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... inference
+# control-plane machine, MCP account
+command="",restrict,port-forwarding,permitopen="127.0.0.1:8001" ssh-ed25519 AAAA... mcp
+# control-plane machine, control account
+command="",restrict,port-forwarding,permitopen="127.0.0.1:8000",permitlisten="172.24.0.1:18092" ssh-ed25519 AAAA... control
+```
+
+After `restrict`, `port-forwarding` re-enables remote (`-R`) as well as local
+forwarding, and `permitopen` limits only the local destination. On its own,
+any of these keys could open listeners on the far machine. So the control
+key's `permitlisten` names its single reverse listener — the control-plane
+machine's Docker bridge gateway and this host's `AGENT_BROKER_REVERSE_PORT` —
+and each account gets its `Match User` block from
+[`deploy/host/sshd-tunnels.conf.example`](../deploy/host/sshd-tunnels.conf.example).
+The inference and MCP blocks set `AllowTcpForwarding local` and
+`PermitListen none`. The control block allows that one `PermitListen` with
+`GatewayPorts clientspecified`. Install the blocks before any other `Match`
+block that could apply to these accounts, run `sshd -t`, and confirm each
+account with `sshd -T -C user=<account>,host=localhost,addr=127.0.0.1` before
+reloading sshd.
 
 Run `sandbox_host.sh check` from the host checkout. Sandbox-runtime containers
 on the relay network must receive HTTP 200 from inference `/health` and MCP
@@ -2487,10 +2717,32 @@ already opens — a reverse forward on the control-plane tunnel:
 | `AGENT_BROKER_REVERSE_PORT` | A free port on that host |
 | `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | `http://<bind>:<port>` — what the runner reports, and what the control plane will dial |
 
-A non-loopback remote bind requires `GatewayPorts yes` or `clientspecified` in
-the **control plane host's** sshd. Without it the bind is refused and, because
-the tunnel runs with `ExitOnForwardFailure`, ssh exits and the container
-restarts rather than sitting there having bound nothing.
+The **control plane host's** sshd must apply `GatewayPorts clientspecified` to
+the control account, as its block in
+[`deploy/host/sshd-tunnels.conf.example`](../deploy/host/sshd-tunnels.conf.example)
+does, together with that account's `PermitListen` and the key's `permitlisten`
+naming this exact address and port. Never set it to `yes`: that binds every
+remote forward to the wildcard address whatever the client asked for, and
+reports success, so each host's broker is published on all of that machine's
+interfaces behind one shared token. With the default, `no`, sshd binds the
+forward to loopback instead, where the control plane's containers cannot reach
+it. A listener sshd refuses outright (a port in use, or one `PermitListen` does
+not allow) makes ssh exit under `ExitOnForwardFailure`, and the container
+restarts; the two wrong `GatewayPorts` values do not. Confirm on that machine
+with `ss -ltn` that the port listens on the bridge address and nowhere else.
+
+Also limit the reverse ports in that machine's firewall to its Docker bridge
+interface. The bind address alone does not: Linux accepts a packet for any
+local address on any interface, so a neighbour routing the bridge address
+through the machine's LAN interface would still reach the listener. Find the
+interface with `ip -o -4 addr show to <bind>`, then, for each reverse port (or
+the range you assign), for example:
+
+```bash
+iptables -I INPUT -p tcp --dport 18092 ! -i br-0123456789ab -j DROP
+```
+
+Persist the rule the way that machine persists its firewall.
 
 Set all three. The supported standalone host stack never publishes its broker
 and does not share a Compose network with the control plane, even when both
@@ -2543,6 +2795,27 @@ port, Git over SSH for one, is refused. Long-lived platform and upstream
 credentials stay outside the sandbox; member-scoped inference and MCP tokens
 enter their CLI processes. The sandbox runs unprivileged, so `apt install`
 does not work — use `pip --user`, a virtualenv, `npm ci`.
+
+New chats can also select up to eight runtime plugins through **+ → Plugins**
+or the create request's `plugins` field. This is thread configuration: follow-ups
+keep the selections, and Fork copies them to the new member. Claude Code and
+Codex use entries such as
+`{"plugin": "review@example", "marketplace": "example/plugins"}`; their
+marketplace source may be a GitHub repository or a credential-free public HTTPS
+source (a Git repository for Codex). pi, OpenCode, and Kilo use npm package
+entries such as `{"plugin": "@example/plugin@1.2.3"}` with no marketplace.
+Exact npm versions are optional; ranges, tags, local paths, arbitrary install
+commands, and credentials in source URLs are rejected.
+
+Installation runs during member runtime initialization, before its resident CLI
+accepts a prompt, using the pinned runtime version and the member's private
+home/configuration. Successful installation is retained across process and
+container restarts; failed installs can retry and never mark the selection
+complete. Errors and timeouts fail startup with a bounded diagnostic. Plugins
+use the group's existing network and unprivileged member identity. Project
+configuration and automatic plugin discovery remain disabled where the runtime
+supports those guards; explicitly selected plugins are loaded through the native
+runtime mechanism, alongside the platform's MCP configuration.
 
 There is one network, the same for every task and every phase, and nothing
 selects it ([design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)).

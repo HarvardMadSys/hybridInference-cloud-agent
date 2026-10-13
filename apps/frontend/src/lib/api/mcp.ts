@@ -74,6 +74,8 @@ export interface McpTemplateApi {
   transport: McpTransport;
   auth_kind: McpAuthKind;
   notes: string[];
+  documentation_url?: string;
+  browser_sign_in_available?: boolean;
 }
 
 /** Public metadata from the official MCP Registry, never an installed connection. */
@@ -213,6 +215,8 @@ export interface McpAuthorizeApi {
   authorization_url: string | null;
   needs_client_id: boolean;
   message: string;
+  /** The configured callback to register with a provider that requires an OAuth app. */
+  redirect_uri?: string | null;
 }
 
 /** Check an untrusted sign-in destination immediately before browser navigation. */
@@ -289,6 +293,8 @@ export interface McpBindingRequest {
 export interface McpInvocationApi {
   id: number;
   job_id: string;
+  /** The attempt that raised the call; absent on older control planes. */
+  attempt_id?: number | null;
   thread_id: string;
   /** Conversation title, absent on older control planes. */
   thread_title?: string | null;
@@ -484,13 +490,14 @@ export async function disconnectMcpConnection(connectionId: number): Promise<voi
 /**
  * Start a browser authorization for an OAuth connection.
  *
- * `clientId` is sent when the user supplies one after the platform reported
+ * Client credentials are sent when supplied after the platform reported
  * `needs_client_id`; the platform still owns discovery, registration and PKCE,
  * so the browser only ever travels to a URL this service built.
  */
 export async function authorizeMcpConnection(
   connectionId: number,
   clientId?: string,
+  clientSecret?: string,
 ): Promise<McpAuthorizeApi> {
   const resp = await fetchWithAuth(
     API_BASE,
@@ -498,7 +505,11 @@ export async function authorizeMcpConnection(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(clientId ? { client_id: clientId } : {}),
+      body: JSON.stringify(
+        clientId
+          ? { client_id: clientId, ...(clientSecret ? { client_secret: clientSecret } : {}) }
+          : {},
+      ),
     },
   );
   return jsonOrThrow(resp);

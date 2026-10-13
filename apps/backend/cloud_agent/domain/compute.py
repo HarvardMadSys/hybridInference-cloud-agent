@@ -38,6 +38,121 @@ def discard_request_id(allocation_id: str) -> str:
     return "discard:" + allocation_id
 
 
+def _openssh_public_key(algorithm: str, body: str) -> str:
+    """Return ``algorithm body`` when the blob matches its label and type."""
+    try:
+        key = serialization.load_ssh_public_key(f"{algorithm} {body}".encode())
+        embedded = base64.b64decode(body, validate=True)
+    except (ValueError, UnsupportedAlgorithm, binascii.Error):
+        raise ValueError("invalid") from None
+    name_length = int.from_bytes(embedded[:4], "big")
+    labelled = embedded[4 : 4 + name_length].decode(errors="replace") == algorithm
+    supported = isinstance(key, ed25519.Ed25519PublicKey | ec.EllipticCurvePublicKey) or (
+        isinstance(key, rsa.RSAPublicKey) and key.key_size >= 2048
+    )
+    if not labelled or not supported:
+        raise ValueError("unsupported")
+    return f"{algorithm} {body}"
+
+
+def normalize_user_public_key(value: str) -> str:
+    """Return one OpenSSH user public key, keeping a short printable comment.
+
+    CloudLab installs this on a new experiment for the SSH user. A private key,
+    more than one line, or a line that does not parse as its type is refused.
+    """
+    if any(character in value for character in "\r\n") or len(value) > 8192:
+        raise ValueError("SSH public key must be one OpenSSH public key")
+    parts = value.split()
+    if len(parts) < 2:
+        raise ValueError("SSH public key must be one OpenSSH public key")
+    try:
+        canonical = _openssh_public_key(parts[0], parts[1])
+    except ValueError:
+        raise ValueError("SSH public key must be one OpenSSH public key") from None
+    comment = " ".join(parts[2:])
+    printable = all(32 <= ord(character) <= 126 for character in comment)
+    if comment and (len(comment) > 128 or not printable):
+        raise ValueError("SSH public key must be one OpenSSH public key")
+    return f"{canonical} {comment}" if comment else canonical
+
+
+def autoscaling_acquire_can_cancel(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Identify an autoscaled acquisition proven not to have reached its provider."""
+    internal = operation.get("result") or {}
+    return bool(
+        allocation
+        and allocation.get("autoscaling_owned")
+        and operation.get("kind") == "acquire"
+        and operation.get("state") in {"pending", "waiting", "blocked", "failed"}
+        and internal.get("external_pending") is False
+        and not internal.get("resource_ref")
+        and not internal.get("external_id")
+        and not internal.get("resolved_external_id")
+        and not allocation.get("external_id")
+        and not allocation.get("nodes")
+        and not allocation.get("scope_complete")
+        and not allocation.get("release_committed_at")
+        and not autoscaling_acquire_is_terminal(operation, allocation)
+    )
+
+
+def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
+    """Report whether no provider identity, node, or Host was ever recorded.
+
+    A create that failed before CloudLab returned an experiment leaves this
+    shape. There is no machine to scan and no observation that can become fresh.
+    """
+    if not allocation:
+        return False
+    return (
+        not allocation.get("external_id")
+        and not allocation.get("nodes")
+        and not allocation.get("hosts")
+    )
+
+
+def autoscaling_acquire_is_terminal(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Identify an owned acquisition whose slot has already been recycled."""
+    return operation.get("kind") == "acquire" and autoscaling_operation_is_terminal(
+        operation, allocation
+    )
+
+
+def autoscaling_operation_is_terminal(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Identify an owned lifecycle whose provider-terminal result is authoritative."""
+    if autoscaling_retirement_needs_settlement(operation, allocation):
+        return False
+    return bool(
+        allocation
+        and allocation.get("autoscaling_owned")
+        and operation.get("kind") in {"acquire", "retire", "discard"}
+        and (
+            allocation.get("autoscaling_member_state") == "released"
+            or allocation.get("observed_state") in {"terminated", "absent"}
+        )
+    )
+
+
+def autoscaling_retirement_needs_settlement(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Keep terminal retirement retryable until its local credential fence commits."""
+    return bool(
+        allocation
+        and allocation.get("autoscaling_owned")
+        and operation.get("kind") in {"retire", "discard"}
+        and allocation.get("observed_state") in {"terminated", "absent"}
+        and not allocation.get("release_committed_at")
+    )
+
+
 def normalize_host_keys(keys: list[str]) -> list[str]:
     """Return a node's SSH host public keys as sorted, comment-free, parsed keys.
 
@@ -51,21 +166,16 @@ def normalize_host_keys(keys: list[str]) -> list[str]:
             raise ComputeRefusal(
                 "invalid_host_keys", "Host keys must be OpenSSH public keys.", status=422
             )
-        algorithm, body = parts[0], parts[1]
         try:
-            key = serialization.load_ssh_public_key(f"{algorithm} {body}".encode())
-            embedded = base64.b64decode(body, validate=True)
-        except (ValueError, UnsupportedAlgorithm, binascii.Error):
-            raise ComputeRefusal(
-                "invalid_host_keys", "Host keys must be OpenSSH public keys.", status=422
-            ) from None
-        name_length = int.from_bytes(embedded[:4], "big")
-        if embedded[4 : 4 + name_length].decode(errors="replace") != algorithm or not (
-            isinstance(key, ed25519.Ed25519PublicKey | ec.EllipticCurvePublicKey)
-            or (isinstance(key, rsa.RSAPublicKey) and key.key_size >= 2048)
-        ):
-            raise ComputeRefusal("invalid_host_keys", "Host key type is not supported.", status=422)
-        normalized.add(f"{algorithm} {body}")
+            canonical = _openssh_public_key(parts[0], parts[1])
+        except ValueError as exc:
+            message = (
+                "Host key type is not supported."
+                if str(exc) == "unsupported"
+                else "Host keys must be OpenSSH public keys."
+            )
+            raise ComputeRefusal("invalid_host_keys", message, status=422) from None
+        normalized.add(canonical)
     if not normalized:
         raise ComputeRefusal("invalid_host_keys", "No host key was supplied.", status=422)
     return sorted(normalized)

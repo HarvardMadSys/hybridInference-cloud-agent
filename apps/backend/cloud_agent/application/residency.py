@@ -87,6 +87,9 @@ async def _mint_residency_grant(
         thread_id=row["thread_id"], generation=row["generation"], grant_id=grant_id, **binding
     )
     if not linked:
-        await grants.revoke(grant_id)
+        # Generation takeover or clock expiry won the race with minting. The
+        # token must never escape, even when best-effort cleanup is unavailable.
+        with contextlib.suppress(Exception):
+            await grants.revoke(grant_id)
         return None
     return token

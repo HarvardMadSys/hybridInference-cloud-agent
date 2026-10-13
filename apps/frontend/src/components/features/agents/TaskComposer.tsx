@@ -3,7 +3,12 @@
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
-import type { AgentConfigApi, CreateAgentJobRequest, GoalInputApi } from '@/lib/api/agents';
+import type {
+  AgentConfigApi,
+  AgentPluginInputApi,
+  CreateAgentJobRequest,
+  GoalInputApi,
+} from '@/lib/api/agents';
 import { isComposerSubmit } from './composerKeys';
 import { ConnectSourceControl } from './ConnectSourceControl';
 import { NEW_TASK_PROMPT_ID, useFirstRun } from './firstRun';
@@ -17,6 +22,8 @@ import {
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
+import { useAuth } from '@/components/providers/AuthProvider';
+import { useComposerDraft } from './useComposerDraft';
 import { Picker } from './Picker';
 import { RepositoryPicker } from './RepositoryPicker';
 import { CreateRepositoryDialog } from './CreateRepositoryDialog';
@@ -32,6 +39,9 @@ import { useComposerMcp } from './mcp/useComposerMcp';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
+import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { PluginSelectionDialog } from './plugins/PluginSelectionDialog';
+import { UserAvatar } from './UserAvatar';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -44,11 +54,56 @@ import type { SelectedSkillApi } from '@/lib/api/skills';
 // produced could run.
 
 export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
+  const { state } = useAuth();
+  const userId = state.user?.id;
+  return (
+    <TaskComposerContent key={userId ?? 'anonymous'} userId={userId} initialRepo={initialRepo} />
+  );
+}
+
+interface NewTaskDraft {
+  task: string;
+  repo: string;
+  runtime: string;
+  model: string;
+  effort: string;
+  branch: string;
+  plugins: AgentPluginInputApi[];
+}
+
+function readNewTaskDraft(value: string): NewTaskDraft | null {
+  try {
+    const saved: unknown = JSON.parse(value);
+    if (!saved || typeof saved !== 'object') return null;
+    const record = saved as Record<string, unknown>;
+    const fields = ['task', 'repo', 'runtime', 'model', 'effort', 'branch'] as const;
+    if (!fields.every((field) => typeof record[field] === 'string')) return null;
+    const plugins = readDraftPlugins(record.plugins);
+    if (plugins === null) return null;
+    return { ...(saved as NewTaskDraft), plugins };
+  } catch {
+    return null;
+  }
+}
+
+function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; userId?: string }) {
   const router = useRouter();
   const t = useT();
-  // What the owner had here before a trip to GitHub, put back when they return.
-  // Read once; the storage copy is dropped as soon as this composer commits.
-  const [draft] = useState(peekComposerDraft);
+  const draftStore = useComposerDraft({ userId, threadId: 'new-task' });
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // Restore this account's unsent text and settings on any return to New task.
+  // The older GitHub receipt remains a scoped fallback for an existing trip.
+  const [draft] = useState(() => {
+    const saved = readNewTaskDraft(draftStore.value);
+    const returning = peekComposerDraft(userId);
+    return saved ?? (returning ? { ...returning, effort: '', branch: '', plugins: [] } : null);
+  });
   const [task, setTask] = useState(() => draft?.task ?? '');
   const skillLibrary = useSkillLibrary();
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
@@ -59,6 +114,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // The attach menu's own state. What this message will carry, as opposed to
   // how it runs; an untouched composer sends neither `skill_ids` nor a goal.
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [plugins, setPlugins] = useState<AgentPluginInputApi[]>(() => draft?.plugins ?? []);
+  const [pluginsOpen, setPluginsOpen] = useState(false);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
@@ -68,7 +125,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker.
-  const [repo, setRepo] = useState('');
+  const [repo, setRepo] = useState(draft?.repo ?? '');
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   // Enter with no repository opens the picker; the choice then hands the caret
   // back to the task, so a second Enter sends it.
@@ -89,16 +146,23 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // Someone with no conversation yet is told, in one line, what a task becomes.
   const firstVisit = useFirstRun().newcomer;
   const [branches, setBranches] = useState<string[]>([]);
-  const [branch, setBranch] = useState('');
-  const [runtime, setRuntime] = useState('');
-  const [model, setModel] = useState('');
-  const [effort, setEffort] = useState('');
+  const [branch, setBranch] = useState(draft?.branch ?? '');
+  const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
+  const [runtime, setRuntime] = useState(draft?.runtime ?? '');
+  const [model, setModel] = useState(draft?.model ?? '');
+  const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
+  const saveDraft = draftStore.setValue;
+  const savedBranch =
+    branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
+  useEffect(() => {
+    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch, plugins }));
+  }, [saveDraft, task, repo, runtime, model, effort, savedBranch, plugins]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -154,7 +218,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     if (first && draft) {
       if (draft.runtime && config.runtimes.includes(draft.runtime)) setRuntime(draft.runtime);
       if (draft.model && (config.models ?? []).includes(draft.model)) setModel(draft.model);
-      if (draft.repo && config.repos.includes(draft.repo)) {
+      if (
+        (!initialRepo || draft.repo === initialRepo) &&
+        draft.repo &&
+        config.repos.includes(draft.repo)
+      ) {
         setRepo(draft.repo);
         setUnavailableRepo(null);
         return;
@@ -173,8 +241,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   }, [config, draft, initialRepo]);
 
   useEffect(() => {
-    if (draft) forgetComposerDraft();
-  }, [draft]);
+    if (draft) forgetComposerDraft(userId);
+  }, [draft, userId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,17 +272,26 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   useEffect(() => {
     if (!githubUnavailable) return undefined;
     let cancelled = false;
-    const timer = window.setInterval(() => {
+    let pending = false;
+    const read = () => {
+      if (document.visibilityState === 'hidden' || pending) return;
+      pending = true;
       getAgentConfig()
         .then((cfg) => {
           if (!cancelled) applyConfig(cfg);
         })
         // The next tick asks again; the notice already says why nothing runs.
-        .catch(() => undefined);
-    }, SOURCE_CONTROL_RECHECK_MS);
+        .catch(() => undefined)
+        .finally(() => {
+          pending = false;
+        });
+    };
+    const timer = window.setInterval(read, SOURCE_CONTROL_RECHECK_MS);
+    document.addEventListener('visibilitychange', read);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
     };
   }, [githubUnavailable, applyConfig]);
 
@@ -236,6 +313,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // and are dropped at once, so the previous repository's branch can never be
   // sent with this one while the new list is on its way.
   useEffect(() => {
+    setBranchOptionsRepo(null);
     setBranches([]);
     setBranch('');
     if (!repo || !config?.github_connected) return undefined;
@@ -244,7 +322,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       .then((found) => {
         if (cancelled) return;
         setBranches(found.branches);
-        setBranch(found.default ?? found.branches[0] ?? '');
+        setBranchOptionsRepo(repo);
+        const restored = draft?.repo === repo ? draft.branch : '';
+        setBranch(
+          found.branches.includes(restored) ? restored : (found.default ?? found.branches[0] ?? ''),
+        );
       })
       .catch(() => {
         // No branch list is a working state: the job then runs against the
@@ -252,12 +334,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         if (!cancelled) {
           setBranches([]);
           setBranch('');
+          setBranchOptionsRepo(repo);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [config?.github_connected, repo]);
+  }, [config?.github_connected, repo, draft]);
 
   // `mcp_runtimes` has been reported by /config since MCP landed and read by
   // nothing; an older control plane omits it, and not knowing is not the same
@@ -267,6 +350,14 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     runtime && mcpRuntimes && !mcpRuntimes.includes(runtime)
       ? t('attach.mcpUnsupported', { runtime })
       : undefined;
+  const pluginsSupported = config?.plugin_runtimes?.includes(runtime) ?? false;
+  const incompatiblePlugins = plugins.some((plugin) => !validPluginForRuntime(runtime, plugin));
+  const pluginBlockedReason = !pluginsSupported
+    ? t('plugins.unsupported', { runtime })
+    : incompatiblePlugins
+      ? t('plugins.incompatible', { runtime })
+      : undefined;
+  const pluginsBlocked = plugins.length > 0 && (!pluginsSupported || incompatiblePlugins);
 
   const disconnected = config?.github_connected === false;
   // Someone who can go and connect may write the task first: the trip keeps
@@ -286,6 +377,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&
+    !pluginsBlocked &&
     Boolean(repo && runtime && model);
 
   /**
@@ -297,12 +389,16 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   async function goToGitHub(kind: 'connect' | 'manage') {
     setLeaving(kind);
     setError(null);
-    rememberReturn(initialRepo ? `/?repo=${encodeURIComponent(initialRepo)}` : '/', {
-      task,
-      repo,
-      runtime,
-      model,
-    });
+    rememberReturn(
+      initialRepo ? `/?repo=${encodeURIComponent(initialRepo)}` : '/',
+      {
+        task,
+        repo,
+        runtime,
+        model,
+      },
+      userId,
+    );
     try {
       const url = await githubAccessUrl(kind);
       if (url) {
@@ -342,6 +438,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     try {
       const cfg = await getAgentConfig({ fresh: true });
       applyConfig(cfg);
+      setError(null);
       // The repository the link asked for may be the one that just arrived.
       if (unavailableRepo && cfg.repos.includes(unavailableRepo)) {
         setRepo(unavailableRepo);
@@ -401,6 +498,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       // Omitted gives the task no servers at all, which is the right default:
       // connecting a server and letting a task call it are separate choices.
       ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
+      ...(plugins.length ? { plugins } : {}),
       // The completion condition rides the first message, so the first turn
       // is already working toward it rather than learning about it later.
       ...(goal ? { goal } : {}),
@@ -430,9 +528,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
    * "unlimited" is the absence of a bound and a large number is not.
    */
   async function applyGoalObjective(objective: string): Promise<void> {
+    if (pluginsBlocked) throw new Error(pluginBlockedReason);
+    const snapshot = draftStore.capture();
     setGoalHint(null);
     const job = await createAgentJob(requestBody(objective, { objective }));
-    router.push(`/${job.id}`);
+    draftStore.acknowledge(snapshot);
+    if (mounted.current) router.push(`/${job.id}`);
   }
 
   async function run() {
@@ -453,8 +554,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     setSubmitting(true);
     setError(null);
     try {
+      const snapshot = draftStore.capture();
       const job = await createAgentJob(requestBody(task.trim()));
-      router.push(`/${job.id}`);
+      draftStore.acknowledge(snapshot);
+      if (mounted.current) router.push(`/${job.id}`);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : t('composer.startFailed'));
       setSubmitting(false);
@@ -465,48 +568,37 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     return (
       <section
         aria-busy="true"
-        className="mx-auto w-full max-w-4xl px-4 pb-12 pt-10 sm:px-8 md:pt-20"
+        className="mx-auto w-full max-w-3xl px-4 pb-10 pt-10 sm:px-8 md:pt-16"
       >
         <div
           aria-hidden="true"
-          className="mx-auto h-12 w-12 rounded-2xl bg-gray-100 motion-safe:animate-pulse dark:bg-white/5"
+          className="mx-auto h-16 w-16 rounded-2xl bg-surface-hover motion-safe:animate-pulse"
         />
-        <p aria-live="polite" className="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
+        <p aria-live="polite" className="mt-6 text-center text-sm text-muted">
           {t('common.loading')}
         </p>
         <div
           aria-hidden="true"
-          className="mt-8 h-64 rounded-2xl border border-gray-200 bg-gray-50 motion-safe:animate-pulse dark:border-white/10 dark:bg-gray-900"
+          className="mt-8 h-64 rounded-2xl border border-border bg-surface-muted motion-safe:animate-pulse"
         />
       </section>
     );
   }
 
   return (
-    <section className="mx-auto w-full max-w-4xl px-4 pb-12 pt-8 sm:px-8 md:pt-16 lg:pt-20">
-      <div
-        aria-hidden="true"
-        className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl border border-crimson/10 bg-crimson/[0.06] text-crimson shadow-[0_4px_16px_-8px_rgba(165,28,48,0.3)] dark:border-crimson-light/20 dark:bg-crimson/10 dark:text-crimson-light"
-      >
-        <svg
-          className="h-6 w-6"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={1.6}
+    <section className="ui-enter mx-auto w-full max-w-3xl px-4 pb-10 pt-8 sm:px-8 md:pt-14 lg:pt-16">
+      <div className="ui-welcome-enter">
+        <UserAvatar />
+        <h1
+          id={headingId}
+          className="text-balance text-center text-[28px] font-semibold leading-tight tracking-[-0.035em] text-foreground sm:text-[34px] lg:text-[36px]"
         >
-          <path strokeLinecap="round" strokeLinejoin="round" d="m5 7 5 5-5 5m8 0h6" />
-        </svg>
+          {t('composer.heading')}
+        </h1>
+        <p className="mx-auto mt-3 max-w-md text-balance text-center text-sm leading-6 text-muted">
+          {firstVisit ? t('composer.subheadingFirstVisit') : t('composer.subheading')}
+        </p>
       </div>
-      <h1
-        id={headingId}
-        className="text-balance text-center text-[30px] font-semibold leading-tight tracking-[-0.035em] text-gray-950 sm:text-[36px] lg:text-[40px] dark:text-gray-50"
-      >
-        {t('composer.heading')}
-      </h1>
-      <p className="mx-auto mt-3 max-w-lg text-balance text-center text-[15px] leading-relaxed text-gray-500 dark:text-gray-400">
-        {firstVisit ? t('composer.subheadingFirstVisit') : t('composer.subheading')}
-      </p>
 
       {disconnected ? (
         <div className="mt-8">
@@ -561,15 +653,9 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             if (files.length) attachments.add(files);
           });
         }}
-        className={`relative rounded-2xl border shadow-[0_8px_40px_-16px_rgba(17,24,39,0.15),0_2px_6px_rgba(17,24,39,0.03)] transition ${
-          dropping
-            ? 'border-crimson/40 ring-4 ring-crimson/[0.08]'
-            : 'border-gray-200/90 dark:border-white/10'
-        } ${disconnected || noRepositories ? 'mt-4' : 'mt-8'} ${
-          locked
-            ? 'bg-gray-50 dark:bg-gray-950'
-            : 'bg-white dark:bg-gray-900 focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]'
-        }`}
+        className={`ui-composer ${
+          dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''
+        } ${disconnected || noRepositories ? 'mt-4' : 'mt-8'} ${locked ? 'bg-surface-muted' : ''}`}
       >
         <ComposerCommandMenu
           id={goalCommand.menuId}
@@ -580,7 +666,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         />
         <textarea
           ref={taskBox}
-          rows={5}
+          rows={4}
           value={task}
           onPaste={(event) => {
             if (disconnected || busy) return;
@@ -612,7 +698,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           aria-labelledby={headingId}
           aria-describedby={keyboardHintId}
           disabled={locked}
-          className="min-h-[160px] w-full resize-y rounded-t-2xl border-0 bg-transparent px-5 pb-4 pt-5 text-base leading-relaxed text-gray-900 focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[180px] sm:px-6 dark:text-gray-50"
+          className="block min-h-[150px] w-full resize-y rounded-t-2xl border-0 bg-transparent px-5 pb-4 pt-5 text-base leading-relaxed text-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[160px] sm:px-6"
         />
 
         {disconnected ? null : (
@@ -636,8 +722,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           />
         )}
 
-        <div className="border-t border-gray-100 dark:border-white/5">
-          <div className="flex flex-wrap items-center gap-1.5 px-3 py-2.5 sm:px-4">
+        <div className="flex flex-col gap-2 rounded-b-2xl border-t border-border bg-surface-muted/50 p-3 sm:px-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             {disconnected ? (
               <span
                 aria-live="polite"
@@ -679,8 +765,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                   onOpenGoal={insertGoalCommand}
                   mcp={mcp}
                   mcpBlockedReason={mcpBlockedReason}
+                  onOpenPlugins={
+                    pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
+                  }
+                  pluginSummary={String(plugins.length)}
                 />
-                <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+                <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
                 <RepositoryPicker
                   repos={config?.repos ?? []}
                   value={repo}
@@ -710,9 +800,9 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
               </>
             )}
           </div>
-          <div className="flex flex-col gap-3 rounded-b-2xl border-t border-gray-100 bg-gray-50/70 px-3 py-3 sm:flex-row sm:items-center sm:px-4 dark:border-white/5 dark:bg-white/[0.02]">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             {!disconnected && (
-              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+              <>
                 <Picker
                   label={t('composer.agent')}
                   value={runtime}
@@ -731,7 +821,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                   options={efforts}
                   onChange={setEffort}
                 />
-              </div>
+              </>
             )}
 
             <button
@@ -739,9 +829,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
               disabled={!canRun}
               onClick={() => void run()}
               title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
-              className={`ml-auto inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-crimson px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 sm:w-auto dark:focus-visible:ring-offset-gray-900 ${
-                canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
-              }`}
+              className="ui-button ui-button-primary ml-auto shrink-0 px-4 text-xs shadow-sm"
             >
               {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
               <svg
@@ -759,13 +847,28 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         </div>
       </div>
 
-      <p
-        id={keyboardHintId}
-        className="mt-3 text-center text-xs leading-relaxed text-gray-500 dark:text-gray-400"
-      >
+      {pluginsBlocked ? (
+        <p role="alert" className="mt-3 text-center text-sm text-status-error">
+          {pluginBlockedReason}{' '}
+          <button type="button" className="underline" onClick={() => setPluginsOpen(true)}>
+            {t('plugins.manage')}
+          </button>
+        </p>
+      ) : null}
+
+      <p id={keyboardHintId} className="mt-4 text-center text-xs leading-relaxed text-muted">
         {t('composer.keyboardHint')}
       </p>
 
+      {pluginsOpen ? (
+        <PluginSelectionDialog
+          runtime={runtime}
+          selected={plugins}
+          onChange={setPlugins}
+          onClose={() => setPluginsOpen(false)}
+          blockedReason={pluginBlockedReason}
+        />
+      ) : null}
       {skillsOpen ? (
         <SkillSelectionDialog
           limits={config?.skill_limits}
@@ -823,37 +926,42 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       {error ? (
         <p className="mt-3 text-center text-[13px] text-red-600 dark:text-red-400" role="alert">
           {error}
+          {!config && (
+            <button
+              type="button"
+              disabled={refreshing}
+              onClick={() => void refreshRepositories()}
+              className="ml-2 underline"
+            >
+              {t('common.retry')}
+            </button>
+          )}
         </p>
       ) : null}
-      <div className="mt-8 grid gap-3 sm:grid-cols-3">
-        {(
-          [
-            ['composer.repository', 'composer.workflowRepository'],
-            ['composer.agent', 'composer.workflowAgent'],
-            ['composer.workflowReviewTitle', 'composer.workflowReview'],
-          ] as const
-        ).map(([title, description], index) => (
-          <div
-            key={title}
-            className="flex gap-3 rounded-xl border border-gray-200/60 bg-gray-50/60 p-4 dark:border-white/5 dark:bg-white/[0.02]"
-          >
-            <span
-              aria-hidden="true"
-              className="mt-0.5 text-xs font-medium tabular-nums text-crimson/70 dark:text-crimson-light"
-            >
-              0{index + 1}
-            </span>
-            <div>
-              <h2 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">
-                {t(title)}
-              </h2>
-              <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-                {t(description)}
-              </p>
+      {firstVisit && (
+        <div className="mt-8 grid gap-5 border-t border-border pt-6 sm:grid-cols-3">
+          {(
+            [
+              ['composer.repository', 'composer.workflowRepository'],
+              ['composer.agent', 'composer.workflowAgent'],
+              ['composer.workflowReviewTitle', 'composer.workflowReview'],
+            ] as const
+          ).map(([title, description], index) => (
+            <div key={title} className="flex gap-3 px-1">
+              <span
+                aria-hidden="true"
+                className="mt-0.5 text-xs font-medium tabular-nums text-muted"
+              >
+                0{index + 1}
+              </span>
+              <div>
+                <h2 className="text-[13px] font-medium text-foreground">{t(title)}</h2>
+                <p className="mt-1 text-xs leading-relaxed text-muted">{t(description)}</p>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

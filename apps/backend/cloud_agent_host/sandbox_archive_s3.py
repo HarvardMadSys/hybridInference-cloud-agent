@@ -8,9 +8,10 @@ delete operation; its only read is an exact-key metadata check after an
 immutable initial write loses an ``If-None-Match`` race.
 
 ``boto3`` is imported only when an upload needs a default client.  Tests and
-other callers can inject the small protocol below, while a deployed broker uses
-the SDK's ordinary workload-identity/default credential chain.  No static AWS
-credential or endpoint option exists in this configuration.
+other callers can inject the small protocol below.  A deployed broker uses a
+saved access key when the policy has one, and otherwise the SDK's ordinary
+workload-identity/default credential chain.  There is still no custom endpoint
+option: archive bytes go to the fixed AWS bucket.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import math
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -57,6 +58,8 @@ S3_INITIAL_CONFLICT_MAX_ATTEMPTS: Final = 3
 ArchivePhase = Literal["initial", "final"]
 _ARCHIVE_PHASES: Final = frozenset(("initial", "final"))
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
+_ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
+_SECRET_ACCESS_KEY_RE: Final = re.compile(r"[A-Za-z0-9/+=]{40}")
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
 _MAX_IDENTITY_BYTES: Final = 1024
 _KMS_KEY_ARN_RE: Final = re.compile(
@@ -118,6 +121,8 @@ class SandboxArchiveS3Config:
     region: str
     kms_key_arn: str
     expected_bucket_owner: str
+    aws_access_key_id: str = field(default="", repr=False)
+    aws_secret_access_key: str = field(default="", repr=False)
     uri: str = SANDBOX_ARCHIVE_S3_URI
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
     multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
@@ -132,18 +137,45 @@ class SandboxArchiveS3Config:
             )
         if not self.region or self.region.strip() != self.region:
             raise SandboxArchiveConfigError("sandbox archive region must be non-empty")
-        if not _ACCOUNT_ID_RE.fullmatch(self.expected_bucket_owner):
+        if bool(self.aws_access_key_id) != bool(self.aws_secret_access_key):
+            raise SandboxArchiveConfigError(
+                "sandbox archive access key id and secret must both be set"
+            )
+        if self.aws_access_key_id and (_ACCESS_KEY_ID_RE.fullmatch(self.aws_access_key_id) is None):
+            raise SandboxArchiveConfigError(
+                "sandbox archive access key id must be a 20-character AWS access key id"
+            )
+        if self.aws_secret_access_key and (
+            _SECRET_ACCESS_KEY_RE.fullmatch(self.aws_secret_access_key) is None
+        ):
+            raise SandboxArchiveConfigError(
+                "sandbox archive secret access key must be a 40-character secret"
+            )
+        uses_access_key = bool(self.aws_access_key_id)
+        if self.expected_bucket_owner and not _ACCOUNT_ID_RE.fullmatch(self.expected_bucket_owner):
             raise SandboxArchiveConfigError(
                 "sandbox archive expected bucket owner must be a 12-digit AWS account id"
             )
-        kms_match = _KMS_KEY_ARN_RE.fullmatch(self.kms_key_arn)
-        if kms_match is None:
+        if not uses_access_key and not self.expected_bucket_owner:
+            raise SandboxArchiveConfigError(
+                "sandbox archive expected bucket owner must be a 12-digit AWS account id"
+            )
+        kms_match = _KMS_KEY_ARN_RE.fullmatch(self.kms_key_arn) if self.kms_key_arn else None
+        if self.kms_key_arn and kms_match is None:
             raise SandboxArchiveConfigError(
                 "sandbox archive KMS key must be a key ARN, not an alias"
             )
-        if kms_match.group("region") != self.region:
+        if not uses_access_key and kms_match is None:
+            raise SandboxArchiveConfigError(
+                "sandbox archive KMS key must be a key ARN, not an alias"
+            )
+        if kms_match is not None and kms_match.group("region") != self.region:
             raise SandboxArchiveConfigError("the KMS key ARN and archive region must match")
-        if kms_match.group("account") != self.expected_bucket_owner:
+        if (
+            kms_match is not None
+            and self.expected_bucket_owner
+            and kms_match.group("account") != self.expected_bucket_owner
+        ):
             raise SandboxArchiveConfigError(
                 "the KMS key ARN account and expected bucket owner must match"
             )
@@ -194,7 +226,13 @@ class SandboxArchiveS3Config:
         return SANDBOX_ARCHIVE_PREFIX
 
     @classmethod
-    def from_policy(cls, policy: SandboxArchivePolicy) -> SandboxArchiveS3Config:
+    def from_policy(
+        cls,
+        policy: SandboxArchivePolicy,
+        *,
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
+    ) -> SandboxArchiveS3Config:
         """Build the broker's S3 client configuration from one validated DB policy."""
         if not policy.enabled:
             raise SandboxArchiveConfigError("sandbox archive policy is disabled")
@@ -203,6 +241,14 @@ class SandboxArchiveS3Config:
             region=policy.region,
             kms_key_arn=policy.kms_key_arn,
             expected_bucket_owner=policy.expected_bucket_owner,
+            aws_access_key_id=(
+                policy.aws_access_key_id if aws_access_key_id is None else aws_access_key_id
+            ),
+            aws_secret_access_key=(
+                policy.aws_secret_access_key
+                if aws_secret_access_key is None
+                else aws_secret_access_key
+            ),
             max_archive_bytes=policy.max_archive_bytes,
             multipart_threshold_bytes=policy.multipart_threshold_bytes,
             multipart_part_bytes=policy.multipart_part_bytes,
@@ -216,6 +262,8 @@ class SandboxArchiveS3Config:
             region=self.region,
             kms_key_arn=self.kms_key_arn,
             expected_bucket_owner=self.expected_bucket_owner,
+            aws_access_key_id=self.aws_access_key_id,
+            aws_secret_access_key=self.aws_secret_access_key,
             max_archive_bytes=self.max_archive_bytes,
             multipart_threshold_bytes=self.multipart_threshold_bytes,
             multipart_part_bytes=self.multipart_part_bytes,
@@ -396,7 +444,7 @@ class SandboxArchiveS3Uploader:
             existing = self._get_client().head_object(
                 Bucket=self.config.bucket,
                 Key=key,
-                ExpectedBucketOwner=self.config.expected_bucket_owner,
+                **self._owner_arguments(),
             )
             self._check_deadline(deadline)
         except Exception as exc:
@@ -431,7 +479,7 @@ class SandboxArchiveS3Uploader:
         self._check_deadline(deadline)
         response = self._get_client().get_bucket_versioning(
             Bucket=self.config.bucket,
-            ExpectedBucketOwner=self.config.expected_bucket_owner,
+            **self._owner_arguments(),
         )
         self._check_deadline(deadline)
         if response.get("Status") != "Enabled":
@@ -442,8 +490,25 @@ class SandboxArchiveS3Uploader:
             if self._closed:
                 raise SandboxArchiveUploadError("sandbox archive S3 uploader is closed")
             if self._client is None:
-                self._client = _default_s3_client(self.config.region)
+                self._client = _default_s3_client(
+                    self.config.region,
+                    aws_access_key_id=self.config.aws_access_key_id,
+                    aws_secret_access_key=self.config.aws_secret_access_key,
+                )
             return self._client
+
+    def _owner_arguments(self) -> dict[str, str]:
+        if not self.config.expected_bucket_owner:
+            return {}
+        return {"ExpectedBucketOwner": self.config.expected_bucket_owner}
+
+    def _encryption_arguments(self) -> dict[str, str]:
+        if self.config.kms_key_arn:
+            return {
+                "ServerSideEncryption": "aws:kms",
+                "SSEKMSKeyId": self.config.kms_key_arn,
+            }
+        return {"ServerSideEncryption": "AES256"}
 
     def _base_object_arguments(
         self,
@@ -463,9 +528,8 @@ class SandboxArchiveS3Uploader:
                 "archive-size-bytes": str(size),
                 "archive-sha256": digest,
             },
-            "ServerSideEncryption": "aws:kms",
-            "SSEKMSKeyId": self.config.kms_key_arn,
-            "ExpectedBucketOwner": self.config.expected_bucket_owner,
+            **self._encryption_arguments(),
+            **self._owner_arguments(),
         }
 
     def _single_upload(
@@ -574,7 +638,7 @@ class SandboxArchiveS3Uploader:
                     ContentLength=len(chunk),
                     ChecksumAlgorithm="SHA256",
                     ChecksumSHA256=part_checksum,
-                    ExpectedBucketOwner=self.config.expected_bucket_owner,
+                    **self._owner_arguments(),
                 )
                 self._check_deadline(deadline)
                 returned_checksum = _optional_response_string(uploaded, "ChecksumSHA256")
@@ -601,7 +665,7 @@ class SandboxArchiveS3Uploader:
                     Key=key,
                     UploadId=upload_id,
                     MultipartUpload={"Parts": parts},
-                    ExpectedBucketOwner=self.config.expected_bucket_owner,
+                    **self._owner_arguments(),
                     **_initial_write_condition(phase),
                 )
                 # Mark the MPU complete before checking time: a successful S3
@@ -635,7 +699,7 @@ class SandboxArchiveS3Uploader:
                         Bucket=self.config.bucket,
                         Key=key,
                         UploadId=upload_id,
-                        ExpectedBucketOwner=self.config.expected_bucket_owner,
+                        **self._owner_arguments(),
                     )
                     self._check_deadline(deadline)
                 except Exception:
@@ -661,7 +725,7 @@ class SandboxArchiveS3Uploader:
         existing = self._get_client().head_object(
             Bucket=self.config.bucket,
             Key=key,
-            ExpectedBucketOwner=self.config.expected_bucket_owner,
+            **self._owner_arguments(),
         )
         self._check_deadline(deadline)
         if not self._matching_initial_head(existing, size=size, digest=digest):
@@ -690,8 +754,12 @@ class SandboxArchiveS3Uploader:
             and metadata.get("archive-sha256") == digest
             and existing.get("ContentLength") == size
             and existing.get("ContentType") == "application/gzip"
-            and existing.get("ServerSideEncryption") == "aws:kms"
-            and existing.get("SSEKMSKeyId") == self.config.kms_key_arn
+            and (
+                existing.get("ServerSideEncryption") == "aws:kms"
+                and existing.get("SSEKMSKeyId") == self.config.kms_key_arn
+                if self.config.kms_key_arn
+                else existing.get("ServerSideEncryption") == "AES256"
+            )
         )
 
     def _receipt(
@@ -720,7 +788,12 @@ class SandboxArchiveS3Uploader:
         )
 
 
-def _default_s3_client(region: str) -> S3ArchiveClient:
+def _default_s3_client(
+    region: str,
+    *,
+    aws_access_key_id: str = "",
+    aws_secret_access_key: str = "",
+) -> S3ArchiveClient:
     try:
         boto3 = importlib.import_module("boto3")
         botocore_config = importlib.import_module("botocore.config")
@@ -728,10 +801,10 @@ def _default_s3_client(region: str) -> S3ArchiveClient:
         raise SandboxArchiveUploadError(
             "boto3 and botocore are required when no sandbox archive S3 client is injected"
         ) from exc
-    # Credentials still come exclusively from the SDK's workload-identity /
-    # default chain. Explicit transport bounds prevent one S3 request from
-    # outliving the broker's shutdown window indefinitely; service-level
-    # retries remain separately bounded.
+    # Without a saved access key, credentials come from the SDK's
+    # workload-identity / default chain. Explicit transport bounds prevent one
+    # S3 request from outliving the broker's shutdown window indefinitely;
+    # service-level retries remain separately bounded.
     sdk_config = botocore_config.Config(
         connect_timeout=S3_CONNECT_TIMEOUT_S,
         read_timeout=S3_READ_TIMEOUT_S,
@@ -744,10 +817,11 @@ def _default_s3_client(region: str) -> S3ArchiveClient:
         # arbitrary S3-compatible service that accepts these request fields.
         ignore_configured_endpoint_urls=True,
     )
-    return cast(
-        "S3ArchiveClient",
-        boto3.client("s3", region_name=region, config=sdk_config),
-    )
+    client_kwargs: dict[str, Any] = {"region_name": region, "config": sdk_config}
+    if aws_access_key_id:
+        client_kwargs["aws_access_key_id"] = aws_access_key_id
+        client_kwargs["aws_secret_access_key"] = aws_secret_access_key
+    return cast("S3ArchiveClient", boto3.client("s3", **client_kwargs))
 
 
 def _validate_bounded_int(name: str, value: int, *, minimum: int, maximum: int) -> None:

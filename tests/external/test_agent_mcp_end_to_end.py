@@ -507,12 +507,19 @@ async def _seed(
         ],
     )
     async with pool.acquire() as conn:
+        # A running attempt belongs to an enrolled host: the relay fence asks
+        # that the machine holding the worker token still has a credential.
+        await conn.execute(
+            "INSERT INTO agent_runner_hosts (host, status, credential_hash) "
+            "VALUES ('e2e-host', 'online', 'e2e-credential-hash') ON CONFLICT (host) DO UPDATE "
+            "SET status = 'online', credential_hash = EXCLUDED.credential_hash"
+        )
         attempt_id = await conn.fetchval(
             """
             INSERT INTO agent_attempts
                 (job_id, thread_id, attempt_no, lease_owner, lease_generation,
-                 lease_expires_at, status)
-            VALUES ($1, $2, 1, 'e2e-worker', 3, NOW() + INTERVAL '1 hour', 'running')
+                 lease_expires_at, status, host_id)
+            VALUES ($1, $2, 1, 'e2e-worker', 3, NOW() + INTERVAL '1 hour', 'running', 'e2e-host')
             RETURNING id
             """,
             str(job["id"]),

@@ -53,6 +53,12 @@ def test_artifact_mode_requires_a_manifest_and_names_its_variant() -> None:
     )
 
 
+def test_control_plane_recipe_advertises_epoch_fenced_deployment_drains() -> None:
+    """New rollouts require V2 while old orchestrators can still cross the bridge."""
+    assert "AGENT_DEPLOY_DRAIN_FENCE_V1" in CONTROL
+    assert "AGENT_DEPLOY_DRAIN_FENCE_V2" in CONTROL
+
+
 def test_only_release_owned_values_reach_the_command_line() -> None:
     """The resolved environment carries credentials; argv carries none of them.
 

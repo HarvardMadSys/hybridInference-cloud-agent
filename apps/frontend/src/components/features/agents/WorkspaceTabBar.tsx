@@ -151,6 +151,24 @@ export function WorkspaceTabBar({
               />
             </svg>
           </button>
+          {onBack ? (
+            <button
+              type="button"
+              aria-label="Close sidebar"
+              title="Close sidebar"
+              onClick={onBack}
+              className="ui-icon-button ui-button-ghost h-9 w-9 shrink-0"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="m4 4 8 8m0-8-8 8"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

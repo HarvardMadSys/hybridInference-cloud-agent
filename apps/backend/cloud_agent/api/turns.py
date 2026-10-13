@@ -20,9 +20,7 @@ without an HTTP request. What stays is the anchor validation, the store's
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import secrets
-import time
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -42,6 +40,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
+from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.application.follow_ups import (
     prepare_follow_up,
     sandbox_context_lost_error,
@@ -70,11 +69,6 @@ from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI re
     JobEventSignal,
 )
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
-from cloud_agent_shared.shared_protocol import (
-    INPUT_REFUSALS,
-    INPUT_REFUSED,
-    INPUT_UNREACHABLE,
-)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -693,49 +687,24 @@ def _mid_turn_input_unsupported() -> HTTPException:
     )
 
 
-#: How long a message chosen to go into a turn that no host has taken yet waits
-#: for one, and how often it looks. A turn that is still waiting after that
-#: keeps the message in line, and it goes as the next turn.
-HAND_OVER_WAIT_S = 600.0
-HAND_OVER_POLL_S = 0.5
-#: With the job's change notification to wait on, the clock is only a backstop
-#: for what does not notify: the owner editing or deleting the message.
-HAND_OVER_IDLE_S = 5.0
-
 #: Hand-overs waiting for a host, kept so they are not collected mid-wait.
 _hand_overs: set[asyncio.Task[None]] = set()
 
 
-async def _hand_over(
-    job_store: _TurnsStorage, *, thread_id: str, attempt_id: int, message: dict[str, Any]
-) -> str | None:
-    """Give the attempt's host the message; ``None`` when its turn has it.
-
-    Otherwise the shared word for why not. The host puts it in front of the
-    model before the model's next tool call, and the turn's own stream says
-    when it did.
-    """
-    broker = await broker_for_attempt(job_store.host_pool, attempt_id)
-    if broker is None:
-        return INPUT_UNREACHABLE
-    try:
-        answer = await broker.inject_shared_input(
-            thread_id,
-            owner=f"attempt:{attempt_id}",
-            message_id=str(message["id"]),
-            text=str(message["prompt"]),
-        )
-    except WorkspaceBrokerError:
-        logger.warning(
-            "agent_send_now_unreachable",
-            extra={"event": "agent_send_now_unreachable", "thread_id": thread_id},
-            exc_info=True,
-        )
-        return INPUT_UNREACHABLE
-    if answer.get("accepted") is True:
-        return None
-    refused = answer.get("reason")
-    return refused if refused in INPUT_REFUSALS else INPUT_REFUSED
+async def close_send_now_handovers() -> None:
+    """Cancel and join request-spawned handoffs before app resources close."""
+    tasks = tuple(_hand_overs)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        joined = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            # The owner still has to wait for task cleanup before closing the
+            # store and broker clients; propagate its cancellation afterwards.
+            await joined
+            raise
 
 
 async def _hand_over_once_claimed(
@@ -748,28 +717,20 @@ async def _hand_over_once_claimed(
     app_credentials: Any | None,
     signal: JobEventSignal | None = None,
 ) -> None:
-    """Wait for a host to take the turn, then give it the message.
-
-    The message stays ``sending`` meanwhile, tied to the turn. A turn that ends
-    first puts it back in line with the rest of its ending, and one that is
-    still waiting at the deadline leaves it there too: either way it goes as
-    the next turn. With ``signal`` the wait ends when the job's state changes,
-    which is when a host claims it; without, it looks every ``HAND_OVER_POLL_S``.
-    """
-    deadline = time.monotonic() + HAND_OVER_WAIT_S
-    subscription = signal.subscribe(job_id) if signal is not None else contextlib.nullcontext()
+    """Eagerly wait for a host; the durable worker remains the crash backstop."""
     try:
-        with subscription as woken:
-            await _hand_over_when_claimed(
+        outcome = await send_now_delivery.wait_for_handoff(
+            job_store,
+            job_id=job_id,
+            message=message,
+            signal=signal,
+        )
+        if outcome.requeued:
+            await _settle(
                 job_store,
                 thread_id=thread_id,
-                job_id=job_id,
-                message=message,
                 gateway=gateway,
                 app_credentials=app_credentials,
-                deadline=deadline,
-                signal=signal,
-                woken=woken,
             )
     except Exception:
         logger.warning(
@@ -777,54 +738,6 @@ async def _hand_over_once_claimed(
             extra={"event": "agent_send_now_hand_over_failed", "thread_id": thread_id},
             exc_info=True,
         )
-
-
-async def _hand_over_when_claimed(
-    job_store: _TurnsStorage,
-    *,
-    thread_id: str,
-    job_id: str,
-    message: dict[str, Any],
-    gateway: Any,
-    app_credentials: Any | None,
-    deadline: float,
-    signal: JobEventSignal | None,
-    woken: asyncio.Event | None,
-) -> None:
-    """The waiting loop of :func:`_hand_over_once_claimed`, subscribed or not."""
-    while time.monotonic() < deadline:
-        job = await job_store.conversation_queries.get_job(job_id)
-        if job is None or job.get("state") in TERMINAL_STATES:
-            return
-        queue = await job_store.pending_messages.queue_state(
-            thread_id=thread_id, user_id=str(message["user_id"])
-        )
-        current = next(
-            (row for row in (queue or {}).get("messages", []) if row["id"] == message["id"]),
-            None,
-        )
-        if current is None or current["state"] != "sending":
-            return
-        attempt_id = job.get("current_attempt_id")
-        if job.get("state") == RUNNING and attempt_id is not None:
-            reason = await _hand_over(
-                job_store, thread_id=thread_id, attempt_id=int(attempt_id), message=message
-            )
-            if reason is not None:
-                await job_store.pending_messages.return_to_queue(
-                    message_id=str(message["id"]), revision=int(message["revision"])
-                )
-                await _settle(
-                    job_store,
-                    thread_id=thread_id,
-                    gateway=gateway,
-                    app_credentials=app_credentials,
-                )
-            return
-        if signal is None or woken is None:
-            await asyncio.sleep(HAND_OVER_POLL_S)
-        else:
-            await signal.wait(woken, HAND_OVER_IDLE_S if signal.listening else HAND_OVER_POLL_S)
 
 
 @router.post(
@@ -894,10 +807,22 @@ async def send_pending_message_now(
             outcome=SettleOutcome(),
             message_id=message_id,
         )
-    reason = await _hand_over(
-        job_store, thread_id=thread_id, attempt_id=int(began["attempt_id"]), message=message
-    )
-    if reason is None:
+    try:
+        handoff = await send_now_delivery.deliver_handoff(
+            job_store,
+            message_id=message_id,
+            revision=int(message["revision"]),
+        )
+    except Exception:
+        # The durable row has committed.  A transient database or broker error
+        # must not make the owner retry the request; the recovery worker owns it.
+        logger.warning(
+            "agent_send_now_hand_over_failed",
+            extra={"event": "agent_send_now_hand_over_failed", "thread_id": thread_id},
+            exc_info=True,
+        )
+        handoff = send_now_delivery.HandoffOutcome()
+    if handoff.reason is None:
         return await _queue_result(
             job_store,
             thread_id=thread_id,
@@ -905,18 +830,22 @@ async def send_pending_message_now(
             outcome=SettleOutcome(),
             message_id=message_id,
         )
-    await job_store.pending_messages.return_to_queue(
-        message_id=message_id, revision=int(message["revision"])
-    )
-    # The turn may have ended meanwhile, with this message out of line; now it
-    # is back, it goes next.
-    outcome = await _settle(
-        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+    # The turn may have ended meanwhile. If this owner put the message back,
+    # settle it now; otherwise that concurrent ending already did so.
+    outcome = (
+        await _settle(
+            job_store,
+            thread_id=thread_id,
+            gateway=gateway,
+            app_credentials=app_credentials,
+        )
+        if handoff.requeued
+        else SettleOutcome()
     )
     result = await _queue_result(
         job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
     )
-    result.not_delivered_reason = reason
+    result.not_delivered_reason = handoff.reason
     return result
 
 

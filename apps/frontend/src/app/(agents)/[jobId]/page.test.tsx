@@ -1,16 +1,28 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJob } from '@/components/features/agents/types';
 import { useConversationReadState } from '@/components/features/agents/useConversationReadState';
-const fixture = vi.hoisted(() => ({ id: 'job-a', loading: false, job: null as AgentJob | null }));
+const fixture = vi.hoisted(() => ({
+  id: 'job-a',
+  loading: false,
+  job: null as AgentJob | null,
+  error: null as string | null,
+  reload: vi.fn(),
+}));
 vi.mock('next/navigation', () => ({ usePathname: () => `/${fixture.id}` }));
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: 'reader' } } }),
 }));
 vi.mock('@/components/features/agents/useAgentJobs', () => ({
-  useAgentJob: () => ({ job: fixture.job, loading: fixture.loading, error: null, events: [] }),
+  useAgentJob: () => ({
+    job: fixture.job,
+    loading: fixture.loading,
+    error: fixture.error,
+    events: [],
+    reload: fixture.reload,
+  }),
 }));
 vi.mock('@/components/features/agents/JobDetail', () => ({
   JobDetail: () => <div>Open conversation</div>,
@@ -43,6 +55,8 @@ beforeEach(() => {
   localStorage.clear();
   fixture.id = 'job-a';
   fixture.loading = false;
+  fixture.error = null;
+  fixture.reload.mockClear();
   fixture.job = { ...completed, state: 'running' };
 });
 afterEach(cleanup);
@@ -79,6 +93,20 @@ describe('viewed completion receipt', () => {
 });
 
 describe('follow-up loading', () => {
+  it('retains a mounted conversation when a background reload fails and offers a local retry', () => {
+    fixture.job = completed;
+    const view = render(<AgentJobPage />);
+    const conversation = screen.getByText('Open conversation');
+    fixture.error = 'Network failure';
+    view.rerender(<AgentJobPage />);
+    expect(screen.getByText('Open conversation')).toBe(conversation);
+    expect(
+      screen.getByText('Refresh failed — showing the last successful read.'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(fixture.reload).toHaveBeenCalledOnce();
+  });
+
   it('only shows the full loading screen when no conversation has loaded', () => {
     fixture.job = null;
     fixture.loading = true;

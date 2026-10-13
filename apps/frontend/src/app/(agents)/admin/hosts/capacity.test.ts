@@ -119,6 +119,7 @@ function storageCapacity(over: Partial<AgentHostCapacity> = {}): AgentHostCapaci
 
 function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
   return {
+    drain_fence_epoch: '00000000-0000-0000-0000-000000000001',
     host: 'runner-a',
     active: false,
     last_worker_id: null,

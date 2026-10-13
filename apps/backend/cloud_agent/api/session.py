@@ -415,6 +415,20 @@ async def session_callback(
     return response
 
 
+def _log_unverified_identity(exc: identity.IdentityError) -> None:
+    """Tell the operator which check an identity token failed, never the token.
+
+    The browser's answer stays deliberately vague; the cause's type (a key
+    fetch, the audience, the clock) is what an operator needs to act on.
+    """
+    cause = type(exc.__cause__ if exc.__cause__ is not None else exc).__name__
+    logger.warning(
+        "agent_identity_token_unverified cause=%s",
+        cause,
+        extra={"event": "agent_identity_token_unverified", "cause": cause},
+    )
+
+
 async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, dict[str, Any]]:
     """Verify an identity token and mint this service's session from it.
 
@@ -437,21 +451,15 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
         claims = await asyncio.to_thread(identity.verify_identity_token, identity_token)
     except identity.IdentityNotConfigured:
         raise AgentConfigurationError() from None
+    except identity.IdentityUnavailable as exc:
+        _log_unverified_identity(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot verify identity with the gateway; try again shortly.",
+        ) from None
     except identity.IdentityError as exc:
-        # The operator gets the cause's type — a key fetch, the audience, the
-        # clock — which names what failed and never carries the token.
-        cause = type(exc.__cause__ if exc.__cause__ is not None else exc).__name__
-        logger.warning(
-            "agent_identity_token_unverified cause=%s",
-            cause,
-            extra={"event": "agent_identity_token_unverified", "cause": cause},
-        )
-        if isinstance(exc, identity.IdentityUnavailable):
-            raise HTTPException(
-                status_code=503,
-                detail="Cannot verify sign-in with the gateway right now; try again shortly.",
-            ) from None
-        # Deliberately not echoing the reason. "Signed by another key" and
+        _log_unverified_identity(exc)
+        # Deliberately not echoing the reason. "Signed by an unknown key" and
         # "expired" are the same answer to a browser, and the difference is
         # useful mostly to somebody probing.
         raise HTTPException(status_code=401, detail="Invalid identity token.") from None

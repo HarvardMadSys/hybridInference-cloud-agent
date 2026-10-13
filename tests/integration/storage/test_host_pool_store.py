@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
+from cloud_agent.application import residency
 from cloud_agent.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
@@ -124,6 +128,17 @@ async def _settled(db, store: Storage, job_id: str) -> None:
             "UPDATE agent_jobs SET native_turn_no = turn_no "
             "WHERE id = $1 AND native_turn_no IS NULL",
             job_id,
+        )
+
+
+async def _expire_residency(db, *, thread_id: str) -> None:
+    """Move a residency past its clock lease without waiting for the reaper."""
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE thread_id = $1",
+            thread_id,
         )
 
 
@@ -262,6 +277,50 @@ async def test_an_expired_token_cannot_be_spent(store, hosts: PostgresHostPoolRe
     await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=-1)
 
     assert not await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+
+
+async def test_enrollment_token_expiry_is_rechecked_after_a_plain_row_lock(
+    db, hosts: PostgresHostPoolRepository
+):
+    token_hash = hash_secret("blocked-token")
+    await hosts.issue_enroll_token(
+        token_hash=token_hash,
+        host="runner-a",
+        ttl_seconds=0.4,
+    )
+    consuming = None
+    async with db.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT token_hash FROM agent_host_enroll_tokens WHERE token_hash = $1 FOR UPDATE",
+            token_hash,
+        )
+        consuming = asyncio.create_task(
+            hosts.consume_enroll_token(token_hash=token_hash, host="runner-a")
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "token consumption did not wait on the token row lock"
+        await asyncio.sleep(0.55)
+
+    assert consuming is not None
+    assert not await asyncio.wait_for(consuming, timeout=2)
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT consumed_at, expires_at <= clock_timestamp() AS expired "
+            "FROM agent_host_enroll_tokens WHERE token_hash = $1",
+            token_hash,
+        )
+    assert row["consumed_at"] is None
+    assert row["expired"] is True
 
 
 async def test_a_token_is_spendable_only_under_the_name_it_names(
@@ -406,6 +465,348 @@ async def test_an_illegal_transition_is_refused_by_the_store(
 
 async def test_an_unknown_host_cannot_be_transitioned(store, hosts: PostgresHostPoolRepository):
     assert await hosts.set_host_status(host="nope", status=HOST_DRAINING) == "unknown"
+
+
+async def _drain_epoch(hosts: PostgresHostPoolRepository, host: str = "runner-a"):
+    row = await hosts.get_host(host=host)
+    assert row is not None
+    return row["drain_fence_epoch"]
+
+
+async def test_drain_fence_acquire_and_release_are_response_loss_idempotent(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
+    token = uuid4()
+
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    active_epoch = acquired[2]
+    assert active_epoch != initial_epoch
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("ok", HOST_ONLINE, active_epoch)
+
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert released[0] == "ok"
+    released_epoch = released[1]
+    assert released_epoch != active_epoch
+    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=token) == (
+        "ok",
+        released_epoch,
+    )
+
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_ONLINE
+    assert row["drain_fence_token"] == token
+    assert row["drain_fence_status_before"] == HOST_ONLINE
+    assert row["drain_fence_active"] is False
+    assert row["drain_fence_epoch"] == released_epoch
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("released", None, released_epoch)
+
+
+async def test_drain_fence_requires_expected_token_and_epoch_for_transfer(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
+    first, second = uuid4(), uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=first,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    first_epoch = acquired[2]
+
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=uuid4(),
+        expected_fence_epoch=first_epoch,
+        fence_token=second,
+    ) == ("stale", None, first_epoch)
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=first,
+        expected_fence_epoch=initial_epoch,
+        fence_token=second,
+    ) == ("stale", None, first_epoch)
+    transferred = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=first,
+        expected_fence_epoch=first_epoch,
+        fence_token=second,
+    )
+    assert transferred[:2] == ("ok", HOST_DRAINING)
+    second_epoch = transferred[2]
+    assert second_epoch != first_epoch
+    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=first) == (
+        "stale",
+        second_epoch,
+    )
+
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] == second
+    assert row["drain_fence_status_before"] == HOST_DRAINING
+    assert row["drain_fence_active"] is True
+
+
+async def test_drain_fence_refuses_manual_drain_and_legacy_undrain_without_force(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    assert await hosts.set_host_status(host="runner-a", status=HOST_DRAINING) == "ok"
+    manual_epoch = await _drain_epoch(hosts)
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=manual_epoch,
+        fence_token=uuid4(),
+    ) == ("manual", None, manual_epoch)
+    assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE) == "ok"
+
+    token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    assert await hosts.set_host_status(host="runner-a", status=HOST_DRAINING) == "ok"
+    assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE) == "fenced"
+    assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE, force=True) == "ok"
+    row = await hosts.get_host(host="runner-a")
+    assert row["drain_fence_token"] is None
+    assert row["drain_fence_status_before"] is None
+    assert row["drain_fence_active"] is False
+
+
+async def test_database_constraint_rejects_active_old_writes_and_partial_receipts(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    import asyncpg
+
+    await _enrol(store, "runner-a", hosts=hosts)
+    token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+    assert acquired[:2] == ("ok", HOST_ONLINE)
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with db.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1",
+                "runner-a",
+                HOST_ONLINE,
+            )
+    assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DRAINING
+
+    await _enrol(store, "runner-b", hosts=hosts)
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with db.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET drain_fence_token=$2::uuid WHERE host=$1",
+                "runner-b",
+                str(uuid4()),
+            )
+
+
+async def test_reenrollment_cannot_clear_an_active_drain_fence(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    token = uuid4()
+    await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+
+    with pytest.raises(ValueError, match="host_drain_fenced"):
+        await hosts.register_host(host="runner-a", credential_hash=hash_secret("replacement"))
+
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] == token
+    assert row["drain_fence_status_before"] == HOST_ONLINE
+    assert row["drain_fence_active"] is True
+    assert await hosts.authenticate_host(
+        host="runner-a", credential_hash=hash_secret("cred-runner-a")
+    )
+    assert (
+        await hosts.authenticate_host(host="runner-a", credential_hash=hash_secret("replacement"))
+        is None
+    )
+
+
+async def test_database_prevents_active_delete_and_epoch_fences_delete_recreate_replay(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    import asyncpg
+
+    await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
+    token = uuid4()
+    await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    )
+
+    assert await hosts.forget_runner_host(host="runner-a") == "fenced"
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM agent_runner_hosts WHERE host=$1", "runner-a")
+
+    assert (await hosts.release_host_drain_fence(host="runner-a", fence_token=token))[0] == "ok"
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "DELETE FROM agent_runner_hosts WHERE host=$1 RETURNING host", "runner-a"
+            )
+            == "runner-a"
+        )
+    await _enrol(store, "runner-a", hosts=hosts)
+    recreated_epoch = await _drain_epoch(hosts)
+    assert recreated_epoch != initial_epoch
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("stale", None, recreated_epoch)
+
+
+async def test_old_writer_clear_and_heartbeat_fence_an_acquire_replay(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    initial_epoch = await _drain_epoch(hosts)
+    token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    )
+    assert acquired[0] == "ok"
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert released[0] == "ok"
+
+    async with db.acquire() as conn:
+        cleared_epoch = await conn.fetchval(
+            """
+            UPDATE agent_runner_hosts
+            SET status=$2, drain_fence_token=NULL,
+                drain_fence_status_before=NULL, drain_fence_active=FALSE
+            WHERE host=$1
+            RETURNING drain_fence_epoch
+            """,
+            "runner-a",
+            HOST_OFFLINE,
+        )
+        heartbeat_epoch = await conn.fetchval(
+            "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1 RETURNING drain_fence_epoch",
+            "runner-a",
+            HOST_ONLINE,
+        )
+    assert cleared_epoch not in (acquired[2], released[1])
+    assert heartbeat_epoch != cleared_epoch
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=initial_epoch,
+        fence_token=token,
+    ) == ("stale", None, heartbeat_epoch)
+
+
+async def test_released_receipt_survives_old_writer_status_change(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=token,
+    )
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=token)
+    assert acquired[0] == released[0] == "ok"
+
+    async with db.acquire() as conn:
+        offline_epoch = await conn.fetchval(
+            "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1 RETURNING drain_fence_epoch",
+            "runner-a",
+            HOST_OFFLINE,
+        )
+    assert offline_epoch != released[1]
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=uuid4(),
+        expected_fence_epoch=uuid4(),
+        fence_token=token,
+    ) == ("released", None, offline_epoch)
+    assert await hosts.release_host_drain_fence(host="runner-a", fence_token=token) == (
+        "ok",
+        offline_epoch,
+    )
+
+
+async def test_inactive_receipt_does_not_turn_a_manual_drain_into_owned_drain(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    receipt_token = uuid4()
+    acquired = await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=None,
+        expected_fence_epoch=await _drain_epoch(hosts),
+        fence_token=receipt_token,
+    )
+    assert acquired[0] == "ok"
+    released = await hosts.release_host_drain_fence(host="runner-a", fence_token=receipt_token)
+    assert released[0] == "ok"
+
+    async with db.acquire() as conn:
+        manual_epoch = await conn.fetchval(
+            "UPDATE agent_runner_hosts SET status=$2 WHERE host=$1 RETURNING drain_fence_epoch",
+            "runner-a",
+            HOST_DRAINING,
+        )
+
+    assert await hosts.acquire_host_drain_fence(
+        host="runner-a",
+        expected_fence_token=receipt_token,
+        expected_fence_epoch=manual_epoch,
+        fence_token=uuid4(),
+    ) == ("manual", None, manual_epoch)
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DRAINING
+    assert row["drain_fence_token"] == receipt_token
+    assert row["drain_fence_active"] is False
 
 
 async def test_the_reaper_marks_a_silent_enrolled_host_offline(
@@ -1097,18 +1498,19 @@ async def test_archive_revision_heartbeat_is_tristate_and_credential_fenced(
     reenrolled = await hosts.register_host(host="runner-a", credential_hash=new_hash)
     assert reenrolled["sandbox_archive_settings_applied_revision"] is None
 
+    # A beat from the replaced credential is refused whole: it neither
+    # confirms an archive revision nor counts as the new machine's liveness.
     stale = await hosts.record_host_heartbeat(
         host="runner-a",
         credential_hash=old_hash,
         sandbox_archive_settings_applied_revision=7,
         sandbox_archive_settings_revision_reported=True,
     )
-    assert stale is not None
-    assert stale["last_heartbeat_at"] is not None
-    assert stale["sandbox_archive_settings_applied_revision"] is None
-    assert (await hosts.get_host(host="runner-a"))[
-        "sandbox_archive_settings_applied_revision"
-    ] is None
+    assert stale is None
+    row = await hosts.get_host(host="runner-a")
+    assert row["sandbox_archive_settings_applied_revision"] is None
+    assert row["last_heartbeat_at"] is None
+    assert row["status"] == HOST_ENROLLING
     current = await hosts.record_host_heartbeat(
         host="runner-a",
         credential_hash=new_hash,
@@ -1117,6 +1519,38 @@ async def test_archive_revision_heartbeat_is_tristate_and_credential_fenced(
     )
     assert current is not None
     assert current["sandbox_archive_settings_applied_revision"] == 7
+
+
+async def test_a_beat_that_authenticated_before_a_removal_changes_nothing(
+    hosts: PostgresHostPoolRepository,
+):
+    """Authentication and the write are two statements; the write re-checks.
+
+    The beat below authenticated while the credential was live and reached
+    the store after the removal committed. It must not stamp the removed row
+    with liveness, a broker address or capabilities.
+    """
+    digest = hash_secret("cred-runner-a")
+    await hosts.register_host(
+        host="runner-a", credential_hash=digest, broker_url="http://runner-a:8787"
+    )
+    assert await hosts.record_host_heartbeat(host="runner-a", credential_hash=digest) is not None
+    before = await hosts.get_host(host="runner-a")
+    assert await hosts.remove_host(host="runner-a") == "ok"
+
+    late = await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=digest,
+        broker_url="http://elsewhere:8787",
+        capabilities=["shared-sandbox-v1"],
+    )
+
+    assert late is None
+    after = await hosts.get_host(host="runner-a")
+    assert after["status"] == HOST_DISABLED
+    assert after["broker_url"] == "http://runner-a:8787"
+    assert after["last_heartbeat_at"] == before["last_heartbeat_at"]
+    assert after["capabilities"] == before["capabilities"]
 
 
 async def test_server_settings_are_kept_apart_from_what_the_host_reports(
@@ -1517,6 +1951,96 @@ async def test_removing_a_busy_host_is_refused_unless_forced(
     assert await hosts.remove_host(host="runner-a", force=True) == "ok"
 
 
+async def test_a_forced_removal_ends_the_work_the_host_was_holding(
+    store, hosts: PostgresHostPoolRepository
+):
+    """Revoking the credential also ends what the host's worker tokens open.
+
+    Those tokens name the attempt, never the machine, so before the removal
+    expired the leases a removed host kept heartbeating them — and with the
+    lease alive its grant was renewed, the relay served it tools, and it could
+    mint fresh residency grants. From the commit on, none of that succeeds,
+    and the reaper's next pass (residencies, then attempts, then grants, as
+    the loop runs them) ends the work and hands both grants over for
+    revocation.
+    """
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    fence = {"attempt_id": claim["attempt_id"], "lease_generation": claim["lease_generation"]}
+    residency = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        **fence,
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=600,
+    )
+    assert residency is not None
+    assert await store.grants.link_residency_grant(
+        thread_id=job["thread_id"], generation=residency["generation"], grant_id="agr_resident"
+    )
+    assert await store.grants.record_attempt_grant(**fence, grant_id="agr_attempt")
+
+    assert await hosts.remove_host(host="runner-a", force=True) == "ok"
+
+    assert await store.attempt_commands.heartbeat(**fence, lease_ttl_seconds=600) == {"ok": False}
+    assert await store.grants.list_renewable_grants() == []
+    assert (
+        await store.credential_queries.resolve_model_credential(job_id=job["id"], **fence) is None
+    )
+    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert (
+        await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            **fence,
+            host="runner-a",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=600,
+        )
+        is None
+    )
+
+    lapsed = await store.residency.reap_expired_residencies()
+    assert [row["grant_id"] for row in lapsed] == ["agr_resident"]
+    reaped = await store.attempt_commands.reap_expired(max_attempts=3)
+    assert [row["attempt_id"] for row in reaped] == [claim["attempt_id"]]
+    assert [row["grant_id"] for row in await store.grants.take_revocable_grants()] == [
+        "agr_attempt"
+    ]
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
+
+
+async def test_a_disabled_host_can_no_longer_extend_or_earn(
+    store, hosts: PostgresHostPoolRepository
+):
+    """The live-host predicate on its own, without the revocation's expiry.
+
+    ``disabled`` reached through the status table keeps the credential and
+    leaves every lease where it was. Neither the lease nor the residency may
+    be kept going from that machine, whatever its worker token still proves.
+    """
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    fence = {"attempt_id": claim["attempt_id"], "lease_generation": claim["lease_generation"]}
+    assert (await store.attempt_commands.heartbeat(**fence, lease_ttl_seconds=60))["ok"] is True
+
+    assert await hosts.set_host_status(host="runner-a", status=HOST_DISABLED) == "ok"
+
+    assert await store.attempt_commands.heartbeat(**fence, lease_ttl_seconds=60) == {"ok": False}
+    assert (
+        await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            **fence,
+            host="runner-a",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=60,
+        )
+        is None
+    )
+
+
 async def test_forgetting_a_host_does_not_break_its_attempts(
     db, store, hosts: PostgresHostPoolRepository
 ):
@@ -1594,6 +2118,50 @@ async def _resident_chat(
     return job, claim, sandbox
 
 
+async def _reclaim_resident_chat(
+    store,
+    job: dict,
+    claim: dict,
+    sandbox: dict,
+    *,
+    host: str,
+    worker_id: str = "w2",
+) -> tuple[dict, dict]:
+    """Cleanly hand one retained activation to a successor attempt."""
+    abandoned = await store.sandbox.abandon_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+        lost=False,
+        detail="retry before prompt admission",
+        idle_timeout_seconds=1800,
+    )
+    assert abandoned is not None
+    assert await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+    reclaimed = await _claim(store, worker_id=worker_id, lease_ttl_seconds=60, host=host)
+    assert reclaimed is not None
+    reserved = await store.sandbox.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=reclaimed["attempt_id"],
+        lease_generation=reclaimed["lease_generation"],
+        host=host,
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=job["execution_profile"],
+    )
+    assert reserved is not None
+    return reclaimed, reserved
+
+
 async def test_residency_is_earned_by_the_running_attempt_only(db, store, hosts):
     """Review finding 4: the gate shares the write's transaction and checks
     the lease clock — expired, finished, or another host's attempt earns
@@ -1605,6 +2173,8 @@ async def test_residency_is_earned_by_the_running_attempt_only(db, store, hosts)
     assert (
         await store.residency.establish_residency(
             thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
             host="runner-b",
             runtime_id="claude-code",
             runtime_version=None,
@@ -1615,6 +2185,8 @@ async def test_residency_is_earned_by_the_running_attempt_only(db, store, hosts)
     # The running host: earned.
     row = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1634,6 +2206,8 @@ async def test_residency_is_earned_by_the_running_attempt_only(db, store, hosts)
     assert (
         await store.residency.establish_residency(
             thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
             host="runner-a",
             runtime_id="claude-code",
             runtime_version=None,
@@ -1653,6 +2227,8 @@ async def test_an_expired_lease_earns_no_residency(store, hosts):
     assert (
         await store.residency.establish_residency(
             thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
             host="runner-a",
             runtime_id="claude-code",
             runtime_version=None,
@@ -1660,6 +2236,58 @@ async def test_an_expired_lease_earns_no_residency(store, hosts):
         )
         is None
     )
+
+
+async def test_lock_wait_cannot_outlive_the_attempt_lease(db, store, hosts):
+    """Wall-clock expiry is rechecked after the earn gate waits on a row lock."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    establish = None
+
+    async with db.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.execute(
+            "UPDATE agent_attempts "
+            "SET lease_expires_at = clock_timestamp() + INTERVAL '250 milliseconds' "
+            "WHERE id = $1",
+            claim["attempt_id"],
+        )
+        establish = asyncio.create_task(
+            store.residency.establish_residency(
+                thread_id=job["thread_id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                host="runner-a",
+                runtime_id="claude-code",
+                runtime_version=None,
+                ttl_seconds=60,
+                sandbox_id=sandbox["sandbox_id"],
+            )
+        )
+        waiting = False
+        async with db.acquire() as observer:
+            for _ in range(100):
+                waiting = await observer.fetchval(
+                    """
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_locks
+                            WHERE NOT granted
+                              AND $1 = ANY(pg_blocking_pids(pid))
+                        )
+                        """,
+                    blocker_pid,
+                )
+                if waiting:
+                    break
+                await asyncio.sleep(0.01)
+        if not waiting:
+            establish.cancel()
+            await asyncio.gather(establish, return_exceptions=True)
+            pytest.fail("residency establish did not wait on the attempt row lock")
+        await asyncio.sleep(0.35)
+
+    assert establish is not None
+    assert await asyncio.wait_for(establish, timeout=2) is None
 
 
 async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, hosts):
@@ -1670,9 +2298,11 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
     it, and the dead generation stays dead there.
     """
     await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     first = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1682,15 +2312,11 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
 
     # The attempt is released and reclaimed on the owning host, which
     # rotates the residency fence.
-    await store.attempt_commands.release_claim(
-        job_id=job["id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-    )
-    reclaim = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
-    assert reclaim is not None
+    reclaim, _sandbox = await _reclaim_resident_chat(store, job, claim, sandbox, host="runner-a")
     second = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=reclaim["attempt_id"],
+        lease_generation=reclaim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1721,12 +2347,65 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
     )
 
 
+async def test_stale_attempt_cannot_rotate_the_current_residency(store, hosts):
+    """A delayed same-host attempt cannot revoke its successor's grant."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, stale, sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    current, current_sandbox = await _reclaim_resident_chat(
+        store, job, stale, sandbox, host="runner-a"
+    )
+    successor = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=current["attempt_id"],
+        lease_generation=current["lease_generation"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+        sandbox_id=current_sandbox["sandbox_id"],
+    )
+    assert successor is not None
+    assert await store.grants.link_residency_grant(
+        thread_id=job["thread_id"],
+        generation=successor["generation"],
+        grant_id="agr-successor",
+    )
+    before = await store.residency.resident_host(thread_id=job["thread_id"])
+
+    stale_result = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=stale["attempt_id"],
+        lease_generation=stale["lease_generation"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+        sandbox_id=sandbox["sandbox_id"],
+    )
+    after = await store.residency.resident_host(thread_id=job["thread_id"])
+
+    assert stale_result is None
+    assert before is not None and after is not None
+    assert (before["generation"], before["status"], before["grant_id"]) == (
+        successor["generation"],
+        "hot",
+        "agr-successor",
+    )
+    assert (after["generation"], after["status"], after["grant_id"]) == (
+        before["generation"],
+        before["status"],
+        before["grant_id"],
+    )
+
+
 async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
     """A guessed (thread, generation) from another machine changes nothing."""
     await _enrol(store, "runner-a", hosts=hosts)
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     row = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1754,11 +2433,90 @@ async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
     )
 
 
+async def test_an_expired_residency_cannot_be_revived_by_a_late_heartbeat(db, store, hosts):
+    """The clock, not the reaper's next pass, removes heartbeat authority."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    row = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    await _expire_residency(db, thread_id=job["thread_id"])
+
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=job["thread_id"],
+            generation=row["generation"],
+            ttl_seconds=60,
+            host="runner-a",
+        )
+        is None
+    )
+    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert [item["thread_id"] for item in await store.residency.reap_expired_residencies()] == [
+        job["thread_id"]
+    ]
+
+
+async def test_an_expired_residency_rejects_and_revokes_a_late_grant(db, store, hosts):
+    """A mint that loses the clock race leaves neither a link nor a token."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    row = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    await _expire_residency(db, thread_id=job["thread_id"])
+    grants = SimpleNamespace(
+        mint=AsyncMock(return_value={"grant_id": "agr-late", "token": "tok-late"}),
+        revoke=AsyncMock(return_value=True),
+    )
+
+    credential = await residency._mint_residency_grant(store.grants, grants, row=row)
+
+    assert credential is None
+    grants.revoke.assert_awaited_once_with("agr-late")
+    assert [item["grant_id"] for item in await store.residency.reap_expired_residencies()] == [None]
+
+
+async def test_the_residency_reaper_leaves_an_unexpired_hot_lease_alone(store, hosts):
+    """The reaper is the expired complement, never a blanket hot-row revoke."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    live = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    assert live is not None
+
+    assert await store.residency.reap_expired_residencies() == []
+    current = await store.residency.resident_host(thread_id=job["thread_id"])
+    assert current is not None
+    assert current["generation"] == live["generation"]
+
+
 async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(store, hosts):
     await _enrol(store, "runner-a", hosts=hosts)
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1772,6 +2530,8 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
     # Re-establishing continues the count — a dead generation stays dead.
     revived = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1789,6 +2549,8 @@ async def test_establish_returns_what_the_grant_mint_needs(store, hosts):
 
     row = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1803,9 +2565,11 @@ async def test_establish_returns_what_the_grant_mint_needs(store, hosts):
 
 async def test_the_residency_grant_link_is_generation_scoped(store, hosts):
     await _enrol(store, "runner-a", hosts=hosts)
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1834,9 +2598,11 @@ async def test_beats_and_release_carry_the_grant_they_keep_alive(store, hosts):
     it revokes the grant — so both hand their caller the grant id, and an
     unlinked residency answers with the empty string, not a loss."""
     await _enrol(store, "runner-a", hosts=hosts)
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1870,9 +2636,11 @@ async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store, 
     """A takeover is a credential rotation: the new establish must name the
     old generation's grant so the endpoint can kill it now, not at TTL."""
     await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1882,14 +2650,11 @@ async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store, 
         thread_id=job["thread_id"], generation=1, grant_id="agr-old"
     )
 
-    await store.attempt_commands.release_claim(
-        job_id=job["id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-    )
-    assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
+    reclaim, _sandbox = await _reclaim_resident_chat(store, job, claim, sandbox, host="runner-a")
     second = await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=reclaim["attempt_id"],
+        lease_generation=reclaim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -1899,25 +2664,154 @@ async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store, 
     assert second["previous_grant_id"] == "agr-old"
 
 
-async def test_reaped_residencies_carry_their_grant_id(store, hosts):
-    """The reaper revokes what the lapse orphans — it needs the id to do it."""
+async def test_reaped_residencies_carry_their_grant_id(db, store, hosts):
+    """The reaper revokes what the lapse orphans — it needs the id to do it.
+
+    The grant is linked while the lease is live. Once that lease is in the
+    past, a further link is refused and cannot replace the id the reaper
+    returns.
+    """
     await _enrol(store, "runner-a", hosts=hosts)
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.residency.establish_residency(
         thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
-        ttl_seconds=-1,
+        ttl_seconds=60,
     )
-    await store.grants.link_residency_grant(
-        thread_id=job["thread_id"], generation=1, grant_id="agr-lapsed"
+    assert (
+        await store.grants.link_residency_grant(
+            thread_id=job["thread_id"], generation=1, grant_id="agr-lapsed"
+        )
+        is True
     )
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert (
+        await store.grants.link_residency_grant(
+            thread_id=job["thread_id"], generation=1, grant_id="agr-after-expiry"
+        )
+        is False
+    )
+    await _expire_residency(db, thread_id=job["thread_id"])
 
     lapsed = await store.residency.reap_expired_residencies()
     assert [(row["thread_id"], row["grant_id"]) for row in lapsed] == [
         (job["thread_id"], "agr-lapsed")
     ]
+
+
+async def test_a_live_lease_heartbeats_and_links_and_an_expired_lease_does_not(db, store, hosts):
+    """The clock ends a generation's authority before the reaper runs.
+
+    A live lease still heartbeats and accepts its grant. The same generation,
+    once the lease is in the past and the row is still hot, cannot extend
+    itself or take another grant. Reaping and an explicit release of that
+    expired row stay available.
+    """
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
+    await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
+        )
+        == ""
+    )
+    assert (
+        await store.grants.link_residency_grant(
+            thread_id=job["thread_id"], generation=1, grant_id="agr-live"
+        )
+        is True
+    )
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
+        )
+        == "agr-live"
+    )
+    assert (await store.residency.resident_host(thread_id=job["thread_id"]))["generation"] == 1
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+
+    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
+        )
+        is None
+    )
+    assert (
+        await store.grants.link_residency_grant(
+            thread_id=job["thread_id"], generation=1, grant_id="agr-late"
+        )
+        is False
+    )
+    # The late beat did not push the lease forward, so the reaper still owns it.
+    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    lapsed = await store.residency.reap_expired_residencies()
+    assert [(row["thread_id"], row["generation"], row["grant_id"]) for row in lapsed] == [
+        (job["thread_id"], 1, "agr-live")
+    ]
+
+    expired_job, expired_claim, _expired_sandbox = await _resident_chat(
+        store, "runner-a", hosts=hosts
+    )
+    await store.residency.establish_residency(
+        thread_id=expired_job["thread_id"],
+        host="runner-a",
+        attempt_id=expired_claim["attempt_id"],
+        lease_generation=expired_claim["lease_generation"],
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=-1,
+    )
+    assert await store.residency.resident_host(thread_id=expired_job["thread_id"]) is None
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=expired_job["thread_id"],
+            generation=1,
+            ttl_seconds=60,
+            host="runner-a",
+        )
+        is None
+    )
+    assert (
+        await store.grants.link_residency_grant(
+            thread_id=expired_job["thread_id"], generation=1, grant_id="agr-born-expired"
+        )
+        is False
+    )
+    assert (
+        await store.residency.release_residency(
+            thread_id=expired_job["thread_id"], generation=1, host="runner-a"
+        )
+        == ""
+    )
+    assert await store.residency.reap_expired_residencies() == []
 
 
 async def test_a_new_chat_without_a_group_is_claimable_by_an_enrolled_host(store, hosts):

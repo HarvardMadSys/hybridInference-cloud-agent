@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth, useT } from '@/components/providers';
 import { getAgentJob, listAgentConversations, type AgentJobApi } from '@/lib/api/agents';
-import { listThreadQuestions } from '@/lib/api/questions';
+import { useQuestionReads } from './AgentReadProvider';
 import { onAgentRecordsChanged, isAgentPushLive, PUSH_FALLBACK_POLL_MS } from './agentPush';
 import {
   NOTIFICATION_PERMISSION_EVENT,
@@ -46,6 +46,7 @@ export function useAgentNotifications(
   preferences: NotificationPreferences,
   notify: (notice: AgentNotice) => boolean,
 ): void {
+  const questionReads = useQuestionReads();
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
   const owner = useRef(userId);
@@ -189,7 +190,7 @@ export function useAgentNotifications(
           readingQuestions.add(threadId);
           const readVersion = reads.get(job.id) ?? 0;
           try {
-            const result = await listThreadQuestions(threadId, controller.signal);
+            const result = await questionReads.listThreadQuestions(threadId, controller.signal);
             const held = jobs.get(job.id);
             if (
               !current() ||
@@ -325,7 +326,7 @@ export function useAgentNotifications(
       clearInterval(questionTimer);
       clearInterval(stateTimer);
     };
-  }, [userId, preferences.enabled, preferences.questions, preferences.turns]);
+  }, [userId, preferences.enabled, preferences.questions, preferences.turns, questionReads]);
 }
 
 export function AgentNotifications() {

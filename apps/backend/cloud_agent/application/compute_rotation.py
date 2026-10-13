@@ -161,6 +161,7 @@ class ComputeRotation:
         created = _moment(row.get("created_at"))
         return (
             policy.rotation_enabled
+            and not row.get("autoscaling_owned")
             and created is not None
             and (now - created).total_seconds() >= policy.max_node_age_seconds
         )
@@ -180,6 +181,7 @@ class ComputeRotation:
         """
         if (
             not policy.rotation_enabled
+            or row.get("autoscaling_owned")
             or row.get("mode") != "provision"
             or row.get("management_mode") != "manage"
             or len(row.get("hosts") or []) != 1
@@ -248,6 +250,14 @@ class ComputeRotation:
 
     async def rotate(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
         """Resume the move of this allocation's Host from its last checkpoint."""
+        if allocation.get("autoscaling_owned"):
+            await self._block(
+                operation,
+                None,
+                "autoscaling_managed",
+                "CloudLab autoscaling does not support node replacement.",
+            )
+            return
         result = operation.setdefault("result", {})
         if result.get("rollback"):
             await self._roll_back(operation, allocation)

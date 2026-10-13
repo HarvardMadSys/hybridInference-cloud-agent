@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 
+import { SettingsSection } from '../SettingsSection';
 import type { NamedHost } from '../hosts/HostSettings';
 
 const AGENT_NAMES: Record<string, string> = {
@@ -172,33 +173,85 @@ export default function AgentVersions({
   for (const runtime of Object.keys(selected)) {
     if (!entries.has(runtime)) entries.set(runtime, []);
   }
+  const installedRuntimes = new Set([
+    ...entries.keys(),
+    ...servers.flatMap(({ host }) => Object.keys(host.runtime_versions ?? {})),
+  ]);
   return (
     <section className="ui-card mt-6 p-4 sm:p-6">
       <h2 className="text-lg font-semibold tracking-tight text-foreground">Agent versions</h2>
       <p className="mt-2 text-sm leading-6 text-muted">
         Default versions for new sandboxes. Existing sessions and their forks keep their version.
       </p>
-      {entries.size === 0 ? (
-        <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
-          No server has reported available versions yet.
-        </p>
-      ) : (
-        <div className="mt-4 divide-y divide-border">
-          {[...entries]
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([runtime, versions]) => (
-              <VersionRow
-                key={`${runtime}:${selected[runtime] ?? ''}`}
-                runtime={runtime}
-                versions={versions}
-                servers={servers}
-                saved={selected[runtime] ?? ''}
-                busy={busy}
-                onChange={onChange}
-              />
-            ))}
-        </div>
-      )}
+      <SettingsSection title="Important" description="Choose the default version for each agent.">
+        {entries.size === 0 ? (
+          <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
+            No server has reported available versions yet.
+          </p>
+        ) : (
+          <div className="mt-4 divide-y divide-border">
+            {[...entries]
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([runtime, versions]) => (
+                <VersionRow
+                  key={`${runtime}:${selected[runtime] ?? ''}`}
+                  runtime={runtime}
+                  versions={versions}
+                  servers={servers}
+                  saved={selected[runtime] ?? ''}
+                  busy={busy}
+                  onChange={onChange}
+                />
+              ))}
+          </div>
+        )}
+      </SettingsSection>
+      <SettingsSection title="Advanced" description="Review the versions installed on each server.">
+        {servers.length === 0 ? (
+          <p className="py-4 text-sm text-muted">No active servers have reported versions yet.</p>
+        ) : (
+          <div className="overflow-x-auto py-3">
+            <table className="w-full text-left text-sm">
+              <caption className="sr-only">Agent versions installed on each server</caption>
+              <thead>
+                <tr className="border-b border-border text-muted">
+                  <th scope="col" className="p-2 font-medium">
+                    Server
+                  </th>
+                  <th scope="col" className="p-2 font-medium">
+                    Agent
+                  </th>
+                  <th scope="col" className="p-2 font-medium">
+                    Default
+                  </th>
+                  <th scope="col" className="p-2 font-medium">
+                    Available versions
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {servers.flatMap(({ name, host }) =>
+                  [...installedRuntimes].sort().map((runtime) => (
+                    <tr
+                      key={`${host.host}:${runtime}`}
+                      className="border-b border-border last:border-b-0"
+                    >
+                      <th scope="row" className="p-2 font-medium">
+                        {name}
+                      </th>
+                      <td className="p-2">{agentName(runtime)}</td>
+                      <td className="p-2">{host.runtime_versions?.[runtime] ?? 'Not reported'}</td>
+                      <td className="p-2">
+                        {host.runtime_versions_available?.[runtime]?.join(', ') || 'Not reported'}
+                      </td>
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SettingsSection>
     </section>
   );
 }

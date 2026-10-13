@@ -20,7 +20,9 @@ import sys
 import tarfile
 from pathlib import Path
 
-# Copied builders may have fewer ancestors; an explicit --root still takes precedence.
+# Repository execution has three containing directories. Docker copies this
+# standalone script to /builder and passes --root; parent chains also work at
+# that shallower path without failing before the explicit root can be parsed.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FORMAT_VERSION = 1
 MAX_SOURCE_BYTES = 64 * 1024 * 1024

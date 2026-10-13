@@ -1,0 +1,90 @@
+name: Warm pull-request caches
+
+# Keep cache warming outside CI: Publish waits for the entire CI workflow to
+# conclude, so even a continue-on-error job in it would delay publication while
+# a hosted VM is queued or the cache build is running.
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-caches-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.9.7"
+  NODE_VERSION: "22"
+
+# A hosted VM uses the image and cache paths that pull requests restore. The
+# caches trusted CI leaves behind are arm64 or use a persistent runner's own
+# paths, both of which are part of the cache key. Fill the uv and npm entries
+# under dev's scope once per push, and export the sandbox build's intermediate
+# layers; pull requests only import those layers.
+#
+# No release consumes this workflow's result or layers. Publication builds on
+# the persistent pools from their own builders.
+jobs:
+  pr-caches:
+    name: Warm pull-request caches
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: [ubuntu-24.04]
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The paths the pull-request jobs set: they are part of each entry's key.
+      - name: Use the pull-request cache paths
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          prune-cache: false
+
+      - name: Fill the uv cache
+        run: |
+          uv python install ${{ env.PYTHON_VERSION }}
+          uv sync
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+
+      - name: Fill the npm cache
+        working-directory: ./apps/frontend
+        run: npm ci --ignore-scripts
+
+      - name: Make a builder
+        run: |
+          docker buildx create --name pr-caches --driver docker-container --use >/dev/null
+          docker buildx inspect pr-caches --bootstrap >/dev/null
+
+      # `cacheonly`: the layers are the product, and nothing loads or pushes an
+      # image. `mode=max` keeps the intermediate stages, so a cell skips the
+      # Kilo and guest-observer builds as well as the final stage.
+      - name: Export the sandbox layers pull requests import
+        uses: docker/build-push-action@v6
+        with:
+          builder: pr-caches
+          context: .
+          file: deploy/sandbox/Dockerfile.agent-sandbox
+          push: false
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=sandbox-amd64
+          cache-to: type=gha,scope=sandbox-amd64,mode=max
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
