@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # The control plane: the API, the reaper, the publisher.
 #
-# **It ships the host package too, and that is not an oversight.**
+# **It ships two files of the host package, and that is not an oversight.**
 # Three control-plane modules still import the runtime registry from
 # `cloud_agent_host.runtimes`: `cloud_agent/api/config.py` publishes it
 # (`registered_runtimes`, `runtime_reasoning_efforts`,
@@ -9,13 +9,18 @@
 # at claim time (`runtimes_supporting_mcp`), and
 # `cloud_agent/application/job_admission.py` validates a new job against all
 # three. `create_app()` mounts the first two through `cloud_agent/api/routes.py`,
-# so dropping `cloud_agent_host/` here produces an image whose control plane
-# cannot start. Those three names are the whole reach —
-# tests/unit/test_import_boundary.py pins them — and `runtimes.py` itself
-# imports only the standard library and `cloud_agent_shared`. The publisher's
-# patch gate and archive builders are no longer part of that reach: they live
-# in `cloud_agent_shared/git/`, which this image and the runner image both
-# ship. See MIGRATION.md, "Manifest corrections".
+# so an image without `runtimes.py` has a control plane that cannot start.
+# Those three names are the whole reach, and tests/unit/test_import_boundary.py
+# pins them. `runtimes.py` itself imports only the standard library and
+# `cloud_agent_shared`. So the package's `__init__.py` and `runtimes.py` are
+# all of it this image copies. The sandbox, network guard, workspace broker and
+# runner never run here, and are not importable here. (The whole host source
+# still travels, unimported, inside the Server-setup archive below.)
+# tests/unit/test_control_plane_deploy.py derives the needed files from the
+# imports, and fails if the COPY lines below disagree. The publisher's patch
+# gate and archive builders are no longer part of that reach: they live in
+# `cloud_agent_shared/git/`, which this image and the runner image both ship.
+# See MIGRATION.md, "Manifest corrections".
 #
 # **No agent runtimes, no docker socket, no git credentials at build time.**
 # This image never executes an agent and never checks a repository out.
@@ -61,10 +66,12 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --frozen --no-dev --no-install-project
 ENV PATH="/app/.venv/bin:$PATH"
 
-# All three packages. See the header for why this image needs the host one.
+# The control-plane and shared packages whole. From the host package, only the
+# two files the control plane imports; the header says why it needs them.
 COPY apps/backend/cloud_agent/ apps/backend/cloud_agent/
 COPY apps/backend/cloud_agent_shared/ apps/backend/cloud_agent_shared/
-COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/
+COPY apps/backend/cloud_agent_host/__init__.py apps/backend/cloud_agent_host/__init__.py
+COPY apps/backend/cloud_agent_host/runtimes.py apps/backend/cloud_agent_host/runtimes.py
 
 # Alembic owns the schema. Nothing in this service creates a table at startup,
 # so these are not optional extras — an image without them can only run against

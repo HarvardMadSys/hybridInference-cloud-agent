@@ -10,9 +10,10 @@ properties worth pinning are different:
 - **The schema is Alembic's.** Nothing creates a table at startup, so an API
   container that can start before migrations have run is a crash loop against
   tables that do not exist.
-- **The image ships the host package.** The control plane still imports the
-  runtime registry from `cloud_agent_host.runtimes`; without it this image
-  builds and then cannot start.
+- **The image ships exactly the host code it imports.** The control plane
+  still imports the runtime registry from `cloud_agent_host.runtimes`. Without
+  it this image builds and then cannot start. Nothing else from the host
+  package runs here, so nothing else is copied.
 - **Every variable it sets is one the code reads.** A compose that configures
   something nothing consumes is documentation that lies — and two such
   variables were found and removed while writing it.
@@ -24,8 +25,10 @@ rule, so the list of forbidden names has exactly one definition.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,6 +40,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "deploy" / "control-plane" / "docker-compose.yml"
 DOCKERFILE_PATH = REPO_ROOT / "deploy" / "control-plane" / "Dockerfile"
 DEPLOY_SCRIPT_PATH = REPO_ROOT / "deploy" / "control-plane" / "deploy.sh"
+
+#: Where the three packages live. The image ships the host one only in part.
+BACKEND_ROOT = REPO_ROOT / "apps" / "backend"
+HOST_PACKAGE = "cloud_agent_host"
+
+#: The Python the image ships whole, and so everything that can import from
+#: the host package there: both packages, and the migrations `migrate` runs.
+SHIPPED_WHOLE = (
+    BACKEND_ROOT / "cloud_agent",
+    BACKEND_ROOT / "cloud_agent_shared",
+    REPO_ROOT / "migrations",
+)
 
 #: Signing and encryption keys. Each must be `:?` — required — rather than
 #: `:-` — defaulted.
@@ -166,18 +181,122 @@ def test_the_cookie_and_proxy_switches_default_to_the_safe_answer(
     assert control_plane_env["AGENT_TRUST_PROXY_HEADERS"] == "${AGENT_TRUST_PROXY_HEADERS:-false}"
 
 
-def test_the_image_ships_the_host_package() -> None:
+def _imported_names(path: Path) -> set[str]:
+    """Every dotted name one file imports, with relative imports resolved.
+
+    A ``from`` import adds each name it takes as well as its module, because
+    the name may be a submodule (``from cloud_agent_host import runtimes``).
+    ``ast.walk`` reaches function bodies and ``TYPE_CHECKING`` blocks too.
+    """
+    package: list[str] = []
+    if path.is_relative_to(BACKEND_ROOT):
+        package = list(path.relative_to(BACKEND_ROOT).with_suffix("").parts[:-1])
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = package[: len(package) - node.level + 1] if node.level else []
+            module = ".".join([*base, *([node.module] if node.module else [])])
+            names.add(module)
+            names.update(f"{module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def _host_files(name: str) -> set[Path]:
+    """The host source files that importing ``name`` executes.
+
+    Each package on the way runs its ``__init__.py``. The walk stops at the
+    first module file, because whatever follows it is an attribute of it.
+    """
+    parts = name.split(".")
+    if parts[0] != HOST_PACKAGE:
+        return set()
+    files: set[Path] = set()
+    for end in range(1, len(parts) + 1):
+        stem = BACKEND_ROOT.joinpath(*parts[:end])
+        if (stem / "__init__.py").is_file():
+            files.add(stem / "__init__.py")
+            continue
+        if stem.with_suffix(".py").is_file():
+            files.add(stem.with_suffix(".py"))
+        break
+    return files
+
+
+def _host_files_the_control_plane_loads() -> set[str]:
+    """Repository paths of the host files the shipped code imports, transitively."""
+    found: set[Path] = set()
+    for root in SHIPPED_WHOLE:
+        for path in sorted(root.rglob("*.py")):
+            for name in _imported_names(path):
+                found |= _host_files(name)
+    pending = sorted(found)
+    while pending:
+        for name in _imported_names(pending.pop()):
+            for path in _host_files(name) - found:
+                found.add(path)
+                pending.append(path)
+    return {path.relative_to(REPO_ROOT).as_posix() for path in found}
+
+
+def _host_files_the_image_copies() -> set[str]:
+    """Repository paths of the host files the Dockerfile COPYs from the context."""
+    text = re.sub(r"\\\n\s*", " ", DOCKERFILE_PATH.read_text())
+    copied: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith("COPY ") or "--from=" in line:
+            continue
+        sources = [word for word in shlex.split(line)[1:] if not word.startswith("--")][:-1]
+        for source in sources:
+            target = REPO_ROOT / source
+            files = sorted(target.rglob("*.py")) if target.is_dir() else [target]
+            copied.update(path.relative_to(REPO_ROOT).as_posix() for path in files)
+    return {path for path in copied if path.startswith(f"apps/backend/{HOST_PACKAGE}/")}
+
+
+def test_the_image_ships_exactly_the_host_files_the_control_plane_imports() -> None:
     """`api/config.py`, `api/worker.py` and `application/job_admission.py`
     import the runtime registry from `cloud_agent_host.runtimes`, and
-    `create_app()` mounts the first two. An image without it builds and then
-    cannot start. (`patch_gate` was the first reason; it moved to
-    `cloud_agent_shared/git/`, which this image ships on its own.)"""
-    dockerfile = DOCKERFILE_PATH.read_text()
-    assert re.search(
-        r"^COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/",
-        dockerfile,
-        re.MULTILINE,
-    ), "the control-plane image drops cloud_agent_host/, so the control plane cannot start"
+    `create_app()` mounts the first two. An image without that module builds
+    and then cannot start. The control plane imports nothing else from the
+    host package, so the image copies nothing else. The sandbox, network
+    guard and broker do not run in this image.
+
+    Both sides are derived, not listed, and compared for equality as the
+    import-boundary allowlists are. A new host import fails the first
+    assertion until the Dockerfile copies it, and so does a host import added
+    inside `runtimes.py`. A file the control plane stopped importing fails the
+    second. (`patch_gate` was the first reason this image shipped host code;
+    it moved to `cloud_agent_shared/git/`, which this image ships whole.)
+    """
+    needed = _host_files_the_control_plane_loads()
+    copied = _host_files_the_image_copies()
+    assert needed - copied == set(), (
+        "the control plane imports host files this image does not copy, so it cannot "
+        f"start: {sorted(needed - copied)}"
+    )
+    assert copied - needed == set(), (
+        "this image copies host files nothing in it imports; copy only what the control "
+        f"plane loads: {sorted(copied - needed)}"
+    )
+
+
+def test_the_host_file_scan_sees_each_import_form(tmp_path: Path) -> None:
+    """The negative case for the check above: a lazy import and a whole module."""
+    importer = tmp_path / "importer.py"
+    importer.write_text(
+        "def lazy():\n"
+        "    from cloud_agent_host import sandbox\n"
+        "import cloud_agent_host.runner as runner\n"
+        "from cloud_agent_shared.shared_protocol import FORK_HELPER\n",
+        encoding="utf-8",
+    )
+
+    loaded = set().union(*(_host_files(name) for name in _imported_names(importer)))
+
+    host = BACKEND_ROOT / HOST_PACKAGE
+    assert loaded == {host / "__init__.py", host / "sandbox.py", host / "runner.py"}
 
 
 def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:
