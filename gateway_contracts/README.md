@@ -46,7 +46,9 @@ or verify files in the Gateway repository.
 
 Agent admission is described in `internal-lookups.openapi.yaml`; it is not a
 fourth contract. The client uses `/internal/users/{user_id}/agent-access` rather
-than the retired user-status lookup. Before connecting an older Gateway, read
+than the user-status lookup. Profile uses the existing user-status endpoint
+only to display the owner's current email; its role and status fields never
+authorize Agent access. Before connecting an older Gateway, read
 [agent access policy](../docs/agent-access-policy.md) for deployment policy,
 rollout requirements, and fail-closed behavior.
 

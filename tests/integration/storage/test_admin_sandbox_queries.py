@@ -156,6 +156,200 @@ async def test_inventory_removal_is_reversible_audited_and_preserves_native_stat
     assert [row["action"] for row in logs] == ["agent.sandbox.archive", "agent.sandbox.restore"]
     assert all(row["actor_id"] == "admin:operator" for row in logs)
     assert all(row["target_user_id"] == origin["user_id"] for row in logs)
+    assert all("stale_host_removal" not in json.loads(row["details"]) for row in logs)
+
+
+@pytest.mark.parametrize(
+    ("state", "host_observation"),
+    [
+        ("running", "missing"),
+        ("running", "offline"),
+        ("running", "no_heartbeat"),
+        ("provisioning", "missing"),
+        ("starting", "missing"),
+        ("stopping", "missing"),
+        ("stopped", "offline"),
+        ("stopped_dirty", "missing"),
+        ("lost", "missing"),
+    ],
+)
+async def test_stale_host_removal_only_changes_audited_inventory_visibility(
+    db, store, state, host_observation
+):
+    origin = await seed(db, store, "asbx_stale_host", state=state)
+    await member(db, "asbx_stale_host", origin, 0)
+    async with db.acquire() as conn:
+        if host_observation != "missing":
+            await conn.execute(
+                """
+                INSERT INTO agent_runner_hosts (host, status, last_heartbeat_at)
+                VALUES ('runner-one', 'offline', CASE WHEN $1
+                    THEN clock_timestamp() - INTERVAL '2 minutes' END)
+                """,
+                host_observation == "offline",
+            )
+        group_before = dict(
+            await conn.fetchrow("SELECT * FROM agent_sandboxes WHERE id='asbx_stale_host'")
+        )
+        members_before = await conn.fetch(
+            "SELECT * FROM agent_thread_sandbox_memberships WHERE sandbox_id='asbx_stale_host'"
+        )
+        job_before = await conn.fetchrow("SELECT * FROM agent_jobs WHERE id=$1", origin["id"])
+
+    assert await archive_request(store, "asbx_stale_host", allow_stale_host=True) == "accepted"
+    hidden = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=100, state="all")
+    assert hidden.sandboxes == [] and hidden.total_count == 0
+    included = await store.admin_sandboxes.list_sandboxes(
+        cursor=None, limit=100, state="all", include_archived=True
+    )
+    assert included.total_count == 1 and included.sandboxes[0].state == state
+
+    async with db.acquire() as conn:
+        group_after = dict(
+            await conn.fetchrow("SELECT * FROM agent_sandboxes WHERE id='asbx_stale_host'")
+        )
+        assert (
+            await conn.fetch(
+                "SELECT * FROM agent_thread_sandbox_memberships WHERE sandbox_id='asbx_stale_host'"
+            )
+            == members_before
+        )
+        assert (
+            await conn.fetchrow("SELECT * FROM agent_jobs WHERE id=$1", origin["id"]) == job_before
+        )
+        audit = await conn.fetchval(
+            "SELECT details FROM agent_admin_audit_log WHERE action='agent.sandbox.archive'"
+        )
+        trajectory = await conn.fetchval(
+            "SELECT details FROM agent_sandbox_events "
+            "WHERE sandbox_id='asbx_stale_host' AND event_type='admin_inventory_archived'"
+        )
+    assert group_after.pop("archived_at") is not None
+    assert group_before.pop("archived_at") is None
+    group_before.pop("updated_at")
+    group_after.pop("updated_at")
+    assert group_after == group_before
+    assert json.loads(audit)["stale_host_removal"] is True
+    assert json.loads(trajectory)["stale_host_removal"] is True
+    assert await archive_request(store, "asbx_stale_host", archived=False) == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("heartbeat_age", "result"), [(0, "host_online"), (89, "host_online"), (91, "accepted")]
+)
+async def test_stale_host_removal_rechecks_heartbeat_freshness_in_storage(
+    db, store, heartbeat_age, result
+):
+    await seed(db, store, "asbx_heartbeat")
+    # An offline status does not establish staleness: the actual heartbeat is
+    # the authority, including observations immediately around the 90s cutoff.
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_runner_hosts (host, status, last_heartbeat_at)
+            VALUES ('runner-one', 'offline', clock_timestamp() - make_interval(secs => $1))
+            """,
+            heartbeat_age,
+        )
+    assert await archive_request(store, "asbx_heartbeat", allow_stale_host=True) == result
+    detail = await store.admin_sandboxes.detail("asbx_heartbeat")
+    assert detail is not None
+    assert (detail.sandbox.archived_at is not None) == (result == "accepted")
+
+
+async def test_stale_host_removal_refuses_a_host_that_heartbeats_after_review(db, store):
+    await seed(db, store, "asbx_host_returned")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_runner_hosts (host, status, last_heartbeat_at)
+            VALUES ('runner-one', 'offline', clock_timestamp() - INTERVAL '2 minutes')
+            """
+        )
+    reviewed = await store.admin_sandboxes.detail("asbx_host_returned")
+    assert reviewed is not None
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET last_heartbeat_at=clock_timestamp(), status='online' "
+            "WHERE host='runner-one'"
+        )
+    assert (
+        await store.sandbox.set_admin_archived(
+            sandbox_id=reviewed.sandbox.id,
+            generation=reviewed.sandbox.generation,
+            container_id=reviewed.sandbox.container_id,
+            last_activity_at=reviewed.sandbox.last_activity_at,
+            archived=True,
+            actor_id="admin:operator",
+            admin_ip="127.0.0.1",
+            allow_stale_host=True,
+        )
+        == "host_online"
+    )
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT archived_at FROM agent_sandboxes WHERE id='asbx_host_returned'"
+            )
+            is None
+        )
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "active_operation_count=1",
+        "snapshot_state='pending'",
+        "snapshot_state='snapshotting'",
+        "snapshot_state='importing'",
+        "deletion_state='pending'",
+    ],
+)
+async def test_stale_host_removal_keeps_operation_snapshot_and_deletion_fences(db, store, change):
+    await seed(db, store, "asbx_stale_busy")
+    async with db.acquire() as conn:
+        await conn.execute(f"UPDATE agent_sandboxes SET {change} WHERE id='asbx_stale_busy'")
+    assert await archive_request(store, "asbx_stale_busy", allow_stale_host=True) == "busy"
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT archived_at FROM agent_sandboxes WHERE id='asbx_stale_busy'"
+            )
+            is None
+        )
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
+
+
+async def test_stale_host_removal_keeps_claimed_job_and_active_membership_fences(db, store):
+    origin = await seed(db, store, "asbx_stale_claimed")
+    await member(db, "asbx_stale_claimed", origin, 0)
+    _, attempt_id, _ = await _seed_attempt(db, store, job=origin, grant_id=None)
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state='running' WHERE id=$1", origin["id"])
+    assert await archive_request(store, "asbx_stale_claimed", allow_stale_host=True) == "busy"
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state='queued' WHERE id=$1", origin["id"])
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships SET active_attempt_id=$1 "
+            "WHERE sandbox_id='asbx_stale_claimed'",
+            attempt_id,
+        )
+    assert await archive_request(store, "asbx_stale_claimed", allow_stale_host=True) == "busy"
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
+
+
+@pytest.mark.parametrize(
+    "fence", [{"generation": 2}, {"container_id": "replacement"}, {"last_activity_at": START}]
+)
+async def test_stale_host_removal_keeps_reviewed_identity_fence(db, store, fence):
+    await seed(db, store, "asbx_stale_review")
+    assert (
+        await archive_request(store, "asbx_stale_review", allow_stale_host=True, **fence) == "stale"
+    )
+    async with db.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
 
 
 async def test_removed_inventory_pagination_and_counts_use_same_visibility(db, store):
@@ -217,10 +411,14 @@ async def test_inventory_controls_reject_stale_review(db, store, archived, fence
 
 
 @pytest.mark.parametrize("archived", [False, True])
-async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived):
-    await seed(db, store, "asbx_audit", state="stopped")
+@pytest.mark.parametrize("allow_stale_host", [False, True])
+async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived, allow_stale_host):
+    await seed(db, store, "asbx_audit", state="running" if allow_stale_host else "stopped")
     if not archived:
-        assert await archive_request(store, "asbx_audit") == "accepted"
+        assert (
+            await archive_request(store, "asbx_audit", allow_stale_host=allow_stale_host)
+            == "accepted"
+        )
     action = "agent.sandbox.archive" if archived else "agent.sandbox.restore"
     async with db.acquire() as conn:
         await conn.execute(
@@ -229,7 +427,9 @@ async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived
         )
     try:
         with pytest.raises(asyncpg.CheckViolationError):
-            await archive_request(store, "asbx_audit", archived=archived)
+            await archive_request(
+                store, "asbx_audit", archived=archived, allow_stale_host=allow_stale_host
+            )
         detail = await store.admin_sandboxes.detail("asbx_audit")
         assert detail is not None and (detail.sandbox.archived_at is None) == archived
     finally:
@@ -239,10 +439,16 @@ async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived
             )
 
 
-async def test_only_fenced_running_observation_restores_removed_group(db, store):
-    origin = await seed(db, store, "asbx_resumed", state="stopped")
+@pytest.mark.parametrize(("state", "allow_stale_host"), [("stopped", False), ("running", True)])
+async def test_only_fenced_running_observation_restores_removed_group(
+    db, store, state, allow_stale_host
+):
+    origin = await seed(db, store, "asbx_resumed", state=state)
     await member(db, "asbx_resumed", origin, 0)
-    assert await archive_request(store, "asbx_resumed") == "accepted"
+    assert (
+        await archive_request(store, "asbx_resumed", allow_stale_host=allow_stale_host)
+        == "accepted"
+    )
     observation = {
         "thread_id": origin["thread_id"],
         "host": "runner-one",
@@ -257,10 +463,9 @@ async def test_only_fenced_running_observation_restores_removed_group(db, store)
             )
             is None
         )
-    assert (
-        await store.sandbox.reconcile_thread_sandbox_observation(**observation, running=False)
-        is None
-    )
+    assert await store.sandbox.reconcile_thread_sandbox_observation(
+        **observation, running=False
+    ) == ("stopped" if state == "running" else None)
     detail = await store.admin_sandboxes.detail("asbx_resumed")
     assert detail is not None and detail.sandbox.archived_at is not None
     assert (

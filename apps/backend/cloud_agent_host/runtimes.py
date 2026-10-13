@@ -93,7 +93,7 @@ class NormalizedEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Bound the report before it crosses the broker or worker transport."""
+        """Bound the report before it crosses the sandbox manager or worker transport."""
         object.__setattr__(self, "payload", bound_event_payload(self.payload))
 
 
@@ -385,6 +385,9 @@ class AgentRuntime:
             server_id: {
                 "type": "http",
                 "url": url,
+                # Use the same bounded window for per-server request/tool
+                # timers and the environment's overall/idle timers.
+                "timeout": 1560000,
                 "headers": {"Authorization": f"Bearer ${{{MCP_TOKEN_ENV}}}"},
             }
             for server_id, url in cls.relay_urls(config, gateway_base_url=gateway_base_url).items()
@@ -565,6 +568,11 @@ class ClaudeCodeRuntime(AgentRuntime):
             "ANTHROPIC_BASE_URL": gateway_base_url.rstrip("/").removesuffix("/v1"),
             "ANTHROPIC_API_KEY": credential,
             "MCP_TOOL_TIMEOUT": "1560000",
+            # Remote MCP has a separate five-minute idle timer. The relay can
+            # wait ten minutes for owner approval without sending progress;
+            # keep that wait within the overall tool timeout so the CLI receives
+            # the approval outcome instead of abandoning a still-pending call.
+            "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "1560000",
             # Referenced by the MCP config above rather than written into it,
             # so the job token never appears in a process argument.
             # The MCP relay's token, which is *not* the inference credential
@@ -867,13 +875,23 @@ class ClaudeCodeRuntime(AgentRuntime):
         # including failed queries. It supersedes provisional block usage.
         usage_fields = {"usage": event.get("usage") or None, "usage_scope": "attempt"}
         if event.get("is_error") or event.get("terminal_reason") == "api_error":
+            # An API failure arrives as subtype "success" with the reason in
+            # ``result``; the error subtypes carry it in ``errors`` instead
+            # (both verified against the pinned 2.1.220).
+            errors = event.get("errors")
+            reasons = [str(item) for item in errors if item] if isinstance(errors, list) else []
+            text = (
+                str(event.get("result") or "")
+                or "; ".join(reasons)
+                or str(event.get("subtype") or "")
+            )
             return NormalizedEvent(
                 ERROR,
                 {
                     "subtype": event.get("subtype"),
                     "terminal_reason": event.get("terminal_reason"),
                     "api_error_status": event.get("api_error_status"),
-                    "text": str(event.get("result") or "")[:2000],
+                    "text": text[:2000],
                     **usage_fields,
                 },
             )

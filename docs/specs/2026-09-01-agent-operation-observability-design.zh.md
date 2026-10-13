@@ -136,7 +136,7 @@ agent_turn op_turn
         └── process subtree
 ```
 
-`operation_id` 由 control plane、Supervisor 或 workspace broker 生成，不能由不可信 repository 自行声明。
+`operation_id` 由 control plane、Supervisor 或 sandbox manager 生成，不能由不可信 repository 自行声明。
 
 ## 5. 三类事实
 
@@ -431,7 +431,7 @@ Census 是 **turn cursor 之后观察到的进程启动**，不是“当时已�
 Hook 标记的采用规则（2026-09-22 起）：
 
 1. Kata 路径的标记由 guest observer 记录在 guest 单调时钟上，与进程事件同一时钟。采用只验证配对：标记指向本 turn 发出的调用、恰好一对 pre/post、pre 早于 post。
-2. 消息级窗口不再作为标记的边界。broker 在读到那一行时才打时间戳，短调用可能在这一行还在管道里时就已经跑完。窗口相对标记的偏差按调用记入 broker 日志：`tool marks thread=… calls=[seq:tool:status:lag=open/close:msg=…:exact=…]`，status 取 `applied`、`no_marks`、`unpaired`、`duplicate`、`misordered`、`call_open`、`outside_window` 之一；指向本 turn 没有保留窗口的标记计入 `unknown_calls`。
+2. 消息级窗口不再作为标记的边界。sandbox manager 在读到那一行时才打时间戳，短调用可能在这一行还在管道里时就已经跑完。窗口相对标记的偏差按调用记入 sandbox manager 日志：`tool marks thread=… calls=[seq:tool:status:lag=open/close:msg=…:exact=…]`，status 取 `applied`、`no_marks`、`unpaired`、`duplicate`、`misordered`、`call_open`、`outside_window` 之一；指向本 turn 没有保留窗口的标记计入 `unknown_calls`。
 3. 非 Kata 的墙钟标记文件保留旧规则：两个标记必须落在消息窗口内。
 4. 采用了 guest 标记的窗口在归属进程时直接比较 guest 时钟，不再加时钟桥误差；消息级窗口仍按误差放宽。
 
@@ -741,7 +741,7 @@ Shared workspace 下，container group total 与 member/turn total 必须分开�
 
 - 统一 turn/tool/terminal/file/Git/Fork/snapshot operation id；
 - Control plane intent + host monotonic receipt；
-- Workspace broker/Supervisor generation fence；
+- Sandbox manager/Supervisor generation fence；
 - UI/API 暴露 boundary source 与 missing reason。
 
 ### OBS-2：Member process accounting

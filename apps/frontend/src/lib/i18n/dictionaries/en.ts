@@ -234,77 +234,143 @@ export const en = {
   'sidebar.dateThisYear': '{month}/{day}',
   'sidebar.dateOtherYear': '{month}/{day}/{year}',
 
+  // ── Homepage profile ────────────────────────────────────────────────────
+  'home.suggestions.title': 'Suggestions for your next request',
+  'home.suggestions.description':
+    'Practical ways to improve your requests, based on your recent activity across projects.',
+  'home.suggestions.loading': 'Loading your suggestions…',
+  'home.suggestions.error': 'Could not load your suggestions. You can still start a task.',
+  'home.suggestions.empty': 'Suggestions will appear when your activity provides enough context.',
+  'home.suggestions.retry': 'Retry suggestions',
+  'home.memorySettings': 'Manage user memory',
+  'home.memoryPaused':
+    'Automatic user memory is paused. Existing suggestions and your avatar theme are kept until you enable updates or clear memory in settings.',
+  'home.avatar.title': 'How your avatar is generated',
+  'home.avatar.choice':
+    'Your uploaded profile image is your avatar. When you have no uploaded image, your Pokémon companion is used instead. You can change or remove your image in My Settings.',
+  'home.avatar.generation':
+    'Your Pokémon avatar is assembled from layered illustrated shapes, without a photo or an image-generation model. Its habitat and work badges come from English keywords in up to your 50 most recent eligible requests across projects.',
+  'home.avatar.character': 'Your Pokémon companion',
+  'home.avatar.characterDescription':
+    'Your account gets Pikachu, Bulbasaur, Charmander, Squirtle, Eevee, Gengar, or Jigglypuff with a consistent pose and expression. Silhouette, ears, tail, and face are layered together; familiar Pokémon colors stay the same.',
+  'home.avatar.theme': 'Habitat palette',
+  'home.avatar.themeDescription':
+    'The backdrop, halo, and platform take their colors from your most frequently detected work area, creating a little habitat around your companion.',
+  'home.avatar.badges': 'Work orbit',
+  'home.avatar.badgesDescription':
+    'The largest badge at the top right shows your leading work area; the left badge shows the second. Smaller badges below show the rest of your recent mix. They describe topics, not skill levels or achievements.',
+  'home.avatar.default': 'Default habitat',
+  'home.avatar.defaultDescription':
+    'When no work area is recognized, your companion keeps an account-specific default habitat with decorative details instead of work badges.',
+  'home.avatar.legend': 'Work area colors and badges',
+  'home.avatar.legend.backend': 'Code brackets · Blue · Backend and APIs',
+  'home.avatar.legend.frontend': 'Window · Rose · Frontend and UI',
+  'home.avatar.legend.testing': 'Checkmark · Green · Testing',
+  'home.avatar.legend.debugging': 'Bug · Gold · Reliability and debugging',
+  'home.avatar.legend.security': 'Shield · Violet · Security',
+  'home.avatar.legend.data': 'Database · Teal · Data and storage',
+  'home.avatar.legend.deployment': 'Cloud · Peach · Deployment and infrastructure',
+  'home.avatar.controls':
+    'Turning off automatic user memory pauses habitat and badge updates. Clearing user memory restores the default habitat. Both keep the same Pokémon, pose, and expression. You can manage both in user memory settings.',
+
   // ── Settings ────────────────────────────────────────────────────────────
-  'settings.title': 'Setting',
-  'settings.description': 'Manage your connections, skills, memory, and notifications.',
-  'settings.memory.consolidate': 'Consolidate',
-  'settings.memory.consolidating': 'Consolidating…',
-  'settings.memory.consolidationModel': 'Consolidation model',
-  'settings.memory.modelsLoading': 'Loading available models…',
-  'settings.memory.modelsError': 'Could not load models for consolidation. Please try again.',
-  'settings.memory.modelsRetry': 'Retry models',
-  'settings.memory.noModels': 'No models available for consolidation.',
-  'settings.memory.scope': 'Applies to',
-  'settings.memory.repoScope': 'Repo: {repo}',
-  'settings.memory.userScope': 'User · all projects',
-  'settings.memory.bounds':
-    '{count}/12 memories · {characters}/2,400 characters · at most 3 user memories',
-  'settings.memory.consolidateDescription':
-    'Choose a model to merge duplicates and choose repo or user scope. Uses your model quota. Existing memory is kept if the model returns no memories.',
-  'settings.memory.title': 'User memory',
+  'settings.title': 'My Settings',
+  'settings.description': 'Manage your profile, connections, skills, memory, and notifications.',
+  'settings.profile.title': 'Profile',
+  'settings.profile.email': 'Email',
+  'settings.profile.image': 'Profile Image',
+  'settings.profile.imageAlt': 'Your profile image',
+  'settings.profile.upload': 'Upload image',
+  'settings.profile.remove': 'Remove image',
+  'settings.profile.imageHelp': 'PNG, JPEG, or WebP up to 2 MB',
+  'settings.profile.defaultImageHelp':
+    'Your Pokémon companion is used when you have no uploaded image.',
+  'settings.profile.firstName': 'First Name',
+  'settings.profile.lastName': 'Last Name',
+  'settings.profile.save': 'Save',
+  'settings.profile.saving': 'Saving…',
+  'settings.profile.saved': 'Profile saved.',
+  'settings.profile.loading': 'Loading profile…',
+  'settings.profile.reading': 'Reading image…',
+  'settings.profile.signIn': 'Sign in to manage your profile.',
+  'settings.profile.retry': 'Try again',
+  'settings.profile.reload': 'Reload profile',
+  'settings.profile.error.load': 'Could not load your profile. Please try again.',
+  'settings.profile.error.save':
+    'Could not save your profile. Your edits are kept. Please try again.',
+  'settings.profile.error.conflict':
+    'Your profile changed elsewhere. Reload to review it before saving. Reloading replaces your unsaved edits.',
+  'settings.profile.imageError.type': 'Choose a PNG, JPEG, or WebP image.',
+  'settings.profile.imageError.size': 'Choose a nonempty image up to 2 MB.',
+  'settings.profile.imageError.read':
+    'Could not use this image. Choose a valid PNG, JPEG, or WebP with at most 16 million pixels.',
+  'settings.memory.title': 'Memory',
   'settings.memory.description':
-    'Your avatar and recent-work profile reflect your activity across projects. User preferences apply to all projects: they come from requests without a project, or preferences explicitly marked “across all projects”. Project-specific context is saved separately below.',
-  'settings.memory.automatic': 'Automatically build memory',
-  'settings.memory.enabled':
-    'Your avatar’s theme, user memory, and suggestions update automatically from your requests. Project memory has its own settings.',
-  'settings.memory.disabled':
-    'Avatar theme updates, memory updates, and user personalization are paused. Project memory keeps its own settings.',
-  'settings.memory.loading': 'Loading your memory…',
-  'settings.memory.error': 'Could not load or update your memory. Please try again.',
-  'settings.memory.retry': 'Retry',
+    'The agent learns your preferences and project context from requests and uses them in later tasks.',
+  'settings.memory.tabs': 'Memory scope',
+  'settings.memory.userTab': 'User memory',
+  'settings.memory.projectTab': 'Project memory',
+  'settings.memory.hint': 'Applies to every project.',
   'settings.memory.signIn': 'Sign in to see your memory.',
-  'settings.memory.updated': 'Memory updated {date}',
+  'settings.memory.loading': 'Loading memory…',
+  'settings.memory.error': 'Could not load or update memory.',
+  'settings.memory.retry': 'Retry',
+  'settings.memory.automatic': 'Remember automatically',
+  'settings.memory.updated': 'Updated {date}',
   'settings.memory.refresh': 'Refresh',
   'settings.memory.refreshing': 'Refreshing…',
-  'settings.memory.clear': 'Clear memory',
-  'settings.memory.confirmTitle': 'Clear user memory and suggestions?',
+  'settings.memory.consolidate': 'Consolidate',
+  'settings.memory.consolidateTitle': 'Consolidate memory',
+  'settings.memory.consolidateDescription':
+    'Merges duplicates and rechecks where each memory applies. Uses your model quota.',
+  'settings.memory.consolidationModel': 'Model',
+  'settings.memory.consolidateNow': 'Consolidate now',
+  'settings.memory.consolidating': 'Consolidating…',
+  'settings.memory.modelsLoading': 'Loading models…',
+  'settings.memory.modelsError': 'Could not load models.',
+  'settings.memory.modelsRetry': 'Reload models',
+  'settings.memory.noModels': 'No models available',
+  'settings.memory.clear': 'Clear',
+  'settings.memory.confirmTitle': 'Clear user memory?',
   'settings.memory.confirmDescription':
-    'Clearing resets your avatar’s work theme while keeping its base character, and removes user memory and suggestions. Project memory is kept. Old requests won’t be used again for user memory. Future requests can build new memory and update the avatar when enabled.',
-  'settings.memory.confirmClear': 'Confirm clear memory',
+    'Removes user memories, recent work, and suggestions, and resets your avatar’s theme. Past requests won’t be learned again. Project memory is not affected.',
+  'settings.memory.confirmClear': 'Yes, clear',
   'settings.memory.clearing': 'Clearing…',
   'settings.memory.cancel': 'Cancel',
+  'settings.memory.memories': 'Saved memories',
+  'settings.memory.bounds': '{count}/12 · {characters}/2,400 characters · up to 3 for all projects',
+  'settings.memory.emptyMemory': 'No memories yet.',
   'settings.memory.portrait': 'Recent work',
   'settings.memory.projects': 'Projects',
   'settings.memory.focusAreas': 'Focus areas',
   'settings.memory.runtime': 'Preferred runtime',
   'settings.memory.model': 'Preferred model',
-  'settings.memory.emptyPortrait':
-    'Recent work will appear after you send requests with memory enabled.',
-  'settings.memory.memories': 'Saved user memory',
-  'settings.memory.entriesDescription':
-    'Edit or remove saved memories. Your changes stay in place when memory refreshes.',
-  'settings.memory.entryLabel': 'Saved memory {number}',
+  'settings.memory.emptyPortrait': 'Appears after a few requests.',
+  'settings.memory.suggestions': 'Suggestions',
+  'settings.memory.emptySuggestions': 'None yet.',
+  'settings.memory.entryLabel': 'Memory {number}',
+  'settings.memory.preference': 'Preference',
+  'settings.memory.task': 'Task context',
+  'settings.memory.userScope': 'All projects',
+  'settings.memory.repoScope': 'This repository ({repo})',
+  'settings.memory.source': 'Source task',
   'settings.memory.edited': 'Edited',
-  'settings.memory.entryProject': 'Project: {project}',
-  'settings.memory.noProject': 'No project',
-  'settings.memory.entryDate': 'Created {date}',
-  'settings.memory.noDate': 'Date unavailable',
-  'settings.memory.savedText': 'Currently saved text',
+  'settings.memory.editEntry': 'Edit',
+  'settings.memory.removeEntry': 'Remove',
+  'settings.memory.savedText': 'Saved text',
   'settings.memory.lastSavedText': 'Last saved text',
-  'settings.memory.editEntry': 'Edit memory',
   'settings.memory.editContent': 'Memory content',
   'settings.memory.entryLimit': '{count}/240 characters',
-  'settings.memory.saveEntry': 'Save memory',
-  'settings.memory.removeEntry': 'Remove memory',
+  'settings.memory.scope': 'Applies to',
+  'settings.memory.saveEntry': 'Save',
   'settings.memory.removeTitle': 'Remove this memory?',
-  'settings.memory.removeDescription':
-    'This memory won’t return when memory refreshes. Its source task remains available.',
-  'settings.memory.confirmRemove': 'Confirm remove memory',
+  'settings.memory.removeDescription': 'It won’t come back when memory refreshes.',
+  'settings.memory.confirmRemove': 'Yes, remove',
   'settings.memory.refreshEntry': 'Refresh memory',
   'settings.memory.entryConflict':
     'Saved memory changed. Refresh to review the latest saved text, then save your draft again.',
   'settings.memory.entryInvalid':
-    'Could not save this memory. Use nonempty text up to 500 characters and leave out credentials. Preferences must apply to future tasks.',
+    'Could not save this memory. Use nonempty text up to 240 characters and leave out credentials. Preferences must apply to future tasks.',
   'settings.memory.entryMissing':
     'This memory is no longer available. Refresh to review your saved memories.',
   'settings.memory.entryUnavailable':
@@ -314,48 +380,21 @@ export const en = {
   'settings.memory.removeConflict':
     'Saved memory changed. Refresh to review the latest memory, then confirm removal again.',
   'settings.memory.removeError': 'Could not remove this memory. Please try again.',
-  'settings.memory.preference': 'Preference',
-  'settings.memory.task': 'Task context',
-  'settings.memory.source': 'View source task',
-  'settings.memory.emptyMemory': 'No saved memory yet.',
-  'settings.memory.suggestions': 'Suggestions for future tasks',
-  'settings.memory.emptySuggestions':
-    'Suggestions will appear when your activity provides enough context.',
-  'settings.projectMemory.title': 'Project memory',
-  'settings.projectMemory.description':
-    'Each repository has its own preferences and task context, used only for that project. Project preferences take priority over user preferences when they conflict. Its memory controls are independent of user memory and other projects.',
-  'settings.projectMemory.signIn': 'Sign in to see your project memory.',
-  'settings.projectMemory.project': 'Repository (owner/repo)',
+  'settings.projectMemory.hint':
+    'Used only in this repository, and takes priority over user memory when they conflict.',
+  'settings.projectMemory.project': 'Repository',
   'settings.projectMemory.select': 'Select a repository',
   'settings.projectMemory.refreshProjects': 'Refresh repositories',
-  'settings.projectMemory.loadingProjects': 'Loading your repositories…',
-  'settings.projectMemory.projectsError':
-    'Could not load your repositories. Refresh repositories to try again.',
+  'settings.projectMemory.loadingProjects': 'Loading repositories…',
+  'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects':
-    'Project memory will appear after you send a request in a repository.',
-  'settings.projectMemory.loading': 'Loading project memory…',
-  'settings.projectMemory.error':
-    'Could not load or update this project’s memory. Please try again.',
-  'settings.projectMemory.automatic': 'Automatically build project memory',
-  'settings.projectMemory.enabled':
-    'Memory and suggestions update automatically for this repository.',
-  'settings.projectMemory.disabled':
-    'Memory updates and personalization are paused for this repository. User memory and other projects keep their own settings.',
-  'settings.projectMemory.refresh': 'Refresh project memory',
-  'settings.projectMemory.consolidate': 'Consolidate project memory',
-  'settings.projectMemory.bounds': '{count}/12 project memories · {characters}/2,400 characters',
-  'settings.projectMemory.clear': 'Clear project memory',
+    'Project memory appears after you send a request in a repository.',
+  'settings.projectMemory.bounds': '{count}/12 · {characters}/2,400 characters',
   'settings.projectMemory.confirmTitle': 'Clear memory for {repo}?',
   'settings.projectMemory.confirmDescription':
-    'This removes only the selected project’s memory and suggestions. Your user memory, avatar, and other projects are kept. Old requests won’t be reused for this project’s memory. Future requests can build new memory when enabled.',
-  'settings.projectMemory.confirmClear': 'Confirm clear project memory',
+    'Removes this repository’s memories and suggestions. Past requests won’t be learned again. User memory and other repositories are not affected.',
   'settings.projectMemory.portrait': 'Project profile',
-  'settings.projectMemory.emptyPortrait':
-    'This project’s profile will appear after you send requests with project memory enabled.',
-  'settings.projectMemory.memories': 'Saved project memory',
-  'settings.projectMemory.emptyMemory': 'No saved memory for this project yet.',
-  'settings.projectMemory.emptySuggestions':
-    'Suggestions will appear when this project’s activity provides enough context.',
+  'settings.projectMemory.details': 'Profile and suggestions',
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -431,6 +470,8 @@ export const en = {
   'conversation.executionHistory': 'Execution history ({count})',
   'conversation.viewingExecution': 'Viewing execution {number}',
   'conversation.executionHistoryHint': 'Select a past execution to view its recorded activity.',
+  'conversation.markdownImage': 'Image: {alt}',
+  'conversation.markdownImageUntitled': 'Image',
 
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': 'Archived sessions',
@@ -514,9 +555,9 @@ export const en = {
   'archive.order': 'Recently archived first',
 
   // ── Composer ────────────────────────────────────────────────────────────
-  'composer.avatarAlt': 'Your automatically generated illustrated avatar',
+  'composer.avatarAlt': 'Your Pokémon companion avatar',
   'composer.avatarDescription':
-    'Your base character stays the same while colors and details reflect your recent work.',
+    'Your Pokémon stays the same while its habitat and orbiting badges reflect your recent work.',
   'composer.heading': 'What should the agent do?',
   'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.subheadingFirstVisit':

@@ -510,6 +510,37 @@ def test_non_utf8_blob_secrets_compare_exact_matches_and_counts():
     assert scan_blob_secrets(b"\0" + credential.replace(b"a", b"b"), baseline) == ["github_token"]
 
 
+@pytest.mark.parametrize(
+    "path", ["a\nb.txt", "a\rb.txt", "a\tb.txt", "a\x1bb.txt", "a\x7fb.txt", "a\x85b.txt"]
+)
+def test_a_staged_path_with_a_control_character_is_refused(path):
+    """Git stores any byte but NUL in a name; the publisher renders names into the PR."""
+    credential = "gh" + "p_" + "a" * 36
+    result = validate_change_set(["ok.txt", path, f"{credential}\n.txt"])
+    assert not result.ok
+    assert "2 path(s) containing control characters" in result.reason
+    # Counted, not echoed: a refused name may be exactly what cannot be shown.
+    assert path not in result.reason
+    assert credential not in result.reason
+
+
+def test_a_quoted_control_character_is_seen_before_apply():
+    """Every single-letter escape git writes decodes to its control character."""
+    for escape in "abfnrtv":
+        quoted = f'"a/x\\{escape}y"'
+        patch = (
+            f"diff --git {quoted} {quoted.replace('a/', 'b/')}\n"
+            f"--- {quoted}\n+++ {quoted.replace('a/', 'b/')}\n@@ -0,0 +1 @@\n+z\n"
+        )
+        result = validate_patch(patch)
+        assert not result.ok, escape
+        assert "control characters" in result.reason
+
+
+def test_ordinary_unicode_paths_are_not_control_characters():
+    assert validate_change_set(["docs/über.md", "docs/文件.md", "docs/a b.md"]).ok
+
+
 def test_actual_staged_paths_are_also_scanned_for_credentials():
     credential = "gh" + "p_" + "a" * 36
     result = validate_change_set([f"{credential}.bin"])

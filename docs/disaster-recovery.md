@@ -49,17 +49,19 @@ Preserve all of the following privately:
 - Both deployment roots' `.env` and mounted credential files. Preserve
   `AGENT_SETTINGS_ENCRYPTION_KEY`, or the original `AGENT_SESSION_SECRET` when
   used as its fallback; also preserve source-control and compute encryption
-  keys, control/session signing secrets, broker credentials and GitHub App keys.
+  keys, control/session signing secrets, sandbox manager credentials and GitHub App keys.
   Saved settings can hold some of these keys, but they still require the
   settings root key to decrypt. Generating new keys does not recover old data.
 - Each host's persisted enrollment credential directory and deployment identity,
   `.deployed-sha`, readiness marker, namespace/project, tunnel SSH credentials
   and verified `known_hosts`, and host runtime/storage configuration. The
   credential must match the restored host row's credential hash.
-- The complete retained Docker data-root and any separate containerd state
-  required by that host's image store. Preserve ownership, modes, hard links,
-  extended attributes and sparse files using storage-driver-supported backup
-  procedures. Keep the thread-to-host-to-container identities in the matching
+- The complete retained Docker store and the containerd image store. With the
+  supported bind layout those trees are `<disk>/docker` and
+  `<disk>/containerd`, while `docker info` still reports
+  `DockerRootDir=/var/lib/docker`. Copy both with Docker and containerd
+  stopped. Preserve ownership, modes, hard links, extended attributes and
+  sparse files. Keep the thread-to-host-to-container identities in the matching
   database; exporting a container filesystem alone omits required metadata.
 - The verified `release.json`, its reviewed pinned SHA-256, `recipe.tar.gz`,
   extracted recipe, helper dependencies and image digests for both the current
@@ -101,7 +103,7 @@ safe. Follow [retained Docker storage](operations.md#retained-docker-storage-on-
    and verify the archive and dump are readable before treating it as usable.
 4. Start the original daemons and both listeners, then start host stacks and run
    host checks; their live probes require the API and MCP listener. Verify
-   identity, broker access and readiness. Restore only the
+   identity, sandbox manager access and readiness. Restore only the
    drain states changed for this maintenance window, then reopen admissions.
    A failed backup does not authorize deleting or replacing the source state.
 
@@ -137,7 +139,7 @@ native-session restore.
    deployment sequence to bootstrap listeners before host live checks. After
    host state and live checks pass, restore only hosts previously eligible for
    work to `online`; the exact-generation readiness fence requires an online
-   host and reverse-broker probes. This can resume work already queued in the
+   host and reverse-sandbox-manager probes. This can resume work already queued in the
    restored database. Keep external ingress closed while completing activation
    and checking the restored system. Verify sign-in, file access,
    retained continuation, separate Fork context, a queued turn, cancellation,
@@ -194,4 +196,4 @@ an explicitly tested compatible recipe or full stopped-writer recovery.
 
 Read both `.deployed-sha` files and host readiness after success. Record the
 incident as a failed candidate rollout even when the previous release serves
-again. Verify retained continuation and broker access before reopening traffic.
+again. Verify retained continuation and sandbox manager access before reopening traffic.

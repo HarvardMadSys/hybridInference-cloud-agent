@@ -27,16 +27,18 @@ class SandboxRepository(Protocol):
         last_activity_at: datetime,
         actor_id: str,
         admin_ip: str,
-        broker_confirmed_stopped: bool = False,
+        sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
+        discard: bool = False,
     ) -> str:
-        """Fence an idle stopped sandbox for verified S3 archival and deletion.
+        """Fence an idle stopped sandbox for deletion.
 
-        A durable request closes admission before host export. No native state
-        or ledger row is removed; only a verified host receipt may finalize
-        physical container deletion and mark its native context lost. An admin
-        recovery may also repair a stale RUNNING row, but only after the API
-        independently proves the exact host container is stopped or dead, and idle.
+        A durable request closes admission before the host removes Docker. The
+        default path exports and verifies an S3 archive first. ``discard``
+        removes the exact stopped or dead container without uploading it. No native
+        state or ledger row is removed until the host confirms that removal.
+        An admin recovery may also repair a stale RUNNING row, but only after
+        the API independently proves the exact host container is stopped or dead, and idle.
         """
         ...
 
@@ -72,6 +74,18 @@ class SandboxRepository(Protocol):
         container_id: str,
     ) -> bool:
         """Retain the archive and ledger after an exact host deletion acknowledgement."""
+        ...
+
+    async def complete_admin_sandbox_discard(
+        self,
+        *,
+        sandbox_id: str,
+        request_id: str,
+        claim_token: str,
+        generation: int,
+        container_id: str,
+    ) -> bool:
+        """Mark native context lost after the host removes a container with no archive."""
         ...
 
     async def fail_admin_sandbox_deletion(
@@ -113,12 +127,15 @@ class SandboxRepository(Protocol):
         archived: bool,
         actor_id: str,
         admin_ip: str,
+        allow_stale_host: bool = False,
     ) -> str:
         """Audit a reviewed inventory removal or restore without deleting state.
 
-        Only stopped, quiescent groups may be hidden. A new turn or running
-        host observation makes a removed group visible again automatically.
-        Native sessions, container writable layers and ledger rows survive.
+        Stopped, quiescent groups may be hidden. An explicit stale-host
+        removal also permits quiescent groups whose host has no fresh
+        heartbeat, without changing their lifecycle or native state. A new
+        turn or running host observation makes a removed group visible again
+        automatically. Containers, native sessions and ledger rows survive.
         """
         ...
 
@@ -155,8 +172,8 @@ class SandboxRepository(Protocol):
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
 
-        The broker's in-memory suspension is the immediate barrier. This
-        durable copy closes broker-restart and old-turn-URL gaps: an active
+        The sandbox manager's in-memory suspension is the immediate barrier. This
+        durable copy closes sandbox-manager-restart and old-turn-URL gaps: an active
         attempt must have published ``workspace_ready``.
         """
         ...
@@ -166,11 +183,11 @@ class SandboxRepository(Protocol):
         ...
 
     async def list_terminal_resumes_pending(self, *, limit: int = 100) -> list[str]:
-        """List settled workspaces whose broker resume still needs confirmation."""
+        """List settled workspaces whose sandbox manager resume still needs confirmation."""
         ...
 
     async def mark_terminal_resume_complete(self, *, job_id: str) -> bool:
-        """Clear durable recovery state after the broker confirms a resume."""
+        """Clear durable recovery state after the sandbox manager confirms a resume."""
         ...
 
     async def reserve_thread_sandbox(

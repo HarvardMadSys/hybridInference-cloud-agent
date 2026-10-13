@@ -50,10 +50,12 @@ export function useConversationList({
   const [loadMode, setLoadMode] = useState<'foreground' | 'background' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
+  const activeRequest = useRef<AbortController | null>(null);
   const busy = useRef(false);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => {
     generation.current += 1;
+    activeRequest.current?.abort();
     setTick((v) => v + 1);
   }, []);
   useEffect(
@@ -114,6 +116,9 @@ export function useConversationList({
   );
   const fetchPage = useCallback(
     async (next?: string, version = generation.current) => {
+      activeRequest.current?.abort();
+      const controller = new AbortController();
+      activeRequest.current = controller;
       busy.current = true;
       const previous = dataRef.current;
       // Refresh even an empty loaded list without inserting a status row and
@@ -138,15 +143,18 @@ export function useConversationList({
           // Each request recomputes conversation activity. Use the API's larger
           // batch size when refreshing history instead of repeating 50-row scans.
           const limit = next ? 50 : Math.min(200, Math.max(50, targetCount - merged.size));
-          const result = await listAgentConversations({
-            q,
-            repo,
-            includeArchived,
-            pinned,
-            cursor,
-            limit,
-          });
-          if (generation.current !== version) return;
+          const result = await listAgentConversations(
+            {
+              q,
+              repo,
+              includeArchived,
+              pinned,
+              cursor,
+              limit,
+            },
+            controller.signal,
+          );
+          if (controller.signal.aborted || generation.current !== version) return;
           result.conversations.map(conversationRow).forEach((row) => merged.set(row.key, row));
           following = result.next_cursor;
           cursor = following ?? undefined;
@@ -158,9 +166,10 @@ export function useConversationList({
           loadedRefresh: refresh,
         });
       } catch (cause) {
-        if (generation.current === version)
+        if (!controller.signal.aborted && generation.current === version)
           setError(cause instanceof Error ? cause.message : 'Could not load conversations');
       } finally {
+        if (activeRequest.current === controller) activeRequest.current = null;
         if (generation.current === version) {
           busy.current = false;
           setLoadMode(null);
@@ -177,14 +186,16 @@ export function useConversationList({
     if (enabled) void fetchPage(undefined, version);
     return () => {
       generation.current += 1;
+      activeRequest.current?.abort();
+      activeRequest.current = null;
     };
   }, [fetchPage, enabled, refresh, tick]);
   const rows = data.identity === identity ? data.rows : EMPTY_ROWS;
   const cursor = data.identity === identity ? data.cursor : null;
   const loadedRefresh = data.identity === identity ? data.loadedRefresh : null;
   const loadMore = useCallback(() => {
-    if (cursor && !busy.current) void fetchPage(cursor);
-  }, [cursor, fetchPage]);
+    if (enabled && cursor && !busy.current) void fetchPage(cursor);
+  }, [cursor, enabled, fetchPage]);
   return {
     rows,
     cursor,

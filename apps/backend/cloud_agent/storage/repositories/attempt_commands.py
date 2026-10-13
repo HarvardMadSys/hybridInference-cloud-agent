@@ -776,6 +776,9 @@ class PostgresAttemptCommands:
                                 WHEN m.last_settled_job_id = $1 THEN m.resident_state
                                 WHEN m.admitted_job_id = $1 OR g.container_id IS NULL
                                     THEN 'lost'
+                                WHEN m.native_session_id IS NULL
+                                     OR m.native_session_id !~ '[^[:space:]]'
+                                    THEN 'stopped'
                                 ELSE 'restarting'
                             END,
                             active_attempt_id = CASE

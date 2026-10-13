@@ -113,7 +113,7 @@ export function ComposerMessageActions({
           disabled={disabled || busy}
           aria-keyshortcuts="Meta+Enter Control+Enter"
           title={steerTitle}
-          className="ui-button ui-button-secondary min-h-9 border-border px-3 text-xs"
+          className="ui-button ui-button-secondary min-h-9 border-border px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
         >
           {steerLabel}
         </button>
@@ -122,7 +122,7 @@ export function ComposerMessageActions({
         type="submit"
         disabled={disabled || busy}
         title={title}
-        className="ui-button ui-button-primary min-h-9 text-xs shadow-sm"
+        className="ui-button ui-button-primary min-h-9 px-3 py-1.5 text-xs shadow-sm [@media(pointer:coarse)]:min-h-11"
       >
         {busy ? (
           <span

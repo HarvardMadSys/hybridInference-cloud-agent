@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import fingerprint
+from cloud_agent.schemas_compute import CloudLabDefaults
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -481,7 +482,19 @@ class CloudLabAutoscaler:
         policy_revision = int(policy["revision"])
         generation = int(runtime["generation"])
         request_id = f"autoscale:cloudlab:up:{policy_revision}:{generation}"
-        supplied = dict(policy.get("configuration") or {})
+        effective_configuration = dict(policy.get("configuration") or {})
+        if (
+            "node_types" not in effective_configuration
+            or "node_type_binding" not in effective_configuration
+        ):
+            defaults = CloudLabDefaults.model_validate(
+                await self.repository.provider_defaults("cloudlab")
+            )
+            effective_configuration.setdefault("node_types", list(defaults.node_types))
+            effective_configuration.setdefault("node_type_binding", defaults.node_type_binding)
+        # Freeze effective preferences in each newly queued operation. Changes
+        # to provider defaults affect the next allocation, never one in flight.
+        supplied = dict(effective_configuration)
         # CloudLab experiment names must be unique within a project. Omitting
         # it lets the existing adapter derive one from the new allocation id.
         supplied.pop("name", None)
@@ -501,7 +514,7 @@ class CloudLabAutoscaler:
             "mode": "provision",
             "connection_id": policy["connection_id"],
             "ssh_connection_id": ssh_connection_id,
-            "configuration": policy.get("configuration") or {},
+            "configuration": effective_configuration,
             "deployment_profiles": list(policy.get("deployment_profiles") or []),
             "sandbox_storage_path": policy.get("sandbox_storage_path"),
             "policy": policy.get("renewal_policy") or {},

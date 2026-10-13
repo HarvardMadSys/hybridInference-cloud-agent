@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from pydantic import ValidationError
+from pydantic import EmailStr, TypeAdapter, ValidationError
 
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.logging_utils import get_logger
@@ -295,6 +295,20 @@ class GatewayClient:
             raise GatewayError("gateway returned no model list")
         models = [str(model) for model in raw_models]
         return models, _catalog_reasoning_efforts(body, set(models))
+
+    async def user_email(self, user_id: str) -> str:
+        """Read the account email for Profile, without using account roles for access.
+
+        The existing status lookup supplies a display field only. Admission
+        continues to use agent_access, and the email never enters a session.
+        """
+        body = await self._get(f"/internal/users/{quote(user_id, safe='')}/status")
+        if body.get("user_id") != user_id or body.get("exists") is not True:
+            raise GatewayError("Gateway could not resolve the profile owner")
+        try:
+            return str(TypeAdapter(EmailStr).validate_python(body.get("email")))
+        except ValidationError:
+            raise GatewayError("Gateway returned an invalid account email") from None
 
     async def agent_access(self, user_id: str) -> AgentAccessDecision:
         """Read the current Agent policy decision without a role-based fallback.

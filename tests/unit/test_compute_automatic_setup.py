@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 SHA = "a" * 40
-BROKER_TOKEN = "private-existing-broker-credential"
+SANDBOX_MANAGER_TOKEN = "private-existing-sandbox-manager-credential"
 ENDPOINT = ControlPlaneEndpoint(
     main_port=8000,
     mcp_port=8001,
@@ -255,7 +255,9 @@ def request(**updates: Any) -> AutomaticDeploymentSetup:
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness]:
     settings.reset_settings()
     monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "s" * 32)
-    settings.apply_settings(1, settings.encode_changes({"workspace_broker_token": BROKER_TOKEN}))
+    settings.apply_settings(
+        1, settings.encode_changes({"sandbox_manager_token": SANDBOX_MANAGER_TOKEN})
+    )
     monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", SHA)
     directory = tmp_path / "release"
     directory.mkdir()
@@ -315,7 +317,7 @@ async def test_initial_machine_defaults_use_saved_gateway_and_service_node_witho
         settings.encode_changes(
             {
                 "gateway_base_url": "https://freeinference.org",
-                "workspace_broker_token": BROKER_TOKEN,
+                "sandbox_manager_token": SANDBOX_MANAGER_TOKEN,
             }
         ),
     )
@@ -331,7 +333,7 @@ async def test_initial_machine_defaults_use_saved_gateway_and_service_node_witho
     assert harness.tunnels.calls == []
     assert harness.repository.profiles == {}
     assert harness.repository.defaults == {}
-    assert BROKER_TOKEN not in json.dumps(status)
+    assert SANDBOX_MANAGER_TOKEN not in json.dumps(status)
 
 
 @pytest.mark.asyncio
@@ -411,7 +413,7 @@ async def test_responses_expose_only_profile_names_and_credentials_are_encrypted
         ]
     )
     assert all(set(profile) == {"id", "label"} for profile in result["profiles"])
-    assert BROKER_TOKEN not in responses
+    assert SANDBOX_MANAGER_TOKEN not in responses
     assert "private-management-key" not in responses
     assert "OPENSSH PRIVATE KEY" not in responses
     for profile in result["profiles"]:
@@ -421,7 +423,7 @@ async def test_responses_expose_only_profile_names_and_credentials_are_encrypted
         for value in assets["files"].values():
             assert value not in responses
         row = harness.repository.profiles[profile["id"]]
-        assert BROKER_TOKEN not in json.dumps(
+        assert SANDBOX_MANAGER_TOKEN not in json.dumps(
             {key: value for key, value in row.items() if key != "source_bundle"}
         )
 
@@ -566,7 +568,7 @@ async def test_gateway_and_control_plane_need_distinct_listeners_when_co_located
 
 
 @pytest.mark.asyncio
-async def test_generated_broker_route_skips_both_control_plane_listener_ports(
+async def test_generated_sandbox_manager_route_skips_both_control_plane_listener_ports(
     harness: Harness,
 ) -> None:
     first = int(hashlib.sha256(b"prepare-one").hexdigest()[:8], 16) % 30000
@@ -618,11 +620,11 @@ async def test_operator_and_custom_routes_are_not_reused(harness: Harness) -> No
         harness.secrets,
         harness.configuration,
         {
-            "deployment:legacy-host": f"AGENT_BROKER_REVERSE_BIND={ENDPOINT.gateway_ip}\nAGENT_BROKER_REVERSE_PORT={first_port}\n"
+            "deployment:legacy-host": f"AGENT_SANDBOX_MANAGER_REVERSE_BIND={ENDPOINT.gateway_ip}\nAGENT_SANDBOX_MANAGER_REVERSE_PORT={first_port}\n"
         },
     )
     custom_assets = {
-        "environment": f"AGENT_BROKER_REVERSE_BIND={ENDPOINT.gateway_ip}\nAGENT_BROKER_REVERSE_PORT={first_port + 1}\n",
+        "environment": f"AGENT_SANDBOX_MANAGER_REVERSE_BIND={ENDPOINT.gateway_ip}\nAGENT_SANDBOX_MANAGER_REVERSE_PORT={first_port + 1}\n",
         "files": {},
     }
     harness.repository.profiles["custom"] = {

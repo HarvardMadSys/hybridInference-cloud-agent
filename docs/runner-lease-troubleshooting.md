@@ -91,7 +91,7 @@ Supervisor settlement retains the last token's receipt until another activation
 takes ownership. Control-plane settlement returns the recorded boundary only
 for the same still-live attempt and activation. Repeating it does not increment
 the workspace epoch, append a snapshot or change the native turn ordinal. A
-broker restart loses its in-memory receipt, so uncertain completion across a
+sandbox manager restart loses its in-memory receipt, so uncertain completion across a
 restart fails closed.
 
 ## When a retained conversation can continue
@@ -111,8 +111,8 @@ replays an unconfirmed admitted prompt.
 
 Recovery after an expired activation or killed runner requires a further
 protocol: durably quarantine the member, fence the old runner's preparation
-commands and broker token, verify the exact retained container and native turn
-boundary, then resume that session or report it unrecoverable. A broker
+commands and sandbox manager token, verify the exact retained container and native turn
+boundary, then resume that session or report it unrecoverable. A sandbox manager
 `busy=false` observation is insufficient because workspace setup commands run
 outside its agent-turn transport. Never requeue a turn solely because its
 admission field is empty, clear a lost flag, or replay an admitted prompt to

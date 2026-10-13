@@ -161,7 +161,11 @@ export function PromptRewrite({
   return (
     <div className={inline ? 'contents' : compact ? 'space-y-2 px-3 pb-1' : 'space-y-3 px-4 pb-3'}>
       <div
-        className={`flex max-w-full flex-wrap items-center ${compact ? 'gap-x-3 gap-y-1' : 'gap-x-4 gap-y-2'}`}
+        className={
+          inline
+            ? 'contents'
+            : `flex max-w-full flex-wrap items-center ${compact ? 'gap-x-3 gap-y-1' : 'gap-x-4 gap-y-2'}`
+        }
       >
         <button
           ref={trigger}

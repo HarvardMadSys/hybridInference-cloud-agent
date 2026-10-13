@@ -7,19 +7,19 @@ setting uses an admin value or its built-in default; clearing a value never
 reactivates the host's old environment variable.
 
 Two processes apply them. The runner hands its share to each turn as it starts
-it, so a turn keeps the values it began with. The workspace broker is a separate
+it, so a turn keeps the values it began with. The sandbox manager is a separate
 container with its own environment, so the runner tells it its share after every
-beat and records what the broker says it applied; a broker that restarted on its
+beat and records what the sandbox manager says it applied; a sandbox manager that restarted on its
 own ``.env`` is corrected by the next beat, at most one interval later.
 
 What the host reports back is what it applies, not what it was sent: the
-runner's share as resolved, and the broker's as the broker confirmed it. A
-broker that did not answer leaves its settings out of the report, so the admin
+runner's share as resolved, and the sandbox manager's as the sandbox manager confirmed it. A
+sandbox manager that did not answer leaves its settings out of the report, so the admin
 page shows them as not yet applied rather than assuming.
 
 Sandbox archive policy is deliberately stricter than those tuning values. It
 has no environment fallback: the runner must deliver one complete DB revision
-to the broker, and claims remain blocked while that confirmation is unknown.
+to the sandbox manager, and claims remain blocked while that confirmation is unknown.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.host_settings import (
-    BROKER_SETTING_KEYS,
     RUNNER_SETTING_KEYS,
+    SANDBOX_MANAGER_SETTING_KEYS,
     admin_values,
     default_values,
     reported_values,
@@ -44,24 +44,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Sends the broker its admin values and returns its answer:
+#: Sends the sandbox manager its admin values and returns its answer:
 #: ``{"applied": {...}, "local": {...}}``.
-BrokerPush = Callable[[dict[str, int]], dict[str, Any]]
-ArchiveBrokerPush = Callable[[dict[str, Any]], dict[str, Any]]
+SandboxManagerPush = Callable[[dict[str, int]], dict[str, Any]]
+ArchiveSandboxManagerPush = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 class RuntimeSettings:
     """What this host applies for each runtime setting, and what it reports."""
 
-    def __init__(self, local: Mapping[str, float], *, broker: BrokerPush | None = None) -> None:
-        """Start from the runner's own values; ``broker`` is ``None`` with no broker."""
+    def __init__(
+        self, local: Mapping[str, float], *, sandbox_manager: SandboxManagerPush | None = None
+    ) -> None:
+        """Start from the runner's own values; ``sandbox_manager`` is ``None`` with no sandbox manager."""
         self._local = {key: value for key, value in local.items() if key in RUNNER_SETTING_KEYS}
-        self._broker = broker
+        self._sandbox_manager = sandbox_manager
         self._lock = threading.Lock()
         self._admin: dict[str, int] = {}
-        self._broker_applied: dict[str, int | float] = {}
-        self._broker_local: dict[str, int | float] = {}
-        self._broker_error: str | None = None
+        self._sandbox_manager_applied: dict[str, int | float] = {}
+        self._sandbox_manager_local: dict[str, int | float] = {}
+        self._sandbox_manager_error: str | None = None
         self._adopted = threading.Event()
 
     @property
@@ -74,13 +76,13 @@ class RuntimeSettings:
         return self._adopted.is_set()
 
     def apply(self, admin: Mapping[str, Any]) -> bool:
-        """Adopt the admin values from a heartbeat answer and hand the broker its share.
+        """Adopt the admin values from a heartbeat answer and hand the sandbox manager its share.
 
-        The runner's share is in force before the broker is asked: a broker
+        The runner's share is in force before the sandbox manager is asked: a sandbox manager
         that is slow to answer must not hold up the values the next turn runs
         with. Returns whether the report changed, so the caller can send it now
-        rather than an interval later. Never raises: a broker that cannot be
-        reached costs this host its broker settings' confirmation, not its
+        rather than an interval later. Never raises: a sandbox manager that cannot be
+        reached costs this host its sandbox manager settings' confirmation, not its
         heartbeat.
         """
         runner_admin = {
@@ -98,31 +100,34 @@ class RuntimeSettings:
                 "agent_host_settings_changed",
                 extra={"event": "agent_host_settings_changed", "was": was, "now": now},
             )
-        if self._broker is None:
+        if self._sandbox_manager is None:
             return changed
-        broker_applied: dict[str, int | float] = {}
-        broker_local: dict[str, int | float] = {}
+        sandbox_manager_applied: dict[str, int | float] = {}
+        sandbox_manager_local: dict[str, int | float] = {}
         error: str | None = None
         try:
-            answer = self._broker(
-                {**default_values(BROKER_SETTING_KEYS), **admin_values(admin, BROKER_SETTING_KEYS)}
+            answer = self._sandbox_manager(
+                {
+                    **default_values(SANDBOX_MANAGER_SETTING_KEYS),
+                    **admin_values(admin, SANDBOX_MANAGER_SETTING_KEYS),
+                }
             )
-            broker_applied = reported_values(answer.get("applied")) or {}
-            broker_local = reported_values(answer.get("local")) or {}
+            sandbox_manager_applied = reported_values(answer.get("applied")) or {}
+            sandbox_manager_local = reported_values(answer.get("local")) or {}
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         with self._lock:
-            changed = changed or (self._broker_applied, self._broker_local) != (
-                broker_applied,
-                broker_local,
+            changed = changed or (self._sandbox_manager_applied, self._sandbox_manager_local) != (
+                sandbox_manager_applied,
+                sandbox_manager_local,
             )
-            self._broker_applied = broker_applied
-            self._broker_local = broker_local
-            previous_error, self._broker_error = self._broker_error, error
+            self._sandbox_manager_applied = sandbox_manager_applied
+            self._sandbox_manager_local = sandbox_manager_local
+            previous_error, self._sandbox_manager_error = self._sandbox_manager_error, error
         if error is not None and error != previous_error:
             logger.warning(
-                "agent_host_settings_broker_unconfirmed",
-                extra={"event": "agent_host_settings_broker_unconfirmed", "error": error},
+                "agent_host_settings_sandbox_manager_unconfirmed",
+                extra={"event": "agent_host_settings_sandbox_manager_unconfirmed", "error": error},
             )
         return changed
 
@@ -135,59 +140,59 @@ class RuntimeSettings:
         """``(applied, local)`` for the next heartbeat.
 
         A setting both processes apply is in force only once both agree. It is
-        reported at the runner's value when the broker confirmed the same one,
-        at the broker's when it confirmed another, and not at all when the
-        broker has not answered — so the page keeps showing it as applying
-        while the broker still sweeps with its old value. With no broker at
+        reported at the runner's value when the sandbox manager confirmed the same one,
+        at the sandbox manager's when it confirmed another, and not at all when the
+        sandbox manager has not answered — so the page keeps showing it as applying
+        while the sandbox manager still sweeps with its old value. With no sandbox manager at
         all, the runner's value is the whole truth. The runner's own value
         wins in ``local``: it is the one it reports when a turn settles.
         """
         with self._lock:
             runner = resolve(self._admin, self._local)
-            applied: dict[str, int | float] = {**self._broker_applied, **runner}
-            if self._broker is not None:
-                for key in RUNNER_SETTING_KEYS & BROKER_SETTING_KEYS:
-                    confirmed = self._broker_applied.get(key)
+            applied: dict[str, int | float] = {**self._sandbox_manager_applied, **runner}
+            if self._sandbox_manager is not None:
+                for key in RUNNER_SETTING_KEYS & SANDBOX_MANAGER_SETTING_KEYS:
+                    confirmed = self._sandbox_manager_applied.get(key)
                     if confirmed is None:
                         applied.pop(key, None)
                     elif confirmed != runner.get(key):
                         applied[key] = confirmed
-            local = {**self._broker_local, **self._local}
+            local = {**self._sandbox_manager_local, **self._local}
         return reported_values(applied) or {}, reported_values(local) or {}
 
 
 class SandboxArchiveRuntimeSettings:
-    """Relay the desired DB archive policy and report exact broker confirmation.
+    """Relay the desired DB archive policy and report exact sandbox manager confirmation.
 
     The full policy is deliberately re-offered after every answered heartbeat,
-    even when its revision did not change. The broker keeps policy in memory;
-    re-offering is how a broker restart is repaired without a host restart.
+    even when its revision did not change. The sandbox manager keeps policy in memory;
+    re-offering is how a sandbox manager restart is repaired without a host restart.
     """
 
-    def __init__(self, broker: ArchiveBrokerPush | None) -> None:
-        self._broker = broker
+    def __init__(self, sandbox_manager: ArchiveSandboxManagerPush | None) -> None:
+        self._sandbox_manager = sandbox_manager
         self._lock = threading.Lock()
         self._applied_revision: int | None = None
         self._ready = threading.Event()
 
     @property
     def ready(self) -> bool:
-        """Whether this broker confirmed the first complete desired policy."""
+        """Whether this sandbox manager confirmed the first complete desired policy."""
         return self._ready.is_set()
 
     def apply(self, settings: Mapping[str, Any]) -> bool:
-        """Offer a complete policy to the broker and verify its exact revision."""
+        """Offer a complete policy to the sandbox manager and verify its exact revision."""
         policy = SandboxArchivePolicy.from_mapping(settings)
         before = self.invalidate()
-        if self._broker is None:
-            raise RuntimeError("workspace broker is unavailable for sandbox archive policy")
-        answer = self._broker(policy.as_broker_dict())
+        if self._sandbox_manager is None:
+            raise RuntimeError("sandbox manager is unavailable for sandbox archive policy")
+        answer = self._sandbox_manager(policy.as_sandbox_manager_dict())
         applied = answer.get("applied_revision")
         if isinstance(applied, bool) or not isinstance(applied, int):
-            raise RuntimeError("workspace broker returned no sandbox archive policy revision")
+            raise RuntimeError("sandbox manager returned no sandbox archive policy revision")
         if applied != policy.revision:
             raise RuntimeError(
-                "workspace broker applied a different sandbox archive policy revision"
+                "sandbox manager applied a different sandbox archive policy revision"
             )
         with self._lock:
             self._applied_revision = applied
@@ -198,22 +203,22 @@ class SandboxArchiveRuntimeSettings:
         """Forget confirmation when a beat omits policy or a re-offer begins."""
         with self._lock:
             before = self._applied_revision
-            # Re-offering is also the broker liveness check. A confirmation
-            # from a broker process that has since restarted is no longer a
+            # Re-offering is also the sandbox manager liveness check. A confirmation
+            # from a sandbox manager process that has since restarted is no longer a
             # confirmation, even when the desired revision did not change.
             self._applied_revision = None
             self._ready.clear()
             return before
 
     def report(self) -> int | None:
-        """Return the last exact revision confirmed by the broker."""
+        """Return the last exact revision confirmed by the sandbox manager."""
         with self._lock:
             return self._applied_revision
 
 
 __all__ = [
-    "ArchiveBrokerPush",
-    "BrokerPush",
+    "ArchiveSandboxManagerPush",
     "RuntimeSettings",
     "SandboxArchiveRuntimeSettings",
+    "SandboxManagerPush",
 ]

@@ -3,7 +3,7 @@
 The admin Servers page has to answer three questions side by side: how loaded
 the machine is, how much execution quota is left, and how many sandboxes are
 still retained. The last two already have sources — ``slots_total/slots_used``
-in the database and the broker's own Docker view — but the first has none, so
+in the database and the sandbox manager's own Docker view — but the first has none, so
 an operator sees a host taking work with no idea whether it is anywhere near
 its ceiling.
 

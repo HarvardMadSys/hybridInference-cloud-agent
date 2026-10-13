@@ -36,8 +36,8 @@
 | `operation_profiling._load()` 每进程只读一次 env，`_USED_OPERATIONS` 是进程内计数 | 新增运行时配置来源，不能靠改 `os.environ` 或清空全局缓存冒充控制 |
 | `bind()`、片段定类、`manifest_for_measurement()` 等还会读取“当前 run” | 在途记录必须绑定自己的不可变 run；切换实验后不能串 target、operations、manifest 或预算 |
 | runner 在 claim 前选中，父进程经 `_profiling` 把选择交给 turn 子进程 | 开始信号不能只放在 claim 响应；必须在下一次 claim 前到达父进程，子进程继承起点和名额 |
-| broker 的 `start_stage_recording()` 同时要求本地 run 与继承 context 匹配 | 只更新 CP 或 runner 会继续产生缺 broker 片段的样本 |
-| host 心跳当前默认 30 秒；runner 与 broker 是不同容器 | 不能把“加个 heartbeat 字段”直接描述为即时开关，也不能依赖进程内变量跨容器传播 |
+| sandbox manager 的 `start_stage_recording()` 同时要求本地 run 与继承 context 匹配 | 只更新 CP 或 runner 会继续产生缺 sandbox manager 片段的样本 |
+| host 心跳当前默认 30 秒；runner 与 sandbox manager 是不同容器 | 不能把“加个 heartbeat 字段”直接描述为即时开关，也不能依赖进程内变量跨容器传播 |
 | 实验目录目前由首条 measurement 入库时创建 | 开始操作必须先持久化实验，零样本实验也可见、可停止 |
 | `measurement-writer` 只报告回答请求的 CP 进程 | 不能拿它的 `running` 或 `Idle / off` 当全部署开关状态 |
 | profiling 默认关闭，三个服务的 compose 只透传旧 env | 必须交付配置来源切换及部署接线；仅在测试中注入 provider 不算完成 |
@@ -187,7 +187,7 @@ Start 请求示例：
 - `environment`：只读旧配置，Admin 显示“由部署配置管理”，不提供假 Stop。
 - `admin`：只使用持久化控制状态；旧 `ENABLED=false` 不再否决 Admin 命令，旧 RUN 也不得在 Admin Stop 后作为 fallback 被启用。初次没有活动实验就是关闭。
 
-这个可选 mode 用于覆盖控制方式，不是每次实验的开关。CP、runner、broker 和 turn 子进程升级后默认支持 Admin，无需设置变量；每次 Enable/Disable 不要求重启。
+这个可选 mode 用于覆盖控制方式，不是每次实验的开关。CP、runner、sandbox manager 和 turn 子进程升级后默认支持 Admin，无需设置变量；每次 Enable/Disable 不要求重启。
 
 ### 5.2 传播方式与时限
 
@@ -199,7 +199,7 @@ flowchart LR
     DB --> CP[CP 进程内配置快照]
     DB --> HOST[host 经已认证接口读取配置]
     HOST --> RUNNER[runner 父进程]
-    RUNNER --> BROKER[broker 配置快照]
+    RUNNER --> SANDBOX_MANAGER[sandbox manager 配置快照]
     RUNNER --> CHILD[turn 子进程继承选择]
     CP --> ROOT[文件 / 终端根测量]
 ```
@@ -209,9 +209,9 @@ flowchart LR
 2. runner 父进程以已有 host 身份调用 `POST /v1/agent/hosts/profiling-policy`，拿到本
    host 的配置后发布到自己的快照；关闭时 30 秒、活动时 5 秒、失败重试 10 秒，请求超时
    2 秒，加小幅抖动。
-3. runner 在后台经现有鉴权 broker RPC 下发配置，broker 应用到自己的快照；broker 只接受
+3. runner 在后台经现有鉴权 sandbox manager RPC 下发配置，sandbox manager 应用到自己的快照；sandbox manager 只接受
    **不低于**已应用版本的配置。**每次同步都重发**，不只重发"变化过的"配置：首次推送可能
-   失败（broker 还在启动），而 broker 的配置在内存里，它自己重启也会丢——这两种情况在
+   失败（sandbox manager 还在启动），而 sandbox manager 的配置在内存里，它自己重启也会丢——这两种情况在
    runner 侧都不可见，而接收端按 revision 幂等，重发是安全的。这不是 ACK 系统：runner
    不等确认，上游也不依赖它。
 4. 已被选中的 turn 子进程**从 `_profiling` 里自带的不可变 manifest 恢复该次测量**，不需要
@@ -219,13 +219,13 @@ flowchart LR
    配置（自己的同步循环还没跑），也不读静态 descriptor。要求它"先自己选中当前实验"会让
    交接只在父进程里成立，真实子进程静默不采集。安全性来自通道而不是本地复查——这段
    context 由已经证明过该选择的父进程经管道交给它；子进程只重新声明，并仍然强制实验未过期。
-5. broker 的判定分两种情况，不能混为一谈：
+5. sandbox manager 的判定分两种情况，不能混为一谈：
    - **延续**：context 带着不可变 manifest（`run` 对象），**且本进程处于 `MODE=admin`**。
-     这是"已经选中的操作在 Disable 之后继续调用 broker"，必须放行，否则根记录会以缺失
-     broker 阶段的形式悄悄入库——比拒绝更糟。
+     这是"已经选中的操作在 Disable 之后继续调用 sandbox manager"，必须放行，否则根记录会以缺失
+     sandbox manager 阶段的形式悄悄入库——比拒绝更糟。
    - **新选择**：context 只声明操作、不带 manifest。这时**本进程的配置说了算**：run 必须
-     匹配且选中该操作。调用方不能靠声明 `operations` 覆盖 broker 的配置。
-   普通 profiling header 单独不能让 broker 开启采集。
+     匹配且选中该操作。调用方不能靠声明 `operations` 覆盖 sandbox manager 的配置。
+   普通 profiling header 单独不能让 sandbox manager 开启采集。
 
    **`MODE=disabled` 与 Admin 卡片上的 Disable 是两件事，不能合并。** 前者是"本部署禁止
    采集"，包括"什么都没配"的默认值：这样的进程不能被上游 context 说服去分配 measurement
@@ -278,13 +278,13 @@ flowchart LR
 - 已冻结记录原样投递，不能因为 UI Stop 就丢掉或修改成功结果。
 - 已经开始的 measurement 正常完成、正常投递，仍受**原有实验截止时间**与采集边界约束：
   不因 Disable 被提前截断，manifest 与 `expires_at` 也不被修改。
-- **它在 Disable 之后发出的 broker 调用仍然采集**：root 只是第一步，容器与 CLI 阶段发生在
+- **它在 Disable 之后发出的 sandbox manager 调用仍然采集**：root 只是第一步，容器与 CLI 阶段发生在
   之后，那些片段属于选中它的那个实验。拒绝它们会得到"记录在、阶段缺"的样本，读起来像
   慢启动而不像配置变更。
 - 未冻结记录只在**实验自己的 `expires_at`** 截止，保留已采集阶段，标为
   `profiling_stopped="expired"` 且 `collection_complete=false`；不能把部分耗时当完整样本
   算进 p50/p95。
-- root、span、broker recorder 与回传片段使用一致的本地截止语义；睡眠/阻塞返回后不得把整段超期时间写进 duration。跨进程仍只传 duration，不虚构可比较偏移。
+- root、span、sandbox manager recorder 与回传片段使用一致的本地截止语义；睡眠/阻塞返回后不得把整段超期时间写进 duration。跨进程仍只传 duration，不虚构可比较偏移。
 - 后续业务结果不覆盖已经冻结的 measurement outcome。长 SSE 的测量仍在 stream attach 时冻结，不等待 SSE 结束；启动仍在 prompt dispatch 冻结，不等模型执行完。
 - 配置停止时刻是服务端命令时刻，本地实际停止**选取**可能晚一个同步窗口（上限 30 秒）；
   页面写出这个延迟，不伪装为全机器瞬时同时关闭。
@@ -311,7 +311,7 @@ manifest 校验。
 
 部署清单：
 
-1. Cloud Agent 的 CP、host、local compose 和环境文档透传 mode（三个进程都要，broker 与
+1. Cloud Agent 的 CP、host、local compose 和环境文档透传 mode（三个进程都要，sandbox manager 与
    runner 是两个容器）；默认行为保持向后兼容。
 2. 迁移接最新 head；测试升级、降级和再次升级，不能凭本文写死下一个编号。
 3. 能力版本随 host 注册/状态报告（`operation-profiling-control-v1`），旧版节点不能被误认
@@ -330,9 +330,9 @@ manifest 校验。
 | 场景 | 必须验证的结果 |
 | --- | --- |
 | 默认关闭 | 正常启动、文件和终端操作无新测量；历史可读 |
-| Enable | 真实 POST → PostgreSQL 创建实验 → CP 配置同步 → runner 真实同步 → broker 真实收到 → 真实根入口 → broker 片段 → 有界投递 → Admin 能读到记录；零样本阶段实验已可见 |
+| Enable | 真实 POST → PostgreSQL 创建实验 → CP 配置同步 → runner 真实同步 → sandbox manager 真实收到 → 真实根入口 → sandbox manager 片段 → 有界投递 → Admin 能读到记录；零样本阶段实验已可见 |
 | runner 部署路径 | host 服务 claim 前选中，经真实 `_profiling` handoff 到子进程；子进程保留原 measurement id、计时起点与实验配置，且不重新占名额 |
-| broker 接线 | runner 用**真实 broker client** 推送配置；broker 收到后贡献真实片段 |
+| sandbox manager 接线 | runner 用**真实 sandbox manager client** 推送配置；sandbox manager 收到后贡献真实片段 |
 | 文件和终端 | 目录与文件按真实结果分类；terminal list/create/stream attach 各自根记录、关联 ID 正确 |
 | Disable | 已存结果保留；后续操作不再被选中；**已经开始**的 measurement 正常完成并入库 |
 | 自动到期 | 浏览器关闭、CP 重启或后台清扫没执行时，仍按原绝对期限停采；重启不续期 |
@@ -341,11 +341,11 @@ manifest 校验。
 | 幂等 | Start 响应丢失后重试仍为同一个 run、同一期限；重复 Stop 无额外副作用 |
 | 下一轮 | A 在途或待投递时停止，随后 B 开始；A 的 manifest、target、片段与入库都不使用 B 的数据 |
 | 预算 | 同 run 同实例反复同步不重置额度；父子不重复占用；UI 不宣称全局精确上限 |
-| 鉴权 | 普通用户不能操作；401/403 到前端撤权；浏览器伪造 profiling header 不能开启 broker；host 不能请求其他 host 的配置 |
+| 鉴权 | 普通用户不能操作；401/403 到前端撤权；浏览器伪造 profiling header 不能开启 sandbox manager；host 不能请求其他 host 的配置 |
 | 压力/异常 | 慢 DB、控制 API 超时、长模型任务、长 SSE 时业务不被开关/投递阻塞；队列满可见且有界 |
 | 前端 | Enable 参数、Measuring/Off/到期/失败状态、刷新恢复、保留筛选、无乐观假成功 |
 
-测试可用受控时钟验证到期，但至少有一条真实 HTTP + PostgreSQL + 独立 host/broker 链路，
+测试可用受控时钟验证到期，但至少有一条真实 HTTP + PostgreSQL + 独立 host/sandbox_manager 链路，
 不能把所有参与者放同一进程共享一个全局变量。应用初始化和部署入口要纳入，避免"helper
 正确、调用点没接"。
 
@@ -365,7 +365,7 @@ manifest 校验。
 - `apps/backend/cloud_agent/ports/`、`storage/repositories/`、bootstrap、迁移：控制 capability、事务、生命周期及清理。
 - `apps/backend/cloud_agent_shared/operation_profiling.py`：配置 provider、run 绑定、撤销、预算隔离。
 - `apps/backend/cloud_agent/operation_measurement.py`、持久化与 ingest：动态根选择、续接、独立 manifest、宽限语义。
-- `apps/backend/cloud_agent_host/runner.py`、host 身份客户端、broker/client/supervisor：父进程预选、子进程继承、控制同步及片段截止。
+- `apps/backend/cloud_agent_host/runner.py`、host 身份客户端、sandbox_manager/client/supervisor：父进程预选、子进程继承、控制同步及片段截止。
 - `deploy/`、`ENVIRONMENT.md`、FI 配套配置：真实启动入口。
 
 完成定义：管理员能通过真实页面开启并停止真实采集，结果能入库并查询；同一操作无需人工修改 env 或重启；失败时状态不撒谎。仅按钮能点击、API 返回 200、或 mock 页面变成 Collecting，均不算完成。

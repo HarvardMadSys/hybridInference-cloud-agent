@@ -99,6 +99,21 @@ def autoscaling_acquire_can_cancel(
     )
 
 
+def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
+    """Report whether no provider identity, node, or Host was ever recorded.
+
+    A create that failed before CloudLab returned an experiment leaves this
+    shape. There is no machine to scan and no observation that can become fresh.
+    """
+    if not allocation:
+        return False
+    return (
+        not allocation.get("external_id")
+        and not allocation.get("nodes")
+        and not allocation.get("hosts")
+    )
+
+
 def autoscaling_acquire_is_terminal(
     operation: dict[str, Any], allocation: dict[str, Any] | None
 ) -> bool:

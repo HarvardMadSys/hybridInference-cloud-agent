@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class SharedTurnStream:
-    """One broker-owned resident turn streamed as bounded NDJSON frames."""
+    """One sandbox-manager-owned resident turn streamed as bounded NDJSON frames."""
 
     _response: httpx.Response
 
@@ -90,14 +90,14 @@ def _validation_problems(detail: Any) -> str:
 
 
 def _error_detail(response: httpx.Response, refused: str) -> str:
-    """The broker's own reason for an error response, or the most a caller can say.
+    """The sandbox manager's own reason for an error response, or the most a caller can say.
 
-    A refusal the broker anticipated carries its reason as a string
+    A refusal the sandbox manager anticipated carries its reason as a string
     ``detail``. Anything else used to collapse into ``refused`` alone, which
-    named neither the call nor the cause: a request the broker's models
-    rejected, whose ``detail`` is a list, or a crash an older broker answered
+    named neither the call nor the cause: a request the sandbox manager's models
+    rejected, whose ``detail`` is a list, or a crash an older sandbox manager answered
     as plain text. The status, and the fields a validation error names, are
-    what make that line findable in the broker's log.
+    what make that line findable in the sandbox manager's log.
     """
     try:
         body = response.json()
@@ -112,7 +112,7 @@ def _error_detail(response: httpx.Response, refused: str) -> str:
 
 
 class SessionSupervisorClient:
-    """Use the broker credential without ever exposing it to a chat container."""
+    """Use the sandbox manager credential without ever exposing it to a chat container."""
 
     def __init__(self, base_url: str, token: str, *, timeout: float = 60) -> None:
         self._base_url = base_url.rstrip("/")
@@ -159,40 +159,40 @@ class SessionSupervisorClient:
         return body
 
     def apply_profiling_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
-        """Hand the broker one profiling policy and read back its confirmation.
+        """Hand the sandbox manager one profiling policy and read back its confirmation.
 
-        The broker is a separate container, so it cannot inherit the runner's
+        The sandbox manager is a separate container, so it cannot inherit the runner's
         policy the way a child process inherits one. It is told instead, over
         the same authenticated channel every other lifecycle message uses --
-        the broker holds no host credential and never will, and the design
+        the sandbox manager holds no host credential and never will, and the design
         forbids widening that.
 
-        Returns what the broker says it applied, which is *not* the same as what
-        was sent: the control plane records the confirmation, so a broker that
+        Returns what the sandbox manager says it applied, which is *not* the same as what
+        was sent: the control plane records the confirmation, so a sandbox manager that
         rejected a newer revision must be visible rather than assumed.
         """
         try:
             response = self._client.post(f"{self._base_url}/profiling-policy", json=policy)
         except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
+            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
         if response.is_error:
             raise SessionSupervisorError(
                 response.status_code,
-                _error_detail(response, "workspace broker rejected the profiling policy"),
+                _error_detail(response, "sandbox manager rejected the profiling policy"),
             )
         body = response.json()
         if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "workspace broker returned invalid data")
+            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
         return body
 
     def apply_host_settings(
         self, settings: dict[str, int], *, timeout: float = 5.0
     ) -> dict[str, Any]:
-        """Hand the broker the runtime settings an admin set and read its answer.
+        """Hand the sandbox manager the runtime settings an admin set and read its answer.
 
-        ``settings`` is the broker's share of what the last heartbeat carried,
-        the whole set: a setting absent from it returns the broker to its own
-        value. The answer says what the broker now applies, which is what this
+        ``settings`` is the sandbox manager's share of what the last heartbeat carried,
+        the whole set: a setting absent from it returns the sandbox manager to its own
+        value. The answer says what the sandbox manager now applies, which is what this
         host reports — not what it sent. Bounded well under the heartbeat
         interval, because it runs on the heartbeat thread.
         """
@@ -201,14 +201,14 @@ class SessionSupervisorClient:
                 f"{self._base_url}/host-settings", json={"settings": settings}, timeout=timeout
             )
         except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
+            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
         if response.is_error:
             raise SessionSupervisorError(
-                response.status_code, "workspace broker rejected the runtime settings"
+                response.status_code, "sandbox manager rejected the runtime settings"
             )
         body = response.json()
         if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "workspace broker returned invalid data")
+            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
         return body
 
     def apply_sandbox_archive_settings(
@@ -217,9 +217,9 @@ class SessionSupervisorClient:
         """Relay one complete DB archive policy and read its applied revision.
 
         AWS credentials are intentionally absent: only the non-secret storage
-        policy crosses this channel, and the broker uses its own workload
+        policy crosses this channel, and the sandbox manager uses its own workload
         identity. Re-sending an equal revision is idempotent and repairs a
-        broker that restarted since the previous heartbeat.
+        sandbox manager that restarted since the previous heartbeat.
         """
         try:
             response = self._client.post(
@@ -228,19 +228,19 @@ class SessionSupervisorClient:
                 timeout=timeout,
             )
         except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
+            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
         if response.is_error:
             raise SessionSupervisorError(
                 response.status_code,
-                _error_detail(response, "workspace broker rejected sandbox archive settings"),
+                _error_detail(response, "sandbox manager rejected sandbox archive settings"),
             )
         body = response.json()
         if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "workspace broker returned invalid data")
+            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
         return body
 
     def list(self) -> builtins.list[dict[str, Any]]:
-        """Observe every retained container owned by this host's broker."""
+        """Observe every retained container owned by this host's sandbox manager."""
         try:
             response = self._client.get(f"{self._base_url}/sandboxes")
         except httpx.HTTPError as exc:
@@ -398,7 +398,7 @@ class SessionSupervisorClient:
     ) -> SharedTurnStream:
         """Start one resident turn and return its framed response stream."""
         path = f"/shared-sandboxes/{quote(thread_id, safe='')}/turn"
-        # The broker emits CLI events, which may be silent throughout model
+        # The sandbox manager emits CLI events, which may be silent throughout model
         # thinking or a tool call. Let the runner's execution/interrupt budget
         # bound that wait without extending ordinary lifecycle requests.
         stream_timeout = httpx.Timeout(self._client.timeout)

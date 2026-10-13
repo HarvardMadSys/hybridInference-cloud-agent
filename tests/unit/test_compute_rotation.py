@@ -322,3 +322,52 @@ async def test_replacement_profile_preserves_the_hosts_explicit_storage_path():
     assert selected.sandbox_storage_path == "/host-data"
     assert selected.data_mount == "/profile-disk"
     assert spare.sandbox_storage_path == "/spare-data"
+
+
+@pytest.mark.parametrize("revoke_fails", [False, True])
+async def test_a_rolled_back_move_withdraws_the_transfer_key_from_the_replacement(
+    monkeypatch, revoke_fails
+):
+    """Cleanup revokes it after a move; a rollback must not leave it authorized."""
+    from cloud_agent.ports.external.compute_provider import ProviderError
+
+    mover = rotation()
+    calls: list[tuple] = []
+    source, target = SimpleNamespace(name="source"), SimpleNamespace(name="target")
+    candidate = {"id": "candidate-a", "nodes": [{"id": "node-b"}]}
+
+    async def revoke_transfer(from_node, to_node):
+        calls.append(("revoke", from_node.name, to_node.name))
+        if revoke_fails:
+            raise ProviderError("ssh_connection_failed", "unreachable")
+
+    async def checkpoint(_operation, step, updates=None):
+        calls.append(("checkpoint", step))
+
+    async def fail_candidate(*args):
+        calls.append(("fail_candidate", args[3], args[4]))
+
+    mover.bootstrap = SimpleNamespace(revoke_transfer=revoke_transfer)
+    mover.repository.set_rotation_hold = AsyncMock()
+    mover.reconciler._allocation = AsyncMock(return_value=candidate)
+    mover.reconciler._checkpoint = checkpoint
+    mover.reconciler._fence = lambda operation: {}
+    monkeypatch.setattr(mover, "_source", lambda *args: (source, None, None))
+    monkeypatch.setattr(mover, "_target", lambda *args: (target, None, None))
+    monkeypatch.setattr(mover, "_fail_candidate", fail_candidate)
+    operation = {
+        "id": "rotation-a",
+        "result": {
+            "rollback": {"class": "switch_failed", "code": "transfer_failed"},
+            "slot": {"host": "compute-a", "node_id": "node-a"},
+            "candidate": candidate,
+        },
+    }
+
+    await mover._roll_back(operation, row())
+
+    assert calls == [
+        ("revoke", "source", "target"),
+        ("checkpoint", "releasing_candidate"),
+        ("fail_candidate", "switch_failed", "transfer_failed"),
+    ]

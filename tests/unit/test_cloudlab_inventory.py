@@ -57,7 +57,7 @@ def inventory_html(*, utah=None, clemson=None, wisconsin=None) -> str:
 
 
 @pytest.mark.asyncio
-async def test_preferred_nodes_are_curated_filtered_sorted_and_cached():
+async def test_preferred_nodes_keep_curated_order_regardless_of_availability_and_cache():
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -72,7 +72,11 @@ async def test_preferred_nodes_are_curated_filtered_sorted_and_cached():
                     "c6525-100g": {"count": 36, "free": 16},
                     "m510": {"count": 270, "free": 200},
                 },
-                clemson={"r6615": {"count": 80, "free": 5}},
+                clemson={
+                    "r6615": {"count": 80, "free": 5},
+                    "r650": {"count": 32, "free": 0},
+                    "r6525": {"count": 32, "free": 32},
+                },
                 wisconsin={
                     "sm220u": {"count": 10, "free": 10},
                     "sm110p": {"count": 20, "free": 17},
@@ -95,11 +99,14 @@ async def test_preferred_nodes_are_curated_filtered_sorted_and_cached():
     assert "x-api-token" not in requests[0].headers
     assert requests[0].headers["Accept-Encoding"] == "identity"
     assert [node["node_type"] for node in first["nodes"]] == [
+        "r6615",
         "c6620",
+        "r650",
+        "r6525",
+        "c6525-100g",
         "c6525-25g",
-        "sm110p",
     ]
-    assert first["nodes"][0] == {
+    assert first["nodes"][1] == {
         "node_type": "c6620",
         "site": "Utah",
         "available": 54,
@@ -111,12 +118,29 @@ async def test_preferred_nodes_are_curated_filtered_sorted_and_cached():
     }
     assert first["observed_at"] == "2026-10-11T12:00:00+00:00"
     assert first["filters"] == {
-        "availability_greater_than": 16,
+        "total_greater_than": 20,
         "minimum_introduced_year": 2021,
         "minimum_physical_cores": 16,
         "minimum_memory_gib": 128,
         "general_purpose_only": True,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("total", "free", "expected_types"),
+    [(20, 20, []), (21, 0, ["c6620"]), (21, 1, ["c6620"])],
+)
+async def test_preferred_nodes_filter_by_total_population(total, free, expected_types):
+    response = streamed_response(
+        200,
+        headers={"Content-Type": "text/html"},
+        text=inventory_html(utah={"c6620": {"count": total, "free": free}}),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: response)) as client:
+        result = await CloudLabNodeInventory(client=client).preferred_nodes()
+
+    assert [node["node_type"] for node in result["nodes"]] == expected_types
 
 
 @pytest.mark.asyncio

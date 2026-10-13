@@ -8,10 +8,8 @@ runs provider mutations inline with an HTTP request.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import re
-import tarfile
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -191,37 +189,20 @@ class ComputeCommands:
     @staticmethod
     def _validate_bundle(bundle: bytes) -> None:
         """Reject unsafe or incomplete archives before they become selectable."""
+        from cloud_agent.application.compute_setup import validate_host_bundle
+
         try:
-            with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:*") as archive:
-                names: set[str] = set()
-                for member in archive.getmembers():
-                    name = member.name.removeprefix("./")
-                    if (
-                        not name
-                        or name.startswith("/")
-                        or ".." in name.split("/")
-                        or not (member.isdir() or member.isfile())
-                        or name in {".env", ".compute-identity.json"}
-                        or name.startswith((".compute-secrets/", ".git/"))
-                    ):
-                        raise ValueError
-                    names.add(name)
-        except (tarfile.TarError, OSError, ValueError):
+            validate_host_bundle(bundle)
+        except ValueError as exc:
+            if str(exc) == "incomplete":
+                raise ComputeRefusal(
+                    "invalid_configuration",
+                    "The release bundle is missing the Host recipe.",
+                    status=422,
+                ) from None
             raise ComputeRefusal(
                 "invalid_configuration", "The release bundle is invalid or unsafe.", status=422
             ) from None
-        required = {
-            "deploy/host/sandbox_host.sh",
-            "deploy/host/setup_kata_runtime.sh",
-            "deploy/host/docker-compose.sandbox.yml",
-            "pyproject.toml",
-        }
-        if not required <= names:
-            raise ComputeRefusal(
-                "invalid_configuration",
-                "The release bundle is missing the Host recipe.",
-                status=422,
-            )
 
     @staticmethod
     def _stored_profile(row: dict[str, Any]) -> DeploymentProfile:
@@ -765,6 +746,12 @@ class ComputeCommands:
         """Read inventory through the independent query surface."""
         return await self.queries.servers()
 
+    async def remove_server(self, allocation_id: str, *, expected_revision: int) -> None:
+        """Remove local server records after the store verifies lifecycle safety."""
+        await self.repository.remove_allocation(
+            allocation_id=allocation_id, expected_revision=expected_revision
+        )
+
     def allocation_view(self, row: dict[str, Any]) -> dict[str, Any]:
         """Use the same public projection for command responses and queries."""
         return self.queries.allocation_view(row)
@@ -894,7 +881,7 @@ class ComputeCommands:
         return row
 
     async def _deployment_profile(self, requested: str | None) -> DeploymentProfile:
-        """Choose configured setup capacity without sharing a live broker endpoint."""
+        """Choose configured setup capacity without sharing a live sandbox manager endpoint."""
         profiles = await self.deployment_profiles()
         reserved_reader = getattr(self.repository, "list_reserved_deployment_profiles", None)
         reserved = set(await reserved_reader()) if reserved_reader is not None else set()
@@ -965,7 +952,7 @@ class ComputeCommands:
                 if field.get("deployment_only") and not deploy:
                     continue
                 value = defaults.get(key)
-                if key not in effective and value not in {"", None}:
+                if key not in effective and value is not None and value != "":
                     effective[key] = value
         config = entry.configuration(effective, connection_id, ssh_connection_id)
         return entry, entry.provider.validate_config(mode, config)

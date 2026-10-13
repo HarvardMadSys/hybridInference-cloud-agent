@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as api from '@/lib/api/compute';
+import { forgetAgentRunnerHost } from '@/lib/api/admin';
 import type {
   ComputeAllocation,
   ComputeCatalog,
@@ -22,6 +23,7 @@ vi.mock('@/lib/api/compute', () => ({
   getComputeProviders: vi.fn(),
   getComputeConnections: vi.fn(),
   getComputeServers: vi.fn(),
+  removeComputeServer: vi.fn(),
   getComputeOperations: vi.fn(),
   createComputeServer: vi.fn(),
   preflightComputeServer: vi.fn(),
@@ -39,6 +41,8 @@ vi.mock('@/lib/api/compute', () => ({
   actOnComputeOperation: vi.fn(),
   resolveComputeOperation: vi.fn(),
 }));
+
+vi.mock('@/lib/api/admin', () => ({ forgetAgentRunnerHost: vi.fn() }));
 
 vi.mock('./CloudLabAutoscaling', () => ({
   default: () => <p>CloudLab auto-scaling controls</p>,
@@ -1465,6 +1469,146 @@ describe('resource dashboard', () => {
     expect(
       within(dialog).getByRole('button', { name: 'Preview retirement impact' }),
     ).toBeInTheDocument();
+  });
+
+  it('confirms permanent cleanup of a pending server and refreshes both inventories', async () => {
+    const pending = allocation({
+      name: 'Pending server',
+      state: 'unknown',
+      external_id: null,
+      nodes: [],
+      allowed_actions: [],
+    });
+    const onHostsChanged = vi.fn();
+    const onInventory = vi.fn();
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [pending],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    vi.mocked(api.removeComputeServer).mockImplementation(async () => {
+      vi.mocked(api.getComputeServers).mockResolvedValue({
+        allocations: [],
+        hosts: [],
+        active_host: null,
+        observed_at: '2026-10-04T08:01:00Z',
+      });
+      return { removed: true };
+    });
+
+    render(<ComputeResources onHostsChanged={onHostsChanged} onInventory={onInventory} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage Pending server' }));
+    const dialog = screen.getByRole('dialog', { name: 'Pending server' });
+    expect(within(dialog).getByText('Pending acquisition')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByLabelText('Server actions'));
+    fireEvent.click(within(dialog).getByRole('menuitem', { name: 'Remove server' }));
+
+    expect(within(dialog).getByText(/resource, node and Host records/)).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        /Shared credentials, server setup, user conversations and run history remain/,
+      ),
+    ).toBeInTheDocument();
+    const remove = within(dialog).getByRole('button', { name: 'Permanently remove server' });
+    expect(remove).toBeDisabled();
+    expect(api.removeComputeServer).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I confirm permanent removal/ }));
+    fireEvent.click(remove);
+
+    await waitFor(() => expect(api.removeComputeServer).toHaveBeenCalledWith('resource-a', 2));
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Pending server was removed from the server inventory.',
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole('listitem', { name: 'Pending server' })).not.toBeInTheDocument(),
+    );
+    expect(onHostsChanged).toHaveBeenCalledTimes(1);
+    expect(onInventory).toHaveBeenLastCalledWith(expect.objectContaining({ allocations: [] }));
+    expect(api.retireComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('keeps a blocked server and displays its removal prerequisite inside confirmation', async () => {
+    vi.mocked(api.removeComputeServer).mockRejectedValue(
+      new APIError('resource_bound', 'Release this server before removing its records.', 409),
+    );
+    const onHostsChanged = vi.fn();
+    render(<ComputeResources onHostsChanged={onHostsChanged} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    fireEvent.click(within(dialog).getByLabelText('Server actions'));
+    fireEvent.click(within(dialog).getByRole('menuitem', { name: 'Remove server' }));
+    expect(within(dialog).getByText(/Release this cloud resource first/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I confirm permanent removal/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently remove server' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Release this server before removing its records.',
+    );
+    expect(screen.getByRole('listitem', { name: 'CloudLab experiment' })).toBeInTheDocument();
+    expect(onHostsChanged).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole('button', { name: 'Permanently remove server' })).toBeEnabled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(within(dialog).getByRole('button', { name: 'Overview' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(api.retireComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('removes grouped unmanaged Host records and retries only records that remain', async () => {
+    const hosts = ['old-host', 'kata-host'];
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [],
+      hosts: hosts.map((host) => ({
+        host,
+        status: 'disabled',
+        retained_groups: 0,
+        allocation_id: null,
+        compute_node_id: null,
+      })),
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    vi.mocked(forgetAgentRunnerHost)
+      .mockResolvedValueOnce({} as Awaited<ReturnType<typeof forgetAgentRunnerHost>>)
+      .mockRejectedValueOnce(
+        new APIError('resource_bound', 'Retained sandboxes block removal.', 409),
+      )
+      .mockResolvedValueOnce({} as Awaited<ReturnType<typeof forgetAgentRunnerHost>>);
+    const onHostsChanged = vi.fn();
+    render(
+      <ComputeResources
+        onHostsChanged={onHostsChanged}
+        serverGroups={[{ name: 'Team server', members: hosts.map((host) => ({ host })) }]}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage Team server' }));
+    const dialog = screen.getByRole('dialog', { name: 'Team server' });
+    fireEvent.click(within(dialog).getByLabelText('Server actions'));
+    fireEvent.click(within(dialog).getByRole('menuitem', { name: 'Remove server' }));
+    expect(within(dialog).getByText(/Stop the host agent first/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I confirm permanent removal/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently remove server' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      '1 Host record(s) removed. Remaining records: Retained sandboxes block removal.',
+    );
+    expect(onHostsChanged).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently remove server' }));
+    await waitFor(() => expect(forgetAgentRunnerHost).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(forgetAgentRunnerHost).mock.calls.map(([host]) => host)).toEqual([
+      'old-host',
+      'kata-host',
+      'kata-host',
+    ]);
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Team server was removed from the server inventory.',
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(onHostsChanged).toHaveBeenCalledTimes(2);
+    expect(api.removeComputeServer).not.toHaveBeenCalled();
   });
 
   it('does not call a ready cloud resource online before its agent has enrolled', async () => {

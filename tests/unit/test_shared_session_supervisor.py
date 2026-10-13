@@ -5,9 +5,11 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from dataclasses import asdict, replace
@@ -44,15 +46,16 @@ from cloud_agent_host.resident_transport import (
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.sandbox_manager import SharedSandboxIdentityRequest, create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
     SharedSessionDescriptor,
     SharedSessionLease,
+    archive_failure_http_detail,
 )
 from cloud_agent_host.tool_windows import ToolMark
-from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
@@ -446,6 +449,31 @@ def _pending_question() -> dict[str, Any]:
     }
 
 
+def test_abandon_before_first_native_locator_keeps_member_stopped():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    fresh_members = [
+        SharedMemberManifest(
+            thread_id="athr_source",
+            context_status="new",
+            resident_slot_id=0,
+        )
+    ]
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=fresh_members,
+    )
+
+    descriptor = supervisor.abandon("athr_source", lease.token, lost=False)
+
+    assert descriptor.native_session_id is None
+    assert descriptor.resident_state == "stopped"
+
+
 def test_native_questions_require_the_active_owner_and_running_turn():
     _, supervisor, lease = _question_activation()
     answers = {"choice": ["First", "Custom response"]}
@@ -583,7 +611,7 @@ def test_native_answer_delivery_holds_the_owner_fence_against_expiry(monkeypatch
 
 
 @pytest.mark.parametrize("disk_limit_mib", [0, 16384])
-def test_broker_reconcile_blocks_an_unmarked_running_orphan_before_accepting_requests(
+def test_sandbox_manager_reconcile_blocks_an_unmarked_running_orphan_before_accepting_requests(
     disk_limit_mib,
 ):
     manager = _Manager()
@@ -1141,6 +1169,235 @@ def test_status_listing_never_stops_a_managed_running_group():
     assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
 
 
+def test_targeted_listing_refreshes_all_members_without_host_reconciliation(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.terminal_opened("athr_peer")
+    supervisor.terminal_opened("athr_peer")
+    supervisor.operation_opened("athr_source")
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+    inspected: list[str] = []
+
+    def inspect(container_name):
+        inspected.append(container_name)
+        return manager.items[container_name]
+
+    def inventory():
+        raise SandboxError("unrelated sandbox inventory failed")
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+    monkeypatch.setattr(manager, "list", inventory)
+
+    descriptors = supervisor.list_for_thread("athr_peer")
+
+    assert inspected == [_spec().container_name]
+    assert {row.thread_id for row in descriptors} == {"athr_source", "athr_peer"}
+    assert sum(row.terminal_count for row in descriptors) == 2
+    assert sum(row.operation_count for row in descriptors) == 1
+    assert all(row.running is False and row.group_busy for row in descriptors)
+    assert manager.stop_count == 0
+    assert manager.pruned_specs == []
+    with pytest.raises(SandboxError, match="unrelated sandbox inventory failed"):
+        supervisor.list()
+
+
+def test_targeted_listing_unknown_member_does_not_discover_or_inspect_containers(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    monkeypatch.setattr(manager, "list", lambda: pytest.fail("unexpected inventory"))
+    monkeypatch.setattr(manager, "inspect", lambda _name: pytest.fail("unexpected inspection"))
+
+    with pytest.raises(SandboxError, match="no shared sandbox membership"):
+        supervisor.list_for_thread("athr_unknown")
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_targeted_listing_marks_missing_or_replaced_container_lost(missing):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    if missing:
+        manager.items.pop(_spec().container_name)
+    else:
+        manager.items[_spec().container_name] = replace(
+            original,
+            container_id="container-replacement",
+        )
+
+    with pytest.raises(RetainedChatLost, match="missing" if missing else "identity changed"):
+        supervisor.list_for_thread("athr_peer")
+
+    group = supervisor._members["athr_source"]
+    assert group.inspection == original
+    assert group.container_lost is True
+    assert {member.context_status for member in group.members.values()} == {"lost"}
+    assert manager.stop_count == 0
+
+
+def test_targeted_listing_rejects_changed_immutable_labels_without_accepting_inspection():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        labels=replace(_spec(), generation=2).docker_labels(),
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+
+    with pytest.raises(SandboxError, match="immutable labels changed"):
+        supervisor.list_for_thread("athr_source")
+
+    assert supervisor._members["athr_source"].inspection == original
+    assert manager.stop_count == 0
+
+
+def test_targeted_listing_inspection_does_not_block_another_groups_status(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(
+        other,
+        [replace(_members()[0], thread_id=other.thread_id)],
+    )
+    inspect_entered = threading.Event()
+    allow_inspect = threading.Event()
+    status_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def inspect(container_name):
+        if container_name == _spec().container_name:
+            inspect_entered.set()
+            assert allow_inspect.wait(timeout=2)
+        return manager.items[container_name]
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    def targeted_listing():
+        try:
+            supervisor.list_for_thread("athr_source")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def other_status():
+        try:
+            supervisor.status(other.thread_id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            status_done.set()
+
+    listing_thread = threading.Thread(target=targeted_listing)
+    status_thread = threading.Thread(target=other_status)
+    listing_thread.start()
+    try:
+        assert inspect_entered.wait(timeout=1)
+        status_thread.start()
+        assert status_done.wait(timeout=0.5), "inspection held the supervisor-wide lock"
+    finally:
+        allow_inspect.set()
+        listing_thread.join(timeout=2)
+        if status_thread.ident is not None:
+            status_thread.join(timeout=2)
+
+    assert not listing_thread.is_alive()
+    assert not status_thread.is_alive()
+    assert errors == []
+
+
+def test_targeted_listing_rejects_a_stopped_observation_after_concurrent_start(monkeypatch):
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    original_generation = group.lifecycle_generation
+    inspect_entered = threading.Event()
+    allow_inspect = threading.Event()
+    errors: list[BaseException] = []
+
+    def inspect(container_name):
+        observed = manager.items[container_name]
+        if not inspect_entered.is_set():
+            inspect_entered.set()
+            assert allow_inspect.wait(timeout=2)
+        return observed
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    def targeted_listing():
+        try:
+            supervisor.list_for_thread(spec.thread_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    listing_thread = threading.Thread(target=targeted_listing)
+    listing_thread.start()
+    try:
+        assert inspect_entered.wait(timeout=1)
+        token, opened = supervisor.terminal_opened("athr_peer")
+        assert opened.running is True
+    finally:
+        allow_inspect.set()
+        listing_thread.join(timeout=2)
+
+    assert not listing_thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], SessionLeaseLost)
+    assert group.lifecycle_generation == original_generation
+    assert group.inspection.running is True
+    assert manager.items[spec.container_name].running is True
+    supervisor.terminal_closed("athr_peer", token)
+
+
+@pytest.mark.parametrize(
+    "changed_fence",
+    ["group_index", "member_index", "member", "lifecycle", "spec", "container"],
+)
+def test_targeted_listing_rejects_a_changed_fence_during_inspection(monkeypatch, changed_fence):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    group = supervisor._members["athr_source"]
+    original = group.inspection
+    stale = replace(original, running=False, status=ChatSandboxStatus.STOPPED)
+
+    def inspect(_container_name):
+        with supervisor._lock:
+            if changed_fence == "group_index":
+                supervisor._groups.pop(_spec().sandbox_id)
+            elif changed_fence == "member_index":
+                supervisor._members.pop("athr_source")
+            elif changed_fence == "member":
+                group.members["athr_source"] = replace(group.members["athr_source"])
+            elif changed_fence == "lifecycle":
+                group.lifecycle_generation += 1
+            elif changed_fence == "spec":
+                group.spec = replace(group.spec, generation=2)
+            else:
+                group.inspection = replace(original, container_id="container-successor")
+        return stale
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    with pytest.raises(SessionLeaseLost, match="lifecycle changed during observation"):
+        supervisor.list_for_thread("athr_source")
+
+    assert group.inspection.running is True
+    assert group.container_lost is False
+    assert manager.stop_count == 0
+
+
 def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
@@ -1252,7 +1509,7 @@ def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():
     repeat = acquire()
 
     assert first.network_verified is True
-    assert asdict(first)["network_verified"] is True, "what the broker endpoint sends"
+    assert asdict(first)["network_verified"] is True, "what the sandbox manager endpoint sends"
     # The same owner is handed its existing lease without touching the group.
     assert repeat.token == first.token
     assert manager.starts == [_spec().container_name]
@@ -1293,6 +1550,43 @@ def test_a_host_that_cannot_show_its_rules_stops_every_running_group():
     # Stopped, not lost: the native session wakes once the rules are back.
     assert [descriptor.resident_state for descriptor in stopped] == ["stopped"]
     assert supervisor.status("athr_source").context_status != "lost"
+
+
+def test_network_fail_stop_final_archive_log_omits_provider_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ProviderError(RuntimeError):
+        def __init__(self, unsafe: str) -> None:
+            super().__init__(unsafe)
+            self.response = {
+                "Error": {"Code": "AccessDenied", "Message": unsafe},
+                "ResponseMetadata": {
+                    "HTTPStatusCode": 403,
+                    "HTTPHeaders": {"authorization": unsafe},
+                },
+            }
+
+    unsafe = "https://archive.invalid/object?credential=network-fail-stop-secret"
+
+    def archive(*_args) -> None:
+        try:
+            raise ProviderError(unsafe)
+        except ProviderError as exc:
+            raise SandboxError("final archive could not be stored") from exc
+
+    manager, supervisor = _running_group(stopped_archive_hook=archive)
+    manager.host_rule_failures = 2
+
+    assert supervisor.guard_network() == []
+
+    assert unsafe not in caplog.text
+    assert any(
+        getattr(record, "event", None) == "shared_chat_network_final_archive_failed"
+        and getattr(record, "detail", None)
+        == "archive failure (phase=fail_stop_final, type=ProviderError, "
+        "code=AccessDenied, status=403)"
+        for record in caplog.records
+    )
 
 
 def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing():
@@ -1487,7 +1781,7 @@ def test_claude_member_launch_shares_only_native_projects(monkeypatch, tmp_path)
         home.mkdir()
         config = home / ".claude-members" / f"member-{slot}"
         # Exercise the actual preparation script twice, as a native resume
-        # after broker/container restart would do, against legacy state.
+        # after sandbox manager/container restart would do, against legacy state.
         for _ in range(2):
             subprocess.run(
                 ["python3", "-c", calls[slot][0][2], str(config), str(projects)], check=True
@@ -1625,9 +1919,9 @@ def test_claude_native_fork_uses_the_source_private_config(monkeypatch):
 @pytest.mark.parametrize(
     ("runtime_id", "collection"),
     [
-        ("codex", "codex-members"),
-        ("opencode", "opencode-members"),
-        ("kilo", "kilo-members"),
+        ("codex", "codex-homes"),
+        ("opencode", "opencode-homes"),
+        ("kilo", "kilo-homes"),
     ],
 )
 def test_private_provider_members_get_deterministic_distinct_homes(
@@ -1644,39 +1938,65 @@ def test_private_provider_members_get_deterministic_distinct_homes(
     assert source_home != child_home
 
 
+#: The image's sandbox user and group, which own /agent-state.
+_SANDBOX_UID = 10001
+_SETPRIV = shutil.which("setpriv")
+
+
 class _LocalMemberShell:
     """Run the real member scripts on this host, with /agent-state under a temp root.
 
     Every path a script touches arrives as an argument, so rebasing the
     ``/agent-state`` arguments is enough to exercise the actual shell. The
-    member pipe is a real pipe between the two local processes.
+    member pipe is a real pipe between the two local processes. With
+    ``as_uids`` (root only) each command runs as the UID the sandbox would
+    run it as, so the kernel's own permission checks are under test.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, as_uids: bool = False) -> None:
         self.root = root
-        self.backend = SimpleNamespace(uid=os.getuid(), gid=os.getgid())
+        self.as_uids = as_uids
+        uid, gid = (_SANDBOX_UID, _SANDBOX_UID) if as_uids else (os.getuid(), os.getgid())
+        self.backend = SimpleNamespace(uid=uid, gid=gid)
         self.calls: list[tuple[object, ...]] = []
 
     def local(self, path: str) -> Path:
         return Path(f"{self.root}{path}")
 
-    def _rebase(self, argv: list[str]) -> list[str]:
-        return [str(self.local(item)) if item.startswith("/agent-state") else item for item in argv]
+    def run_as(self, uid: int | None, gid: int | None, argv: list[str]) -> list[str]:
+        argv = [str(self.local(item)) if item.startswith("/agent-state") else item for item in argv]
+        if not self.as_uids:
+            return argv
+        assert _SETPRIV is not None
+        uid = self.backend.uid if uid is None else uid
+        gid = self.backend.gid if gid is None else gid
+        return [_SETPRIV, f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--", *argv]
 
     def exec_capture(self, _spec, argv, **kwargs):
         self.calls.append(("exec", kwargs.get("user_uid")))
-        return subprocess.run(self._rebase(argv), capture_output=True, timeout=30, check=False)
+        return subprocess.run(
+            self.run_as(kwargs.get("user_uid"), kwargs.get("user_gid"), argv),
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+
+    def ensure_private_member_collections(self, spec):
+        # The production script, through this shell's exec.
+        ChatSandboxManager.ensure_private_member_collections(self, spec)  # type: ignore[arg-type]
 
     def pipe_member_exec(
         self, _spec, *, source_argv, source_uid, target_argv, target_uid, user_gid, timeout_s
     ):
         self.calls.append(("pipe", source_uid, target_uid))
         source = subprocess.Popen(
-            self._rebase(source_argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            self.run_as(source_uid, user_gid, source_argv),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         assert source.stdout is not None and source.stderr is not None
         target = subprocess.run(
-            self._rebase(target_argv),
+            self.run_as(target_uid, user_gid, target_argv),
             stdin=source.stdout,
             capture_output=True,
             timeout=timeout_s,
@@ -1703,56 +2023,90 @@ def _assert_private(home: Path) -> None:
         assert path.lstat().st_mode & 0o077 == 0, (path, oct(path.lstat().st_mode))
 
 
+def _assert_trusted(state: Path, collection: Path, uid: int) -> None:
+    assert state.stat().st_mode & stat.S_ISVTX, "no member may rename a collection away"
+    info = collection.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == uid
+    assert stat.S_IMODE(info.st_mode) == 0o3770, oct(info.st_mode)
+
+
 @pytest.mark.parametrize("runtime_id", ["codex", "opencode", "kilo"])
 def test_a_member_provider_home_is_private_to_its_member(tmp_path: Path, runtime_id: str):
     """A sibling UID shares the group, so group bits would hand it this home."""
-    _private_state_root(tmp_path)
+    state = _private_state_root(tmp_path)
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id=runtime_id)
     home = factory._member_state_dir(launch)
 
     factory._prepare_member_state(_spec(), launch, home)
+    factory._prepare_member_state(_spec(), launch, home)
 
     _assert_private(manager.local(home))
-    collection = manager.local(home).parent
-    assert collection.stat().st_mode & 0o070 == 0o070, "every member can add its own home"
-    assert manager.calls == [("exec", MEMBER_UID_BASE + 1)]
+    _assert_trusted(state, manager.local(home).parent, os.getuid())
+    # The collection is secured once, as the sandbox user, then only checked.
+    assert manager.calls == [
+        ("exec", MEMBER_UID_BASE + 1),
+        ("exec", None),
+        ("exec", MEMBER_UID_BASE + 1),
+        ("exec", MEMBER_UID_BASE + 1),
+    ]
     if runtime_id == "codex":
         assert (manager.local(home) / "config.toml").read_text() == "model = 'bootstrap'\n"
 
 
-def test_an_older_group_writable_member_home_is_narrowed_on_its_next_start(tmp_path: Path):
+def test_an_earlier_releases_home_moves_into_the_trusted_collection(tmp_path: Path):
     _private_state_root(tmp_path)
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="opencode")
-    home = manager.local(factory._member_state_dir(launch))
-    (home / "opencode/config").mkdir(parents=True)
-    home.chmod(0o2770)
-    (home / ".freeinference-member-state-v1").write_text("")
+    legacy = manager.local(factory._legacy_member_state_dir(launch))
+    (legacy / "opencode/data").mkdir(parents=True)
+    (legacy / "opencode/data/opencode.db").write_text("native session")
+    (legacy / "opencode/data/opencode.db").chmod(0o660)
+    for directory in (legacy.parent, legacy, legacy / "opencode", legacy / "opencode/data"):
+        directory.chmod(0o2770)
+    (legacy / ".freeinference-member-state-v1").write_text("")
 
     factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
 
-    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    home = manager.local(factory._member_state_dir(launch))
+    assert not legacy.exists()
+    assert (home / "opencode/data/opencode.db").read_text() == "native session"
+    _assert_private(home)
 
 
-def test_a_planted_member_home_is_refused_not_adopted(tmp_path: Path):
+def test_a_symlink_at_a_members_home_is_refused_not_adopted(tmp_path: Path):
     _private_state_root(tmp_path)
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="codex")
+    manager.ensure_private_member_collections(_spec())
     home = manager.local(factory._member_state_dir(launch))
     planted = tmp_path / "sibling-owned"
     planted.mkdir()
     planted.chmod(0o777)
-    home.parent.mkdir()
     home.symlink_to(planted, target_is_directory=True)
 
     with pytest.raises(DriverError, match="not owned by this member"):
         factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
 
     assert list(planted.iterdir()) == []
+
+
+def test_a_squatted_collection_name_is_moved_aside_and_replaced(tmp_path: Path):
+    state = _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    elsewhere = tmp_path / "sibling-tree"
+    elsewhere.mkdir()
+    (state / "codex-homes").symlink_to(elsewhere, target_is_directory=True)
+
+    manager.ensure_private_member_collections(_spec())
+
+    for runtime_id in ("codex", "opencode", "kilo"):
+        _assert_trusted(state, state / f"{runtime_id}-homes", os.getuid())
+    assert [path.name for path in state.glob("codex-homes.refused-*")]
+    assert list(elsewhere.iterdir()) == []
 
 
 @pytest.mark.parametrize("runtime_id", ["codex", "opencode"])
@@ -1784,7 +2138,7 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path,
     _assert_private(child)
     # The CLI's own files keep its umask; the closed home is what protects them.
     assert stat.S_IMODE(source.stat().st_mode) == 0o700
-    assert manager.calls == [("pipe", MEMBER_UID_BASE + 0, MEMBER_UID_BASE + 2)]
+    assert manager.calls == [("exec", None), ("pipe", MEMBER_UID_BASE + 0, MEMBER_UID_BASE + 2)]
     assert (child / "sessions/rollout.jsonl").read_text() == '{"id":"native-source"}\n'
     assert (child / ".hidden").read_text() == "dotfile"
     assert list((child / "tmp").iterdir()) == []
@@ -1792,6 +2146,233 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path,
     locks = child / f"{runtime_id}/state/{runtime_id}/locks"
     assert locks.exists() is (runtime_id == "codex")
     assert (source / "tmp/scratch").exists(), "the source home is read, never changed"
+
+
+@pytest.fixture
+def _multi_uid_state():
+    """A /agent-state the image's own UIDs can reach, for kernel-checked tests."""
+    if os.geteuid() != 0 or _SETPRIV is None:
+        pytest.skip("switching to the sandbox and member UIDs needs root and setpriv")
+    base = Path(tempfile.mkdtemp(prefix="member-homes-"))
+    try:
+        base.chmod(0o755)
+        state = base / "agent-state"
+        state.mkdir()
+        os.chown(state, _SANDBOX_UID, _SANDBOX_UID)
+        state.chmod(0o2770)
+        yield base, state
+    finally:
+        shutil.rmtree(base)
+
+
+def _as_member(manager: _LocalMemberShell, uid: int, script: str, *args: str):
+    return subprocess.run(
+        manager.run_as(uid, _SANDBOX_UID, ["/bin/sh", "-c", script, "sh", *args]),
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def test_a_sibling_cannot_swap_a_members_home_before_its_cli_starts(_multi_uid_state):
+    """Codex review P1: a 0700 home is not enough in a group-writable collection.
+
+    A sibling could rename the home away and put its own tree at the same path
+    between the owner check and the CLI's start. With the sandbox user owning a
+    sticky collection inside a sticky /agent-state, the kernel refuses each step.
+    """
+    base, state = _multi_uid_state
+    manager = _LocalMemberShell(base, as_uids=True)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
+    factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+    home = manager.local(factory._member_state_dir(victim))
+    collection = home.parent
+    _assert_trusted(state, collection, _SANDBOX_UID)
+    assert home.stat().st_uid == MEMBER_UID_BASE + 1
+    sibling = MEMBER_UID_BASE
+
+    renamed_home = _as_member(manager, sibling, 'mv -T -- "$1" "$1.away"', str(home))
+    renamed_collection = _as_member(manager, sibling, 'mv -T -- "$1" "$1.away"', str(collection))
+    removed_home = _as_member(manager, sibling, 'rm -rf -- "$1"', str(home))
+    unsticky = _as_member(manager, sibling, 'chmod -t -- "$1"', str(state))
+
+    for attempt in (renamed_home, renamed_collection, removed_home, unsticky):
+        assert attempt.returncode != 0
+        assert b"ermission denied" in attempt.stderr or b"not permitted" in attempt.stderr
+    assert home.is_dir() and home.stat().st_uid == MEMBER_UID_BASE + 1
+    _assert_trusted(state, collection, _SANDBOX_UID)
+    # The sibling can still make its own home, and the victim restarts cleanly.
+    own = replace(_launch("athr_sibling", native_session_id=None, slot=0), runtime_id="codex")
+    factory._prepare_member_state(_spec(), own, factory._member_state_dir(own))
+    factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+
+
+@pytest.mark.parametrize("planted", ["sibling_directory", "sibling_file_inside"])
+def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_state, planted):
+    """The legacy collection is still swappable, so its entry is judged after the move."""
+    base, _state = _multi_uid_state
+    manager = _LocalMemberShell(base, as_uids=True)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
+    legacy = manager.local(factory._legacy_member_state_dir(victim))
+    sibling = MEMBER_UID_BASE
+    # An earlier release's member-created, group-writable collection.
+    made = _as_member(manager, sibling, 'umask 0007; mkdir -p -- "$1"', str(legacy.parent))
+    assert made.returncode == 0, made.stderr
+    if planted == "sibling_directory":
+        script = 'umask 0; mkdir -- "$1"; printf evil > "$1/config.toml"'
+        result = _as_member(manager, sibling, script, str(legacy))
+    else:
+        result = _as_member(manager, MEMBER_UID_BASE + 1, 'umask 0007; mkdir -- "$1"', str(legacy))
+        assert result.returncode == 0, result.stderr
+        script = 'umask 0; printf evil > "$1/config.toml"'
+        result = _as_member(manager, sibling, script, str(legacy))
+    assert result.returncode == 0, result.stderr
+
+    with pytest.raises(DriverError, match=r"not owned by this member|another UID"):
+        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+
+    # Codex review P1 on #568: the next start must not find the refused tree at
+    # the home's path, take it for an already migrated home, and adopt it.
+    home = manager.local(factory._member_state_dir(victim))
+    try:
+        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+    except DriverError:
+        pass  # Still refused is safe; adopting the planted tree is not.
+    else:
+        assert home.stat().st_uid == MEMBER_UID_BASE + 1
+        assert not (home / "config.toml").exists(), "the sibling's config was adopted"
+
+
+def _poison_legacy_home(manager: _LocalMemberShell, factory, victim) -> None:
+    """An earlier release's group-writable home a sibling put its config into."""
+    legacy = manager.local(factory._legacy_member_state_dir(victim))
+    sibling = MEMBER_UID_BASE
+    made = _as_member(manager, sibling, 'umask 0007; mkdir -p -- "$1"', str(legacy.parent))
+    assert made.returncode == 0, made.stderr
+    made = _as_member(manager, victim_uid(victim), 'umask 0007; mkdir -- "$1"', str(legacy))
+    assert made.returncode == 0, made.stderr
+    made = _as_member(manager, sibling, 'umask 0; printf evil > "$1/config.toml"', str(legacy))
+    assert made.returncode == 0, made.stderr
+
+
+def victim_uid(launch) -> int:
+    return MEMBER_UID_BASE + launch.slot_id
+
+
+def _never_adopted(manager: _LocalMemberShell, factory, victim) -> None:
+    """Start again: refused is safe; a home with a sibling's file in it is not."""
+    home = manager.local(factory._member_state_dir(victim))
+    try:
+        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+    except DriverError as exc:
+        assert "another UID" in str(exc) or "not owned by this member" in str(exc)
+        return
+    assert home.stat().st_uid == victim_uid(victim)
+    owners = {path.lstat().st_uid for path in [home, *home.rglob("*")]}
+    assert owners == {victim_uid(victim)}, "a sibling-owned entry was adopted"
+    config = home / "config.toml"
+    assert not config.exists() or config.read_text() != "evil"
+
+
+def test_a_sibling_holding_every_guessable_quarantine_name_gets_nothing_adopted(
+    _multi_uid_state,
+):
+    """Codex review P1 on #568: the set-aside name must not decide adoption.
+
+    A sibling may create entries in the sticky collection. It takes the name
+    the previous release used for the set-aside home, for a whole range of
+    PIDs, plus other obvious spellings; the poisoned home is still never
+    adopted, on this start or the next.
+    """
+    base, _state = _multi_uid_state
+    manager = _LocalMemberShell(base, as_uids=True)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
+    manager.ensure_private_member_collections(_spec())
+    _poison_legacy_home(manager, factory, victim)
+    home = manager.local(factory._member_state_dir(victim))
+    squat = (
+        'for name in "$@"; do mkdir -- "$name"; : > "$name/keep"; done; '
+        'i=1; while [ "$i" -le 2048 ]; do mkdir -- "$0.refused-$i"; i=$((i + 1)); done'
+    )
+    guessed = [f"{home}.refused", f"{home}.refused-", f"{home}.refused-0", f"{home}.old"]
+    squatted = subprocess.run(
+        manager.run_as(
+            MEMBER_UID_BASE, _SANDBOX_UID, ["/bin/sh", "-c", squat, str(home), *guessed]
+        ),
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert squatted.returncode == 0, squatted.stderr
+
+    with pytest.raises(DriverError, match="another UID"):
+        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+
+    _never_adopted(manager, factory, victim)
+    _never_adopted(manager, factory, victim)
+
+
+def test_a_poisoned_home_is_refused_on_every_start_when_it_cannot_be_set_aside(
+    _multi_uid_state, monkeypatch
+):
+    """Adoption never depends on the set-aside rename succeeding."""
+    base, _state = _multi_uid_state
+    manager = _LocalMemberShell(base, as_uids=True)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
+    manager.ensure_private_member_collections(_spec())
+    _poison_legacy_home(manager, factory, victim)
+    home = manager.local(factory._member_state_dir(victim))
+    # Every name mktemp offers is one the sibling already holds.
+    stubs = base / "stubs"
+    stubs.mkdir()
+    stub = stubs / "mktemp"
+    stub.write_text('#!/bin/sh\nfor last; do :; done\nprintf "%staken\\n" "${last%%XXXX*}"\n')
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stubs}:{os.environ['PATH']}")
+    taken = _as_member(
+        manager, MEMBER_UID_BASE, 'mkdir -- "$1"; : > "$1/keep"', f"{home}.refused-taken"
+    )
+    assert taken.returncode == 0, taken.stderr
+
+    for _start in range(3):
+        with pytest.raises(DriverError, match="another UID"):
+            factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        # The poisoned tree is still at the home's path, and still refused.
+        assert (home / "config.toml").read_text() == "evil"
+
+
+def test_a_clean_home_and_a_fork_copy_pass_the_every_start_check(_multi_uid_state):
+    """Every legitimate writer is the member itself, so nothing honest is refused."""
+    base, _state = _multi_uid_state
+    manager = _LocalMemberShell(base, as_uids=True)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="opencode"
+    )
+    child = replace(_launch("athr_child", native_session_id=None, slot=2), runtime_id="opencode")
+    factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
+    source_home = manager.local(factory._member_state_dir(source))
+    written = _as_member(
+        manager,
+        victim_uid(source),
+        'mkdir -p -- "$1/opencode/data"; printf session > "$1/opencode/data/opencode.db"',
+        str(source_home),
+    )
+    assert written.returncode == 0, written.stderr
+    factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
+
+    factory._clone_private_member_state(_spec(), source, child)
+    factory._prepare_member_state(_spec(), child, factory._member_state_dir(child))
+
+    child_home = manager.local(factory._member_state_dir(child))
+    assert {path.lstat().st_uid for path in [child_home, *child_home.rglob("*")]} == {
+        victim_uid(child)
+    }
+    assert (child_home / "opencode/data/opencode.db").read_text() == "session"
 
 
 def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(monkeypatch):
@@ -2272,7 +2853,7 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_registered", [False, True])
 @pytest.mark.parametrize("disk_limit_mib", [0, 16384])
-async def test_broker_fork_materializes_reserved_target_and_replays_stale_manifest(
+async def test_sandbox_manager_fork_materializes_reserved_target_and_replays_stale_manifest(
     already_registered,
     disk_limit_mib,
 ):
@@ -2294,7 +2875,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
     supervisor.register_manifest(spec, members if already_registered else _members())
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,
     )
     body = {
@@ -2319,10 +2900,12 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         "source_launch": asdict(_launch("athr_source", native_session_id="native-source", slot=0)),
         "target_launch": asdict(_launch("athr_child", native_session_id=None, slot=2)),
     }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         first = await client.post(
             "/shared-sandboxes/athr_source/fork",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=body,
         )
         assert first.status_code == 200, first.text
@@ -2330,7 +2913,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         # after the host has created the child but before receipt finalization.
         registered = await client.post(
             "/shared-sandboxes/athr_source/register",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=SharedSandboxIdentityRequest.model_validate(body).model_dump(),
         )
         assert registered.status_code == 200, registered.text
@@ -2340,7 +2923,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         body["target_launch"]["residency_generation"] = 11
         retried = await client.post(
             "/shared-sandboxes/athr_source/fork",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=body,
         )
         assert retried.status_code == 200, retried.text
@@ -2357,7 +2940,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         }
         refused = await client.post(
             "/shared-sandboxes/athr_source/fork",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=collision,
         )
         assert refused.status_code == 409, refused.text
@@ -3545,6 +4128,9 @@ def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -
 
     status = supervisor.status("athr_source")
     assert raised.value is initial_failure
+    assert archive_failure_http_detail(raised.value) == (
+        "archive failure (phase=initial, type=RuntimeError)"
+    )
     assert prepared == [True]
     assert archived == [(False, ("agent-net",))]
     assert manager.stop_count == 2
@@ -3659,10 +4245,32 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
     assert all(event[0] != "thaw" for event in manager.events)
 
 
-def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws() -> None:
+def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     manager = _Manager()
     prepared: list[bool] = []
+
+    class ProviderError(RuntimeError):
+        def __init__(self, *, code: str, status: int, unsafe: str) -> None:
+            super().__init__(unsafe)
+            self.response = {
+                "Error": {"Code": code, "Message": unsafe},
+                "ResponseMetadata": {
+                    "HTTPStatusCode": status,
+                    "HTTPHeaders": {"authorization": unsafe},
+                },
+                "Body": unsafe,
+            }
+
+    initial_unsafe = "https://initial.invalid/private-key?credential=initial-secret"
+    final_unsafe = "https://final.invalid/object-key?credential=final-secret"
     final_failure = RuntimeError("final upload failed")
+    final_failure.__cause__ = ProviderError(
+        code="SlowDown",
+        status=503,
+        unsafe=final_unsafe,
+    )
 
     def archive(*_args) -> None:
         raise final_failure
@@ -3681,6 +4289,11 @@ def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws() -> None:
         manifest=_members(),
     )
     initial_failure = RuntimeError("initial upload failed")
+    initial_failure.__cause__ = ProviderError(
+        code="AccessDenied",
+        status=403,
+        unsafe=initial_unsafe,
+    )
 
     def capture(*_args):
         manager.initial_archive_marker = b"prepared-initial-marker"
@@ -3696,6 +4309,23 @@ def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws() -> None:
     status = supervisor.status("athr_source")
     assert raised.value is final_failure
     assert raised.value.__cause__ is initial_failure
+    safe_detail = archive_failure_http_detail(raised.value)
+    assert safe_detail == (
+        "archive failure (phase=initial, type=ProviderError, code=AccessDenied, status=403); "
+        "archive failure (phase=fail_stop_final, type=ProviderError, code=SlowDown, status=503)"
+    )
+    assert initial_unsafe not in safe_detail
+    assert final_unsafe not in safe_detail
+    assert initial_unsafe not in caplog.text
+    assert final_unsafe not in caplog.text
+    assert initial_unsafe not in " ".join(getattr(raised.value, "__notes__", ()))
+    assert final_unsafe not in " ".join(getattr(raised.value, "__notes__", ()))
+    assert any(
+        getattr(record, "detail", None)
+        == "archive failure (phase=fail_stop_final, type=ProviderError, "
+        "code=SlowDown, status=503)"
+        for record in caplog.records
+    )
     assert prepared == [True]
     assert manager.stop_count == 1
     assert manager.items[_spec().container_name].networks == ("agent-net",)
@@ -3897,10 +4527,21 @@ def test_pending_final_archive_retries_after_external_bridge_removal() -> None:
     assert stopped.running is False
     assert stopped.networks == ("agent-net",)
     manager.items[_spec().container_name] = replace(stopped, networks=())
+    supervisor.register_manifest(
+        _spec(),
+        [
+            replace(_members()[0], resident_state="restarting"),
+            replace(_members()[1], context_status="lost", resident_state="lost"),
+        ],
+    )
+    assert supervisor.status("athr_source").resident_state == "restarting"
+    assert supervisor.status("athr_peer").resident_state == "lost"
 
     descriptor = supervisor.stop_if_idle("athr_source", generation=1)
 
     assert descriptor.running is False
+    assert descriptor.resident_state == "stopped"
+    assert supervisor.status("athr_peer").resident_state == "lost"
     assert archive_calls == 2
     assert manager.items[_spec().container_name].networks == ()
 
@@ -4724,7 +5365,7 @@ def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch
 
 
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
-    """The supervisor must carry the retained hook slice to the broker."""
+    """The supervisor must carry the retained hook slice to the sandbox manager."""
 
     class Manager(_Manager):
         def tool_mark_reader(self, _spec):
@@ -4905,7 +5546,7 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
 def test_checkpoints_are_produced_without_a_hook_because_production_has_none():
     """The delivery gate must not depend on an observer nobody installs.
 
-    The broker builds its supervisor without a checkpoint hook. An earlier
+    The sandbox manager builds its supervisor without a checkpoint hook. An earlier
     version returned early when the hook was absent, so no checkpoint was ever
     produced in production while a test that passed its own hook stayed green --
     the same shape of gap as a fixture that does not match the producer.
@@ -5024,7 +5665,7 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
 def test_acquire_reports_what_it_did_to_the_container(pre_existing, running, expected):
     """The four startup paths differ by the action, and only the call knows it.
 
-    A group can outlive the broker that made it, and a container that was
+    A group can outlive the sandbox manager that made it, and a container that was
     stopped and restarted looks exactly like one that never stopped once it is
     running again. So the action is reported by the code that performed it
     rather than inferred later from the container's state.
@@ -5175,14 +5816,16 @@ def test_ensure_resident_reports_reuse_for_a_hot_process():
     assert len(factory.opened) == 1
 
 
-def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypatch, tmp_path):
-    """With the broker's switch on, the container work comes back as durations."""
+def test_sandbox_manager_sub_stages_are_reported_when_this_process_is_profiling(
+    monkeypatch, tmp_path
+):
+    """With the sandbox manager's switch on, the container work comes back as durations."""
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
         json.dumps(
             {
-                "run_id": "broker-stages-1",
+                "run_id": "sandbox-manager-stages-1",
                 "operations": ["attempt.startup"],
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
@@ -5201,7 +5844,7 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
         has_settled_context=True,
         manifest=_members(),
         profiling={
-            "run_id": "broker-stages-1",
+            "run_id": "sandbox-manager-stages-1",
             "measurement_id": "msm_x",
             "operation": "attempt.startup",
             "call_id": "c7",
@@ -5222,13 +5865,13 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
     assert lease.container_action == "create"
 
 
-def _enable_broker_profiling(monkeypatch) -> None:
+def _enable_sandbox_manager_profiling(monkeypatch) -> None:
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
         json.dumps(
             {
-                "run_id": "broker-context-1",
+                "run_id": "sandbox-manager-context-1",
                 "operations": ["attempt.startup"],
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
@@ -5238,13 +5881,13 @@ def _enable_broker_profiling(monkeypatch) -> None:
     operation_profiling.reset_cache()
 
 
-def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
+def test_a_lapsed_selection_stops_the_sandbox_manager_recording(monkeypatch):
     """A run that already expired must not collect container sub-stages.
 
-    Regression: the broker checked only that its cached run existed, so it
+    Regression: the sandbox manager checked only that its cached run existed, so it
     kept measuring after the runner had stopped.
     """
-    _enable_broker_profiling(monkeypatch)
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -5256,7 +5899,7 @@ def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
         has_settled_context=True,
         manifest=_members(),
         profiling={
-            "run_id": "broker-context-1",
+            "run_id": "sandbox-manager-context-1",
             "measurement_id": "msm_gone",
             "operation": "attempt.startup",
             "expires_at": time.time() - 1,
@@ -5272,8 +5915,8 @@ def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
 
 
 def test_a_selection_for_another_run_is_refused(monkeypatch):
-    """The broker honours only the run configured here."""
-    _enable_broker_profiling(monkeypatch)
+    """The sandbox manager honours only the run configured here."""
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -5296,8 +5939,8 @@ def test_a_selection_for_another_run_is_refused(monkeypatch):
 
 
 def test_a_live_selection_records_container_sub_stages(monkeypatch):
-    """With a matching, unexpired selection the broker reports its work."""
-    _enable_broker_profiling(monkeypatch)
+    """With a matching, unexpired selection the sandbox manager reports its work."""
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -5309,7 +5952,7 @@ def test_a_live_selection_records_container_sub_stages(monkeypatch):
         has_settled_context=True,
         manifest=_members(),
         profiling={
-            "run_id": "broker-context-1",
+            "run_id": "sandbox-manager-context-1",
             "measurement_id": "msm_x",
             "operation": "attempt.startup",
             "call_id": "c9",
@@ -5331,14 +5974,14 @@ def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
     """An empty stage list is a completed collection, not a missing one.
 
     Regression: the reuse path runs no `cli_spawn`, so it answers with no
-    stages, and the caller read that as never having heard from the broker.
+    stages, and the caller read that as never having heard from the sandbox manager.
     """
-    _enable_broker_profiling(monkeypatch)
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     factory = _TransportFactory()
     supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
     live = {
-        "run_id": "broker-context-1",
+        "run_id": "sandbox-manager-context-1",
         "measurement_id": "msm_x",
         "operation": "attempt.startup",
         "call_id": "c1",
@@ -5387,13 +6030,13 @@ def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
 def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
     """An empty answer is only "nothing to time" when collection finished.
 
-    Regression, at the response the runner actually reads: the broker's local
+    Regression, at the response the runner actually reads: the sandbox manager's local
     deadline lapsed while it waited for the member lock, the CLI start was
     never timed, and the lease still reported a completed collection.
     """
-    _enable_broker_profiling(monkeypatch)
+    _enable_sandbox_manager_profiling(monkeypatch)
     live = {
-        "run_id": "broker-context-1",
+        "run_id": "sandbox-manager-context-1",
         "measurement_id": "msm_x",
         "operation": "attempt.startup",
         "call_id": "c1",

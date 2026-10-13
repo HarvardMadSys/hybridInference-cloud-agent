@@ -1,7 +1,7 @@
 """Validated deployment-wide policy for retained-sandbox archives.
 
 The control plane stores this policy and returns it on every host heartbeat.
-The runner relays it over the authenticated workspace-broker channel. Brokers
+The runner relays it over the authenticated sandbox-manager channel. SandboxManagers
 authenticate with their workload identity, or with an AWS access key saved by
 an administrator. The secret stays out of ``as_dict``: that form is written
 into sandbox markers, and long-lived credentials never enter the sandbox.
@@ -206,7 +206,7 @@ class SandboxArchivePolicy:
             "multipart_threshold_bytes",
             "multipart_part_bytes",
             "revision",
-            # A response timestamp is metadata, not broker configuration.
+            # A response timestamp is metadata, not sandbox manager configuration.
             "updated_at",
             # Admin responses name this flag. Hosts ignore it.
             "aws_secret_access_key_configured",
@@ -253,7 +253,7 @@ class SandboxArchivePolicy:
             **({"access_key_auth": True} if self.access_key_auth else {}),
         }
 
-    def as_broker_dict(self) -> dict[str, bool | int | str]:
+    def as_sandbox_manager_dict(self) -> dict[str, bool | int | str]:
         """Return the host payload, including a saved access key when one exists."""
         values = self.as_dict()
         if self.aws_access_key_id:

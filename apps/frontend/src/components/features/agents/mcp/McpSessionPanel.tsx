@@ -17,7 +17,7 @@ import {
   type McpPolicy,
 } from '@/lib/api/mcp';
 
-import { McpInvocationCard, connectionName, invocationAction } from './McpInvocationCard';
+import { McpInvocationCard } from './McpInvocationCard';
 
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from '../agentPush';
 
@@ -309,14 +309,46 @@ function McpSessionPanelContent({
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const selectionOperation = useRef(false);
-  // Calls approved with "Always allow" whose rule is not saved yet. Saving a
-  // server's rules expires every call still waiting on it, the approved one
-  // included, so each rule waits until nothing on its server is in flight.
-  const alwaysAllow = useRef(new Map<number, McpInvocationApi>());
-  // Each save reads the rules and writes them back; one at a time, so two
-  // rules for the same server cannot overwrite each other.
-  const alwaysAllowSaves = useRef(Promise.resolve());
+  const synchronizedAllowIds = useRef(new Set<number>());
 
+  useEffect(() => {
+    if (approvalsOnly) return;
+    const applied = invocations.filter(
+      (call) =>
+        call.always_allow_status === 'applied' && !synchronizedAllowIds.current.has(call.id),
+    );
+    if (!applied.length) return;
+    let disposed = false;
+    void getMcpThreadBindings(threadId)
+      .then(({ bindings: current }) => {
+        if (disposed) return;
+        setBindings(current);
+        setSelections((drafts) => {
+          const next = { ...drafts };
+          for (const call of applied) {
+            const binding = current.find((item) => item.connection_id === call.connection_id);
+            const draft = next[call.connection_id];
+            if (!binding || !draft) continue;
+            const key = selectionKey(call.capability_kind);
+            const value = binding[key][call.capability_name];
+            // Read the current rule: a later manual revocation wins. Preserve
+            // unsaved edits to every other capability in the open panel.
+            next[call.connection_id] = {
+              ...draft,
+              [key]: { ...draft[key], [call.capability_name]: value ?? 'confirm' },
+            };
+          }
+          return next;
+        });
+        for (const call of applied) synchronizedAllowIds.current.add(call.id);
+      })
+      .catch(() => {
+        // A later poll or manual refresh will retry the permission read.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [invocations, approvalsOnly, threadId]);
   const applyInvocationSnapshot = useCallback(
     (response: { invocations: McpInvocationApi[]; hasMore: boolean }, version: number) => {
       if (version < historyAppliedVersion.current) return;
@@ -518,9 +550,9 @@ function McpSessionPanelContent({
     setError(null);
     setNotice(null);
     try {
-      const result = await decideMcpInvocation(invocation.id, approve);
-      if (always && result.status === 'approved')
-        alwaysAllow.current.set(invocation.id, invocation);
+      const result = always
+        ? await decideMcpInvocation(invocation.id, approve, true)
+        : await decideMcpInvocation(invocation.id, approve);
       setInvocations((current) =>
         mergeInvocations(current, [result], false, historyPages.current * 50),
       );
@@ -533,63 +565,6 @@ function McpSessionPanelContent({
       setDecidingIds(new Set(decisionOperations.current));
     }
   }
-
-  /** Stop asking for this capability in this conversation. */
-  const allowFromNowOn = useCallback(
-    async (invocation: McpInvocationApi) => {
-      const key = selectionKey(invocation.capability_kind ?? 'tool');
-      const name = invocation.capability_name;
-      try {
-        // Read the rules fresh: the panel may not have loaded them, and a
-        // stale copy would undo a change made since.
-        const { bindings: current } = await getMcpThreadBindings(threadId);
-        const binding = current.find((item) => item.connection_id === invocation.connection_id);
-        if (!binding) {
-          throw new Error(`${connectionName(invocation)} is no longer in this conversation.`);
-        }
-        const payload: McpBindingRequest = {
-          connection_id: binding.connection_id,
-          alias: binding.alias,
-          enabled: binding.enabled,
-          use_defaults: binding.selection_pending,
-          tools: binding.tools,
-          resources: binding.resources,
-          prompts: binding.prompts,
-        };
-        payload[key] = { ...binding[key], [name]: 'allow' };
-        const response = await updateMcpThreadBinding(threadId, payload);
-        setBindings(response.bindings);
-        // Keep unsaved edits to other capabilities; only this one changed.
-        setSelections((drafts) => {
-          const draft = drafts[invocation.connection_id];
-          if (!draft) return drafts;
-          return {
-            ...drafts,
-            [invocation.connection_id]: { ...draft, [key]: { ...draft[key], [name]: 'allow' } },
-          };
-        });
-        setNotice(
-          `${connectionName(invocation)} can now ${invocationAction(invocation)} without asking in this conversation.`,
-        );
-      } catch (cause: unknown) {
-        setError(cause instanceof Error ? cause.message : 'Could not save the permission.');
-      }
-    },
-    [threadId],
-  );
-
-  useEffect(() => {
-    for (const [id, invocation] of alwaysAllow.current) {
-      const inFlight = invocations.some(
-        (call) =>
-          call.connection_id === invocation.connection_id &&
-          (call.status === 'pending' || call.status === 'approved'),
-      );
-      if (inFlight) continue;
-      alwaysAllow.current.delete(id);
-      alwaysAllowSaves.current = alwaysAllowSaves.current.then(() => allowFromNowOn(invocation));
-    }
-  }, [invocations, allowFromNowOn]);
 
   if (!active && !loaded) {
     if (approvalsOnly) return null;
@@ -638,6 +613,15 @@ function McpSessionPanelContent({
               <p className="text-sm text-gray-800 dark:text-gray-200">
                 {invocation.capability_name} · {invocation.status}
               </p>
+              {invocation.always_allow_status ? (
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {invocation.always_allow_status === 'pending'
+                    ? 'Always allow was recorded. The permission will save after waiting calls advance; you can leave this page.'
+                    : invocation.always_allow_status === 'applied'
+                      ? 'Always allow was saved for this conversation.'
+                      : 'Always allow was not applied because the connection or permissions changed. Review the current permissions.'}
+                </p>
+              ) : null}
               {invocation.guidance ? (
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   {invocation.guidance}

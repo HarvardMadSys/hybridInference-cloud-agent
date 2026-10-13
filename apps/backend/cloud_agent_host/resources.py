@@ -73,7 +73,7 @@ SAMPLER_VERSION = "2"
 def shared_member_resource_rollup() -> dict[str, object]:
     """Return the honest top-level base for one shared-member turn.
 
-    The broker may add tool windows and UID-scoped guest observations to this
+    The sandbox manager may add tool windows and UID-scoped guest observations to this
     object. Keeping all aggregate counters absent prevents an unforked turn and
     a forked turn from silently acquiring different accounting semantics.
     """

@@ -38,7 +38,7 @@ def good_log() -> str:
             "[deploy] waiting for bootstrap control plane at http://127.0.0.1:8000/healthz",
             "[deploy] bootstrap control plane: ok",
             "[deploy] bootstrap MCP relay: ok",
-            "[deploy] waiting for target abc host readiness and reverse broker probes",
+            "[deploy] waiting for target abc host readiness and reverse sandbox manager probes",
             ac.FENCE_REFUSAL + " no host has heartbeated",
         ]
     )

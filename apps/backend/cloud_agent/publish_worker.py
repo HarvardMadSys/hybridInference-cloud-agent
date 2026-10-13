@@ -75,7 +75,7 @@ class PublishStorage(Protocol):
     """What publishing a group snapshot reaches the storage layer for.
 
     Two capabilities and no more: the snapshot rows it claims and records,
-    and the host pool, which it needs only to find the broker holding the
+    and the host pool, which it needs only to find the sandbox manager holding the
     workspace it is publishing from.
     """
 
@@ -306,9 +306,33 @@ def _github_headers(credential: GitHubCredential) -> dict[str, str]:
     }
 
 
+_BACKTICK_RUN = re.compile(r"`+")
+
+
+def _code_span(value: str) -> str:
+    """Render agent-chosen text as one Markdown code span it cannot close early.
+
+    A file name is the agent's to choose, and the App posts the body under its
+    own name, so a name that closed its span could write mentions, closing
+    keywords or links into it. A span ends at the first backtick run as long
+    as the one that opened it, so the fence is one longer than any run inside,
+    and padded when the text starts or ends with a backtick or a space (the
+    renderer strips one space from each side). Control characters, which could
+    end the list item with the span still open, are shown as escapes; the
+    publisher's change-set gate refuses such names before this is reached.
+    """
+    text = "".join(
+        ascii(char)[1:-1] if unicodedata.category(char).startswith("C") else char for char in value
+    )
+    fence = "`" * (max(map(len, _BACKTICK_RUN.findall(text)), default=0) + 1)
+    if text[:1] in ("`", " ") or text[-1:] in ("`", " "):
+        text = f" {text} "
+    return f"{fence}{text}{fence}"
+
+
 def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
     """Compose a PR body that tells the reviewer what they are reviewing."""
-    files = "\n".join(f"- `{path}`" for path in changed_files[:50])
+    files = "\n".join(f"- {_code_span(path)}" for path in changed_files[:50])
     if len(changed_files) > 50:
         files += f"\n- …and {len(changed_files) - 50} more"
     included = ", ".join(f"`{item}`" for item in job.get("included_job_ids") or [])
@@ -406,17 +430,17 @@ async def _import_snapshot_base(
             detail="the publisher produced no retained base bundle",
         )
         return False
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
-    broker = await broker_for_job(store.host_pool, snapshot["anchor_job_id"])
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_job(store.host_pool, snapshot["anchor_job_id"])
+    if sandbox_manager is None:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
-            detail="the owning workspace broker is unavailable for base import",
+            detail="the owning sandbox manager is unavailable for base import",
         )
         return False
     try:
-        await broker.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
+        await sandbox_manager.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
     except Exception as exc:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,

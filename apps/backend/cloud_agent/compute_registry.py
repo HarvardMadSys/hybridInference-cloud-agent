@@ -313,6 +313,22 @@ def build_registry(
                         "default": {},
                         "modes": ["provision"],
                     },
+                    {
+                        "key": "node_types",
+                        "label": "Preferred node types",
+                        "type": "string_list",
+                        "description": "Try these types from top to bottom when capacity is unavailable. An explicit node type in profile parameters takes precedence. Leave empty to use the profile's choice.",
+                        "modes": ["provision"],
+                    },
+                    {
+                        "key": "node_type_binding",
+                        "label": "Node type parameter",
+                        "type": "text",
+                        "default": "phystype",
+                        "max_length": 64,
+                        "advanced": True,
+                        "modes": ["provision"],
+                    },
                     {"key": "group", "label": "Project group", "type": "text", "advanced": True},
                     {
                         "key": "ssh_username",

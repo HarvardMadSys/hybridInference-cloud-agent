@@ -194,6 +194,34 @@ def test_error_result_maps_to_error():
     assert event.payload["subtype"] == "error_max_turns"
 
 
+@pytest.mark.parametrize(
+    ("result", "text"),
+    [
+        # An API failure: the reason is the result text (staging, 2026-09-27).
+        (
+            {
+                "subtype": "success",
+                "api_error_status": 403,
+                "result": "Failed to authenticate. API Error: 403 This account has no active API key",
+            },
+            "Failed to authenticate. API Error: 403 This account has no active API key",
+        ),
+        # The error subtypes carry it in ``errors`` (the pinned 2.1.220).
+        (
+            {"subtype": "error_max_turns", "errors": ["Reached maximum number of turns (8)"]},
+            "Reached maximum number of turns (8)",
+        ),
+        ({"subtype": "error_during_execution", "errors": []}, "error_during_execution"),
+    ],
+)
+def test_a_claude_error_result_says_why(result, text):
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "is_error": True, **result})
+    )
+    assert event.event_type == "error"
+    assert event.payload["text"] == text
+
+
 @pytest.mark.parametrize("is_error", [None, False])
 def test_terminal_api_failure_overrides_the_success_subtype(is_error):
     failure = {
@@ -221,6 +249,25 @@ def test_successful_terminal_reason_remains_a_result():
     )
     assert event.event_type == "lifecycle"
     assert event.payload["phase"] == "result"
+
+
+@pytest.mark.parametrize("is_error", [None, False])
+def test_terminal_api_failure_uses_errors_when_result_is_absent(is_error):
+    failure = {
+        "type": "result",
+        "subtype": "success",
+        "terminal_reason": "api_error",
+        "api_error_status": 503,
+        "errors": ["No provider is currently available"],
+    }
+    if is_error is not None:
+        failure["is_error"] = is_error
+    event = ClaudeCodeRuntime().parse_event(json.dumps(failure))
+
+    assert event.event_type == "error"
+    assert event.payload["text"] == "No provider is currently available"
+    assert event.payload["terminal_reason"] == "api_error"
+    assert event.payload["api_error_status"] == 503
 
 
 def test_api_retry_notices_report_each_attempt_and_delay():
@@ -949,7 +996,7 @@ def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
     assert "mcp-secret-must-not-leak" not in str(raised.value)
 
 
-def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
+def test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credential():
     """The same rule, for the adapter that does resolve servers.
 
     "Fails closed" was only ever a stand-in for this: a requested server must
@@ -983,6 +1030,27 @@ def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
     servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
     assert servers[MERGED_MCP_SERVER_NAME]["url"] == "http://agent-mcp:8000/v1/agent/mcp"
     assert "--strict-mcp-config" in argv
+
+
+def test_claude_idle_timeout_covers_owner_approval_and_returns_its_outcome():
+    """The remote idle timer must not cancel a call before the approval window."""
+    from cloud_agent.mcp.invocations import DEFAULT_DECISION_WINDOW
+
+    argv, env = ClaudeCodeRuntime().prepare(
+        workdir="/tmp/x",
+        task_prompt="do it",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="test-grant",
+        mcp_config=RuntimeMCPConfig(
+            server_ids=("github",), base_url="http://agent-mcp:8000", credential="test-mcp-token"
+        ),
+    )
+    idle_ms = int(env["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"])
+    assert idle_ms > DEFAULT_DECISION_WINDOW.total_seconds() * 1000
+    assert idle_ms <= int(env["MCP_TOOL_TIMEOUT"])
+    server = _mcp_config_of(argv)["mcpServers"][MERGED_MCP_SERVER_NAME]
+    assert server["timeout"] >= idle_ms
 
 
 @pytest.mark.parametrize(
@@ -1263,7 +1331,7 @@ def test_suppression_does_not_leak_between_jobs():
 # out a repository's own servers when a job requests none, the one-normalisation
 # of the gateway base url, and which runtimes may claim MCP at all. The other
 # three cases in that section were already covered here under different names
-# (``test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential``,
+# (``test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credential``,
 # ``test_runtime_credentials_stay_out_of_process_arguments``,
 # ``test_mcp_config_fails_closed_without_an_isolated_relay``) and were not
 # duplicated.

@@ -433,7 +433,7 @@ class ProfilingControlService:
             # version of a background switch is "this takes a few seconds", and
             # a page that did not say so would be implying instant agreement.
             "sync_note": (
-                "this switch reaches the control plane, runners and brokers through a "
+                "this switch reaches the control plane, runners and sandbox managers through a "
                 "background sync, which normally takes about 30 seconds; a measurement "
                 "that already started is not affected"
             ),

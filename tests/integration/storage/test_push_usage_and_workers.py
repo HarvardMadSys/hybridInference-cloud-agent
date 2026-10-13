@@ -556,7 +556,7 @@ async def test_a_failed_base_import_waits_out_its_retry(store, pool):
     assert await store.snapshot.next_base_import_retry_due() is None
 
     await store.snapshot.record_snapshot_base_import_failure(
-        snapshot_id=capture["snapshot_id"], detail="the broker is unavailable"
+        snapshot_id=capture["snapshot_id"], detail="the sandbox manager is unavailable"
     )
     assert await store.snapshot.pending_snapshot_base_import() is None, "not before its retry"
     due = await store.snapshot.next_base_import_retry_due()

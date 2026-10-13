@@ -23,7 +23,29 @@ vi.mock('@/lib/api/compute', () => ({
 
 const catalog: ComputeCatalog = {
   secret_store_configured: true,
-  providers: [],
+  providers: [
+    {
+      id: 'cloudlab',
+      label: 'CloudLab',
+      modes: ['provision'],
+      capabilities: {},
+      connection_fields: [],
+      fields: [
+        {
+          key: 'node_types',
+          label: 'Preferred node types (top to bottom)',
+          type: 'string_list',
+          default: ['r6615', 'c6620', 'r650', 'r6525', 'c6525-100g', 'c6525-25g'],
+        },
+        {
+          key: 'node_type_binding',
+          label: 'Node type profile parameter',
+          type: 'text',
+          default: 'phystype',
+        },
+      ],
+    },
+  ],
   deployment_profiles: [
     { id: 'profile-a', label: 'Host A' },
     { id: 'profile-b', label: 'Host B' },
@@ -69,7 +91,7 @@ const preferredNodes: CloudLabPreferredNodesSnapshot = {
     {
       node_type: 'c6525-25g',
       site: 'Utah',
-      available: 24,
+      available: 0,
       total: 144,
       introduced_year: 2021,
       physical_cores: 16,
@@ -80,7 +102,7 @@ const preferredNodes: CloudLabPreferredNodesSnapshot = {
   observed_at: '2026-10-11T12:00:00Z',
   source: 'CloudLab public hardware inventory',
   filters: {
-    availability_greater_than: 16,
+    total_greater_than: 20,
     minimum_introduced_year: 2021,
     minimum_physical_cores: 16,
     minimum_memory_gib: 128,
@@ -104,6 +126,8 @@ function autoscaling(over: Partial<CloudLabAutoscalingSnapshot> = {}): CloudLabA
         profile_name: 'cloud-agent',
         duration: 8,
         bindings: { phystype: 'm510' },
+        node_types: ['r6615', 'c6620', 'r650', 'r6525', 'c6525-100g', 'c6525-25g'],
+        node_type_binding: 'phystype',
         ssh_username: 'operator',
         host_key_source: 'registration',
       },
@@ -230,7 +254,7 @@ describe('CloudLab auto-scaling panel', () => {
     expect(screen.getByText(/Lease rotation is not available/)).toBeInTheDocument();
   });
 
-  it('lists plentiful modern nodes and selects one without dropping other bindings', async () => {
+  it('lists modern nodes with more than 20 total, including no free nodes, and pins one without dropping other bindings', async () => {
     const current = autoscaling();
     current.policy.configuration.bindings = {
       phystype: 'm510',
@@ -241,8 +265,11 @@ describe('CloudLab auto-scaling panel', () => {
     render(<CloudLabAutoscaling catalog={catalog} connections={connections} activeHost={null} />);
 
     expect(await screen.findByText('c6620 · 54 free of 132')).toBeInTheDocument();
-    expect(screen.getByText('c6525-25g · 24 free of 144')).toBeInTheDocument();
-    expect(screen.getByText(/more than 16 currently free/)).toBeInTheDocument();
+    expect(screen.getByText('c6525-25g · 0 free of 144')).toBeInTheDocument();
+    expect(screen.getByText(/more than 20 total/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Preferred node types (top to bottom)')).toHaveValue(
+      'r6615\nc6620\nr650\nr6525\nc6525-100g\nc6525-25g',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Use c6620' }));
 
     const bindings = screen.getByLabelText('Profile parameters (JSON object)');
@@ -260,6 +287,120 @@ describe('CloudLab auto-scaling panel', () => {
     expect(
       vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0].policy.configuration.bindings,
     ).toEqual({ phystype: 'c6620', dataMount: '/mydata' });
+  });
+
+  it('saves the preferred list in order independently of current free inventory', async () => {
+    render(<CloudLabAutoscaling catalog={catalog} connections={connections} activeHost={null} />);
+
+    const preferences = await screen.findByLabelText('Preferred node types (top to bottom)');
+    fireEvent.change(preferences, {
+      target: { value: 'c6525-25g, r650\nr6615\nc6525-25g' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save auto-scaling' }));
+
+    await waitFor(() => expect(api.updateCloudLabAutoscaling).toHaveBeenCalledTimes(1));
+    expect(
+      vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0].policy.configuration,
+    ).toMatchObject({
+      node_types: ['c6525-25g', 'r650', 'r6615'],
+      node_type_binding: 'phystype',
+    });
+  });
+
+  it('pins and restores ordered preferences using the configured profile parameter', async () => {
+    const current = autoscaling();
+    current.policy.configuration.node_type_binding = 'hardware';
+    current.policy.configuration.bindings = {
+      hardware: 'r650',
+      phystype: 'legacy',
+      dataMount: '/mydata',
+    };
+    vi.mocked(api.getCloudLabAutoscaling).mockResolvedValue(current);
+
+    render(<CloudLabAutoscaling catalog={catalog} connections={connections} activeHost={null} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Use c6620' }));
+    const bindings = screen.getByLabelText(
+      'Profile parameters (JSON object)',
+    ) as HTMLTextAreaElement;
+    expect(JSON.parse(bindings.value)).toEqual({
+      hardware: 'c6620',
+      phystype: 'legacy',
+      dataMount: '/mydata',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use ordered preferences' }));
+    expect(JSON.parse(bindings.value)).toEqual({ phystype: 'legacy', dataMount: '/mydata' });
+    expect(screen.getByRole('button', { name: 'Use c6620' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save auto-scaling' }));
+
+    await waitFor(() => expect(api.updateCloudLabAutoscaling).toHaveBeenCalledTimes(1));
+    expect(
+      vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0].policy.configuration,
+    ).toMatchObject({
+      node_types: ['r6615', 'c6620', 'r650', 'r6525', 'c6525-100g', 'c6525-25g'],
+      node_type_binding: 'hardware',
+      bindings: { phystype: 'legacy', dataMount: '/mydata' },
+    });
+  });
+
+  it('uses catalog preferences for older policies without marking the form edited', async () => {
+    const current = autoscaling();
+    delete current.policy.configuration.node_types;
+    delete current.policy.configuration.node_type_binding;
+    vi.mocked(api.getCloudLabAutoscaling).mockResolvedValue(current);
+    const customized: ComputeCatalog = {
+      ...catalog,
+      providers: catalog.providers.map((provider) => ({
+        ...provider,
+        fields: provider.fields.map((field) => ({
+          ...field,
+          default: field.key === 'node_types' ? ['r650', 'c6620'] : 'hardware',
+        })),
+      })),
+    };
+
+    render(
+      <CloudLabAutoscaling catalog={customized} connections={connections} activeHost={null} />,
+    );
+
+    expect(await screen.findByLabelText('Preferred node types (top to bottom)')).toHaveValue(
+      'r650\nc6620',
+    );
+    expect(screen.getByLabelText('Node type profile parameter')).toHaveValue('hardware');
+    expect(screen.getByRole('button', { name: 'Save auto-scaling' })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('CloudLab project'), {
+      target: { value: 'UPDATED-PROJECT' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save auto-scaling' }));
+
+    await waitFor(() => expect(api.updateCloudLabAutoscaling).toHaveBeenCalledTimes(1));
+    expect(
+      vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0].policy.configuration,
+    ).toMatchObject({ node_types: ['r650', 'c6620'], node_type_binding: 'hardware' });
+  });
+
+  it('preserves an explicitly empty preferred list instead of replacing it with catalog defaults', async () => {
+    const current = autoscaling();
+    current.policy.configuration.node_types = [];
+    vi.mocked(api.getCloudLabAutoscaling).mockResolvedValue(current);
+
+    render(<CloudLabAutoscaling catalog={catalog} connections={connections} activeHost={null} />);
+
+    expect(await screen.findByLabelText('Preferred node types (top to bottom)')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('CloudLab project'), {
+      target: { value: 'UPDATED-PROJECT' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save auto-scaling' }));
+
+    await waitFor(() => expect(api.updateCloudLabAutoscaling).toHaveBeenCalledTimes(1));
+    expect(
+      vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0].policy.configuration.node_types,
+    ).toEqual([]);
   });
 
   it('keeps policy editing available when live node availability fails', async () => {
@@ -440,9 +581,11 @@ describe('CloudLab auto-scaling panel', () => {
     expect(screen.getByText(/Select at least 2 available deployment profiles/)).toBeInTheDocument();
   });
 
-  it('allows an enabled pool to be paused when a referenced credential has degraded', async () => {
+  it('pauses a legacy enabled pool with degraded credentials without adding inherited defaults', async () => {
     const active = autoscaling();
     active.policy.enabled = true;
+    delete active.policy.configuration.node_types;
+    delete active.policy.configuration.node_type_binding;
     vi.mocked(api.getCloudLabAutoscaling).mockResolvedValue(active);
     const degradedConnections = connections.map((connection) =>
       connection.id === 'cloudlab-account'
@@ -458,13 +601,51 @@ describe('CloudLab auto-scaling panel', () => {
       name: /Enable CloudLab auto-scaling/,
     });
     expect(enabled).toBeChecked();
+    expect(screen.getByLabelText('Preferred node types (top to bottom)')).toHaveValue(
+      'r6615\nc6620\nr650\nr6525\nc6525-100g\nc6525-25g',
+    );
     fireEvent.click(enabled);
     const save = screen.getByRole('button', { name: 'Save auto-scaling' });
     expect(save).toBeEnabled();
     fireEvent.click(save);
 
     await waitFor(() => expect(api.updateCloudLabAutoscaling).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0].policy.enabled).toBe(false);
+    const { revision, ...policy } = active.policy;
+    expect(vi.mocked(api.updateCloudLabAutoscaling).mock.calls[0][0]).toEqual({
+      expected_revision: revision,
+      policy: { ...policy, enabled: false },
+    });
+    expect(screen.getByLabelText('Preferred node types (top to bottom)')).toHaveValue(
+      'r6615\nc6620\nr650\nr6525\nc6525-100g\nc6525-25g',
+    );
+  });
+
+  it('requires verified credentials when preferences are edited while pausing a legacy pool', async () => {
+    const active = autoscaling();
+    active.policy.enabled = true;
+    delete active.policy.configuration.node_types;
+    delete active.policy.configuration.node_type_binding;
+    vi.mocked(api.getCloudLabAutoscaling).mockResolvedValue(active);
+    const degradedConnections = connections.map((connection) =>
+      connection.id === 'cloudlab-account'
+        ? { ...connection, status: 'unverified' as const }
+        : connection,
+    );
+
+    render(
+      <CloudLabAutoscaling catalog={catalog} connections={degradedConnections} activeHost={null} />,
+    );
+
+    fireEvent.change(await screen.findByLabelText('Preferred node types (top to bottom)'), {
+      target: { value: 'c6620\nr650' },
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Enable CloudLab auto-scaling/ }));
+
+    const save = screen.getByRole('button', { name: 'Save auto-scaling' });
+    expect(save).toBeDisabled();
+    expect(screen.getByText('Select a verified CloudLab account connection.')).toBeInTheDocument();
+    fireEvent.click(save);
+    expect(api.updateCloudLabAutoscaling).not.toHaveBeenCalled();
   });
 
   it('saves a revisioned reference-only policy and forces host-key registration', async () => {

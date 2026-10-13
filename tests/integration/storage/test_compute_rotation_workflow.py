@@ -222,12 +222,13 @@ async def rig(store, hosts, monkeypatch):
         ),
     )
     nodes = FakeNodes(hosts)
-    broker = SimpleNamespace(
+    sandbox_manager = SimpleNamespace(
         health=AsyncMock(return_value={}), list_sandboxes=AsyncMock(return_value=[])
     )
     for module in ("compute_reconcile", "compute_rotation"):
         monkeypatch.setattr(
-            f"cloud_agent.application.{module}.broker_for_host", lambda host: broker
+            f"cloud_agent.application.{module}.sandbox_manager_for_host",
+            lambda host: sandbox_manager,
         )
     reconciler = ComputeReconciler(commands=commands, host_pool=hosts, bootstrap=nodes)
     request_id = str(uuid4())

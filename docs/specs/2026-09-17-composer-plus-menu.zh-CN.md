@@ -194,7 +194,7 @@ Agent 阶段的出口仍然是 `platform_only`：字节在 claim 阶段就已经
 ### 5.6 为什么不能放在 /workspace
 
 `CHAT_WORKDIR` 是 `/workspace`（`cloud_agent_host/chat_sandbox.py:100`），而工作区
-的发布路径跑的是 `git add -A -N`（`cloud_agent_host/workspace_broker.py:1130`）。
+的发布路径跑的是 `git add -A -N`（`cloud_agent_host/sandbox_manager.py:1130`）。
 **落在 `/workspace` 里的上传会被收进 diff，然后出现在 draft PR 里。**
 
 所以目标目录是工作区外面的 `/uploads`，并且对沙箱只读。只读还有一个好处：Agent

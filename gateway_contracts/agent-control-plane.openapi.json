@@ -1712,6 +1712,11 @@
             ],
             "title": "Deletion Archive Version Id"
           },
+          "deletion_discard": {
+            "default": false,
+            "title": "Deletion Discard",
+            "type": "boolean"
+          },
           "deletion_error": {
             "anyOf": [
               {
@@ -5711,7 +5716,8 @@
                 "type": "null"
               }
             ],
-            "description": "Where this host's workspace broker listens, as the control plane reaches it.",
+            "deprecated": true,
+            "description": "Compatibility alias for sandbox_manager_url.",
             "title": "Broker Url"
           },
           "capabilities": {
@@ -5900,7 +5906,7 @@
                 "type": "null"
               }
             ],
-            "description": "Archive-policy revision this host's broker confirmed applying. Null means the host predates database-backed archive settings or has not synchronized yet.",
+            "description": "Archive-policy revision this host's sandbox manager confirmed applying. Null means the host predates database-backed archive settings or has not synchronized yet.",
             "title": "Sandbox Archive Settings Applied Revision"
           },
           "sandbox_image_digest": {
@@ -5914,6 +5920,18 @@
             ],
             "description": "Digest of the sandbox image this host launches, as last reported.",
             "title": "Sandbox Image Digest"
+          },
+          "sandbox_manager_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where this host's sandbox manager listens, as the control plane reaches it.",
+            "title": "Sandbox Manager Url"
           },
           "sandbox_runtime": {
             "anyOf": [
@@ -6019,6 +6037,12 @@
             "description": "Pool lifecycle state: enrolling, online, draining, disabled or offline. Only an online host takes new claims.",
             "title": "Status",
             "type": "string"
+          },
+          "untrusted_without_disk_quota": {
+            "default": false,
+            "description": "True when this host can be given untrusted (Kata) work and reports applying no container disk quota (sandbox_disk_mib 0), so a new untrusted sandbox's writable layer is unbounded on a disk every other sandbox on the host shares. A recommendation only: nothing is refused or rescheduled. False when the host has not reported the setting.",
+            "title": "Untrusted Without Disk Quota",
+            "type": "boolean"
           }
         },
         "required": [
@@ -8242,6 +8266,21 @@
             "title": "Duration",
             "type": "integer"
           },
+          "node_type_binding": {
+            "default": "phystype",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+            "title": "Node Type Binding",
+            "type": "string"
+          },
+          "node_types": {
+            "items": {
+              "pattern": "^[A-Za-z0-9_-]{1,32}$",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Node Types",
+            "type": "array"
+          },
           "profile_name": {
             "default": "",
             "maxLength": 128,
@@ -9288,6 +9327,11 @@
         "additionalProperties": false,
         "description": "Approve or deny one pending call.",
         "properties": {
+          "always_allow": {
+            "default": false,
+            "title": "Always Allow",
+            "type": "boolean"
+          },
           "approve": {
             "title": "Approve",
             "type": "boolean"
@@ -10426,18 +10470,6 @@
       "HostHeartbeatRequest": {
         "description": "A host reporting that it is still there, and what it now looks like.\n\nEvery field is optional and only overwrites when present, so a heartbeat\nthat carries nothing but liveness does not blank out what enrollment\ndeclared.",
         "properties": {
-          "broker_url": {
-            "anyOf": [
-              {
-                "maxLength": 2048,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Broker Url"
-          },
           "capabilities": {
             "anyOf": [
               {
@@ -10591,7 +10623,7 @@
                 "type": "null"
               }
             ],
-            "description": "The archive-policy revision the authenticated workspace broker confirmed. Explicit null clears a stale confirmation after restart; omitting the field keeps the last observation for compatibility with older runners.",
+            "description": "The archive-policy revision the authenticated sandbox manager confirmed. Explicit null clears a stale confirmation after restart; omitting the field keeps the last observation for compatibility with older runners.",
             "title": "Sandbox Archive Settings Applied Revision"
           },
           "sandbox_image_digest": {
@@ -10606,6 +10638,18 @@
             ],
             "description": "Content digest of the sandbox image this host launches, from the local image store (RepoDigest, or the local image Id for a never-pushed build). Stamped onto attempts at claim so a retry can know exactly what executed the original.",
             "title": "Sandbox Image Digest"
+          },
+          "sandbox_manager_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Manager Url"
           },
           "sandbox_runtime": {
             "anyOf": [
@@ -10640,7 +10684,7 @@
                 "type": "null"
               }
             ],
-            "description": "The runtime settings this host is applying now, by key — the workspace broker's as it last confirmed them. Null means not reported and keeps what is stored.",
+            "description": "The runtime settings this host is applying now, by key — the sandbox manager's as it last confirmed them. Null means not reported and keeps what is stored.",
             "title": "Settings Applied"
           },
           "settings_local": {
@@ -10695,7 +10739,8 @@
                 "type": "null"
               }
             ],
-            "description": "Set when the control plane could not use the broker_url this host reported. Checked at most once a minute, and always when the reported address changes.",
+            "deprecated": true,
+            "description": "Compatibility alias for sandbox_manager_error.",
             "title": "Broker Error"
           },
           "heartbeat_interval_seconds": {
@@ -10725,6 +10770,18 @@
           },
           "sandbox_archive_settings": {
             "$ref": "#/components/schemas/HostSandboxArchiveSettings"
+          },
+          "sandbox_manager_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when the control plane could not use the sandbox_manager_url this host reported. Checked at most once a minute, and always when the reported address changes.",
+            "title": "Sandbox Manager Error"
           },
           "settings": {
             "additionalProperties": {
@@ -10779,12 +10836,6 @@
       "HostRegisterRequest": {
         "description": "A machine presenting an enrollment token to join the pool.",
         "properties": {
-          "broker_url": {
-            "description": "Where this host's workspace broker listens, as the control plane reaches it. Every executable attempt records an enrolled host, and files, terminals and Git resolve the broker from that host row. Omitting it leaves the host unready and unable to serve chats.",
-            "maxLength": 2048,
-            "title": "Broker Url",
-            "type": "string"
-          },
           "capabilities": {
             "description": "What this machine can run — runtime tiers, sandbox backends, whatever a job may ask for. A job goes to a host only when the host declares everything the job requires.",
             "items": {
@@ -10832,6 +10883,12 @@
             ],
             "title": "Runner Version"
           },
+          "sandbox_manager_url": {
+            "description": "Where this host's sandbox manager listens, as the control plane reaches it. Every executable attempt records an enrolled host, and files, terminals and Git resolve the sandbox manager from that host row. Omitting it leaves the host unready and unable to serve chats.",
+            "maxLength": 2048,
+            "title": "Sandbox Manager Url",
+            "type": "string"
+          },
           "slots_total": {
             "description": "Concurrent attempts this enrolled host accepts.",
             "exclusiveMinimum": 0.0,
@@ -10844,7 +10901,7 @@
           "enroll_token",
           "name",
           "slots_total",
-          "broker_url"
+          "sandbox_manager_url"
         ],
         "title": "HostRegisterRequest",
         "type": "object"
@@ -10861,7 +10918,8 @@
                 "type": "null"
               }
             ],
-            "description": "Set when the control plane could not use the broker_url this host reported: unreachable from here, or refusing the shared broker credential. Enrolment still succeeds — a broker is often still starting — but every file, terminal and git request for this host's jobs will fail until it is fixed.",
+            "deprecated": true,
+            "description": "Compatibility alias for sandbox_manager_error.",
             "title": "Broker Error"
           },
           "credential": {
@@ -10872,6 +10930,18 @@
           "host": {
             "title": "Host",
             "type": "string"
+          },
+          "sandbox_manager_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when the control plane could not use the sandbox_manager_url this host reported: unreachable from here, or refusing the shared sandbox manager credential. Enrolment still succeeds — a sandbox manager is often still starting — but every file, terminal and git request for this host's jobs will fail until it is fixed.",
+            "title": "Sandbox Manager Error"
           },
           "status": {
             "title": "Status",
@@ -10933,7 +11003,7 @@
         "type": "object"
       },
       "HostSandboxArchiveSettings": {
-        "description": "Archive policy delivered to a broker. Empty access-key fields are omitted.",
+        "description": "Archive policy delivered to a sandbox manager. Empty access-key fields are omitted.",
         "properties": {
           "aws_access_key_id": {
             "default": "",
@@ -11043,10 +11113,10 @@
             "type": "integer"
           },
           "scope": {
-            "description": "Which host process applies it: the runner, as it starts each turn; the workspace broker, which runs terminals and the idle sweep; or both.",
+            "description": "Which host process applies it: the runner, as it starts each turn; the sandbox manager, which runs terminals and the idle sweep; or both.",
             "enum": [
               "runner",
-              "broker",
+              "sandbox_manager",
               "both"
             ],
             "title": "Scope",
@@ -11251,6 +11321,17 @@
       "InvocationView": {
         "description": "One call that needed a decision.",
         "properties": {
+          "always_allow_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Always Allow Status"
+          },
           "arguments": {
             "anyOf": [
               {
@@ -12263,6 +12344,46 @@
         "title": "ProcessObservation",
         "type": "object"
       },
+      "ProfileResponse": {
+        "description": "Combine Agent-owned display fields with a read-only account email.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "first_name": {
+            "default": "",
+            "title": "First Name",
+            "type": "string"
+          },
+          "image_data_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Data Url"
+          },
+          "last_name": {
+            "default": "",
+            "title": "Last Name",
+            "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "ProfileResponse",
+        "type": "object"
+      },
       "ProjectMemoryView": {
         "description": "An owner's independently controlled memory for one exact repository.",
         "properties": {
@@ -12485,6 +12606,22 @@
         "title": "ReleaseHostDrainFenceRequest",
         "type": "object"
       },
+      "RemoveComputeRequest": {
+        "additionalProperties": false,
+        "description": "Remove server inventory against the allocation the admin reviewed.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "RemoveComputeRequest",
+        "type": "object"
+      },
       "RenewalPolicy": {
         "additionalProperties": false,
         "description": "Independent resource deadlines, expressed in seconds.\n\nWith rotation, ``renew_before_seconds`` is also when a node is replaced:\nan extension is tried first; a refused one, or a node at its maximum age,\nstarts a move of the whole Host to a newly allocated node instead.",
@@ -12697,7 +12834,7 @@
                 "type": "null"
               }
             ],
-            "description": "Whether this exact supervisor generation currently has a turn, terminal, or bounded workspace operation open. Null means the broker could not prove activity state after reconstruction.",
+            "description": "Whether this exact supervisor generation currently has a turn, terminal, or bounded workspace operation open. Null means the sandbox manager could not prove activity state after reconstruction.",
             "title": "Activity Active"
           },
           "container_id": {
@@ -15074,6 +15211,46 @@
         "title": "UpdateMemorySettings",
         "type": "object"
       },
+      "UpdateProfile": {
+        "additionalProperties": false,
+        "description": "Save names and optionally replace or remove the profile picture.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "first_name": {
+            "maxLength": 100,
+            "title": "First Name",
+            "type": "string"
+          },
+          "image_data_url": {
+            "anyOf": [
+              {
+                "maxLength": 2796236,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Data Url"
+          },
+          "last_name": {
+            "maxLength": 100,
+            "title": "Last Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "first_name",
+          "last_name",
+          "expected_revision"
+        ],
+        "title": "UpdateProfile",
+        "type": "object"
+      },
       "UpdateSettingsRequest": {
         "additionalProperties": false,
         "description": "A partial settings update; omitted keys retain their existing values.",
@@ -15157,7 +15334,7 @@
         "type": "object"
       },
       "UserAvatar": {
-        "description": "An illustrated portrait that can be displayed directly by an image element.",
+        "description": "An illustrated companion displayed directly by an image element.",
         "properties": {
           "data_url": {
             "title": "Data Url",
@@ -15586,6 +15763,19 @@
               }
             ],
             "title": "Sandbox Archive Settings Applied Revision"
+          },
+          "sandbox_disk_limit_mib": {
+            "anyOf": [
+              {
+                "maximum": 16777216.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Disk Limit Mib"
           },
           "sandbox_image_digest": {
             "anyOf": [
@@ -16123,7 +16313,7 @@
         "type": "object"
       },
       "WorkerProcessObservation": {
-        "description": "One bounded guest-kernel process identity reported by the broker.",
+        "description": "One bounded guest-kernel process identity reported by the sandbox manager.",
         "properties": {
           "comm": {
             "maxLength": 64,
@@ -18242,7 +18432,7 @@
     },
     "/admin/agent/compute-availability/cloudlab": {
       "get": {
-        "description": "List fresh, plentiful CloudLab node types from the public inventory.",
+        "description": "List newer CloudLab node types with more than 20 total nodes, in order.",
         "operationId": "cloudlab_preferred_nodes_admin_agent_compute_availability_cloudlab_get",
         "parameters": [
           {
@@ -19778,7 +19968,7 @@
     },
     "/admin/agent/host-settings": {
       "put": {
-        "description": "Set or clear runtime settings for every server, without a redeploy.\n\nEach host picks the values up from its next heartbeat answer, except where\na value set for that server wins. ``null`` clears a setting, and each host\ngoes back to the deployment's built-in default for it.\n\n**Saving is not applying.** Each host reports what it applied, and the page\nshows the hosts that have not caught up yet. Nothing running is\ninterrupted: a turn keeps the time limit it started with, an existing\nsandbox keeps its chat capacity, and the terminal limits apply from the\nbroker's next sweep.",
+        "description": "Set or clear runtime settings for every server, without a redeploy.\n\nEach host picks the values up from its next heartbeat answer, except where\na value set for that server wins. ``null`` clears a setting, and each host\ngoes back to the deployment's built-in default for it.\n\n**Saving is not applying.** Each host reports what it applied, and the page\nshows the hosts that have not caught up yet. Nothing running is\ninterrupted: a turn keeps the time limit it started with, an existing\nsandbox keeps its chat capacity, and the terminal limits apply from the\nsandbox manager's next sweep.",
         "operationId": "set_agent_host_settings_admin_agent_host_settings_put",
         "parameters": [
           {
@@ -20694,7 +20884,7 @@
     },
     "/admin/agent/runner-hosts/{host}": {
       "delete": {
-        "description": "Drop a decommissioned host from the list.\n\nHousekeeping only: a runner still polling on that machine re-adds itself\nwithin seconds. The active host cannot be dropped, because doing so would\nsilently unpin new-chat placement, which is the opposite of what removing a\nhost from a list looks like it does. Existing retained owners are not moved\nby forgetting their pool row; their broker routing continues to fail closed\nuntil the same named host is enrolled again. The active-host refusal is\ndecided inside the store's transaction, not by a check here: a check here\nis a read a concurrent switch can outrun.",
+        "description": "Drop a decommissioned host from the list.\n\nHousekeeping only: removal invalidates its credential and enrollment tokens;\nthe machine needs a fresh administrator-issued token to register again.\nThe active host cannot be dropped, because doing so would\nsilently unpin new-chat placement, which is the opposite of what removing a\nhost from a list looks like it does. Existing retained owners are not moved\nby forgetting their pool row; their sandbox manager routing continues to fail closed\nuntil the same named host is enrolled again. The active-host refusal is\ndecided inside the store's transaction, not by a check here: a check here\nis a read a concurrent switch can outrun.",
         "operationId": "forget_agent_runner_host_admin_agent_runner_hosts__host__delete",
         "parameters": [
           {
@@ -21988,7 +22178,7 @@
         "summary": "Get Sandbox Archive Settings"
       },
       "put": {
-        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code. A saved access key is encrypted\nat rest and is not returned. With no key, brokers authenticate with their\nworkload identity and still require the bucket owner and KMS key.",
+        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code. A saved access key is encrypted\nat rest and is not returned. With no key, sandbox managers authenticate with their\nworkload identity and still require the bucket owner and KMS key.",
         "operationId": "set_sandbox_archive_settings_admin_agent_sandbox_archive_settings_put",
         "parameters": [
           {
@@ -22207,7 +22397,7 @@
     },
     "/admin/agent/sandboxes/{sandbox_id}/archive": {
       "post": {
-        "description": "Remove a stopped sandbox from inventory while retaining native state.",
+        "description": "Remove a stopped or explicitly reviewed stale-host inventory entry.",
         "operationId": "archive_admin_sandbox_admin_agent_sandboxes__sandbox_id__archive_post",
         "parameters": [
           {
@@ -22217,6 +22407,18 @@
             "schema": {
               "title": "Sandbox Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Remove only the inventory entry when its host has no fresh heartbeat, retaining native state.",
+            "in": "query",
+            "name": "stale",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Remove only the inventory entry when its host has no fresh heartbeat, retaining native state.",
+              "title": "Stale",
+              "type": "boolean"
             }
           },
           {
@@ -22273,7 +22475,7 @@
     },
     "/admin/agent/sandboxes/{sandbox_id}/delete": {
       "post": {
-        "description": "Queue verified deletion, with fail-closed recovery for a stale running or dead container.",
+        "description": "Queue deletion, with fail-closed recovery for a stale running or dead container.\n\nThe discard query removes the exact stopped or dead container without an S3 upload.\nThe default path still requires a configured archive bucket.",
         "operationId": "delete_admin_sandbox_admin_agent_sandboxes__sandbox_id__delete_post",
         "parameters": [
           {
@@ -22292,6 +22494,16 @@
             "schema": {
               "default": false,
               "title": "Force",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "discard",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Discard",
               "type": "boolean"
             }
           },
@@ -22727,6 +22939,76 @@
           }
         },
         "summary": "Add Server"
+      }
+    },
+    "/admin/agent/servers/{allocation_id}": {
+      "delete": {
+        "description": "Remove safe local inventory without orphaning provider resources or work.",
+        "operationId": "remove_server_admin_agent_servers__allocation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Remove Server Admin Agent Servers  Allocation Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Server"
       }
     },
     "/admin/agent/settings": {
@@ -23279,7 +23561,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {
@@ -24739,7 +25021,7 @@
     },
     "/v1/agent/jobs/{job_id}/files": {
       "get": {
-        "description": "Browse the chat's retained workspace through its owning host broker.",
+        "description": "Browse the chat's retained workspace through its owning host sandbox manager.",
         "operationId": "get_agent_job_workspace_file_v1_agent_jobs__job_id__files_get",
         "parameters": [
           {
@@ -25120,7 +25402,7 @@
     },
     "/v1/agent/jobs/{job_id}/stream": {
       "get": {
-        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off — which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection.",
+        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off — which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection. 429 when\nthe account already holds as many streams as this process allows one\naccount (:mod:`cloud_agent.api._stream_slots`).",
         "operationId": "stream_agent_job_events_v1_agent_jobs__job_id__stream_get",
         "parameters": [
           {
@@ -25605,7 +25887,7 @@
     },
     "/v1/agent/jobs/{job_id}/terminals/{terminal_id}/stream": {
       "get": {
-        "description": "Relay a resumable private PTY stream without exposing its broker token.",
+        "description": "Relay a resumable private PTY stream without exposing its sandbox manager token.",
         "operationId": "stream_agent_job_terminal_v1_agent_jobs__job_id__terminals__terminal_id__stream_get",
         "parameters": [
           {
@@ -27775,6 +28057,114 @@
         ]
       }
     },
+    "/v1/agent/profile": {
+      "get": {
+        "description": "Read the signed-in owner's display profile and current account email.",
+        "operationId": "read_profile_v1_agent_profile_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Profile",
+        "tags": [
+          "profile"
+        ]
+      },
+      "patch": {
+        "description": "Persist names and a sanitized picture at the profile revision the owner read.",
+        "operationId": "save_profile_v1_agent_profile_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Profile",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
     "/v1/agent/project-memory": {
       "delete": {
         "description": "Forget only this project's past activity, preserving its enabled setting.",
@@ -28566,7 +28956,7 @@
     },
     "/v1/agent/service/oncall/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one on-call job.\n\nThe relay calls this when its await deadline passes or the incident\nresolves while the analysis is still running — the answer is already\nstale, so the tokens it would keep spending buy nothing.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition at its next heartbeat, after which\nthe reaper stops renewing the attempt's grant and the sandbox credential\ndies on its own TTL. Unlike the owner route there is no terminal-resume\nsettling here: on-call jobs open no interactive terminals, and reaching for\nthe workspace broker would couple this door to a service it never needs.",
+        "description": "Request cancellation of one on-call job.\n\nThe relay calls this when its await deadline passes or the incident\nresolves while the analysis is still running — the answer is already\nstale, so the tokens it would keep spending buy nothing.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition at its next heartbeat, after which\nthe reaper stops renewing the attempt's grant and the sandbox credential\ndies on its own TTL. Unlike the owner route there is no terminal-resume\nsettling here: on-call jobs open no interactive terminals, and reaching for\nthe sandbox manager would couple this door to a service it never needs.",
         "operationId": "cancel_oncall_job_v1_agent_service_oncall_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -32227,7 +32617,7 @@
     },
     "/v1/session/logout": {
       "post": {
-        "description": "Clear the session cookie.\n\nUnauthenticated on purpose: signing out must work when the session is\nalready expired or malformed, which is exactly when a browser most wants\nit. There is nothing to protect — the only effect is deleting a cookie the\ncaller already holds.\n\nThe attributes must match the ones the cookie was set with, or the browser\nkeeps the original and the user stays signed in.",
+        "description": "Clear the session cookie.\n\nUnauthenticated on purpose: signing out must work when the session is\nalready expired or malformed, which is exactly when a browser most wants\nit. There is nothing to protect — the only effect is deleting a cookie the\ncaller already holds.\n\nWhere the cookie is ``Secure`` both of its names are expired: a browser\nsigned in before the ``__Host-`` rename holds only the plain one. Without\n``Secure`` the prefixed name cannot exist.",
         "operationId": "session_logout_v1_session_logout_post",
         "responses": {
           "200": {

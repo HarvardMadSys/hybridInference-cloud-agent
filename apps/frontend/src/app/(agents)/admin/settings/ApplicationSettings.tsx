@@ -153,6 +153,7 @@ function SettingField({
     <div className="border-t border-border py-5 first:border-t-0">
       <form
         noValidate
+        tabIndex={-1}
         className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,360px)] lg:gap-8"
         onSubmit={(event) => {
           event.preventDefault();
@@ -635,7 +636,8 @@ export function ApplicationSettingsCategory({
     const input = document.getElementById(`application-setting-${focusField}`);
     const advanced = input?.closest('details');
     if (advanced) advanced.open = true;
-    input?.focus();
+    const target = input?.matches(':disabled') ? input.closest('form') : input;
+    target?.focus();
     input?.scrollIntoView?.({ block: 'center' });
     clearFocusField();
   }, [active, focusField, definitions, clearFocusField]);
@@ -681,7 +683,11 @@ export function ApplicationDeploymentSetup({ settings }: { settings: Application
           </p>
           <dl className="mt-3 space-y-3">
             {snapshot?.bootstrap.map((definition) => (
-              <div key={definition.key}>
+              <div
+                key={definition.key}
+                id={`application-bootstrap-${definition.key}`}
+                tabIndex={-1}
+              >
                 <dt className="text-sm font-medium text-foreground">
                   {definition.label}{' '}
                   <code className="ml-1 break-all rounded bg-surface-muted px-1.5 py-0.5 text-xs font-normal text-muted">

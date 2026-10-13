@@ -280,6 +280,29 @@ def _record_text(record: dict[str, Any]) -> str:
     )
 
 
+def _codex_error_text(message: str) -> str:
+    """Codex's error message without the request diagnostics it appends.
+
+    0.145.0 appends ``, url: <address>`` and then cf-ray, request id and auth
+    details to an HTTP error's message. The address is the sandbox's gateway
+    relay, which means nothing to the owner; the full error stays in the event.
+    """
+    return message.split(", url: ", 1)[0][:2000]
+
+
+def _http_agent_error_text(error: Any) -> str:
+    """Read an OpenCode/Kilo session error the way their own CLI prints it.
+
+    The error is ``{name, data: {message, ...}}`` (OpenCode 1.18.9, and Kilo's
+    fork of it): the message when there is one, otherwise the error's name.
+    """
+    if isinstance(error, dict):
+        data = error.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        return str(message or error.get("name") or "session failed")
+    return str(error or "session failed")
+
+
 def user_message_event(pending: PendingInput, *, raw_line: str | None = None) -> HarnessEvent:
     """The stream event saying the turn took ``pending`` at this point."""
     return HarnessEvent(
@@ -772,7 +795,7 @@ class _ProtocolReply:
 
 
 class _InputReceipt:
-    """One turn-local message-ID receipt shared by concurrent broker retries."""
+    """One turn-local message-ID receipt shared by concurrent sandbox manager retries."""
 
     def __init__(self) -> None:
         self._settled = threading.Event()
@@ -822,7 +845,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         # the stream reports the message taken whenever its answer arrives.
         self._steers: dict[str, PendingInput] = {}
         self._replies_lock = threading.Lock()
-        # The control plane may lose the broker's accepted response and replay
+        # The control plane may lose the sandbox manager's accepted response and replay
         # the same durable handoff after its lease expires.  One message ID is
         # one native steer for this exact turn, including concurrent retries.
         self._input_receipts: dict[str, _InputReceipt] = {}
@@ -1008,7 +1031,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
         self._live_turn: _JsonResidentTurn[_LiveRuntimeT] | None = None
         self._request_sequence = 0
         self._prefetched: list[str] = []
-        # A mid-turn message is written from the broker's request thread while
+        # A mid-turn message is written from the sandbox manager's request thread while
         # the turn's own thread may be interrupting: one line at a time.
         self._request_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -1043,7 +1066,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
             # Keep enough local diagnostics to distinguish a protocol crash
             # from an ordinary EOF.  The sandbox process already retains only
             # a bounded stderr tail; cap it again here because this exception
-            # crosses the broker boundary.  Agent credentials are supplied in
+            # crosses the sandbox manager boundary.  Agent credentials are supplied in
             # environment variables, never in the CLI's argv; the host's
             # ``docker exec`` names them without their values, which reach
             # the Docker client through its environment, not its argv (see
@@ -1309,7 +1332,13 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         if value is None:
             return HarnessEvent(LINE, raw_line=line)
         if value.get("error") is not None:
-            return HarnessEvent(ERROR, {"text": str(value["error"])[:2000]}, raw_line=line)
+            # A JSON-RPC error answer: {code, message}. Its message, not the
+            # Python spelling of the whole object.
+            error = value["error"]
+            message = error.get("message") if isinstance(error, dict) else None
+            return HarnessEvent(
+                ERROR, {"text": str(message or error)[:2000], "error": error}, raw_line=line
+            )
         method = str(value.get("method") or "")
         params = value.get("params")
         params = params if isinstance(params, dict) else {}
@@ -1325,6 +1354,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
             raw_line=line,
         )
+        if method == "error" and params.get("willRetry") is not True:
+            # The error that fails the turn (0.145.0 sends it before the failed
+            # turn/completed); a retried one says ``willRetry`` and stays raw.
+            error = params.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            if message:
+                return HarnessEvent(
+                    ERROR,
+                    {"text": _codex_error_text(str(message)), "error": error},
+                    raw_line=line,
+                )
         if method == "item/tool/requestUserInput":
             native_id = value.get("id")
             questions = _question_choices(params.get("questions"), dialect="codex")
@@ -1651,6 +1691,17 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
         self, line: str, turn: _JsonResidentTurn[PiRuntime]
     ) -> HarnessEvent:
         """Normalize one Pi RPC protocol event for the active turn."""
+        value = self._object(line)
+        if (
+            value is not None
+            and value.get("type") == "response"
+            and value.get("id") == turn.protocol_turn_id
+            and value.get("success") is False
+        ):
+            # The prompt failed before it ran (0.73.1 answers this way only
+            # before preflight succeeds); later failures end in agent_end.
+            text = str(value.get("error") or "pi did not accept the prompt")
+            return HarnessEvent(ERROR, {"text": text[:2000]}, raw_line=line)
         event = self.runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
@@ -1905,19 +1956,25 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                         raw_line=line,
                     )
                 if status in {"completed", "error"}:
+                    content = str(state.get("output") or state.get("error") or "")
+                    # A task's result is its subagent's whole answer, so only the
+                    # marked event bound applies to it. Other tools keep a short
+                    # preview that says it is one.
+                    clipped = part.get("tool") != "task" and len(content) > 4000
                     return HarnessEvent(
                         TOOL_RESULT,
                         {
                             "tool_use_id": call_id,
                             "is_error": status == "error",
-                            "content": str(state.get("output") or state.get("error") or "")[:4000],
+                            "content": content[:4000] if clipped else content,
+                            **({"truncated": True} if clipped else {}),
                         },
                         raw_line=line,
                     )
             if event_type == "session.error":
                 return HarnessEvent(
                     ERROR,
-                    {"text": str(properties.get("error") or "session failed")[:2000]},
+                    {"text": _http_agent_error_text(properties.get("error"))[:2000]},
                     raw_line=line,
                 )
             return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
@@ -2078,14 +2135,25 @@ class ClaudeCodeDriver(HarnessDriver[ClaudeCodeRuntime]):
 
 
 class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
-    """One turn on a resident process: borrows the shared stdout, ends at result."""
+    """One turn on a resident process: borrows the shared stdout, ends as ``claude -p`` would."""
 
-    def __init__(self, session: ClaudeCodeLiveSession, process: SandboxProcess) -> None:
+    def __init__(
+        self, session: ClaudeCodeLiveSession, process: SandboxProcess, *, prompt: str = ""
+    ) -> None:
         super().__init__(session, process)
         self._session: ClaudeCodeLiveSession = session
+        self._prompt = prompt
         self._saw_result = False
         self._error_result = False
         self._saw_api_retry = False
+        # Ending the turn the way the one-shot CLI ends its run (the pinned
+        # 2.1.220): it holds its result while a background agent runs, and a
+        # finished background task is answered in a turn Claude opens itself,
+        # whose result says ``origin: task-notification``.
+        self._prompt_read = False
+        self._answered = False
+        self._running_agents: set[str] = set()
+        self._unanswered: set[str] = set()
         # Tool calls the model made that have no result yet. Claude folds a
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
@@ -2094,7 +2162,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         # calls a tool, then written, then taken once the CLI echoes them.
         self._held: list[PendingInput] = []
         self._written: list[PendingInput] = []
-        # An accepted broker response can be lost after the CLI takes the
+        # An accepted sandbox manager response can be lost after the CLI takes the
         # message and removes it from ``_written``. Keep its ID for this turn
         # so a later durable replay returns the same receipt without writing it
         # to the native process a second time.
@@ -2136,13 +2204,63 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             self._error_result = True
         return event
 
+    def _settles(self, line: str) -> bool:
+        """Whether this line ends the turn, as the one-shot CLI's run would end.
+
+        Not while a background agent is still running, and not before Claude
+        has answered a finished background task: the notification turn it then
+        opens comes after this turn's result, and read by the next turn it
+        would end that one with this one's answer. A notification turn read
+        before this turn's prompt was answered, left by a task that finished
+        between turns, does not end it either.
+        """
+        record = _json_object(line)
+        if record is None:
+            return False
+        kind = record.get("type")
+        if kind == "user" and record.get("isReplay") and self._prompt:
+            self._prompt_read = self._prompt_read or self._prompt in _record_text(record)
+        if kind == "system" and not record.get("parent_tool_use_id"):
+            subtype = record.get("subtype")
+            if subtype == "background_tasks_changed":
+                tasks = [task for task in record.get("tasks") or [] if isinstance(task, dict)]
+                listed = {str(task["task_id"]): task for task in tasks if task.get("task_id")}
+                self._session._background_tasks |= set(listed)
+                self._running_agents = {
+                    task_id
+                    for task_id, task in listed.items()
+                    if task.get("task_type") == "local_agent"
+                }
+            elif subtype == "task_notification":
+                task_id = str(record.get("task_id") or "")
+                # A stopped task gets no turn of its own; a foreground agent's
+                # notification is answered by its tool result.
+                if task_id in self._session._background_tasks and record.get("status") != "stopped":
+                    self._unanswered.add(task_id)
+            elif subtype == "init":
+                self._unanswered.clear()
+        if kind == "control_response" and self._cancelled and self._answered:
+            # An interrupt stops the background agents and opens no turn.
+            if self._running_agents:
+                self._session.retire_after_turn = True
+            return True
+        if kind != "result":
+            return False
+        origin = record.get("origin")
+        notification = isinstance(origin, dict) and origin.get("kind") == "task-notification"
+        self._answered = self._answered or not notification or self._prompt_read
+        if not self._answered or self._running_agents:
+            return False
+        return self._cancelled or not self._unanswered
+
     def raw_lines(self) -> Iterator[str]:
-        """This turn's slice of the shared stream, up to its result line."""
+        """This turn's slice of the shared stream, up to the line that settles it."""
         for line in self._session.shared_lines():
-            if self._runtime.turn_settled(line):
+            settles = self._settles(line)
+            if settles:
                 self._clear_questions()
             yield line
-            if self._runtime.turn_settled(line):
+            if settles:
                 self._saw_result = True
                 with self._input_lock:
                     self._input_closed = True
@@ -2354,10 +2472,11 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         if kind == "result":
             with self._input_lock:
                 self._open_tool_uses.clear()
-                self._input_closed = True
-                # Held messages were never written: the turn answered without
-                # another tool call, so they wait and go as the next turn.
-                self._held.clear()
+                if self._answered:
+                    self._input_closed = True
+                    # Held messages were never written: the turn answered
+                    # without another tool call, so they go as the next turn.
+                    self._held.clear()
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -2450,7 +2569,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         if context.state_dir is None:
             raise DriverError("a resident session needs a state mount")
         # Hook installation is an observability upgrade and must never cost a
-        # user their turn. The retained broker writes into the container's
+        # user their turn. The retained sandbox manager writes into the container's
         # Docker-owned state; tests and non-observing embeddings omit the seam.
         if context.install_tool_hooks is not None:
             try:
@@ -2483,6 +2602,9 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         #: only meaningful once ``_process`` exists.
         self._reasoning_effort: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
+        # Every task Claude has listed as running in the background. A shell
+        # can outlive the turn that started it, and its end still opens a turn.
+        self._background_tasks: set[str] = set()
         # The turn's prompt, an interrupt and a mid-turn message can come from
         # different threads; stdin takes them one whole line at a time.
         self._write_lock = threading.Lock()
@@ -2603,7 +2725,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # typed refusal, so the caller's fallback ladder catches it the
             # same way it catches every other driver refusal.
             raise DriverError(f"resident process is gone: {exc}") from exc
-        self._live_turn = ClaudeCodeLiveTurn(self, self._process)
+        self._live_turn = ClaudeCodeLiveTurn(self, self._process, prompt=turn_input.prompt)
         return self._live_turn
 
     def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
@@ -2655,7 +2777,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # successful answer, then parent the next user to that error.
             # Resume follows that branch and loses the successful answer.
             # EOF at the result boundary prevents the stale parent update.
-            # Request EOF after broker settlement has recorded the native id.
+            # Request EOF after sandbox manager settlement has recorded the native id.
             # The supervisor then restores that id on the next turn; ordinary
             # turns keep their resident process.
             self.retire_after_turn = True

@@ -462,12 +462,17 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
 def _set_session_cookie(response: Response, session: str) -> None:
     """Attach the session cookie to a response.
 
+    With ``Secure`` the cookie is set under its ``__Host-`` name and the plain
+    name a browser may still hold from before the rename is expired, so the
+    two can never disagree about who is signed in.
+
     Args:
         response: The response to set the cookie on.
         session: The signed session token.
     """
+    secure = _cookie_is_secure()
     response.set_cookie(
-        identity.SESSION_COOKIE,
+        identity.session_cookie_name(secure=secure),
         session,
         max_age=identity.SESSION_TTL_S,
         httponly=True,
@@ -476,8 +481,25 @@ def _set_session_cookie(response: Response, session: str) -> None:
         # that request. Lax still refuses to send it on a cross-site POST,
         # which is the request a CSRF would have to be.
         samesite="lax",
-        secure=_cookie_is_secure(),
+        secure=secure,
         path="/",
+    )
+    if secure:
+        _expire_session_cookie(response, identity.LEGACY_SESSION_COOKIE)
+
+
+def _expire_session_cookie(response: Response, name: str) -> None:
+    """Tell the browser to drop a session cookie set under ``name``.
+
+    The attributes must match the ones the cookie was set with, or the browser
+    keeps the original and the user stays signed in.
+    """
+    response.delete_cookie(
+        name,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_is_secure(),
     )
 
 
@@ -490,16 +512,13 @@ async def session_logout(response: Response) -> dict[str, bool]:
     it. There is nothing to protect — the only effect is deleting a cookie the
     caller already holds.
 
-    The attributes must match the ones the cookie was set with, or the browser
-    keeps the original and the user stays signed in.
+    Where the cookie is ``Secure`` both of its names are expired: a browser
+    signed in before the ``__Host-`` rename holds only the plain one. Without
+    ``Secure`` the prefixed name cannot exist.
     """
-    response.delete_cookie(
-        identity.SESSION_COOKIE,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=_cookie_is_secure(),
-    )
+    if _cookie_is_secure():
+        _expire_session_cookie(response, identity.SESSION_COOKIE)
+    _expire_session_cookie(response, identity.LEGACY_SESSION_COOKIE)
     return {"ok": True}
 
 

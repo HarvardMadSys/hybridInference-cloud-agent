@@ -1,6 +1,8 @@
 'use client';
 
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useId,
@@ -46,13 +48,13 @@ import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
 import { GoalBar } from './goal/GoalBar';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { hasLiveWork } from './goal/liveWork';
-import { SkillSelectionDialog } from './skills/SkillPicker';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
@@ -62,6 +64,7 @@ import { BackToBottom, TurnRail } from './TurnNavigator';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { ActivityIcon, ActivityWindow } from './ActivityWindow';
+import { FloatingActivityWindow } from './FloatingActivityWindow';
 import { buildActivityOverview, hasActivityOverview } from './activityOverview';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
@@ -90,7 +93,7 @@ import {
 import { useComposerDraft } from './useComposerDraft';
 import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
 import { TurnDeliverables } from './TurnDeliverables';
-import { createRecordedOutputsSelector, type RecordedFileSelection } from './turnDeliverables';
+import { createRecordedOutputsSelector, type RecordedFileSelection } from './recordedTurnOutputs';
 import {
   hasLostContext,
   isActiveConversationState,
@@ -150,6 +153,9 @@ const RecordedDiffPanel = dynamic(
 const SideChat = dynamic(() => import('./SideChat').then((module) => module.SideChat), {
   loading: () => <PanelLoading>Loading side chat…</PanelLoading>,
 });
+const SkillSelectionDialog = lazy(() =>
+  import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
+);
 
 const EMPTY_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
 const EMPTY_THREAD_JOBS: AgentJobApi[] = [];
@@ -1092,18 +1098,21 @@ export function JobDetail({
         latestQuestionTurn.native_state !== 'lost',
     };
   }
-  const latestTerminalEvent = [...job.events]
-    .reverse()
-    .find(
-      (event) =>
+  const latestTerminalPhase = useMemo(() => {
+    for (let index = job.events.length - 1; index >= 0; index -= 1) {
+      const event = job.events[index];
+      if (
         event.kind === 'lifecycle' &&
         event.attemptNo === job.currentAttemptNo &&
         (event.text === 'workspace_preparing' ||
           event.text === 'workspace_ready' ||
-          event.text === 'workspace_finalizing'),
-    );
-  const latestTerminalPhase =
-    latestTerminalEvent?.kind === 'lifecycle' ? latestTerminalEvent.text : undefined;
+          event.text === 'workspace_finalizing')
+      ) {
+        return event.text;
+      }
+    }
+    return undefined;
+  }, [job.events, job.currentAttemptNo]);
   const terminalWorkspaceReady =
     !isActive ||
     (job.state === 'running' &&
@@ -1548,6 +1557,15 @@ export function JobDetail({
     () => describeHistoryTurns({ historyTurns: historicalRows }),
     [historicalRows],
   );
+  const { rewindAnchors, currentRewindAnchor } = useMemo(() => {
+    let previous: string | undefined;
+    const rewindAnchors = historyTurns.map((turn) => {
+      const anchor = previous;
+      if (turn.forkable) previous = turn.jobId;
+      return anchor;
+    });
+    return { rewindAnchors, currentRewindAnchor: previous };
+  }, [historyTurns]);
   const currentTurn = useMemo(
     () => describeCurrentTurn(job, { attemptNo, currentAttemptNo }),
     [job, attemptNo, currentAttemptNo],
@@ -1619,10 +1637,6 @@ export function JobDetail({
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [activityVisible, closeActivity, setWorkspaceOpen]);
-  const currentRewindAnchor = job.historyTurns
-    ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
-    : undefined;
-
   // The rail renders two host elements per turn while `toDisplayJob()` hands
   // the page a rebuilt job per streamed event. Handing it the entries it was
   // already showing keeps those marks from being rebuilt for a delta that only
@@ -1796,9 +1810,9 @@ export function JobDetail({
   const panelOpen = workspaceOpen || inspector !== null;
   const content = (
     <section className="flex h-full min-h-0 flex-col bg-surface">
-      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-border bg-surface px-4 sm:px-6">
+      <header className="agent-conversation-header relative z-20 shrink-0 border-b border-border bg-surface px-3 sm:px-4">
         {isArchived ? (
-          <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
+          <div className="flex items-center gap-2 pt-2 text-xs text-gray-500 dark:text-gray-400">
             <Link
               href="/archived"
               className="hover:text-crimson hover:underline dark:hover:text-crimson-light"
@@ -1810,31 +1824,17 @@ export function JobDetail({
           </div>
         ) : null}
         <div className="agent-conversation-toolbar flex flex-col">
-          <div className="agent-conversation-context flex min-w-0 items-center gap-3 pb-2 pt-3">
-            <div className="min-w-0 flex-1">
+          <div className="agent-conversation-context flex min-w-0 items-center gap-2 py-1.5">
+            <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
               <h1
                 title={title}
-                className="truncate text-base font-semibold tracking-[-0.01em] text-foreground"
+                className="max-w-full truncate text-sm font-semibold tracking-tight text-foreground"
               >
                 {title}
               </h1>
-              <div className="mt-1 flex items-center gap-2 text-xs text-muted">
-                <svg
-                  aria-hidden="true"
-                  className="h-3.5 w-3.5"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
-                  />
-                </svg>
-                <span className="truncate">{job.repo}</span>
-              </div>
+              <span className="min-w-0 truncate text-xs text-muted" title={job.repo}>
+                {job.repo}
+              </span>
             </div>
             <ThreadActions
               key={job.threadId ?? job.id}
@@ -1845,10 +1845,10 @@ export function JobDetail({
               onRename={setTitle}
             />
           </div>
-          <div className="agent-conversation-controls flex flex-wrap items-center gap-x-3 gap-y-2 pb-3">
+          <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pb-1.5">
             <nav
               aria-label="Run views"
-              className="flex shrink-0 items-center gap-1 rounded-xl bg-surface-muted p-1 text-xs"
+              className="flex shrink-0 items-center gap-0.5 rounded-md bg-surface-muted p-0.5 text-xs"
             >
               {(['chat', 'trajectory'] as const).map((view) => (
                 <button
@@ -1856,7 +1856,7 @@ export function JobDetail({
                   type="button"
                   onClick={() => setTab(view)}
                   aria-current={tab === view ? 'page' : undefined}
-                  className={`ui-focus-ring min-h-9 rounded-lg px-3 py-1.5 capitalize transition-colors [@media(pointer:coarse)]:min-h-11 ${
+                  className={`ui-focus-ring min-h-7 rounded-md px-2.5 py-1 capitalize transition-colors [@media(pointer:coarse)]:min-h-11 ${
                     tab === view
                       ? 'bg-surface font-semibold text-foreground shadow-sm ring-1 ring-border'
                       : 'text-muted hover:bg-surface-hover hover:text-foreground'
@@ -1986,10 +1986,10 @@ export function JobDetail({
                 trajectory is a wide table of steps, so it keeps the width the
                 inspector is not holding instead of a reading column. */}
             <div
-              className={`flex w-full flex-1 flex-col pb-6 pt-7 ${
+              className={`flex w-full flex-1 flex-col pb-4 pt-4 ${
                 tab === 'trajectory'
-                  ? 'px-6'
-                  : `mx-auto max-w-4xl ${showRail ? 'pl-6 pr-12' : 'px-6'}`
+                  ? 'px-4'
+                  : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
               }`}
             >
               {tab === 'trajectory' ? (
@@ -2009,9 +2009,7 @@ export function JobDetail({
               ) : (
                 <div className="flex-1">
                   {historyTurns.map((turn, index) => {
-                    const rewindAnchorJobId = [...historyTurns.slice(0, index)]
-                      .reverse()
-                      .find((candidate) => candidate.forkable)?.jobId;
+                    const rewindAnchorJobId = rewindAnchors[index];
                     return (
                       <HistoryTurn
                         key={turn.key}
@@ -2087,14 +2085,16 @@ export function JobDetail({
                     {job.historyIncludesPrompt ? null : (
                       <div
                         data-block-key={`${job.id}:prompt`}
-                        className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle"
+                        className="group my-2 flex items-start gap-2 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-2.5 shadow-subtle"
                       >
-                        <MessageContent
-                          text={job.prompt || job.title}
-                          presentation={presentation}
-                        />
+                        <div className="min-w-0 flex-1">
+                          <MessageContent
+                            text={job.prompt || job.title}
+                            presentation={presentation}
+                          />
+                        </div>
                         {presentation !== 'compact' || (currentRewindAnchor && canForkWorkspace) ? (
-                          <MessageActions align="end">
+                          <MessageActions align="end" className="!mt-0 max-w-[45%] shrink-0">
                             {presentation !== 'compact' ? (
                               <MessageActionButton
                                 label="Copy message"
@@ -2204,7 +2204,7 @@ export function JobDetail({
                         )}
                       />
                       {job.state === 'queued' && visibleEvents.length === 0 ? (
-                        <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
+                        <div className="flex items-center gap-2 py-1 text-[13px] text-gray-500 dark:text-gray-400">
                           <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
                           Waiting to start
                         </div>
@@ -2241,7 +2241,7 @@ export function JobDetail({
                     />
                     {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
                     {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
-                      <div className="mt-4">{usageFooter}</div>
+                      <div className="mt-2">{usageFooter}</div>
                     ) : null}
                   </section>
                 </div>
@@ -2250,7 +2250,7 @@ export function JobDetail({
               {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
               <div
                 ref={scroll.composerRef}
-                className="sticky bottom-0 z-10 -mx-2 mt-4 bg-gray-50 px-2 pb-2 pt-3 dark:bg-gray-950"
+                className="sticky bottom-0 z-10 -mx-1 mt-3 bg-gray-50 px-1 pb-1 pt-2 dark:bg-gray-950"
               >
                 <LiveAgentStatus job={job} />
                 {/* `/goal` on its own is not an objective. It is consumed
@@ -2417,14 +2417,14 @@ export function JobDetail({
                             : 'Message or run a task, / commands, @ files or sessions'
                         }
                         aria-label="Add a follow-up"
-                        className="block max-h-[30vh] min-h-16 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
+                        className="block max-h-[30vh] min-h-12 w-full resize-y rounded-t-xl border-0 bg-transparent px-3 py-2 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
                       />
                       <AttachmentStrip
                         entries={attachments.entries}
                         onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
-                      <div className="flex flex-wrap items-center gap-1 border-t border-border px-3 py-2">
+                      <div className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
@@ -2447,12 +2447,14 @@ export function JobDetail({
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
                             <Picker
+                              compact
                               label="Model for this turn"
                               value={model}
                               options={modelOptions}
                               onChange={setModel}
                             />
                             <Picker
+                              compact
                               label="Reasoning for this turn"
                               value={effort}
                               options={efforts}
@@ -2498,7 +2500,7 @@ export function JobDetail({
                           busy={submitting || goalCommand.busy}
                         />
                       </div>
-                      <p className="px-4 pb-3 text-[11px] leading-4 text-muted">
+                      <p className="px-3 pb-2 text-[11px] leading-4 text-muted">
                         {contextLost
                           ? `Start a new chat · ${job.runtime}`
                           : job.state === 'cancelled'
@@ -2512,21 +2514,30 @@ export function JobDetail({
                   )}
                 </div>
                 {skillsOpen ? (
-                  <SkillSelectionDialog
-                    limits={config?.skill_limits}
-                    selected={selectedSkills}
-                    onClose={() => setSkillsOpen(false)}
-                    onApply={(skills) => {
-                      const originalIds = new Set(selectedSkills.map((skill) => skill.id));
-                      if (
-                        skills.length !== originalIds.size ||
-                        skills.some((skill) => !originalIds.has(skill.id))
-                      ) {
-                        setChosenSkills(skills);
-                      }
-                      setSkillsOpen(false);
-                    }}
-                  />
+                  <Suspense
+                    fallback={
+                      <ComposerDialogLoading
+                        title={t('skills.title')}
+                        onClose={() => setSkillsOpen(false)}
+                      />
+                    }
+                  >
+                    <SkillSelectionDialog
+                      limits={config?.skill_limits}
+                      selected={selectedSkills}
+                      onClose={() => setSkillsOpen(false)}
+                      onApply={(skills) => {
+                        const originalIds = new Set(selectedSkills.map((skill) => skill.id));
+                        if (
+                          skills.length !== originalIds.size ||
+                          skills.some((skill) => !originalIds.has(skill.id))
+                        ) {
+                          setChosenSkills(skills);
+                        }
+                        setSkillsOpen(false);
+                      }}
+                    />
+                  </Suspense>
                 ) : null}
                 <ThreadStatsBar job={job} />
                 {/* A goal write's refusal is drawn inside the editor that made
@@ -2544,31 +2555,22 @@ export function JobDetail({
             </div>
           </div>
 
-          {activityVisible ? (
-            <div
-              className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-end px-4 pt-4 sm:px-6"
-              style={{ bottom: composerHeight + 64 }}
-            >
-              <aside
-                id="job-activity-window"
-                role="region"
-                aria-label="Tasks and subagents"
-                className="pointer-events-auto flex max-h-full w-full max-w-sm flex-col overflow-hidden rounded-xl bg-white/95 shadow-xl ring-1 ring-gray-200/90 backdrop-blur-sm dark:bg-gray-900/95 dark:ring-white/10"
-              >
-                <ActivityWindow
-                  overview={activityOverview}
-                  turnNo={currentTurn.displayNo}
-                  attemptNo={attemptNo}
-                  onClose={closeActivity}
-                  stepKeyForEvent={activityStepKey}
-                  onSelectStep={(stepKey) => {
-                    setTab('trajectory');
-                    selectStep(stepKey);
-                  }}
-                />
-              </aside>
-            </div>
-          ) : null}
+          <FloatingActivityWindow visible={activityVisible} bottom={composerHeight + 64}>
+            {(moveHandleProps) => (
+              <ActivityWindow
+                moveHandleProps={moveHandleProps}
+                overview={activityOverview}
+                turnNo={currentTurn.displayNo}
+                attemptNo={attemptNo}
+                onClose={closeActivity}
+                stepKeyForEvent={activityStepKey}
+                onSelectStep={(stepKey) => {
+                  setTab('trajectory');
+                  selectStep(stepKey);
+                }}
+              />
+            )}
+          </FloatingActivityWindow>
 
           {/* Above the transcript, below its composer and the page header:
               the design's order is body, rail preview, composer, header. */}
@@ -2600,7 +2602,7 @@ export function JobDetail({
               }}
             >
               <div
-                className={`mx-auto flex w-full max-w-4xl flex-col items-end gap-2 ${showRail ? 'pl-6 pr-12' : 'px-6'}`}
+                className={`mx-auto flex w-full max-w-4xl flex-col items-end gap-2 ${showRail ? 'pl-4 pr-10' : 'px-4'}`}
               >
                 {/* One live region for both answers: where a jump landed, and
                   when it could not land at all. It is always in the DOM, since

@@ -541,14 +541,22 @@ class StreamableHttpTransport(_HttpCore):
         merged["_meta"] = request_meta(self._protocol_version)
         return merged
 
-    async def request(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
+    async def request(
+        self,
+        method: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        input_schema: Mapping[str, Any] | None = None,
+    ) -> Any:
         """Send one request and return its result."""
         request_id = self._new_id()
         request_params = self._params_for(params)
         body = encode_request(request_id, method, request_params)
 
         async def post(payload: bytes) -> httpx.Response:
-            return await self._post(payload, method=method, params=request_params)
+            return await self._post(
+                payload, method=method, params=request_params, input_schema=input_schema
+            )
 
         response = await post(body)
         try:
@@ -609,13 +617,16 @@ class StreamableHttpTransport(_HttpCore):
         *,
         method: str = "",
         params: Mapping[str, Any] | None = None,
+        input_schema: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
         """POST one JSON-RPC payload to the endpoint."""
         config = self._config_with_state()
         await self._guard(config.endpoint.url)
         headers = build_headers(config, body=True)
         if self.stateless and method:
-            headers.update(request_headers(method, params))
+            headers = merge_headers(
+                headers, request_headers(method, params, input_schema=input_schema)
+            )
         request = self._client.build_request(
             "POST",
             config.endpoint.url,

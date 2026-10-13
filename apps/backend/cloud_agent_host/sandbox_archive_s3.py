@@ -1,6 +1,6 @@
 """Bounded S3 storage for compressed sandbox archives.
 
-The workspace broker is the trust boundary for this module.  It may export an
+The sandbox manager is the trust boundary for this module.  It may export an
 already-built ``tar.gz`` stream, but a sandbox never receives the S3 client or
 its workload credentials.  Object names are generated here instead of being
 accepted from a caller.  The API has no object-body read, restore, list, or
@@ -8,7 +8,7 @@ delete operation; its only read is an exact-key metadata check after an
 immutable initial write loses an ``If-None-Match`` race.
 
 ``boto3`` is imported only when an upload needs a default client.  Tests and
-other callers can inject the small protocol below.  A deployed broker uses a
+other callers can inject the small protocol below.  A deployed sandbox manager uses a
 saved access key when the policy has one, and otherwise the SDK's ordinary
 workload-identity/default credential chain.  There is still no custom endpoint
 option: archive bytes go to the fixed AWS bucket.
@@ -47,7 +47,7 @@ TIB: Final = 1024 * 1024 * 1024 * 1024
 # Archive construction temporarily holds both the raw Docker tar streams and
 # the compressed outer object. Keep the default modest enough for an ordinary
 # host and cap operator tuning so one hostile workspace cannot consume an
-# unbounded amount of broker scratch space.
+# unbounded amount of sandbox manager scratch space.
 MAX_S3_OBJECT_BYTES: Final = 5 * TIB
 MAX_MULTIPART_PARTS: Final = 10_000
 S3_CONNECT_TIMEOUT_S: Final = 5
@@ -233,7 +233,7 @@ class SandboxArchiveS3Config:
         aws_access_key_id: str | None = None,
         aws_secret_access_key: str | None = None,
     ) -> SandboxArchiveS3Config:
-        """Build the broker's S3 client configuration from one validated DB policy."""
+        """Build the sandbox manager's S3 client configuration from one validated DB policy."""
         if not policy.enabled:
             raise SandboxArchiveConfigError("sandbox archive policy is disabled")
         return cls(
@@ -422,7 +422,7 @@ class SandboxArchiveS3Uploader:
         """Return whether the exact immutable baseline is already in S3.
 
         This metadata-only probe supports recovery after S3 committed an
-        initial write but the broker or its caller lost the response.  A
+        initial write but the sandbox manager or its caller lost the response.  A
         missing key is distinct from an object whose immutable identity does
         not match: absence returns ``False``; a mismatch fails closed.
         """
@@ -803,7 +803,7 @@ def _default_s3_client(
         ) from exc
     # Without a saved access key, credentials come from the SDK's
     # workload-identity / default chain. Explicit transport bounds prevent one
-    # S3 request from outliving the broker's shutdown window indefinitely;
+    # S3 request from outliving the sandbox manager's shutdown window indefinitely;
     # service-level retries remain separately bounded.
     sdk_config = botocore_config.Config(
         connect_timeout=S3_CONNECT_TIMEOUT_S,

@@ -589,6 +589,42 @@ def test_the_post_apply_gate_catches_what_the_parser_would_miss(origin, monkeypa
     assert "agent/ajob_postgate" not in _branches(clone_url)
 
 
+def test_the_post_apply_gate_refuses_a_name_with_a_newline(origin, monkeypatch):
+    """A newline git really staged in a file name is refused before any push.
+
+    The publisher renders changed names into the pull request body the App
+    posts, and a line break is how a name would leave its code span there.
+    """
+    from cloud_agent import publisher
+    from cloud_agent_host.patch_gate import PatchGateResult
+
+    clone_url, base_sha = origin
+    patch = (
+        'diff --git "a/x\\ny.txt" "b/x\\ny.txt"\n'
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        '+++ "b/x\\ny.txt"\n'
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+    )
+    monkeypatch.setattr(
+        publisher,
+        "validate_patch",
+        lambda *_a, **_k: PatchGateResult(ok=True, changed_files=["README.md"]),
+    )
+
+    with pytest.raises(PublishError, match=r"after apply: .*control characters"):
+        publish_patch(
+            job_id="ajob_newline_name",
+            patch=patch,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: add a file",
+        )
+
+    assert "agent/ajob_newline_name" not in _branches(clone_url)
+
+
 def test_the_post_apply_gate_reports_the_real_paths(origin):
     """A clean publish reports the change set git staged, not the parse."""
     clone_url, base_sha = origin

@@ -111,7 +111,6 @@ _STAGES = [
         ("async_client", False, False),
         ("gateway_client", True, False),
         ("grant_client", True, False),
-        ("source_control", True, False),
         ("listen", True, False),
         ("mcp_maintenance", True, True),
         ("measurement_writer", True, True),
@@ -120,6 +119,7 @@ _STAGES = [
     ),
     *_only(
         True,
+        ("source_control", True, False),
         ("compute_runtime", True, False),
         ("compute_run", True, False),
         ("mcp_catalog", True, False),
@@ -309,11 +309,13 @@ def _prepare(
         if host_error:
             raise RuntimeError(host_error)
 
-    async def close_brokers() -> None:
-        events.append("brokers")
+    async def close_sandbox_managers() -> None:
+        events.append("sandbox_managers")
 
     monkeypatch.setattr("cloud_agent.api.mcp_relay.close_host", close_host)
-    monkeypatch.setattr("cloud_agent.broker_routing.close_broker_clients", close_brokers)
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.close_sandbox_manager_clients", close_sandbox_managers
+    )
 
     real_aclose = SourceControlRuntime.aclose
 
@@ -431,9 +433,10 @@ def _assert_released(prepared: _Prepared, stage: _Stage, caplog: pytest.LogCaptu
     assert prepared.pool.closes == 1
     assert prepared.events.count("pool") == 1
     assert prepared.events.count("host") == 1
-    assert prepared.events.count("brokers") == 1
+    assert prepared.events.count("sandbox_managers") == 1
     assert prepared.events.count("http") == (1 if stage.opens_http else 0)
-    assert prepared.events.count("source") == (0 if stage.name in _BEFORE_SOURCE else 1)
+    expected_source_closes = int(stage.background and stage.name not in _BEFORE_SOURCE)
+    assert prepared.events.count("source") == expected_source_closes
     if stage.opens_http:
         assert prepared.events.index("host") < prepared.events.index("http")
         assert prepared.events.index("http") < prepared.events.index("pool")
@@ -500,8 +503,8 @@ async def test_successful_shutdown_keeps_its_order(
         "reset_writer",
         *expected_tasks,
         "host",
-        "brokers",
-        "source",
+        "sandbox_managers",
+        *(["source"] if background else []),
         "http",
         "pool",
         "reset_settings",
@@ -628,8 +631,8 @@ async def test_shutdown_cancellation_joins_send_now_before_closing_resources() -
     async def close_host() -> None:
         events.append("host")
 
-    async def close_brokers() -> None:
-        events.append("brokers")
+    async def close_sandbox_managers() -> None:
+        events.append("sandbox_managers")
 
     app = FastAPI()
     shutdown = asyncio.create_task(
@@ -641,7 +644,7 @@ async def test_shutdown_cancellation_joins_send_now_before_closing_resources() -
             writer_installed=False,
             log_stopped=False,
             close_host=close_host,
-            close_broker_clients=close_brokers,
+            close_sandbox_manager_clients=close_sandbox_managers,
             reset_writer=lambda _writer: None,
             reset_settings=lambda: events.append("reset_settings"),
         )
@@ -675,8 +678,8 @@ async def test_measurement_writer_cancellation_propagates_after_later_cleanup() 
     async def close_host() -> None:
         events.append("host")
 
-    async def close_brokers() -> None:
-        events.append("brokers")
+    async def close_sandbox_managers() -> None:
+        events.append("sandbox_managers")
 
     errors = await lifespan_module._shutdown_lifespan(
         app,
@@ -686,14 +689,14 @@ async def test_measurement_writer_cancellation_propagates_after_later_cleanup() 
         writer_installed=True,
         log_stopped=False,
         close_host=close_host,
-        close_broker_clients=close_brokers,
+        close_sandbox_manager_clients=close_sandbox_managers,
         reset_writer=lambda _writer: events.append("reset_writer"),
         reset_settings=lambda: events.append("reset_settings"),
     )
 
     assert len(errors) == 1
     assert isinstance(errors[0], asyncio.CancelledError)
-    assert events == ["reset_writer", "host", "brokers", "http", "pool", "reset_settings"]
+    assert events == ["reset_writer", "host", "sandbox_managers", "http", "pool", "reset_settings"]
     with pytest.raises(asyncio.CancelledError):
         lifespan_module._surface_cleanup_errors(None, errors)
 
@@ -718,8 +721,8 @@ async def test_owner_cancellation_while_joining_a_resistant_child_finishes_clean
     async def close_host() -> None:
         events.append("host")
 
-    async def close_brokers() -> None:
-        events.append("brokers")
+    async def close_sandbox_managers() -> None:
+        events.append("sandbox_managers")
 
     shutdown = asyncio.create_task(
         lifespan_module._shutdown_lifespan(
@@ -730,7 +733,7 @@ async def test_owner_cancellation_while_joining_a_resistant_child_finishes_clean
             writer_installed=False,
             log_stopped=False,
             close_host=close_host,
-            close_broker_clients=close_brokers,
+            close_sandbox_manager_clients=close_sandbox_managers,
             reset_writer=lambda _writer: None,
             reset_settings=lambda: events.append("reset_settings"),
         )
@@ -741,7 +744,7 @@ async def test_owner_cancellation_while_joining_a_resistant_child_finishes_clean
 
     assert child.cancelled()
     assert len([error for error in errors if isinstance(error, asyncio.CancelledError)]) == 1
-    assert events == ["host", "brokers", "http", "pool", "reset_settings"]
+    assert events == ["host", "sandbox_managers", "http", "pool", "reset_settings"]
     with pytest.raises(asyncio.CancelledError):
         lifespan_module._surface_cleanup_errors(None, errors)
 
@@ -776,7 +779,7 @@ async def test_primary_error_survives_owner_cancellation_during_cleanup() -> Non
                 writer_installed=False,
                 log_stopped=False,
                 close_host=lambda: None,
-                close_broker_clients=lambda: None,
+                close_sandbox_manager_clients=lambda: None,
                 reset_writer=lambda _writer: None,
                 reset_settings=lambda: events.append("reset_settings"),
             )

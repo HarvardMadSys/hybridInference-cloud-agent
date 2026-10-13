@@ -211,7 +211,7 @@ export interface AgentRunnerHost {
    */
   launch_error?: string | null;
   runner_version: string | null;
-  broker_url: string | null;
+  sandbox_manager_url: string | null;
   last_heartbeat_at: string | null;
   /**
    * The container runtime this host's jobs actually execute under. `''` is a
@@ -254,8 +254,15 @@ export interface AgentRunnerHost {
    * with no admin value. Clearing an admin value returns the host to this.
    */
   settings_local?: HostSettingValues | null;
-  /** Archive-policy revision this host's broker confirmed applying. */
+  /** Archive-policy revision this host's sandbox manager confirmed applying. */
   sandbox_archive_settings_applied_revision?: number | null;
+  /**
+   * True when this host can be given untrusted (Kata) work and reports no
+   * container disk quota, so a new untrusted sandbox's writable layer is
+   * unbounded. A recommendation only; nothing is refused. Absent from a
+   * control plane older than the warning; the page reads it as false.
+   */
+  untrusted_without_disk_quota?: boolean;
 }
 
 /** Which unit a runtime setting's whole number counts. */
@@ -278,7 +285,7 @@ export interface HostSettingDefinition {
   minimum: number;
   maximum: number;
   /** Which host process applies it. */
-  scope: 'runner' | 'broker' | 'both';
+  scope: 'runner' | 'sandbox_manager' | 'both';
 }
 
 /** Runtime setting values by key. */

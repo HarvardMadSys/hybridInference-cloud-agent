@@ -8,7 +8,7 @@ export function SettingsSection({
   description,
   children,
   open = false,
-  className = 'mt-6',
+  className = 'mt-4',
 }: {
   title: 'Important' | 'Advanced';
   description?: string;
@@ -28,16 +28,16 @@ export function SettingsSection({
     return (
       <details
         ref={details}
-        className={`group ${className} overflow-hidden rounded-xl border border-border bg-surface`}
+        className={`group ${className} overflow-hidden rounded-lg border border-border bg-surface`}
       >
-        <summary className="ui-focus-ring flex min-h-11 cursor-pointer list-none items-center gap-3 bg-surface-muted/70 px-4 py-3 transition-colors hover:bg-surface-hover marker:content-none sm:px-5 [&::-webkit-details-marker]:hidden">
+        <summary className="ui-focus-ring flex min-h-9 cursor-pointer list-none items-center gap-2 bg-surface-muted/70 px-3 py-2 transition-colors hover:bg-surface-hover marker:content-none sm:px-4 [&::-webkit-details-marker]:hidden [@media(pointer:coarse)]:min-h-11">
           <span className="min-w-0 flex-1">
             <span className="block text-sm font-semibold text-foreground">{title}</span>
             {description && (
               <span className="mt-0.5 block text-sm leading-5 text-muted">{description}</span>
             )}
           </span>
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface text-muted shadow-sm ring-1 ring-inset ring-border">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface text-muted ring-1 ring-inset ring-border">
             <svg
               aria-hidden
               viewBox="0 0 20 20"
@@ -50,7 +50,7 @@ export function SettingsSection({
             </svg>
           </span>
         </summary>
-        <div className="border-t border-border px-4 py-2 sm:px-5">{children}</div>
+        <div className="border-t border-border px-3 py-2 sm:px-4">{children}</div>
       </details>
     );
   }

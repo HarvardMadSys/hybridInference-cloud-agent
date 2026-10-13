@@ -45,7 +45,7 @@ const SESSIONS: HostSettingDefinition = {
   default: 64,
   minimum: 1,
   maximum: 4096,
-  scope: 'broker',
+  scope: 'sandbox_manager',
 };
 
 const CPU: HostSettingDefinition = {
@@ -75,7 +75,7 @@ function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
     slots_total: 3,
     slots_used: 0,
     runner_version: null,
-    broker_url: null,
+    sandbox_manager_url: null,
     last_heartbeat_at: null,
     sandbox_runtime: null,
     sandbox_image_digest: null,
@@ -265,7 +265,7 @@ describe('input units', () => {
     }
   });
 
-  it('reads and formats broker input limits in KiB', () => {
+  it('reads and formats sandbox manager input limits in KiB', () => {
     const inputLimit: HostSettingDefinition = {
       ...SESSIONS,
       key: 'terminal_input_max_kib',

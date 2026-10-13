@@ -32,7 +32,7 @@ PROFILING_CONTROL_CAPABILITY = "operation-profiling-control-v1"
 #: answer and reports back what it applied. A host without it keeps the values
 #: in its ``.env`` until it is redeployed, and the page says so.
 HOST_SETTINGS_CAPABILITY = "host-settings-v1"
-#: Advertised once per runtime by a host whose broker can hand a message to a
+#: Advertised once per runtime by a host whose sandbox manager can hand a message to a
 #: running turn of that runtime (``POST /shared-sandboxes/{thread}/input``).
 #: Per runtime because each CLI takes mid-turn input through its own channel,
 #: and a host is only asked to steer a turn whose runtime it names here.
@@ -51,7 +51,7 @@ def mid_turn_input_capability(runtime_id: str) -> str:
 #: never took has no such event, and goes as the next turn instead.
 USER_MESSAGE_EVENT = "user_message"
 
-#: Why a running turn cannot take a message: the broker answers with one of
+#: Why a running turn cannot take a message: the sandbox manager answers with one of
 #: these words and the owner's page says what each means. The message itself is
 #: never lost — it stays waiting and is sent when the turn ends.
 #: The turn is over, or was never this one.
@@ -73,10 +73,10 @@ INPUT_REFUSALS = frozenset(
         INPUT_UNREACHABLE,
     }
 )
-#: Header the runner uses when it hands its workspace broker the profiling policy
-#: a control plane sent it. The broker has no host credential and never will --
+#: Header the runner uses when it hands its sandbox manager the profiling policy
+#: a control plane sent it. The sandbox manager has no host credential and never will --
 #: the design forbids widening that -- so the policy travels over the existing
-#: broker-authenticated channel and is carried in a header whose value is an
+#: sandbox-manager-authenticated channel and is carried in a header whose value is an
 #: opaque, bounded, revision-stamped message rather than a bearer token.
 PROFILING_POLICY_HEADER = "X-Agent-Profiling-Policy"
 #: How many turns at once an operator may ask a host for. Two is the

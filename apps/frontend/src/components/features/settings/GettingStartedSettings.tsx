@@ -25,7 +25,7 @@ export function GettingStartedSettings() {
   return (
     <section
       aria-labelledby="settings-getting-started"
-      className="ui-card mt-6 rounded-2xl bg-surface p-4 sm:p-6"
+      className="ui-card mt-4 bg-surface p-3 sm:p-4"
     >
       <div className="flex flex-wrap items-center gap-1">
         <h2 id="settings-getting-started" className="text-base font-semibold text-foreground">

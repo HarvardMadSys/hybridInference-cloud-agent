@@ -6,7 +6,7 @@ ingest refuses, a run manifest the endpoint validates but the repository
 compares differently, a field the Admin page needs that the frozen record never
 carried.
 
-The pieces are the real ones -- the real route with a broker stand-in, the real
+The pieces are the real ones -- the real route with a sandbox manager stand-in, the real
 validator, the real repository, the real Admin router -- and only the
 destination between collection and storage is arranged by the test, because
 that is a network hop and not a rule.
@@ -30,7 +30,7 @@ from tests.servers.test_agent_jobs_api import (
     _create_job,
 )
 
-from cloud_agent import broker_routing, identity, measurement_ingest
+from cloud_agent import identity, measurement_ingest, sandbox_manager_routing
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app
 from cloud_agent.measurement_ingest import Owner
@@ -52,7 +52,7 @@ EXPIRES_AT = (datetime.now(UTC) + timedelta(minutes=30)).replace(microsecond=0)
 def _deployment(monkeypatch, tmp_path):
     """One experiment, its sink, and the secrets the routes need."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "api-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
     monkeypatch.setenv("ADMIN_TOKEN", "admin-e2e-test")
@@ -79,8 +79,8 @@ def _deployment(monkeypatch, tmp_path):
     reset_selections()
 
 
-class _Broker:
-    """A broker stand-in that speaks the same candidate protocol as the real one."""
+class _SandboxManager:
+    """A sandbox manager stand-in that speaks the same candidate protocol as the real one."""
 
     def __init__(self, *, delay_s: float = 0.03) -> None:
         self.delay_s = delay_s
@@ -122,12 +122,12 @@ def store() -> FakeStorage:
 
 @pytest_asyncio.fixture()
 async def collector_client(store: FakeStorage, monkeypatch):
-    """The control-plane routes a browser reaches, with a broker stand-in."""
-    broker = _Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    """The control-plane routes a browser reaches, with a sandbox manager stand-in."""
+    sandbox_manager = _SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
-        yield http, broker
+        yield http, sandbox_manager
 
 
 def _emitted() -> list[dict[str, object]]:
@@ -275,7 +275,7 @@ async def test_one_file_read_travels_the_whole_chain(
     collector_client, reader, store: FakeStorage, monkeypatch, tmp_path
 ):
     """Collect, deliver, store and read back one operation, unaltered."""
-    browser, _broker = collector_client
+    browser, _sandbox_manager = collector_client
     admin, capability = reader
     job_id = await _create_job(browser)
     _attach_shared_workspace(store, job_id)
@@ -353,7 +353,7 @@ async def test_the_chain_files_a_subdirectory_as_a_listing(
     collector_client, reader, store: FakeStorage, monkeypatch
 ):
     """The classification survives every hop, not only the first one."""
-    browser, _broker = collector_client
+    browser, _sandbox_manager = collector_client
     admin, capability = reader
     job_id = await _create_job(browser)
     _attach_shared_workspace(store, job_id)
@@ -384,7 +384,7 @@ async def test_a_record_the_ingest_refuses_never_reaches_the_page(
     collector_client, reader, store: FakeStorage, monkeypatch
 ):
     """A producer the deployment does not understand cannot corrupt a chart."""
-    browser, _broker = collector_client
+    browser, _sandbox_manager = collector_client
     _admin, capability = reader
     job_id = await _create_job(browser)
     _attach_shared_workspace(store, job_id)
@@ -406,7 +406,7 @@ async def test_a_record_never_carries_the_file_it_read(
     collector_client, store: FakeStorage, monkeypatch
 ):
     """The chain's content-free promise is enforceable at the seam."""
-    browser, _broker = collector_client
+    browser, _sandbox_manager = collector_client
     job_id = await _create_job(browser)
     _attach_shared_workspace(store, job_id)
     store.jobs[job_id]["thread_sandbox"].update({"sandbox_id": "asbx_e2e", "host": "host-e2e"})
@@ -415,7 +415,7 @@ async def test_a_record_never_carries_the_file_it_read(
     assert response.status_code == 200
     record = _emitted()[0]
 
-    # The broker's answer is in the response body, and only the kind it found
+    # The sandbox manager's answer is in the response body, and only the kind it found
     # is in the record: the content and the path stayed behind.
     assert response.json()["content"] == "hello"
     serialized = json.dumps(record)

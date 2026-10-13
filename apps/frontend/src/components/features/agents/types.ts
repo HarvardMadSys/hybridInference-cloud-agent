@@ -81,6 +81,8 @@ export type AgentEvent =
       /** Native structured result, retained alongside the readable output. */
       structuredOutput?: unknown;
       outputIsError?: boolean;
+      /** The platform marked the stored result as shortened. */
+      outputTruncated?: boolean;
       /** e.g. "+12 −3" for Edit rows. */
       diffStat?: string;
       attemptNo?: number;
@@ -94,6 +96,8 @@ export type AgentEvent =
       parentToolUseId?: string;
       cancelled?: boolean;
       isError: boolean;
+      /** The platform marked the stored result as shortened. */
+      truncated?: boolean;
       /** Event time, ISO — paired with its tool_use to time the call. */
       at?: string | null;
       attemptNo?: number;

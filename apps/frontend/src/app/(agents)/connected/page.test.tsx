@@ -223,6 +223,40 @@ describe('AgentsConnectedPage', () => {
     expect(mockedConnectGitHub).toHaveBeenCalledTimes(2);
   });
 
+  it('words a provider error itself instead of repeating the link', async () => {
+    // Anyone can write this URL, description included.
+    navigation.search = new URLSearchParams({
+      provider: 'github',
+      error: 'access_denied',
+      error_description: 'Your GitHub account is locked. Call +1 555 0100 to unlock it.',
+    }).toString();
+
+    render(<AgentsConnectedPage />);
+
+    expect(
+      await screen.findByText('Access was cancelled or denied (access_denied).'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Call \+1 555 0100/)).not.toBeInTheDocument();
+    expect(mockedConnectGitHub).not.toHaveBeenCalled();
+  });
+
+  it('quotes an unknown provider error as unverified detail', async () => {
+    navigation.search = new URLSearchParams({
+      provider: 'gitlab',
+      error_description: 'Your session expired; sign in at evil.example',
+    }).toString();
+
+    render(<AgentsConnectedPage />);
+
+    expect(
+      await screen.findByText(
+        'GitLab did not complete the authorization. Unverified detail from the redirect: ' +
+          '“Your session expired; sign in at evil.example”',
+      ),
+    ).toBeInTheDocument();
+    expect(mockedConnectGitLab).not.toHaveBeenCalled();
+  });
+
   it('does not exchange a code without connection state', async () => {
     navigation.search = 'provider=gitlab&code=gitlab-code';
 

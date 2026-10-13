@@ -71,6 +71,25 @@ export function AgentsSidebar({
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects();
+  const backgroundRefreshPending = useRef(false);
+  const refreshInBackground = useCallback(() => {
+    if (document.visibilityState === 'hidden') {
+      backgroundRefreshPending.current = true;
+      return;
+    }
+    backgroundRefreshPending.current = false;
+    reload();
+    reloadProjects();
+  }, [reload, reloadProjects]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
+        refreshInBackground();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refreshInBackground]);
 
   const [selected, setSelected] = useState<{
     path: string;
@@ -228,23 +247,17 @@ export function AgentsSidebar({
         // Tool approvals, usage, queues and publication hints belong to detail
         // panes. Only changed records or a stream gap can affect these lists.
         if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
-        reload();
-        reloadProjects();
+        refreshInBackground();
       }),
-    [reload, reloadProjects],
+    [refreshInBackground],
   );
   const pushLive = useAgentPushLive();
+  const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
-    if (!projects.some((project) => project.active_count > 0)) return;
-    const timer = setInterval(
-      () => {
-        reload();
-        reloadProjects();
-      },
-      pushLive ? PUSH_FALLBACK_POLL_MS : 10000,
-    );
+    if (!hasActiveProjects) return;
+    const timer = setInterval(refreshInBackground, pushLive ? PUSH_FALLBACK_POLL_MS : 10000);
     return () => clearInterval(timer);
-  }, [projects, pushLive, reload, reloadProjects]);
+  }, [hasActiveProjects, pushLive, refreshInBackground]);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setQuery('');
@@ -577,12 +590,12 @@ export function AgentsSidebar({
         style={{ width: pane.width }}
         className="ui-enter flex min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted"
       >
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
-          <div className="flex items-center gap-2">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+          <div className="flex items-center gap-1.5">
             <Link
               href="/"
               aria-current={pathname === '/' ? 'page' : undefined}
-              className={`ui-focus-ring flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-xl border px-3 py-2.5 text-[13px] font-semibold transition-colors ${
+              className={`ui-focus-ring flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[13px] font-semibold transition-colors [@media(pointer:coarse)]:min-h-11 ${
                 pathname === '/'
                   ? 'border-border bg-surface text-foreground shadow-subtle'
                   : 'border-border/70 bg-surface text-foreground hover:border-border-strong/50 hover:bg-surface-hover'
@@ -608,10 +621,10 @@ export function AgentsSidebar({
           </div>
 
           {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
-            <section aria-labelledby="sidebar-pinned-heading" className="mt-6">
+            <section aria-labelledby="sidebar-pinned-heading" className="mt-4">
               <h2
                 id="sidebar-pinned-heading"
-                className="mb-2 px-2 text-[11px] font-medium tracking-[0.04em] text-muted"
+                className="mb-1 px-2 text-[11px] font-medium text-muted"
               >
                 {t('sidebar.pinned')}
               </h2>
@@ -640,10 +653,8 @@ export function AgentsSidebar({
             </section>
           )}
 
-          <div className="mb-2 mt-6 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pl-2 pr-0.5">
-            <span className="text-[11px] font-medium tracking-[0.04em] text-muted">
-              {t('sidebar.projects')}
-            </span>
+          <div className="mb-1 mt-4 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pl-2 pr-0.5">
+            <span className="text-[11px] font-medium text-muted">{t('sidebar.projects')}</span>
             <div className="ml-auto flex items-center gap-0.5">
               <button
                 ref={searchButton}
@@ -863,11 +874,11 @@ export function AgentsSidebar({
 
         <GettingStarted />
 
-        <div className="shrink-0 space-y-1 border-t border-border/70 px-3 py-3">
+        <div className="shrink-0 space-y-0.5 border-t border-border/70 px-2 py-2">
           <Link
             href="/archived"
             aria-current={pathname === '/archived' ? 'page' : undefined}
-            className={`ui-focus-ring flex min-h-10 items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
+            className={`ui-focus-ring flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
               pathname === '/archived'
                 ? 'bg-surface-hover text-foreground'
                 : 'text-muted hover:bg-surface-hover hover:text-foreground'
@@ -893,7 +904,7 @@ export function AgentsSidebar({
           <Link
             href="/integrations"
             aria-current={pathname === '/integrations' ? 'page' : undefined}
-            className={`ui-focus-ring flex min-h-10 items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
+            className={`ui-focus-ring flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
               pathname === '/integrations'
                 ? 'bg-surface-hover text-foreground'
                 : 'text-muted hover:bg-surface-hover hover:text-foreground'

@@ -125,6 +125,16 @@ class AppNotInstalled(GitHubAppError):
     """
 
 
+class CommitNotOnBranch(GitHubAppError):
+    """A commit exists in the repository's object store but not in a branch's history.
+
+    Settled, and the caller's to fix: GitHub serves any object reachable in a
+    repository's network by hash — a fork's pull request head among them — so
+    a commit that resolves is not therefore one the repository's own history
+    holds. The message names the commit and the branch and is safe to show.
+    """
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """The App's identity. The private key never leaves this process."""
@@ -855,6 +865,84 @@ class GitHubAppCredentials:
         if not isinstance(sha, str) or not sha:
             raise GitHubAppError(f"GitHub returned no commit for {ref!r} in {repo}")
         return sha
+
+    async def require_commit_on_branch(
+        self, repo: str, sha: str, *, branch: str | None = None
+    ) -> str:
+        """Confirm ``sha`` is in the history of a branch of ``repo``; return that branch.
+
+        A job's base commit is fetched by hash and the publisher pushes a
+        branch built on it, so a hash alone would let a submission start from
+        any object GitHub serves for the repository, such as a fork's pull
+        request head, and have the platform push it under its own name.
+
+        ``branch`` is the one the job names. When it is not a branch of this
+        repository (a tag, a commit, ``refs/pull/...``) or none is named, the
+        repository's default branch is the anchor instead: the branch is read
+        through ``/branches/``, so a caller cannot point the comparison at
+        another repository's branch. Comparing the tip with the commit answers
+        ``behind`` or ``identical`` exactly when the commit is an ancestor of
+        the tip. Raises :class:`CommitNotOnBranch` when it is not.
+        """
+        if not _COMMIT_SHA.fullmatch(sha or ""):
+            raise GitHubAppError(f"base commit must be a commit sha, got {sha!r}")
+        owner, _, name = repo.partition("/")
+        if not owner or not name:
+            raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+        token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        base_url = f"{self._config.api_base}/repos/{owner}/{name}"
+
+        async def branch_tip(client: httpx.AsyncClient, candidate: str) -> str | None:
+            response = await client.get(
+                f"{base_url}/branches/{quote(candidate, safe='/')}", headers=headers
+            )
+            if response.status_code == 404:
+                return None
+            if response.status_code >= 400:
+                raise GitHubAppError(
+                    f"could not read branch {candidate!r} in {repo}", status=response.status_code
+                )
+            commit = response.json().get("commit")
+            tip = commit.get("sha") if isinstance(commit, dict) else None
+            return tip if isinstance(tip, str) and _COMMIT_SHA.fullmatch(tip) else None
+
+        async with self._http() as client:
+            anchor = branch or ""
+            tip = await branch_tip(client, anchor) if anchor else None
+            if tip is None:
+                meta = await client.get(base_url, headers=headers)
+                if meta.status_code >= 400:
+                    raise GitHubAppError(f"could not read {repo}", status=meta.status_code)
+                default = meta.json().get("default_branch")
+                if not isinstance(default, str) or not default:
+                    raise GitHubAppError(f"GitHub returned no default branch for {repo}")
+                anchor, tip = default, await branch_tip(client, default)
+                if tip is None:
+                    raise GitHubAppError(f"could not read branch {default!r} in {repo}")
+            if tip.lower().startswith(sha.lower()):
+                return anchor
+            comparison = await client.get(
+                f"{base_url}/compare/{tip}...{sha}", params={"per_page": 1}, headers=headers
+            )
+        refused = CommitNotOnBranch(
+            f"commit {sha[:12]} is not in the history of branch {anchor!r} in {repo}"
+        )
+        if comparison.status_code in (404, 422):
+            # No such commit, or none GitHub can relate to the tip.
+            raise refused
+        if comparison.status_code >= 400:
+            raise GitHubAppError(
+                f"could not compare {sha[:12]} with {anchor!r} in {repo}",
+                status=comparison.status_code,
+            )
+        if comparison.json().get("status") not in ("behind", "identical"):
+            raise refused
+        return anchor
 
     async def repository_contents(
         self,

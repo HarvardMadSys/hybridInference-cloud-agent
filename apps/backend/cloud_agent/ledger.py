@@ -447,41 +447,60 @@ async def collect_usage_snapshots(
 ) -> None:
     """Run ledger reads on their own bounded pool, separate from grant renewal.
 
-    With ``wake`` an idle collector waits for an attempt to stop or a refresh
-    to be scheduled, and otherwise until the earliest scheduled one is due,
+    Refill each slot as soon as its query completes, so a slow Gateway read
+    does not hold up other jobs. With ``wake`` a collector with spare capacity
+    waits for an attempt to stop or a refresh to be scheduled, and otherwise
+    until the earliest scheduled one is due,
     never longer than ``LEDGER_IDLE_S``. Without it, or while nothing listens,
     it looks every ``REFRESH_POLL_SECONDS``.
     """
-    while True:
-        try:
-            rows = []
-            for _ in range(integer_setting("ledger_refresh_concurrency", REFRESH_CONCURRENCY)):
-                row = await store.claim_due_ledger_refresh()
-                if row is None:
-                    break
-                rows.append(row)
-            if rows:
-                outcomes = await asyncio.gather(
-                    *(refresh_ledger_entry(store, grants, row) for row in rows),
-                    return_exceptions=True,
+    inflight: set[asyncio.Task[None]] = set()
+    try:
+        while True:
+            concurrency = integer_setting("ledger_refresh_concurrency", REFRESH_CONCURRENCY)
+            try:
+                while len(inflight) < concurrency:
+                    row = await store.claim_due_ledger_refresh()
+                    if row is None:
+                        break
+                    inflight.add(asyncio.create_task(refresh_ledger_entry(store, grants, row)))
+            except Exception:
+                logger.warning("agent_ledger_snapshot_pass_failed")
+
+            waiter: asyncio.Task[Any] | None = None
+            waiting: set[asyncio.Task[Any]] = set(inflight)
+            if len(inflight) < concurrency:
+                # A free slot must also notice newly due work while another
+                # query is slow, rather than only waiting for that query.
+                idle_s = REFRESH_POLL_SECONDS
+                if wake is not None:
+                    # While nothing listens, look on the old short clock.
+                    idle_s = (
+                        number_setting("ledger_idle_s", LEDGER_IDLE_S)
+                        if wake.listening
+                        else REFRESH_POLL_SECONDS
+                    )
+                    with contextlib.suppress(Exception):
+                        due = await store.next_ledger_refresh_due()
+                        if due is not None:
+                            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
+                delay = max(idle_s, REFRESH_MIN_WAIT_S)
+                waiter = asyncio.create_task(
+                    asyncio.sleep(delay) if wake is None else wake.wait(LEDGER, delay)
                 )
-                if any(isinstance(outcome, Exception) for outcome in outcomes):
-                    logger.warning("agent_ledger_snapshot_save_failed")
-                continue
-        except Exception:
-            logger.warning("agent_ledger_snapshot_pass_failed")
-        if wake is None:
-            await asyncio.sleep(REFRESH_POLL_SECONDS)
-            continue
-        # While nothing listens, a refresh scheduled meanwhile announces
-        # nothing: look on the old clock until the listener is back.
-        idle_s = (
-            number_setting("ledger_idle_s", LEDGER_IDLE_S)
-            if wake.listening
-            else REFRESH_POLL_SECONDS
-        )
-        with contextlib.suppress(Exception):
-            due = await store.next_ledger_refresh_due()
-            if due is not None:
-                idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
-        await wake.wait(LEDGER, max(idle_s, REFRESH_MIN_WAIT_S))
+                waiting.add(waiter)
+            try:
+                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if waiter is not None:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+            completed = inflight.intersection(done)
+            inflight.difference_update(completed)
+            errors = [task.exception() for task in completed if not task.cancelled()]
+            if any(error is not None for error in errors):
+                logger.warning("agent_ledger_snapshot_save_failed")
+    finally:
+        for task in inflight:
+            task.cancel()
+        await asyncio.gather(*inflight, return_exceptions=True)

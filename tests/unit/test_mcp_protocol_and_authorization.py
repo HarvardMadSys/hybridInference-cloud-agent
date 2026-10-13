@@ -202,6 +202,54 @@ class TestProtocol:
         assert meta[protocol.META_PROTOCOL_VERSION] == "2026-07-28"
         assert protocol.META_CLIENT_CAPABILITIES in meta
 
+    def test_annotated_tool_arguments_are_mirrored_into_param_headers(self) -> None:
+        """GitHub rejects a 2026-07-28 call that omits ``Mcp-Param-*`` headers."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-mcp-header": "owner"},
+                "repo": {"type": "string", "x-mcp-header": "repo"},
+                "path": {"type": "string", "default": "/"},
+                "note": {"type": "string", "x-mcp-header": "note"},
+                "count": {"type": "integer", "x-mcp-header": "count"},
+                "draft": {"type": "boolean", "x-mcp-header": "draft"},
+                "title": {"type": "string", "x-mcp-header": "title"},
+                "skipped": {"type": "array", "x-mcp-header": "skipped"},
+                "nested": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string", "x-mcp-header": "nested"}},
+                },
+            },
+        }
+        headers = protocol.request_headers(
+            protocol.TOOLS_CALL,
+            {
+                "name": "get_file_contents",
+                "arguments": {
+                    "owner": "acme",
+                    "repo": None,
+                    "note": "",
+                    "count": 3,
+                    "draft": False,
+                    "title": "café ",
+                    "skipped": ["nope"],
+                    "nested": {"name": "inner"},
+                },
+            },
+            input_schema=schema,
+        )
+        assert headers["mcp-method"] == "tools/call"
+        assert headers["mcp-name"] == "get_file_contents"
+        assert headers["Mcp-Param-owner"] == "acme"
+        assert "Mcp-Param-repo" not in headers
+        assert "Mcp-Param-path" not in headers
+        assert headers["Mcp-Param-note"] == ""
+        assert headers["Mcp-Param-count"] == "3"
+        assert headers["Mcp-Param-draft"] == "false"
+        assert headers["Mcp-Param-title"].startswith("=?base64?")
+        assert "Mcp-Param-skipped" not in headers
+        assert headers["Mcp-Param-nested"] == "inner"
+
     def test_a_paginated_catalogue_is_walked_to_its_end(self) -> None:
         """Two pages of tools become one snapshot."""
 

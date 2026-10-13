@@ -318,6 +318,7 @@ def run_builder_step(tmp_path: Path, existing: list[str]) -> tuple[dict[str, str
     github_env = tmp_path / "github-env"
     env = {
         **os.environ,
+        "BASH_ENV": "/dev/null",
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "DOCKER_CALLS": str(calls),
         "EXISTING_CONTAINERS": " ".join(existing),
@@ -329,7 +330,12 @@ def run_builder_step(tmp_path: Path, existing: list[str]) -> tuple[dict[str, str
         "RUNNER_WORKSPACE": str(tmp_path / "persistent-runner" / "work"),
         "RUNNER_NAME": "image-verify-x64-1",
     }
-    subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, check=True)
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+    )
     outputs = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
     return outputs, calls.read_text().splitlines()
 

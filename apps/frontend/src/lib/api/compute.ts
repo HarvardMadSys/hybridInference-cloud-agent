@@ -14,7 +14,7 @@ export interface BlockedReason {
 export interface ComputeField {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'select' | 'json' | 'textarea';
+  type: 'text' | 'number' | 'select' | 'json' | 'textarea' | 'string_list';
   required?: boolean;
   advanced?: boolean;
   section?: 'template' | 'access';
@@ -52,6 +52,9 @@ export interface CloudLabDefaults {
   profile_name: string;
   ssh_username: string;
   ssh_public_key: string;
+  /** Hardware attempted in order for each new allocation. */
+  node_types: string[];
+  node_type_binding: string;
 }
 
 export interface ComputeConnection {
@@ -255,6 +258,12 @@ export interface ComputeServerSnapshot {
 
 export const getComputeServers = (signal?: AbortSignal) =>
   get<ComputeServerSnapshot>('/servers', signal);
+export const removeComputeServer = (id: string, expectedRevision: number) =>
+  write<{ removed: true }>(
+    `/servers/${encodeURIComponent(id)}`,
+    { expected_revision: expectedRevision },
+    'DELETE',
+  );
 export const getComputeOperations = (requestId?: string, signal?: AbortSignal) =>
   get<{ operations: ComputeOperation[] }>(
     `/compute-operations${requestId ? `?request_id=${encodeURIComponent(requestId)}` : ''}`,
@@ -356,6 +365,8 @@ export interface CloudLabAutoscalingConfiguration {
   bindings?: Record<string, unknown>;
   ssh_username?: string;
   ssh_public_key?: string;
+  node_types?: string[];
+  node_type_binding?: string;
   /** Autoscaled nodes always pin the key registered by their first-boot script. */
   host_key_source?: 'registration';
 }
@@ -469,7 +480,7 @@ export interface CloudLabPreferredNodesSnapshot {
   observed_at: string;
   source: string;
   filters: {
-    availability_greater_than: number;
+    total_greater_than: number;
     minimum_introduced_year: number;
     minimum_physical_cores: number;
     minimum_memory_gib: number;

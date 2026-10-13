@@ -10,13 +10,13 @@
 #
 # Three narrow tunnel containers carry model, MCP, and control-plane traffic.
 # Sandboxes run on one routable bridge per group, created by the runner and
-# broker behind this deployment's host nftables table: public IPv4 on TCP
+# sandbox manager behind this deployment's host nftables table: public IPv4 on TCP
 # 80/443, the named resolver and the two relays, nothing else. Setup and the
 # agent share that bridge; there is no proxy and no network switch.
 #
 # Usage, from the repository root on the runner host:
 #
-#   deploy/host/sandbox_host.sh up       # build, start the tunnels, broker and runner
+#   deploy/host/sandbox_host.sh up       # build, start the tunnels, sandbox manager and runner
 #   deploy/host/sandbox_host.sh status   # what is running, and the log tails
 #   deploy/host/sandbox_host.sh check    # prove the tunnel reaches the gateway
 #   deploy/host/sandbox_host.sh down     # stop everything this file started
@@ -36,8 +36,8 @@
 #   AGENT_TUNNEL_*                 inference tunnel destination/key/known_hosts
 #   AGENT_MCP_TUNNEL_*             MCP-only tunnel destination/key/known_hosts
 #   AGENT_CONTROL_PLANE_TUNNEL_*   control API tunnel destination/key/known_hosts
-#   AGENT_BROKER_REVERSE_*         the control plane's route back to this broker
-#   AGENT_WORKSPACE_BROKER_TOKEN   broker authentication secret
+#   AGENT_SANDBOX_MANAGER_REVERSE_*         the control plane's route back to this sandbox manager
+#   AGENT_SANDBOX_MANAGER_TOKEN   sandbox manager authentication secret
 #   AGENT_EGRESS_CHAT_NETWORK_POOL this deployment's own RFC1918 pool for group bridges
 #   AGENT_EGRESS_DNS_SERVER        the one IPv4 resolver sandboxes may reach
 #
@@ -76,7 +76,7 @@ case "$AGENT_DEPLOY_MODE" in
   *) die "AGENT_DEPLOY_MODE must be source or artifacts" ;;
 esac
 
-env_or_dotenv() {
+raw_env_or_dotenv() {
   # A value may come from the environment or from .env; compose reads both, so
   # the preflight has to look in both or it rejects working configurations.
   local name="$1"
@@ -103,6 +103,25 @@ env_or_dotenv() {
   value="${value%\"}"; value="${value#\"}"
   value="${value%\'}"; value="${value#\'}"
   printf '%s' "$value"
+}
+
+# Accept existing host .env files while examples and new deployments use the
+# Sandbox Manager names. The compose wrapper also supplies the normalized token.
+env_or_dotenv() {
+  local name="$1" value legacy
+  value="$(raw_env_or_dotenv "$name")"
+  if [[ -n "$value" ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  case "$name" in
+    AGENT_SANDBOX_MANAGER_TOKEN) legacy=AGENT_WORKSPACE_BROKER_TOKEN ;;
+    AGENT_SANDBOX_MANAGER_URL) legacy=AGENT_WORKSPACE_BROKER_URL ;;
+    AGENT_SANDBOX_MANAGER_ADVERTISE_URL) legacy=AGENT_WORKSPACE_BROKER_ADVERTISE_URL ;;
+    AGENT_SANDBOX_MANAGER_*) legacy="AGENT_BROKER_${name#AGENT_SANDBOX_MANAGER_}" ;;
+    *) return 0 ;;
+  esac
+  raw_env_or_dotenv "$legacy"
 }
 
 # Ask Compose itself to parse the interpolation environment used by the stack.
@@ -176,6 +195,10 @@ COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
 # to answer "can this host isolate a sandbox" because of how the containers are
 # to be labelled.
 compose() {
+  # Nested :? fallbacks are evaluated eagerly by Compose. Normalize the legacy
+  # token here, then let the recipe require the canonical credential as before.
+  local manager_token
+  manager_token="$(env_or_dotenv AGENT_SANDBOX_MANAGER_TOKEN)"
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in
       build) die "artifact deployments cannot build images" ;;
@@ -186,6 +209,7 @@ compose() {
   [[ -n "$COMPOSE_PROJECT" ]] || die \
     "COMPOSE_PROJECT is not set — export it or put it in .env (e.g. freeinference-cloud-agent-sandbox-staging). It is what keeps this stack apart from the other environment on this machine."
   if [[ -f .env ]]; then
+    AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
       -f "$COMPOSE_FILE" \
@@ -195,6 +219,7 @@ compose() {
     # pass a path that does not exist: env-only hosts are an explicitly supported
     # direct-operator path, even though the CD wrapper deliberately requires a
     # deploy-root .env so credentials survive non-interactive service restarts.
+    AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
       -f "$COMPOSE_FILE" "$@"
@@ -245,7 +270,7 @@ require_env() {
   # that restarts forever, a missing known_hosts as a refusal nobody reads.
   local missing=() name
   for name in AGENT_SANDBOX_IMAGE \
-              AGENT_WORKSPACE_BROKER_TOKEN \
+              AGENT_SANDBOX_MANAGER_TOKEN \
               AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY \
               AGENT_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_MCP_TUNNEL_SSH_DESTINATION AGENT_MCP_TUNNEL_SSH_KEY \
@@ -253,8 +278,8 @@ require_env() {
               AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION \
               AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY \
               AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS \
-              AGENT_BROKER_REVERSE_BIND AGENT_BROKER_REVERSE_PORT \
-              AGENT_WORKSPACE_BROKER_ADVERTISE_URL \
+              AGENT_SANDBOX_MANAGER_REVERSE_BIND AGENT_SANDBOX_MANAGER_REVERSE_PORT \
+              AGENT_SANDBOX_MANAGER_ADVERTISE_URL \
               AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
     [[ -n "$(env_or_dotenv "$name")" ]] || missing+=("$name")
   done
@@ -301,26 +326,26 @@ require_env() {
        host verification is mandatory for every scoped relay."
   done
 
-  # This compose file is the standalone/remote-host topology: its broker has no
+  # This compose file is the standalone/remote-host topology: its sandbox manager has no
   # published host port and shares no Docker network with the control-plane
   # stack. The reverse forward is therefore not an optional optimisation. A
   # missing half would let the host attest locally, then make the control deploy
   # wait the full readiness timeout on an address it can never reach.
   local reverse_bind reverse_port advertise_url
-  reverse_bind="$(env_or_dotenv AGENT_BROKER_REVERSE_BIND)"
-  reverse_port="$(env_or_dotenv AGENT_BROKER_REVERSE_PORT)"
-  advertise_url="$(env_or_dotenv AGENT_WORKSPACE_BROKER_ADVERTISE_URL)"
+  reverse_bind="$(env_or_dotenv AGENT_SANDBOX_MANAGER_REVERSE_BIND)"
+  reverse_port="$(env_or_dotenv AGENT_SANDBOX_MANAGER_REVERSE_PORT)"
+  advertise_url="$(env_or_dotenv AGENT_SANDBOX_MANAGER_ADVERTISE_URL)"
   case "$reverse_bind" in
     0.0.0.0|127.0.0.1|localhost|::|::1)
-      die "AGENT_BROKER_REVERSE_BIND=$reverse_bind is not the control-plane Docker bridge gateway: loopback is invisible to its containers and a wildcard exposes the broker to the host network"
+      die "AGENT_SANDBOX_MANAGER_REVERSE_BIND=$reverse_bind is not the control-plane Docker bridge gateway: loopback is invisible to its containers and a wildcard exposes the sandbox manager to the host network"
       ;;
   esac
   [[ "$reverse_port" =~ ^[0-9]+$ \
      && "$reverse_port" -ge 1 \
      && "$reverse_port" -le 65535 ]] \
-    || die "AGENT_BROKER_REVERSE_PORT must be an integer from 1 through 65535 (got '$reverse_port')"
+    || die "AGENT_SANDBOX_MANAGER_REVERSE_PORT must be an integer from 1 through 65535 (got '$reverse_port')"
   [[ "$advertise_url" =~ ^https?://[^/]+(:[0-9]+)?(/.*)?$ ]] \
-    || die "AGENT_WORKSPACE_BROKER_ADVERTISE_URL must be an http(s) URL reachable by the control plane (got '$advertise_url')"
+    || die "AGENT_SANDBOX_MANAGER_ADVERTISE_URL must be an http(s) URL reachable by the control plane (got '$advertise_url')"
 }
 
 normalise_host_path() {
@@ -410,7 +435,7 @@ validate_retained_config() {
     die "AGENT_GATEWAY_HOSTNAME ('$GATEWAY_HOSTNAME'), AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME'), and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
   fi
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
-  # the broker receives is the daemon backed by the configured storage root;
+  # the sandbox manager receives is the daemon backed by the configured storage root;
   # otherwise the stack can come up green while retaining state on the wrong
   # disk. Whether that root is a durable mount remains host provisioning's job.
   local expected_root actual_root
@@ -1292,10 +1317,10 @@ cleanup_attest_dir() {
   fi
 }
 
-wait_for_broker_health() {
-  # The runners' preflight asks the broker for its retained sandboxes, and it
+wait_for_sandbox_manager_health() {
+  # The runners' preflight asks the sandbox manager for its retained sandboxes, and it
   # asks exactly once. `compose up -d` returns as soon as the containers are
-  # created, so on a rollout that replaced the broker the replicas were judging
+  # created, so on a rollout that replaced the sandbox manager the replicas were judging
   # one that had been alive for a second: long enough to accept a connection,
   # not long enough to have finished reconciling the sandboxes it serves. Every
   # replica then reported "chat Session Supervisor is unavailable" and the
@@ -1303,16 +1328,16 @@ wait_for_broker_health() {
   #
   # Waiting here is what taking the fixed five-second pause out of this path was
   # supposed to leave behind: a wait on the fact the next step depends on rather
-  # than on a timer. A broker that is already serving costs one exec.
-  local deadline="${1:-$SECONDS}" broker_id
-  broker_id="$(compose ps -q workspace-broker)" || broker_id=""
-  [[ -n "$broker_id" ]] \
-    || die "no workspace-broker replica is running; shared-live cannot be attested"
+  # than on a timer. A sandbox manager that is already serving costs one exec.
+  local deadline="${1:-$SECONDS}" sandbox_manager_id
+  sandbox_manager_id="$(compose ps -q sandbox-manager)" || sandbox_manager_id=""
+  [[ -n "$sandbox_manager_id" ]] \
+    || die "no sandbox-manager replica is running; shared-live cannot be attested"
   while :; do
     # Any HTTP answer settles it, including the 401 an unauthenticated probe
     # gets: this waits for the server to be serving, not for it to authorize.
     # A refused connection is the state worth waiting out.
-    if docker exec "$broker_id" python3 -c 'import urllib.error, urllib.request
+    if docker exec "$sandbox_manager_id" python3 -c 'import urllib.error, urllib.request
 try:
     urllib.request.urlopen("http://127.0.0.1:8092/health", timeout=2)
 except urllib.error.HTTPError:
@@ -1320,8 +1345,8 @@ except urllib.error.HTTPError:
       return 0
     fi
     if (( SECONDS >= deadline )); then
-      die "the workspace broker did not answer /health before the readiness deadline.
-     'docker logs ${broker_id}' shows why it is not serving; a reconcile that
+      die "the sandbox manager did not answer /health before the readiness deadline.
+     'docker logs ${sandbox_manager_id}' shows why it is not serving; a reconcile that
      raises at startup exits the process and every runner then reports the chat
      session supervisor as unavailable."
     fi
@@ -1333,7 +1358,7 @@ check_shared_live_stack() {
   local deadline="${1:-$SECONDS}" fenced="${2:-0}"
   # Ask the runner container to complete the same executable preflight as its
   # turns' own processes, then attest the exact image labels, helper pins,
-  # runtime drivers, broker settings and default pool size used by the claim
+  # runtime drivers, sandbox manager settings and default pool size used by the claim
   # path.  Calling preflight here is intentional: a freshly started runner may
   # still be blocked inside its own kernel/host-rule/relay probe while
   # `docker exec` already works.  Static capability inspection during that
@@ -1345,9 +1370,9 @@ check_shared_live_stack() {
   [[ -n "$runner_ids" ]] || die "no running runner container is available to attest shared-sandbox-v1"
 
   # Only once the container that will be asked is known to be there: this is
-  # about what it is about to ask the broker, so it must not pre-empt a more
+  # about what it is about to ask the sandbox manager, so it must not pre-empt a more
   # specific verdict about the runner itself.
-  wait_for_broker_health "$deadline"
+  wait_for_sandbox_manager_health "$deadline"
 
   # Every listed container attests at the same time — a rollout can briefly
   # list the old one beside the new. The preflight is dominated by the real
@@ -1355,7 +1380,7 @@ check_shared_live_stack() {
   # reads another's answer, so a serial loop bought nothing and cost the sum
   # of the waits. Verdicts are still reported per container, in listing order,
   # so a failure names the container it came from and the first one is still
-  # the one asked to start a turn process and dial the broker below.
+  # the one asked to start a turn process and dial the sandbox manager below.
   #
   # Each container's exit status goes to a file because `wait` is reaped in a
   # second pass, after every one has been started — and it is captured with
@@ -1409,7 +1434,7 @@ check_shared_live_stack() {
     capability="$(<"${ATTEST_DIR}/${id}.capability")"
     case ",${capability}," in
       *,shared-sandbox-v1,*) ;;
-      *) verdicts+=("runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and broker configuration") ;;
+      *) verdicts+=("runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and sandbox manager configuration") ;;
     esac
     case ",${capability}," in
       *,native-fork-at-anchor-v1,*) ;;
@@ -1460,27 +1485,27 @@ check_shared_live_stack() {
     die "runner $first_id started a turn process that answered '${turn_probe:-nothing}' instead of declining an empty turn; the image cannot run turns"
   fi
 
-  # Capability attestation proves the runner is configured to dial the broker;
-  # make the dial as well. This catches a broker crash-loop (including a
+  # Capability attestation proves the runner is configured to dial the sandbox manager;
+  # make the dial as well. This catches a sandbox manager crash-loop (including a
   # DockerRootDir mismatch) before the control plane begins assigning chats.
-  local broker_root expected_root control_status recent_runner_logs
-  while ! broker_root="$(docker exec "$first_id" python -c \
-    'import json, os, urllib.request; url = os.environ["AGENT_WORKSPACE_BROKER_URL"].rstrip("/") + "/health"; request = urllib.request.Request(url, headers={"X-Agent-Workspace-Token": os.environ["AGENT_WORKSPACE_BROKER_TOKEN"]}); print(json.load(urllib.request.urlopen(request, timeout=10)).get("retained_docker_data_root") or "")')"; do
+  local sandbox_manager_root expected_root control_status recent_runner_logs
+  while ! sandbox_manager_root="$(docker exec "$first_id" python -c \
+    'import json, os, urllib.request; url = os.environ["AGENT_SANDBOX_MANAGER_URL"].rstrip("/") + "/health"; request = urllib.request.Request(url, headers={"X-Agent-Workspace-Token": os.environ["AGENT_SANDBOX_MANAGER_TOKEN"]}); print(json.load(urllib.request.urlopen(request, timeout=10)).get("retained_docker_data_root") or "")')"; do
     (( SECONDS < deadline )) \
-      || die "runner $first_id cannot authenticate to the workspace broker health endpoint"
-    log "workspace broker is not ready yet; retrying"
+      || die "runner $first_id cannot authenticate to the sandbox manager health endpoint"
+    log "sandbox manager is not ready yet; retrying"
     sleep 3
   done
   expected_root="$(env_or_dotenv AGENT_RETAINED_DOCKER_DATA_ROOT)"
   expected_root="$(normalise_host_path "${expected_root:-/var/lib/docker}")"
-  broker_root="$(normalise_host_path "$broker_root")"
-  [[ "$broker_root" == "$expected_root" ]] \
-    || die "workspace broker reports retained DockerRootDir '${broker_root:-unset}', expected '$expected_root'"
+  sandbox_manager_root="$(normalise_host_path "$sandbox_manager_root")"
+  [[ "$sandbox_manager_root" == "$expected_root" ]] \
+    || die "sandbox manager reports retained DockerRootDir '${sandbox_manager_root:-unset}', expected '$expected_root'"
 
   # The inference-gateway probe above is a different tunnel. Prove the runner
   # can also reach the control plane that receives its capability heartbeat.
   # The control-plane deployment performs the authoritative second half: it
-  # waits for a fresh database heartbeat and dials this broker in reverse.
+  # waits for a fresh database heartbeat and dials this sandbox manager in reverse.
   while ! control_status="$(docker exec "$first_id" python -c \
     'import os, urllib.request; url = os.environ["AGENT_CONTROL_PLANE_URL"].rstrip("/") + "/healthz"; print(urllib.request.urlopen(url, timeout=10).status)')"; do
     (( SECONDS < deadline )) \
@@ -1513,7 +1538,7 @@ check_shared_live_stack() {
   verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline" "$fenced"
   cleanup_attest_dir
 
-  log "host-local shared-live ready: the runner attests shared-sandbox-v1 and native-fork-at-anchor-v1, can start a turn process, reaches the control plane, and broker storage is ${broker_root}"
+  log "host-local shared-live ready: the runner attests shared-sandbox-v1 and native-fork-at-anchor-v1, can start a turn process, reaches the control plane, and sandbox manager storage is ${sandbox_manager_root}"
 }
 
 # ── Isolation ─────────────────────────────────────────────────────────
@@ -1632,7 +1657,7 @@ check_candidate() {
   # Compose resolves both the source-built name and artifact-mode digest.
   # Use a separate container with no live stack mounts or credentials. This
   # runs the full Kata observer probe before the first disruptive operation,
-  # including on a cold host where no Compose network or broker exists yet.
+  # including on a cold host where no Compose network or sandbox manager exists yet.
   local runner_image backend
   # --images runner includes dependency images too. Read this service only;
   # a source build without an explicit image uses Compose's project-service tag.
@@ -1768,7 +1793,7 @@ cmd_prepare() {
   # Build every replacement while the old, proven generation is still serving.
   # Only after all builds and the Kata probe succeed do we invalidate its
   # marker and drain runners. That keeps a failed build from pausing the queue
-  # and prevents Compose from replacing the broker underneath an active turn.
+  # and prevents Compose from replacing the sandbox manager underneath an active turn.
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     log "pulling host release images"
     compose pull
@@ -1784,24 +1809,36 @@ cmd_prepare() {
 }
 
 # Resolve every project-owned process before mutating any of them, then let
-# each process finish its own bounded shutdown work. In particular the broker
+# each process finish its own bounded shutdown work. In particular the sandbox manager
 # archives every retained group from its lifespan finalizer; a Compose grace
 # period cannot safely represent that serial work.
-drain_runners_then_broker() {
-  local runner_ids_text broker_ids_text
+drain_runners_then_sandbox_manager() {
+  local runner_ids_text sandbox_manager_ids_text legacy_ids_text
   local -a runner_ids=()
-  local -a broker_ids=()
+  local -a sandbox_manager_ids=()
+  local -a legacy_ids=()
   if ! runner_ids_text="$(compose ps -q runner)"; then
     die "could not resolve the existing runner containers; refusing to stop the stack"
   fi
-  if ! broker_ids_text="$(compose ps -q workspace-broker)"; then
-    die "could not resolve the existing workspace-broker containers; refusing to stop the stack"
+  if ! sandbox_manager_ids_text="$(compose ps -q sandbox-manager)"; then
+    die "could not resolve the existing sandbox-manager containers; refusing to stop the stack"
+  fi
+  # The old service is absent from the new Compose file. Resolve it by exact
+  # project/service labels before starting another manager for the same groups.
+  if ! legacy_ids_text="$(docker ps -aq \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+    --filter 'label=com.docker.compose.service=workspace-broker')"; then
+    die "could not resolve the previous sandbox manager service; refusing to stop the stack"
   fi
   if [[ -n "$runner_ids_text" ]]; then
     mapfile -t runner_ids <<< "$runner_ids_text"
   fi
-  if [[ -n "$broker_ids_text" ]]; then
-    mapfile -t broker_ids <<< "$broker_ids_text"
+  if [[ -n "$sandbox_manager_ids_text" ]]; then
+    mapfile -t sandbox_manager_ids <<< "$sandbox_manager_ids_text"
+  fi
+  if [[ -n "$legacy_ids_text" ]]; then
+    mapfile -t legacy_ids <<< "$legacy_ids_text"
+    sandbox_manager_ids+=("${legacy_ids[@]}")
   fi
   if (( ${#runner_ids[@]} > 0 )); then
     # The runner treats SIGTERM as a drain: it stops claiming, waits for every
@@ -1811,17 +1848,20 @@ drain_runners_then_broker() {
     log "draining existing runners without a forced-kill deadline"
     docker stop --time=-1 "${runner_ids[@]}"
   fi
-  if (( ${#broker_ids[@]} > 0 )); then
-    # Runners settle first because active turns still use the broker. Once they
-    # have gone, SIGTERM runs the broker lifespan finalizer and its own archive
+  if (( ${#sandbox_manager_ids[@]} > 0 )); then
+    # Runners settle first because active turns still use the sandbox manager. Once they
+    # have gone, SIGTERM runs the sandbox manager lifespan finalizer and its own archive
     # deadlines govern every retained group instead of Compose's fixed grace.
-    log "draining the existing workspace broker without a forced-kill deadline"
-    docker stop --time=-1 "${broker_ids[@]}"
+    log "draining the existing sandbox manager without a forced-kill deadline"
+    docker stop --time=-1 "${sandbox_manager_ids[@]}"
+  fi
+  if (( ${#legacy_ids[@]} > 0 )); then
+    docker rm "${legacy_ids[@]}"
   fi
 }
 
 # The half that replaces things: invalidate the marker, drain the runners and
-# broker, start the target generation and prove it.
+# sandbox manager, start the target generation and prove it.
 #
 # Assumes `prepare` has run in this deployment root — for the same release, on
 # this machine. It does not re-check that, because the check would be the
@@ -1841,13 +1881,13 @@ cmd_activate() {
   # container that comes up before the checks finish report `unverified`
   # instead of the previous deployment's reading.
   prepare_storage_verdict
-  drain_runners_then_broker
+  drain_runners_then_sandbox_manager
 
-  log "starting the three purpose-scoped tunnels, broker, and the runner service"
+  log "starting the three purpose-scoped tunnels, sandbox manager, and the runner service"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
-  # runners claiming from one host, which is the two-brokers incident again.
+  # runners claiming from one host, which is the two-sandbox-managers incident again.
   AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" \
     compose up -d --no-build --remove-orphans
 
@@ -1872,7 +1912,7 @@ cmd_activate() {
   compose logs --tail 20 runner
   if [[ "$probe_ok" -ne 0 ]]; then
     die "the containers started but the deployment readiness check failed (see
-     the probe output above). Fix the reported tunnel, broker, retained-storage
+     the probe output above). Fix the reported tunnel, sandbox manager, retained-storage
      or shared-live attestation error, then re-run 'check'."
   fi
   if [[ "${DEFER_SHARED_READY_MARKER:-0}" != "1" ]]; then
@@ -1932,16 +1972,16 @@ cmd_status() {
   printf '\n'
   compose logs --tail 20 \
     gateway-tunnel mcp-tunnel control-plane-tunnel \
-    workspace-broker runner
+    sandbox-manager runner
 }
 
 cmd_down() {
   if [[ $# -gt 0 ]]; then
     die "'down' takes no arguments"
   fi
-  drain_runners_then_broker
+  drain_runners_then_sandbox_manager
   compose down
-  log "stopped after runners settled and the workspace broker finished cleanup."
+  log "stopped after runners settled and the sandbox manager finished cleanup."
 }
 
 cmd_mark_ready() {

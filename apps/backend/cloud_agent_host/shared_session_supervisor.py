@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import re
 import secrets
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -96,6 +97,114 @@ DueCensus = tuple[
 ]
 
 logger = logging.getLogger(__name__)
+
+_ARCHIVE_FAILURE_DIAGNOSTICS_ATTR = "_cloud_agent_archive_failure_diagnostics"
+_ARCHIVE_ERROR_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_ArchiveFailurePhase = Literal["initial", "fail_stop_final"]
+
+
+@dataclass(frozen=True)
+class _ArchiveFailureDiagnostic:
+    """One bounded archive error description safe to cross the broker API."""
+
+    phase: _ArchiveFailurePhase
+    error_type: str
+    error_code: str | None = None
+    http_status: int | None = None
+
+    def render(self) -> str:
+        error_type = self.error_type if _ARCHIVE_ERROR_TOKEN.fullmatch(self.error_type) else "Error"
+        parts = [f"phase={self.phase}", f"type={error_type}"]
+        if self.error_code is not None and _ARCHIVE_ERROR_TOKEN.fullmatch(self.error_code):
+            parts.append(f"code={self.error_code}")
+        if (
+            self.http_status is not None
+            and not isinstance(self.http_status, bool)
+            and 100 <= self.http_status <= 599
+        ):
+            parts.append(f"status={self.http_status}")
+        return f"archive failure ({', '.join(parts)})"
+
+
+def _archive_failure_diagnostic(
+    phase: _ArchiveFailurePhase,
+    error: BaseException,
+) -> _ArchiveFailureDiagnostic:
+    """Classify an exception without copying any provider-controlled message."""
+    current: BaseException | None = error
+    selected = error
+    error_code: str | None = None
+    http_status: int | None = None
+    seen: set[int] = set()
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        selected = current
+        try:
+            response = getattr(current, "response", None)
+        except Exception:
+            response = None
+        if isinstance(response, Mapping):
+            error_payload = response.get("Error")
+            metadata = response.get("ResponseMetadata")
+            candidate_code = (
+                error_payload.get("Code") if isinstance(error_payload, Mapping) else None
+            )
+            candidate_status = (
+                metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+            )
+            if isinstance(candidate_code, str) and _ARCHIVE_ERROR_TOKEN.fullmatch(candidate_code):
+                error_code = candidate_code
+            if (
+                isinstance(candidate_status, int)
+                and not isinstance(candidate_status, bool)
+                and 100 <= candidate_status <= 599
+            ):
+                http_status = candidate_status
+            if error_code is not None or http_status is not None:
+                break
+        current = current.__cause__
+        if current is None and not selected.__suppress_context__:
+            current = selected.__context__
+    error_type = type(selected).__name__
+    if _ARCHIVE_ERROR_TOKEN.fullmatch(error_type) is None:
+        error_type = "Error"
+    return _ArchiveFailureDiagnostic(
+        phase=phase,
+        error_type=error_type,
+        error_code=error_code,
+        http_status=http_status,
+    )
+
+
+def _safe_error_type(error: BaseException) -> str:
+    """Return only a bounded Python type name, never an exception message."""
+    name = type(error).__name__
+    return name if _ARCHIVE_ERROR_TOKEN.fullmatch(name) else "Error"
+
+
+def _record_archive_failure_diagnostics(
+    error: BaseException,
+    *,
+    initial: BaseException,
+    fail_stop_final: BaseException | None = None,
+) -> None:
+    """Attach only safe fields before ``raise ... from`` replaces a cause chain."""
+    diagnostics = [_archive_failure_diagnostic("initial", initial)]
+    if fail_stop_final is not None:
+        diagnostics.append(_archive_failure_diagnostic("fail_stop_final", fail_stop_final))
+    setattr(error, _ARCHIVE_FAILURE_DIAGNOSTICS_ATTR, tuple(diagnostics))
+
+
+def archive_failure_http_detail(error: BaseException) -> str | None:
+    """Return a bounded broker response for a recorded initial archive failure."""
+    diagnostics = getattr(error, _ARCHIVE_FAILURE_DIAGNOSTICS_ATTR, None)
+    if not isinstance(diagnostics, tuple) or not diagnostics:
+        return None
+    if not all(isinstance(item, _ArchiveFailureDiagnostic) for item in diagnostics):
+        return None
+    return "; ".join(item.render() for item in diagnostics)
 
 
 @dataclass(frozen=True)
@@ -361,7 +470,7 @@ HELD_INPUT_TTL_S = 15 * 60.0
 
 @dataclass(frozen=True)
 class _HeldInput:
-    """A message for an owner's turn that has not started on this broker yet."""
+    """A message for an owner's turn that has not started on this sandbox manager yet."""
 
     owner: str
     pending: PendingInput
@@ -661,9 +770,9 @@ class SharedChatSessionSupervisor:
                 turn_lock.release()
 
     def stop_all_for_shutdown(self, *, include_running: bool = True) -> None:
-        """Cleanly stop and archive every running group during broker shutdown.
+        """Cleanly stop and archive every running group during sandbox manager shutdown.
 
-        The broker calls this only when final archival is configured, after
+        The sandbox manager calls this only when final archival is configured, after
         :meth:`quiesce` has stopped background admission but before
         :meth:`close` detaches native transports. A failed archive remains
         pending and is reported after the other groups have also had a chance
@@ -832,13 +941,13 @@ class SharedChatSessionSupervisor:
         try:
             self._stopped_archive_hook(group.spec, inspection, members)
         except Exception as exc:
-            logger.exception(
+            logger.error(
                 "stopped sandbox final archive failed",
                 extra={
                     "event": "sandbox_final_archive_failed",
                     "sandbox_id": group.spec.sandbox_id,
                     "generation": group.spec.generation,
-                    "detail": str(exc)[:300],
+                    "detail": _archive_failure_diagnostic("fail_stop_final", exc).render(),
                 },
             )
             raise
@@ -894,6 +1003,15 @@ class SharedChatSessionSupervisor:
             )
             with self._lock:
                 self._accept_inspection_locked(group, inspection)
+        with self._lock:
+            for member in group.members.values():
+                member.resident_state = (
+                    "lost"
+                    if member.resident_state == "lost" or member.context_status == "lost"
+                    else "stopped"
+                )
+            members = self._archive_members_locked(group)
+            group.stop_archive_members = members
         if not persist:
             return
         self._persist_stopped_archive(group, inspection, members)
@@ -1081,7 +1199,7 @@ class SharedChatSessionSupervisor:
             with self._lock:
                 group = self._groups.get(spec.sandbox_id)
                 if group is None:
-                    # A replacement broker cannot reattach the old docker-exec
+                    # A replacement sandbox manager cannot reattach the old docker-exec
                     # pipes. Stop only a newly discovered orphan before
                     # adopting it; list() also calls reconcile(), so stopping a
                     # group already managed by this process would race every
@@ -1106,7 +1224,7 @@ class SharedChatSessionSupervisor:
                     except BaseException:
                         # A marker read is an authority check, not optional
                         # observability. Keep the adopted group fenced if its
-                        # broker-private lifecycle record is unreadable, but do
+                        # sandbox-manager-private lifecycle record is unreadable, but do
                         # not let one damaged orphan prevent healthy groups from
                         # reconciling and receiving the network guard.
                         group.orphan_finalization_pending = True
@@ -1418,13 +1536,13 @@ class SharedChatSessionSupervisor:
                         else:
                             with self._lock:
                                 self._accept_inspection_locked(group, inspection)
-                    logger.exception(
+                    logger.error(
                         "shared sandbox archive finalization remains pending",
                         extra={
                             "event": "sandbox_archive_finalization_pending",
                             "sandbox_id": spec.sandbox_id,
                             "generation": spec.generation,
-                            "detail": str(exc)[:300],
+                            "detail": _archive_failure_diagnostic("fail_stop_final", exc).render(),
                         },
                     )
                 finally:
@@ -1494,10 +1612,10 @@ class SharedChatSessionSupervisor:
                     continue
                 member = group.members.get(manifest.thread_id)
                 if member is None:
-                    # A durable observation that the previous broker owned a
+                    # A durable observation that the previous sandbox manager owned a
                     # live process is not an attachable local transport. Docker
                     # preserves the native session files, but the replacement
-                    # broker has no stdin/stdout pipes and must resume it before
+                    # sandbox manager has no stdin/stdout pipes and must resume it before
                     # claiming a HOT hit.
                     resident_state: ResidentState = manifest.resident_state
                     if resident_state == "live":
@@ -1560,6 +1678,29 @@ class SharedChatSessionSupervisor:
         """Whether this supervisor currently knows the membership alias."""
         with self._lock:
             return thread_id in self._members
+
+    def admin_deletion_target_absent(
+        self,
+        thread_id: str,
+        *,
+        sandbox_id: str,
+        container_id: str,
+    ) -> bool:
+        """Prove a stale durable sandbox has no corresponding Docker object.
+
+        This is only the idempotent terminal case for an already-fenced admin
+        discard. A known membership, the original container under another
+        name, or any object occupying the group's stable name all mean the
+        target is not absent. Docker/protocol failures propagate and therefore
+        cannot be mistaken for successful deletion.
+        """
+        with self._lock:
+            if thread_id in self._members or sandbox_id in self._groups:
+                return False
+            container_name = ChatSandboxSpec.container_name_for(thread_id, sandbox_id)
+            if self._manager.inspect(container_name) is not None:
+                return False
+            return self._manager.inspect(container_id) is None
 
     def acquire(
         self,
@@ -1761,7 +1902,7 @@ class SharedChatSessionSupervisor:
                 if begin_observation is None:
                     observer_cursor = GuestObserverCursor.unavailable(
                         MEMBER_UID_BASE + member.resident_slot_id,
-                        "workspace broker has no guest observer client",
+                        "sandbox manager has no guest observer client",
                     )
                 else:
                     # The window opens on the same fence as the turn: the
@@ -1918,7 +2059,7 @@ class SharedChatSessionSupervisor:
             finish_observation = getattr(self._manager, "finish_guest_observation", None)
             if finish_observation is None:
                 observation = GuestObservation.unavailable(
-                    "workspace broker has no guest observer client",
+                    "sandbox manager has no guest observer client",
                     source=GUEST_OBSERVER_SOURCE,
                 )
             else:
@@ -1935,7 +2076,7 @@ class SharedChatSessionSupervisor:
                         )
                     else:
                         observation = GuestObservation.unavailable(
-                            "workspace broker returned invalid process telemetry",
+                            "sandbox manager returned invalid process telemetry",
                             source=GUEST_OBSERVER_SOURCE,
                         )
                 except Exception as exc:
@@ -2208,7 +2349,7 @@ class SharedChatSessionSupervisor:
         The checkpoint is parked on the member for whoever forwards it, and the
         optional hook is an extra observer rather than the delivery mechanism.
         Gating this on a hook meant that a supervisor built without one -- which
-        is how the broker builds it -- produced no checkpoints at all, so a
+        is how the sandbox manager builds it -- produced no checkpoints at all, so a
         crashed turn kept nothing.
         """
         with self._lock:
@@ -2400,7 +2541,7 @@ class SharedChatSessionSupervisor:
         ``owner`` is the lease owner the control plane expects — ``attempt:<id>``
         — so a message meant for one attempt never reaches a later one that
         re-leased the member. The runner's lease token is not needed: this is
-        the control plane's request, authenticated by the broker, and the owner
+        the control plane's request, authenticated by the sandbox manager, and the owner
         string is its fence. Siblings are untouched. A turn that has not
         started here yet (its sandbox is still being prepared) is given the
         message when it starts; one that never does leaves it to the control
@@ -2477,7 +2618,7 @@ class SharedChatSessionSupervisor:
         token: str,
         turn: ResidentTurn[DialectRuntime],
     ) -> SharedTurnTelemetry:
-        """Fence a turn whose broker stream disappeared before its result.
+        """Fence a turn whose sandbox manager stream disappeared before its result.
 
         An HTTP client can vanish while the CLI is quiet. Merely closing the
         response generator would otherwise leave both the native turn and the
@@ -2635,7 +2776,9 @@ class SharedChatSessionSupervisor:
             # replay against whatever state the restart leaves behind.
             member.settlement_receipt = None
             member.context_status = "lost" if lost else member.context_status
-            member.resident_state = "lost" if lost else "restarting"
+            member.resident_state = (
+                "lost" if lost else "restarting" if member.native_session_id else "stopped"
+            )
             self._arm_idle_if_quiescent(group)
             descriptor = self._descriptor(group, member)
         if transport is not None:
@@ -2976,7 +3119,7 @@ class SharedChatSessionSupervisor:
 
         The metadata lock is held only while installing/removing the barrier.
         Docker exec and Git work happen outside it, so status/read paths stay
-        responsive.  New turns, forks, terminals, and mutating broker
+        responsive.  New turns, forks, terminals, and mutating sandbox manager
         operations observe ``snapshotting`` and wait/retry.  A normal idle
         stop is not a reason to abandon publication: start that exact retained
         container, capture it, and arm its ordinary idle deadline again.
@@ -3248,22 +3391,27 @@ class SharedChatSessionSupervisor:
                 group.initial_archive_preservation_pending = True
             self._condition.notify_all()
         if preservation_error is not None:
+            assert capture_error is not None
+            _record_archive_failure_diagnostics(
+                preservation_error,
+                initial=capture_error,
+                fail_stop_final=preservation_error,
+            )
             preservation_error.add_note(
                 "initial archive capture failed before fail-stop preservation: "
-                f"{type(capture_error).__name__}: {capture_error}"
+                f"{_archive_failure_diagnostic('initial', capture_error).render()}"
             )
             if marker_read_error is not None:
                 preservation_error.add_note(
                     "the initial archive marker could not be read, so its presence "
-                    "was treated as uncertain: "
-                    f"{type(marker_read_error).__name__}: {marker_read_error}"
+                    "was treated as uncertain; error type: "
+                    f"{_safe_error_type(marker_read_error)}"
                 )
             if preservation_inspection_error is not None:
                 preservation_error.add_note(
                     "the exact container state could not be confirmed after fail-stop; "
-                    "the snapshot admission barrier remains set: "
-                    f"{type(preservation_inspection_error).__name__}: "
-                    f"{preservation_inspection_error}"
+                    "the snapshot admission barrier remains set; error type: "
+                    f"{_safe_error_type(preservation_inspection_error)}"
                 )
             elif not release_snapshot_barrier:
                 preservation_error.add_note(
@@ -3276,6 +3424,7 @@ class SharedChatSessionSupervisor:
         if identity_error is not None:
             raise identity_error
         if capture_error is not None:
+            _record_archive_failure_diagnostics(capture_error, initial=capture_error)
             if marker_read_error is not None:
                 capture_error.add_note(
                     "the initial archive marker could not be read; the exact sandbox "
@@ -3389,6 +3538,48 @@ class SharedChatSessionSupervisor:
                 for group in self._groups.values()
                 for member in group.members.values()
             ]
+        for transport in stale_transports:
+            with contextlib.suppress(Exception):
+                transport.close()
+        return descriptors
+
+    def list_for_thread(self, thread_id: str) -> builtins.list[SharedSessionDescriptor]:
+        """Observe one known group without running host-wide reconciliation."""
+        with self._lock:
+            group, member = self._member(thread_id)
+            spec = group.spec
+            lifecycle_generation = group.lifecycle_generation
+            inspection = group.inspection
+            container_id = inspection.container_id
+
+        current = self._manager.inspect(spec.container_name)
+        stale_transports: builtins.list[ResidentTransport[DialectRuntime]] = []
+        with self._lock:
+            # A concurrent start can refresh inspection without advancing the
+            # lifecycle generation. Never overwrite its accepted Docker state.
+            if (
+                self._groups.get(spec.sandbox_id) is not group
+                or self._members.get(thread_id) is not group
+                or group.members.get(thread_id) is not member
+                or group.spec != spec
+                or group.lifecycle_generation != lifecycle_generation
+                or group.inspection != inspection
+            ):
+                raise SessionLeaseLost("shared sandbox lifecycle changed during observation")
+            if current is None:
+                self._mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container is missing")
+            if current.container_id != container_id:
+                self._mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container identity changed")
+            if self._spec_from_inspection(current) != spec:
+                raise SandboxError("shared sandbox immutable labels changed")
+            self._accept_inspection_locked(group, current)
+            for group_member in group.members.values():
+                stale = self._detach_dead_transport(group_member)
+                if stale is not None:
+                    stale_transports.append(stale)
+            descriptors = self._descriptors(group)
         for transport in stale_transports:
             with contextlib.suppress(Exception):
                 transport.close()
@@ -3857,17 +4048,23 @@ class SharedChatSessionSupervisor:
                     raise SessionLeaseLost("sandbox archive identity changed")
                 if group.archive_request_id not in (None, request_id):
                     raise SessionLeaseLost("sandbox archive request is stale")
-                self._require_deletion_lifecycle_admission(group)
-                if group.archive_request_id is None:
-                    self._require_mutation_admission(group)
-                if group.archive_request_id is None and not self._is_quiescent(group):
-                    raise SessionBusy("sandbox deletion requires an idle group")
-                group.archive_request_id = request_id
-                group.stopping = True
-                group.idle_deadline = None
             current = self._manager.inspect(spec.container_name)
             if current is not None:
+                if group is not None:
+                    self._require_deletion_lifecycle_admission(group)
+                    if group.archive_request_id is None:
+                        self._require_mutation_admission(group)
+                    if group.archive_request_id is None and not self._is_quiescent(group):
+                        raise SessionBusy("sandbox deletion requires an idle group")
+                    group.archive_request_id = request_id
+                    group.stopping = True
+                    group.idle_deadline = None
                 self._manager.remove_stopped_archived(spec, container_id=container_id)
+            # Removal may have succeeded before its response failed. A status
+            # read can then mark the group lost while the durable receipt is
+            # still pending. Complete that request only after proving both the
+            # stable name and exact original absent; lifecycle admission guards
+            # are still required whenever a container remains to be removed.
             if self._manager.inspect(container_id) is not None:
                 raise RetainedChatLost("archived sandbox identity changed during deletion")
             if group is not None:
@@ -4211,11 +4408,11 @@ class SharedChatSessionSupervisor:
     def guard_network(self) -> builtins.list[SharedSessionDescriptor]:
         """Stop every running group when the host can no longer show its rules.
 
-        The guard re-reads the host at most once a minute and reinstalls what
-        it finds missing, so this only acts when that repair fails twice: a
-        running group would otherwise go on without the boundary it was
-        started behind, and anything a repository left running in it with
-        it. Fail closed — stop them all, which releases their bridges and
+        Every pass reads the host's tables back and reinstalls what it finds
+        missing, so this only acts when that repair fails twice: a running
+        group would otherwise go on without the boundary it was started
+        behind, and anything a repository left running in it with it. Fail
+        closed — stop them all, which releases their bridges and
         keeps their workspaces. Waking one reinstalls and verifies the rules
         before it runs again, and refuses while they cannot be.
         """
@@ -4281,13 +4478,14 @@ class SharedChatSessionSupervisor:
                         reason="unguarded",
                     )
                 )
-            except Exception:
-                logger.exception(
+            except Exception as exc:
+                logger.error(
                     "unguarded shared sandbox final archive did not complete",
                     extra={
                         "event": "shared_chat_network_final_archive_failed",
                         "thread_id": thread_id,
                         "generation": generation,
+                        "detail": _archive_failure_diagnostic("fail_stop_final", exc).render(),
                     },
                 )
         return stopped
@@ -4308,4 +4506,5 @@ __all__ = [
     "SharedSessionLease",
     "SharedTurnBoundaryError",
     "SharedTurnTelemetry",
+    "archive_failure_http_detail",
 ]

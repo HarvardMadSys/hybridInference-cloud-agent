@@ -2,7 +2,7 @@
 
 The first supported bootstrap OS is Ubuntu 22.04/24.04 amd64 with passwordless
 sudo and KVM. Docker/Compose and pinned Kata can be installed by the trusted
-profile. Tunnel permissions and broker routing must already be provisioned on
+profile. Tunnel permissions and sandbox manager routing must already be provisioned on
 the stable control-plane/gateway machines and supplied through the profile.
 """
 
@@ -29,6 +29,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     TransferResult,
 )
 from cloud_agent.providers.compute.ssh import known_hosts_line
+from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
     from pydantic import SecretStr
@@ -116,13 +117,21 @@ def storage_mount_units_compatible():
         return True
     except OSError:
         return False
+def deployment_identity_matches(stored, identity):
+    # The release stamp may advance for this same owner. Every other field,
+    # including an optional namespace or storage path, still has to match.
+    if not isinstance(stored, dict) or not isinstance(identity, dict) or not stored or not identity:
+        return False
+    def owner(value):
+        return {key: value[key] for key in value if key != 'deployment_sha'}
+    return owner(stored) == owner(identity)
 def deployment_storage_owned(deployment):
     if not isinstance(deployment, dict) or not isinstance(deployment.get('identity'), dict):
         return False
     try:
         root = Path(deployment['root'])
         marker = root / '.compute-identity.json'
-        return root.is_dir() and root.resolve() == root and not root.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.resolve() == marker and json.loads(marker.read_text()) == deployment['identity']
+        return root.is_dir() and root.resolve() == root and not root.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.resolve() == marker and deployment_identity_matches(json.loads(marker.read_text()), deployment['identity'])
     except (KeyError, TypeError, OSError, ValueError):
         return False
 def storage_state_compatible(base, owned):
@@ -368,7 +377,10 @@ print(json.dumps({'machine_identity': hashlib.sha256(machine.encode()).hexdigest
 
 # Executed with sudo and a tar stream on stdin, never a secret command argument.
 # Existing installations require our persisted identity marker. A retry uses
-# the same identity and flock; it cannot overwrite or enroll a different Host.
+# the same owner and flock; it cannot overwrite or enroll a different Host.
+# deployment_sha is the release stamp and may advance for that same owner. The
+# marker records the new stamp only after the host recipe succeeds, so a failed
+# rollout leaves the previous owner record in place.
 _DEPLOY = (
     _DAEMON_STORAGE_GUARD
     + r"""
@@ -411,13 +423,25 @@ with open(lock_path, 'a') as lock:
     if params.get('data_mount') and not storage_state_compatible(Path(params['data_mount']), owned_storage):
         print(json.dumps({'ready': False, 'blocked_reasons': ['data_mount_conflict']}))
         raise SystemExit(0)
+    advancing = False
     if root.exists() and any(root.iterdir()):
-        if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != identity:
+        if not marker.is_file() or marker.is_symlink():
             raise SystemExit('existing deployment identity conflict')
+        try:
+            current_identity = json.loads(marker.read_text())
+        except ValueError:
+            raise SystemExit('existing deployment identity conflict')
+        if not deployment_identity_matches(current_identity, identity):
+            raise SystemExit('existing deployment identity conflict')
+        advancing = current_identity.get('deployment_sha') != identity.get('deployment_sha')
     root.mkdir(mode=0o700, exist_ok=True)
     root.chmod(0o700)
-    marker.write_text(json.dumps(identity))
-    marker.chmod(0o600)
+    def commit_identity():
+        marker.write_text(json.dumps(identity))
+        marker.chmod(0o600)
+    # A release change keeps the previous stamp until the recipe succeeds.
+    if not advancing:
+        commit_identity()
     with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()), mode='r:gz') as archive:
         for member in archive.getmembers():
             parts = Path(member.name).parts
@@ -433,8 +457,20 @@ with open(lock_path, 'a') as lock:
     for name in ('DOCKER_TLS', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
         environment.pop(name, None)
     quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+    def advertises_generation():
+        ready_file = root / '.shared-live-ready'
+        try:
+            if not ready_file.is_file() or ready_file.is_symlink():
+                return False
+            current = ready_file.read_text().strip()
+        except OSError:
+            return False
+        return bool(current) and not current.startswith('pending:')
     def blocked(step):
-        print(json.dumps({'ready': False, 'blocked_reasons': [step]}))
+        body = {'ready': False, 'blocked_reasons': [step]}
+        if step in ('host_deployment_failed', 'host_readiness_failed'):
+            body['advertising'] = advertises_generation()
+        print(json.dumps(body))
         raise SystemExit(0)
     def run(step, args):
         if subprocess.run(args, cwd=root, env=environment, **quiet).returncode:
@@ -515,6 +551,7 @@ with open(lock_path, 'a') as lock:
         run('kata_install_failed', ['bash', 'deploy/host/setup_kata_runtime.sh'])
     if not params.get('activate', True):
         # Staged to take a Host over: the recipe is in place, nothing runs or enrolls.
+        commit_identity()
         print(json.dumps({'ready': True, 'blocked_reasons': []}))
         raise SystemExit(0)
     # A node that received another node's state starts with its daemons stopped.
@@ -526,7 +563,7 @@ with open(lock_path, 'a') as lock:
         if credential.is_symlink():
             blocked('host_deployment_failed')
         credential.unlink(missing_ok=True)
-    # This invokes the existing Kata, relay, broker, observer, network-guard
+    # This invokes the existing Kata, relay, sandbox manager, observer, network-guard
     # and retained-state checks, then writes the actual shared-ready marker.
     run('host_deployment_failed', ['bash', 'deploy/host/sandbox_host.sh', 'up'])
     run('host_readiness_failed', ['bash', 'deploy/host/sandbox_host.sh', 'check'])
@@ -535,6 +572,7 @@ with open(lock_path, 'a') as lock:
     # spent bootstrap token from .env; it never leaves through command output.
     envfile = root / '.env'
     envfile.write_text('\n'.join(line for line in envfile.read_text().splitlines() if not line.startswith('AGENT_ENROLL_TOKEN=')) + '\n')
+    commit_identity()
     print(json.dumps({'ready': True, 'blocked_reasons': []}))
 """
 )
@@ -556,7 +594,7 @@ print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_rea
 
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
-    "AGENT_WORKSPACE_BROKER_TOKEN",
+    "AGENT_SANDBOX_MANAGER_TOKEN",
     "AGENT_TUNNEL_SSH_DESTINATION",
     "AGENT_TUNNEL_SSH_KEY",
     "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
@@ -566,9 +604,9 @@ _REQUIRED_ENV = {
     "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION",
     "AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY",
     "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS",
-    "AGENT_BROKER_REVERSE_BIND",
-    "AGENT_BROKER_REVERSE_PORT",
-    "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+    "AGENT_SANDBOX_MANAGER_REVERSE_BIND",
+    "AGENT_SANDBOX_MANAGER_REVERSE_PORT",
+    "AGENT_SANDBOX_MANAGER_ADVERTISE_URL",
     "AGENT_EGRESS_CHAT_NETWORK_POOL",
     "AGENT_EGRESS_DNS_SERVER",
 }
@@ -593,6 +631,42 @@ _FORBIDDEN_ENV = {
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
+
+
+#: Every failure code the remote scripts in this module print. A node runs
+#: them, as root, and can print anything in their place; and a code travels on
+#: verbatim — as a ProviderError code or a blocked reason, into the operation
+#: record, the log, the admin view and the text of the ops webhook. So only
+#: this vocabulary is believed. Anything else is treated as no reason at all,
+#: which every caller already answers with its own generic code.
+_REMOTE_REASONS = frozenset(
+    {
+        "data_mount_unavailable",
+        "data_mount_conflict",
+        "data_mount_failed",
+        "prerequisites_update_failed",
+        "prerequisites_install_failed",
+        "docker_start_failed",
+        "kata_install_failed",
+        "host_deployment_failed",
+        "host_readiness_failed",
+        "deployment_identity_conflict",
+        "host_stop_failed",
+        "transfer_failed",
+    }
+)
+
+
+def _remote_reason(value: object) -> str | None:
+    """Return a remote failure code if it is one of ours, else ``None``."""
+    return value if isinstance(value, str) and value in _REMOTE_REASONS else None
+
+
+def _remote_reasons(value: object) -> tuple[str, ...]:
+    """Keep only the remote blocked reasons that belong to our vocabulary."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(reason for reason in value if _remote_reason(reason) is not None)
 
 
 class SshHostBootstrap:
@@ -735,7 +809,7 @@ class SshHostBootstrap:
             "deploy_root": profile.deploy_root,
         }.items():
             template = template.replace("{" + key + "}", value)
-        values = dotenv_values(stream=io.StringIO(template), interpolate=False)
+        values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
         if (
             any(
                 not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
@@ -751,7 +825,7 @@ class SshHostBootstrap:
         if any(not values.get(name) for name in _REQUIRED_ENV):
             raise ProviderError(
                 "deployment_profile_invalid",
-                "Deployment profile is missing required relay, broker or network settings",
+                "Deployment profile is missing required relay, sandbox manager or network settings",
             )
         values.update(
             {
@@ -764,7 +838,7 @@ class SshHostBootstrap:
         )
         if profile.sandbox_storage_path is not None:
             # Both daemon stores are bound from the selected disk to their
-            # standard paths. Broker and runner must attest that same daemon.
+            # standard paths. Sandbox Manager and runner must attest that same daemon.
             values["AGENT_RETAINED_DOCKER_DATA_ROOT"] = "/var/lib/docker"
         # A persisted runner credential takes precedence in the existing host
         # recipe. A retry never deletes that file to spend another token.
@@ -929,17 +1003,19 @@ class SshHostBootstrap:
                 self._connection(node), command, stdin=archive, timeout=profile.timeout_seconds
             )
         )
+        advertising = result.get("advertising")
         return BootstrapResult(
             ready=result.get("ready") is True,
             host=intent.host,
             deployment_sha=profile.deployment_sha,
-            blocked_reasons=tuple(result.get("blocked_reasons", ())),
+            blocked_reasons=_remote_reasons(result.get("blocked_reasons")),
+            advertising=advertising if isinstance(advertising, bool) else None,
         )
 
     async def readiness(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> BootstrapResult:
-        """Recheck deployment identity and the full host and broker readiness gates."""
+        """Recheck deployment identity and the full host and sandbox manager readiness gates."""
         command = (
             "sudo -n python3 -c "
             + shlex.quote(_READINESS)
@@ -955,7 +1031,7 @@ class SshHostBootstrap:
             ready=result.get("ready") is True,
             host=intent.host,
             deployment_sha=profile.deployment_sha,
-            blocked_reasons=tuple(result.get("blocked_reasons", ())),
+            blocked_reasons=_remote_reasons(result.get("blocked_reasons")),
         )
 
     async def inventory(
@@ -973,14 +1049,20 @@ class SshHostBootstrap:
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> None:
         """Stop the Host stack, its sandboxes and the container daemons, keeping all state."""
-        params = self._params(profile, intent)
+        params = {
+            **self._params(profile, intent),
+            "sandbox_manager_drain_seconds": _SANDBOX_MANAGER_DRAIN_SECONDS,
+        }
         script = "sudo -n python3 -c " + shlex.quote(_STOP) + " " + shlex.quote(json.dumps(params))
-        result = self._json(await self._transport.run(self._connection(node), script, timeout=900))
+        result = self._json(
+            await self._transport.run(self._connection(node), script, timeout=_STOP_TIMEOUT_SECONDS)
+        )
         if result.get("stopped") is not True:
+            reason = _remote_reason(result.get("reason"))
             raise ProviderError(
-                str(result.get("reason") or "host_stop_failed"),
+                reason or "host_stop_failed",
                 "The Host could not be stopped",
-                retryable=result.get("reason") == "host_stop_failed",
+                retryable=reason == "host_stop_failed",
             )
 
     async def transfer(
@@ -1020,6 +1102,7 @@ class SshHostBootstrap:
         target_params = self._params(target_profile, target_intent)
         authorize = {
             "key": public_key,
+            "source": source_connection.address,
             "first": first,
             "root": target_params["root"],
             "identity": target_params["identity"],
@@ -1036,7 +1119,7 @@ class SshHostBootstrap:
         )
         if authorized.get("authorized") is not True:
             raise ProviderError(
-                str(authorized.get("reason") or "transfer_failed"),
+                _remote_reason(authorized.get("reason")) or "transfer_failed",
                 "The target node cannot receive the Host's state",
             )
         push = {
@@ -1080,9 +1163,9 @@ class SshHostBootstrap:
         script = "sudo -n python3 -c " + shlex.quote(_WIPE) + " " + shlex.quote(json.dumps(params))
         result = self._json(await self._transport.run(self._connection(node), script, timeout=1800))
         if result.get("wiped") is not True:
-            reason = result.get("reason")
+            reason = _remote_reason(result.get("reason"))
             raise ProviderError(
-                str(reason or "wipe_failed"),
+                reason or "wipe_failed",
                 "The node's container state could not be removed",
                 retryable=reason is None,
             )
@@ -1092,6 +1175,11 @@ class SshHostBootstrap:
 # sites carries about 30 MB/s; four reached 128 MB/s in the 2026-10-10 drill.
 _TRANSFER_STREAMS = 6
 _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
+
+# The sandbox manager's drain must end early enough inside the stop's SSH deadline to
+# leave time for the runner, the remaining containers and the daemons.
+_STOP_TIMEOUT_SECONDS = 900
+_SANDBOX_MANAGER_DRAIN_SECONDS = 600
 
 _STOP = r"""
 import json, subprocess, sys
@@ -1105,12 +1193,22 @@ quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
 def running(*filters):
     result = subprocess.run(['docker', 'ps', '-q', *filters], capture_output=True, text=True)
     return result.stdout.split() if result.returncode == 0 else []
+def service(name):
+    return running('--filter', 'label=com.docker.compose.project=' + params['project'],
+                   '--filter', 'label=com.docker.compose.service=' + name)
 if subprocess.run(['systemctl', 'is-active', '--quiet', 'docker'], **quiet).returncode == 0:
     # The runner first: nothing may claim or resume while the state is moving.
-    runner = running('--filter', 'label=com.docker.compose.project=' + params['project'],
-                     '--filter', 'label=com.docker.compose.service=runner')
+    runner = service('runner')
     if runner:
         subprocess.run(['docker', 'stop', '-t', '60', *runner], **quiet)
+    # Then the sandbox manager, alone: its shutdown stops each running sandbox cleanly.
+    # While lifecycle archives are enabled, the next node's sandbox manager quarantines
+    # a sandbox that Docker stopped behind the sandbox manager's back.
+    # Retained source nodes may still run the service under its previous name.
+    sandbox_manager = service('sandbox-manager') + service('workspace-broker')
+    if sandbox_manager:
+        drain = str(params['sandbox_manager_drain_seconds'])
+        subprocess.run(['docker', 'stop', '-t', drain, *sandbox_manager], **quiet)
     # Explicitly stopped containers stay stopped when a daemon starts again,
     # including on the node that receives this state. The CLI stops them in
     # parallel, each with its own configured grace period.
@@ -1132,9 +1230,45 @@ _TRANSFER_KEY = (
     "[ -f $d/key ] || ssh-keygen -q -t ed25519 -N '' -C ca-transfer -f $d/key; cat $d/key.pub"
 )
 
+# The forced command of the transfer key on the target. The copy in _PUSH sends
+# only rsync's receiving server, through sudo, into the directories it copies;
+# anything else — a shell, another program, rsync --sender reading the target's
+# files back, another destination — is refused before it runs. Receiving into
+# /var/lib as root still trusts the source with the target's container state,
+# which is what the copy is for, but no longer with an interactive root shell.
+# Server arguments are what rsync 3.2.7 (Ubuntu 22.04 and 24.04) sends for the
+# _PUSH options: one short-option cluster ending in its capability string, a
+# few long options, then "." and the destination.
+_TRANSFER_RECEIVE = r"""
+import os, re, shlex, sys
+destinations = {
+    '/var/lib/',
+    '/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/',
+    '/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/',
+}
+options = {'--stats', '--numeric-ids', '--delete', '--no-r'}
+try:
+    argv = shlex.split(os.environ.get('SSH_ORIGINAL_COMMAND', ''))
+except ValueError:
+    argv = []
+if not (
+    len(argv) >= 7
+    and argv[:4] == ['sudo', '-n', 'rsync', '--server']
+    and argv[-2] == '.'
+    and argv[-1] in destinations
+    and all(
+        re.fullmatch(r'-[ldHogDtpAXrRxS]+(?:e\.[A-Za-z]+)?', flag) or flag in options
+        for flag in argv[4:-2]
+    )
+):
+    sys.stderr.write('this key only receives the Host state transfer\n')
+    raise SystemExit(1)
+os.execvp('sudo', argv)
+"""
+
 # Runs as the management user on the target; sudo only for daemon and state steps.
 _AUTHORIZE_TRANSFER = r"""
-import json, subprocess, sys
+import ipaddress, json, re, socket, subprocess, sys
 from pathlib import Path
 params = json.loads(sys.argv[1])
 def refuse(reason):
@@ -1146,6 +1280,21 @@ try:
         refuse('deployment_identity_conflict')
 except ValueError:
     refuse('deployment_identity_conflict')
+# Checked before anything here changes. The key works only from the source, as
+# this machine resolves the address the control plane reaches it at; sshd
+# matches from= against the peer's address.
+try:
+    sources = sorted({
+        str(ipaddress.ip_address(info[4][0].split('%')[0]))
+        for info in socket.getaddrinfo(params['source'], None, type=socket.SOCK_STREAM)
+    })
+except (OSError, UnicodeError, ValueError):
+    sources = []
+if not sources:
+    refuse('transfer_failed')
+receive = Path.home() / '.ssh' / 'ca-transfer-receive'
+if not all(re.fullmatch(r'[A-Za-z0-9_./+-]+', path) for path in (sys.executable, str(receive))):
+    refuse('transfer_failed')
 quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
 if subprocess.run(['sudo', '-n', 'systemctl', 'stop', 'docker.socket', 'docker', 'containerd'], **quiet).returncode:
     refuse('transfer_failed')
@@ -1157,16 +1306,25 @@ if params['first']:
             refuse('transfer_failed')
 ssh = Path.home() / '.ssh'
 ssh.mkdir(mode=0o700, exist_ok=True)
+receive.unlink(missing_ok=True)
+receive.write_text(RECEIVE_PROGRAM)
+receive.chmod(0o700)
 keys = ssh / 'authorized_keys'
 current = keys.read_text() if keys.exists() else ''
-entry = 'restrict ' + params['key']
-if entry not in current.splitlines():
-    keys.write_text(current.rstrip('\n') + ('\n' if current.strip() else '') + entry + '\n')
+entry = (
+    'restrict,from="' + ','.join(sources) + '",command="' + sys.executable + ' -I '
+    + str(receive) + '" ' + params['key']
+)
+# One transfer key at a time: an entry from an earlier attempt, or from a
+# control plane that authorized it without these restrictions, is replaced.
+kept = [line for line in current.splitlines() if not line.endswith(' ca-transfer')]
+keys.write_text(''.join(line + '\n' for line in [*kept, entry]))
 keys.chmod(0o600)
 print(json.dumps({'authorized': True}))
-"""
+""".replace("RECEIVE_PROGRAM", repr(_TRANSFER_RECEIVE))
 
 _REVOKE_TRANSFER_TARGET = (
+    "rm -f ~/.ssh/ca-transfer-receive; "
     'f=~/.ssh/authorized_keys; [ -f "$f" ] || exit 0; '
     '{ grep -v \' ca-transfer$\' "$f" || true; } > "$f.ca"; '
     'mv "$f.ca" "$f"; chmod 600 "$f"'

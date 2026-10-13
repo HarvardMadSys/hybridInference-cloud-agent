@@ -28,10 +28,13 @@ The orchestrator then waits until that exact host still reports `draining` and
 no later claim can commit while the status remains draining. The host is
 activated while the fence stays in place. Control-plane activation sets
 `AGENT_DEPLOY_DRAINING_HOST` to the exact enrollment name, which authorizes the
-deployment readiness check to accept only that named draining host. The check
-requires zero occupied slots, the target deployment capability, a fresh
-heartbeat and a successful reverse broker probe, then rereads the same
-conditions after the network await. Ordinary readiness remains online-only.
+deployment readiness check to accept only that named draining host. When
+new-chat placement is pinned to a different enrolled host, that host must be
+online at the same target commit; the name difference is not itself a failure.
+The check requires zero occupied slots on the draining host, the target
+deployment capability, a fresh heartbeat and a successful reverse sandbox manager probe,
+then rereads the same conditions after the network await. Ordinary readiness
+remains online-only.
 
 Only a normal fenced release holding the exact active owner token may put the host online.
 An identical acquire or release retry is idempotent, including after a lost
@@ -54,7 +57,7 @@ bridge upgrade.
 
 Source and artifact deployments resolve the candidate runner image through
 Compose, then run `cloud_agent_host.candidate_check` before stopping the old
-runners. The candidate container has no network, enrollment state, broker token
+runners. The candidate container has no network, enrollment state, sandbox manager token
 or live stack mounts other than the Docker socket. It creates and removes its
 own temporary guest on network `none`, verifies kernel isolation and the guest
 observer, and compares the **built image's** runtime/helper labels with the
@@ -67,7 +70,7 @@ Turn children also install their drain handler before preflight as protection
 against an out-of-band signal, but deployment does not rely on that fallback.
 
 If that check fails, the old readiness marker and runners remain in place. The
-replacement runners, relays and broker must still pass their live checks before
+replacement runners, relays and sandbox manager must still pass their live checks before
 `mark-ready`; a later failure uses the recorded-generation recovery path.
 
 ### Host runtime qualification
@@ -83,7 +86,7 @@ blocks acceptance. Deployment initializes a missing epoch on existing hosts
 after the normal runtime check. A failed qualification stops claims, logs the
 failure once, and retries after five seconds with exponential backoff capped at
 five minutes. Probe containers carry `org.freeinference.chat-probe-created`, so
-the broker excludes them from orphan-chat adoption. Each probe removes abandoned
+the sandbox manager excludes them from orphan-chat adoption. Each probe removes abandoned
 probe containers in its namespace that are over an hour old.
 
 The host adds its qualification verdict to the child's stdin payload after
@@ -99,12 +102,12 @@ for the marker format and installer requirements.
 
 ### Network verification and startup work
 
-The broker verifies a group's bridge when acquiring a turn activation and
+The sandbox manager verifies a group's bridge when acquiring a turn activation and
 returns `network_verified`. The runner may rely on that proof for up to one
 minute, matching the network guard's existing freshness window. Commands after
 that minute verify again, including after a long setup script or at turn end.
-Terminals and broker workspace operations always check, as does every command
-when the broker did not supply that proof. The turn child still installs and
+Terminals and sandbox manager workspace operations always check, as does every command
+when the sandbox manager did not supply that proof. The turn child still installs and
 reads back host rules before acceptance.
 
 Network-rule reads share a disposable helper; route reads use a separate helper
@@ -181,9 +184,10 @@ minutes old:
 
 Follow-ups waiting behind an earlier turn are excluded. Occupied slots with
 running work are normal backpressure. The monitor reports state; it never claims
-jobs, restarts hosts, changes scheduling or relaxes isolation. External
-process/HTTP monitoring remains necessary because a dead API cannot monitor
-itself.
+jobs, restarts hosts, changes scheduling or relaxes isolation. Compute-managed
+hosts follow a new control-plane commit through the compute worker's upgrade
+operation, which uses the host recipe's drain. External process/HTTP monitoring
+remains necessary because a dead API cannot monitor itself.
 
 Events are logged even without external delivery. To enable notifications, set
 `AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` to an operator-owned

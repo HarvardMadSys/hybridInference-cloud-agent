@@ -1,7 +1,7 @@
 """The trusted host runner that schedules turns into retained chat sandboxes.
 
 It runs outside the chat container, claims one fenced attempt at a time, and
-streams the member Agent CLI's output through the workspace broker. Its shape
+streams the member Agent CLI's output through the sandbox manager. Its shape
 follows from the adjudicated security model rather than convenience:
 
 - **Narrow credentials.** The enrolled host claims with its own identity. Only
@@ -41,6 +41,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
+
+from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -174,10 +176,10 @@ _ATTACHMENT_TIMEOUT_S = 120.0
 DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
-# The broker closes guest telemetry and enforces the member activation
+# The sandbox manager closes guest telemetry and enforces the member activation
 # boundary after an interrupt. Keep draining its terminal frame so a cancel or
 # timeout cannot strand the member lock or discard the already-closed resource
-# report. Broker lifecycle requests have the same 180 second request ceiling;
+# report. Sandbox Manager lifecycle requests have the same 180 second request ceiling;
 # the turn stream gets the execution budget plus this drain window.
 _SHARED_TURN_INTERRUPT_DRAIN_S = 180.0
 _GIT_TIMEOUT_S = 300.0
@@ -245,6 +247,20 @@ MAX_SOURCE_IMPORT_MIB = 64 * 1024
 SITE_MISCONFIGURED_MCP = (
     "Site misconfigured: this chat uses connected tools, but the server that ran it "
     "has no MCP relay. Ask an admin to finish setting up the site."
+)
+
+#: The execution profile for public, untrusted work. Spelled out here because
+#: the host cannot import the control plane's ``ExecutionProfile``.
+UNTRUSTED_EXECUTION_PROFILE = "untrusted-kata-v1"
+#: What the runner logs when it starts a new untrusted group without a disk
+#: quota. Recommended, not required: the group's writable layer holds its
+#: workspace and every installed file and survives ``docker stop``, so without
+#: one a single tenant can fill the disk every other group on this host writes
+#: to. The fix is the deployment's, so this names the setting.
+UNTRUSTED_DISK_QUOTA_RECOMMENDED = (
+    "this untrusted sandbox has no container disk quota: set Container disk "
+    "(sandbox_disk_mib) above 0 for this server, on Docker overlay2 backed by XFS "
+    "with project quotas"
 )
 
 # Hermetic git for anything the *runner* runs: no user config, no hooks, no
@@ -611,7 +627,7 @@ class ControlPlane:
         runtime_id: str,
         runtime_version: str | None,
     ) -> dict[str, Any]:
-        """Obtain the member-scoped renewable credential owned by the broker."""
+        """Obtain the member-scoped renewable credential owned by the sandbox manager."""
         return self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/sandbox/residency",
             {
@@ -1299,9 +1315,9 @@ def _shared_live_host_capabilities(
         return []
     if not 2 <= resident_capacity <= 128:
         return []
-    if not (os.environ.get("AGENT_WORKSPACE_BROKER_URL") or "").strip():
+    if not (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip():
         return []
-    if not (os.environ.get("AGENT_WORKSPACE_BROKER_TOKEN") or "").strip():
+    if not (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip():
         return []
     digest = stamp.get("sandbox_image_digest")
     if not isinstance(digest, str) or not digest.strip():
@@ -1340,12 +1356,12 @@ def _shared_live_host_capabilities(
         # it whole, before anything bounds it. This host therefore never
         # advertises the goal report without the contract it rides on.
         GOAL_REPORT_CAPABILITY,
-        # Named per runtime: the broker of this same deployment takes a
+        # Named per runtime: the sandbox manager of this same deployment takes a
         # message into a running turn only through a driver that wires it.
         *steerable,
         # This exact replica can accept the deployment-wide DB archive policy
-        # over its authenticated broker channel. A claim also attests the
-        # exact revision that broker confirmed.
+        # over its authenticated sandbox manager channel. A claim also attests the
+        # exact revision that sandbox manager confirmed.
         SANDBOX_ARCHIVE_CAPABILITY,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
@@ -1384,15 +1400,29 @@ def _claim_attestation(
     backend: SandboxBackend,
     *,
     sandbox_archive_settings_applied_revision: int | None = None,
+    host_settings: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Build the exact-replica proof required for every claim."""
+    """Build the exact-replica proof required for every claim.
+
+    ``host_settings`` are the settings a turn claimed now would be handed;
+    absent ones are read from this process's environment, as the turn does.
+    """
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
     # ``version_stamp`` proves the immutable image. This separately proves the
-    # polling process has the broker, slots and driver surfaces
+    # polling process has the sandbox manager, slots and driver surfaces
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    # The disk quota a group created by this claim would get, so the control
+    # plane can warn about a new untrusted group with none. Zero, or a value
+    # the turn would refuse, is no quota.
+    try:
+        stamp["sandbox_disk_limit_mib"] = _sandbox_resource_setting(
+            "sandbox_disk_mib", host_settings or {}
+        )
+    except ValueError:
+        stamp["sandbox_disk_limit_mib"] = 0
     if sandbox_archive_settings_applied_revision is not None:
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
@@ -1410,12 +1440,12 @@ def _claim_attestation(
 
 
 def _session_supervisor_from_env() -> SessionSupervisorClient:
-    url = (os.environ.get("AGENT_WORKSPACE_BROKER_URL") or "").strip()
-    token = (os.environ.get("AGENT_WORKSPACE_BROKER_TOKEN") or "").strip()
+    url = (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip()
+    token = (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip()
     if not url or not token:
         raise SandboxError(
-            "restartable chat execution needs AGENT_WORKSPACE_BROKER_URL and "
-            "AGENT_WORKSPACE_BROKER_TOKEN"
+            "restartable chat execution needs AGENT_SANDBOX_MANAGER_URL and "
+            "AGENT_SANDBOX_MANAGER_TOKEN"
         )
     return SessionSupervisorClient(url, token, timeout=180)
 
@@ -1424,7 +1454,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     """Read Docker truth from the host singleton without breaking host beats.
 
     The host heartbeat must remain a liveness signal even while the workspace
-    broker is restarting. Returning ``None`` means "not observed this beat";
+    sandbox manager is restarting. Returning ``None`` means "not observed this beat";
     it must never be confused with an authoritative empty list or deletion.
     """
     client: SessionSupervisorClient | None = None
@@ -1435,7 +1465,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
         now = time.monotonic()
         for row in rows[:4096]:
             if row.get("shared_live") is not True:
-                raise ValueError("workspace broker returned a non-shared sandbox")
+                raise ValueError("sandbox manager returned a non-shared sandbox")
             members = [dict(item) for item in row.get("members") or [] if isinstance(item, dict)]
             activation_generation = int(row["activation_generation"])
             running = bool(row["running"])
@@ -1444,8 +1474,8 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             active = active or bool(row.get("workspace_suspended"))
             deadline = row.get("idle_deadline_monotonic")
             # A generation-zero RUNNING entry with no local deadline was just
-            # reconstructed after a broker restart. Its empty in-memory token
-            # set is not proof that the group has been idle: the broker may
+            # reconstructed after a sandbox manager restart. Its empty in-memory token
+            # set is not proof that the group has been idle: the sandbox manager may
             # have restarted while a terminal had cleared the durable
             # deadline. Report activity as unknown. The control plane installs
             # one recovery deadline only when its durable deadline is also
@@ -1500,7 +1530,7 @@ _RetainedStopKey = tuple[str, int, int]
 
 
 class _RetainedSandboxStopWorker:
-    """Keep synchronous broker stops off the host-heartbeat thread.
+    """Keep synchronous sandbox manager stops off the host-heartbeat thread.
 
     The control plane repeats a durable stop fence until Docker reports the
     group stopped. Exact duplicate fences are ignored and overflow is left for
@@ -1543,7 +1573,7 @@ class _RetainedSandboxStopWorker:
         return thread_id, generation, activation
 
     def submit(self, commands: list[dict[str, Any]]) -> None:
-        """Admit unique exact fences without ever waiting for broker I/O."""
+        """Admit unique exact fences without ever waiting for sandbox manager I/O."""
         invalid = 0
         overflow = 0
         with self._condition:
@@ -1910,7 +1940,7 @@ def _verified_native_session_id(
 
 
 def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> list[dict[str, Any]]:
-    """Project the durable member manifest onto the broker's strict wire shape."""
+    """Project the durable member manifest onto the sandbox manager's strict wire shape."""
     raw = reservation.get("group_members")
     members = [dict(item) for item in raw or [] if isinstance(item, dict)]
     if not members:
@@ -1969,7 +1999,7 @@ def _report_checkpoint_quietly(control: Any, payload: dict[str, Any]) -> None:
 def _reportable_turn_resources(payload: Any) -> dict[str, Any] | None:
     """Return the snapshot to post, or None when there is nothing honest to send.
 
-    ``None`` is a real answer, not a failure: a turn whose broker returned no
+    ``None`` is a real answer, not a failure: a turn whose sandbox manager returned no
     summary was not measured, and a synthesized empty snapshot would store
     "this turn used nothing" -- a claim nobody made. The attempt's legacy
     resource row already says "no member totals were attributed", so silence
@@ -1994,14 +2024,20 @@ def _stream_shared_agent_turn(
     timeout_s: float,
     measurement: operation_profiling.Measurement | None = None,
     on_frozen: Callable[[operation_profiling.Measurement], None] | None = None,
-) -> tuple[int, str, list[str], dict[str, Any] | None]:
-    """Relay exactly one broker-framed member turn under its attempt fence.
+) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
+    """Relay exactly one sandbox-manager-framed member turn under its attempt fence.
 
     Handing the prompt to the supervisor closes the startup measurement:
     everything after that point is model execution, which the design keeps in a
     separate post-dispatch fragment. The caller marks the ``prompt_dispatch``
     boundary immediately before this call, so the handoff is one stage in the
     startup timeline rather than a stage of its own after it.
+
+    The last element is what the turn itself said went wrong, when it said
+    anything: the Agent CLI's own last error, or else the sandbox manager's. It is the
+    failure's reason; the output tail is only a fallback for when neither
+    exists, because its last lines are whatever the CLI printed last -- for a
+    Codex turn refused with a 403 that was a configuration warning.
     """
     stream = supervisor.start_shared_turn(
         job.thread_id,
@@ -2028,8 +2064,20 @@ def _stream_shared_agent_turn(
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
     interrupt_deadline: float | None = None
+    agent_error: str | None = None
+    sandbox_error: str | None = None
+
+    def outcome(exit_code: int) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
+        if agent_error:
+            reported = f"agent reported an error: {agent_error[:900]}"
+        elif sandbox_error:
+            reported = f"sandbox failed: {sandbox_error[:900]}"
+        else:
+            reported = None
+        return exit_code, tail.text(), tool_errors, result_frame, reported
+
     try:
-        # The broker admits and dispatches the prompt before opening this
+        # The sandbox manager admits and dispatches the prompt before opening this
         # response stream. Resident follow-ups need not emit a native init
         # event, so report this shared boundary before waiting for CLI output.
         control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
@@ -2055,7 +2103,7 @@ def _stream_shared_agent_turn(
                 forced_exit_code = 124
                 interrupt_deadline = now + _SHARED_TURN_INTERRUPT_DRAIN_S
             if interrupt_deadline is not None and now > interrupt_deadline:
-                return forced_exit_code or 1, tail.text(), tool_errors, result_frame
+                return outcome(forced_exit_code or 1)
             try:
                 frame = frames.get(timeout=_POLL_INTERVAL_S)
             except queue.Empty:
@@ -2078,6 +2126,13 @@ def _stream_shared_agent_turn(
                 if event_type == "tool_result" and payload.get("is_error"):
                     content = str(payload.get("content") or "")
                     tool_errors.append(content[:200])
+                if event_type == "error":
+                    # Each driver reports its CLI's own failure this way: a
+                    # Claude error result, Codex's final error, pi's failed
+                    # prompt or agent end, OpenCode and Kilo's session error.
+                    text = str(payload.get("text") or payload.get("detail") or "").strip()
+                    if text:
+                        agent_error = text
                 if event_type and event_type != LINE:
                     control.append_event(NormalizedEvent(event_type, payload))
                 continue
@@ -2100,7 +2155,8 @@ def _stream_shared_agent_turn(
                 result_frame = frame
                 detail = str(frame.get("detail") or "shared turn failed")
                 tail.append(detail[-2000:])
-                return forced_exit_code or 1, tail.text(), tool_errors, result_frame
+                sandbox_error = detail
+                return outcome(forced_exit_code or 1)
             if kind == "client_error":
                 # The result may already have crossed the wire before the
                 # transport failed. Preserve that terminal frame rather than
@@ -2112,7 +2168,7 @@ def _stream_shared_agent_turn(
         if result_frame is None:
             raise SessionSupervisorError(502, "shared turn ended without a result")
         if forced_exit_code is not None:
-            return forced_exit_code, tail.text(), tool_errors, result_frame
+            return outcome(forced_exit_code)
         status = str(result_frame.get("status") or "failed")
         exit_code = int(result_frame.get("exit_code") or 0)
         if status == "cancelled":
@@ -2129,7 +2185,7 @@ def _stream_shared_agent_turn(
                     },
                 )
             )
-        return exit_code, tail.text(), tool_errors, result_frame
+        return outcome(exit_code)
     finally:
         if frames is not None:
             frames.close()
@@ -2149,7 +2205,7 @@ def _classify_startup_path(container_action: str, resident_action: str) -> str:
         return "new_group"
     if container_action == "start":
         return "resume_stopped"
-    # Anything else -- including a resident action the broker did not report --
+    # Anything else -- including a resident action the sandbox manager did not report --
     # does not identify a path, and guessing one would poison the comparison
     # the four paths exist for.
     if container_action == "reuse":
@@ -2259,6 +2315,16 @@ def _run_shared_live_attempt(
         except ValueError as exc:
             finish_attempt("failed", str(exc))
             return 2
+        if job.execution_profile == UNTRUSTED_EXECUTION_PROFILE and not disk_limit_mib:
+            # A warning, not a refusal: the group starts as configured.
+            logger.warning(
+                UNTRUSTED_DISK_QUOTA_RECOMMENDED,
+                extra={
+                    "event": "agent_untrusted_sandbox_without_disk_quota",
+                    "job_id": job.job_id,
+                    "host": host,
+                },
+            )
     sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
     origin_thread_id = str(existing.get("origin_thread_id") or job.thread_id)
     seed_spec = ChatSandboxSpec(
@@ -2412,9 +2478,9 @@ def _run_shared_live_attempt(
         supervisor = _session_supervisor_from_env()
         try:
             acquire_call = operation_profiling.expect_fragment(
-                measurement, "broker", "supervisor_acquire"
+                measurement, SANDBOX_MANAGER_PRODUCER, "supervisor_acquire"
             )
-            # Before the call, so a proof the broker makes during it is never
+            # Before the call, so a proof the sandbox manager makes during it is never
             # taken for younger than it is.
             acquire_started = time.monotonic()
             lease = supervisor.acquire_shared(
@@ -2432,12 +2498,12 @@ def _run_shared_live_attempt(
             raise
         lease_token = str(lease["token"])
         container_action = str(lease.get("container_action") or "unknown")
-        # One answer for one call. Sub-stages the broker measured are durations,
+        # One answer for one call. Sub-stages the sandbox manager measured are durations,
         # not offsets, so they hang off the stage they happened in rather than
         # being placed on this process's timeline.
         operation_profiling.record_fragment(
             measurement,
-            producer="broker",
+            producer=SANDBOX_MANAGER_PRODUCER,
             call_id=acquire_call,
             stage="supervisor_acquire",
             response=lease,
@@ -2456,8 +2522,8 @@ def _run_shared_live_attempt(
             container_id=str(lease["container_id"]),
             context_status=context_status,
         )
-        # The broker proved the group bridge inside that call, the same check
-        # the turn's commands would repeat. A broker that does not say so leaves
+        # The sandbox manager proved the group bridge inside that call, the same check
+        # the turn's commands would repeat. A sandbox manager that does not say so leaves
         # every command to check for itself, as before.
         retained = RetainedChatBackend(
             manager,
@@ -2516,7 +2582,7 @@ def _run_shared_live_attempt(
                     reused_workspace = True
                     valid_status = True
             if not valid_status:
-                raise SandboxError("workspace broker returned an invalid initial archive status")
+                raise SandboxError("sandbox manager returned an invalid initial archive status")
             if recovered_initial and source is not None:
                 source.discard()
                 source = None
@@ -2608,7 +2674,7 @@ def _run_shared_live_attempt(
         if not has_context and not recovered_initial:
             # Source, setup, permissions, and uploaded files are complete, and
             # no resident CLI or prompt exists yet. Capture this point-in-time
-            # boundary before admitting either. The broker owns S3 access; the
+            # boundary before admitting either. The sandbox manager owns S3 access; the
             # runner never receives cloud credentials.
             stage = _stage(measurement, "initial_archive")
             initial_archive = supervisor.capture_initial_archive(
@@ -2626,7 +2692,7 @@ def _run_shared_live_attempt(
                 (archive_enabled is False and archive_stored is False)
                 or (archive_enabled is True and archive_stored is True)
             ):
-                raise SandboxError("workspace broker returned an invalid initial archive receipt")
+                raise SandboxError("sandbox manager returned an invalid initial archive receipt")
             control.append_event(
                 NormalizedEvent(
                     "lifecycle",
@@ -2715,7 +2781,7 @@ def _run_shared_live_attempt(
         if lease.get("resident_state") == "live":
             try:
                 resident_call = operation_profiling.expect_fragment(
-                    measurement, "broker", "resident_start"
+                    measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
                 )
                 resident_descriptor = supervisor.ensure_shared_resident(
                     job.thread_id,
@@ -2725,7 +2791,7 @@ def _run_shared_live_attempt(
                 )
             except SessionSupervisorError:
                 # A process-fixed model/MCP setting changed, the process died,
-                # or this broker restarted. Rotate only this member's grant and
+                # or this sandbox manager restarted. Rotate only this member's grant and
                 # resume its exact native session below.
                 resident_descriptor = None
         if resident_descriptor is None:
@@ -2746,7 +2812,7 @@ def _run_shared_live_attempt(
                 residency_generation=int(residency["generation"]),
             )
             resident_call = operation_profiling.expect_fragment(
-                measurement, "broker", "resident_start"
+                measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
             )
             resident_descriptor = supervisor.ensure_shared_resident(
                 job.thread_id,
@@ -2763,7 +2829,7 @@ def _run_shared_live_attempt(
         resident_action = str(resident_descriptor.get("resident_action") or "unknown")
         operation_profiling.record_fragment(
             measurement,
-            producer="broker",
+            producer=SANDBOX_MANAGER_PRODUCER,
             call_id=resident_call,
             stage="resident_start",
             response=resident_descriptor,
@@ -2829,19 +2895,21 @@ def _run_shared_live_attempt(
                     drain_s=DELIVERY_HANDOFF_DRAIN_S,
                 )
 
-            exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
-                supervisor=supervisor,
-                job=job,
-                control=control,
-                heart=heart,
-                lease_token=lease_token,
-                timeout_s=agent_timeout_s,
-                measurement=measurement,
-                on_frozen=_frozen_measurement,
+            exit_code, tail, tool_errors, result_frame, reported_failure = (
+                _stream_shared_agent_turn(
+                    supervisor=supervisor,
+                    job=job,
+                    control=control,
+                    heart=heart,
+                    lease_token=lease_token,
+                    timeout_s=agent_timeout_s,
+                    measurement=measurement,
+                    on_frozen=_frozen_measurement,
+                )
             )
         finally:
             # Container totals include concurrent siblings and cannot be
-            # attributed to this member. The broker instead returns UID-scoped
+            # attributed to this member. The sandbox manager instead returns UID-scoped
             # guest process telemetry and per-turn tool windows; if the stream
             # died before a terminal frame, retain an explicit zero-coverage
             # row rather than inventing a share of the container total.
@@ -2856,7 +2924,7 @@ def _run_shared_live_attempt(
             # without the key is a turn nobody measured, and is left absent
             # rather than filled with zeros.
             with contextlib.suppress(Exception):
-                # The broker ships the legacy rollup and the turn summary
+                # The sandbox manager ships the legacy rollup and the turn summary
                 # inside one ``resources`` object; reading the frame's top
                 # level found nothing and silently reported no turn at all.
                 turn_resources = (
@@ -2879,7 +2947,7 @@ def _run_shared_live_attempt(
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
         # A terminal native API error can leave its history and process
-        # intact. Only a broker result emitted after activation cleanup proves
+        # intact. Only a sandbox manager result emitted after activation cleanup proves
         # this boundary; process death, timeout and lost streams remain LOST.
         settled_failure = (
             exit_code != 0
@@ -2889,7 +2957,7 @@ def _run_shared_live_attempt(
             and result_frame.get("native_turn_settled") is True
         )
         if exit_code != 0 and not settled_failure:
-            failure_detail = f"agent exited {exit_code}: {tail[-500:]}"
+            failure_detail = reported_failure or f"agent exited {exit_code}: {tail[-500:]}"
             abandon_before_finish(lost=True, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
@@ -2939,7 +3007,9 @@ def _run_shared_live_attempt(
             # Record the native turn ordinal before failing the job, so later
             # retries and historical forks keep matching the CLI transcript.
             finish_attempt(
-                "failed", f"agent failed at native turn boundary: {tail[-500:]}", base_sha=base_sha
+                "failed",
+                reported_failure or f"agent failed at native turn boundary: {tail[-500:]}",
+                base_sha=base_sha,
             )
             return 1
         try:
@@ -3449,38 +3519,38 @@ def _drain_on_sigterm() -> None:
         signal.signal(signal.SIGTERM, handler)
 
 
-def _broker_url_from_env() -> str | None:
-    """This host's broker address, **as the control plane will reach it**.
+def _sandbox_manager_url_from_env() -> str | None:
+    """This host's sandbox manager address, **as the control plane will reach it**.
 
-    Defaults to the same variable `workspace_broker_client` uses, so the
+    Defaults to the same variable `sandbox_manager_client` uses, so the
     address a host *reports* cannot drift from the one it *serves* — a row
-    pointing at a broker this machine is not running answers 409 for every file
+    pointing at a sandbox manager this machine is not running answers 409 for every file
     and terminal request on its jobs. That is right only when both readers
     share a network, as in the integrated local Compose stack. Merely running
     separate Compose projects on one physical machine does not make their DNS
     or networks shared.
 
     It stops being right the moment the control plane is on another machine.
-    `AGENT_WORKSPACE_BROKER_URL` is a compose service name; it resolves here and
+    `AGENT_SANDBOX_MANAGER_URL` is a compose service name; it resolves here and
     nowhere else. Reported verbatim, the control plane stores an address it
-    cannot resolve, and the first call that needs the broker — a terminal
+    cannot resolve, and the first call that needs the sandbox manager — a terminal
     suspend, a file listing — fails with a DNS error surfaced as 503. Every
     attempt then dies at the same point until the job runs out of them, which
     is what happened to the first real job on this deployment.
 
     So the two questions are separated, and only when a deployment says so:
 
-    * `AGENT_WORKSPACE_BROKER_URL` — how *this runner* reaches its own broker.
-    * `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` — how *the control plane* reaches
+    * `AGENT_SANDBOX_MANAGER_URL` — how *this runner* reaches its own sandbox manager.
+    * `AGENT_SANDBOX_MANAGER_ADVERTISE_URL` — how *the control plane* reaches
       it, when that is a different address (a reverse tunnel's far end).
 
     Unset, the second is the first, and the drift the original comment warns
     about remains impossible without somebody explicitly asking for it.
     """
-    advertised = (os.environ.get("AGENT_WORKSPACE_BROKER_ADVERTISE_URL") or "").strip()
+    advertised = (manager_env("AGENT_SANDBOX_MANAGER_ADVERTISE_URL") or "").strip()
     if advertised:
         return advertised
-    return (os.environ.get("AGENT_WORKSPACE_BROKER_URL") or "").strip() or None
+    return (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip() or None
 
 
 def _runner_version() -> str:
@@ -3863,7 +3933,7 @@ def run_forever(
     operator's number, so a number this host has not yet confirmed can only
     ever admit less work, never more.
 
-    The host runner owns scheduling and attestation only. The workspace broker
+    The host runner owns scheduling and attestation only. The sandbox manager
     owns every retained container and resident Agent CLI process, so this loop
     never creates or bind-mounts a host worktree.
     """
@@ -3890,7 +3960,7 @@ def run_forever(
     if SHARED_SANDBOX_CAPABILITY not in capabilities:
         raise RuntimeError(
             "this runner cannot attest shared-sandbox-v1; verify the container "
-            "backend, broker URL/token, AGENT_HOST_SLOTS, image labels, "
+            "backend, sandbox manager URL/token, AGENT_HOST_SLOTS, image labels, "
             "runtime pins, and live-session driver capabilities"
         )
     if not (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip():
@@ -3916,7 +3986,7 @@ def run_forever(
     identity = ensure_enrolled(
         base_url=base_url,
         host=host,
-        broker_url=_broker_url_from_env(),
+        sandbox_manager_url=_sandbox_manager_url_from_env(),
         slots_total=host_default,
         capabilities=host_capabilities,
         runner_version=_runner_version(),
@@ -3948,19 +4018,23 @@ def run_forever(
 
     # The runtime settings an admin sets on the Servers page, over this host's
     # own. Adopted from each heartbeat answer on the heartbeat thread, which
-    # also hands the broker its share; read here as each turn is handed over.
+    # also hands the sandbox manager its share; read here as each turn is handed over.
     # Until the first answer, every setting is this host's own, which is also
     # what an unreachable control plane leaves in place.
     try:
-        settings_broker: SessionSupervisorClient | None = _session_supervisor_from_env()
+        settings_sandbox_manager: SessionSupervisorClient | None = _session_supervisor_from_env()
     except Exception:
-        settings_broker = None
+        settings_sandbox_manager = None
     runtime_settings = RuntimeSettings(
         _runner_local_settings(agent_timeout_s),
-        broker=None if settings_broker is None else settings_broker.apply_host_settings,
+        sandbox_manager=None
+        if settings_sandbox_manager is None
+        else settings_sandbox_manager.apply_host_settings,
     )
     archive_settings = SandboxArchiveRuntimeSettings(
-        None if settings_broker is None else settings_broker.apply_sandbox_archive_settings
+        None
+        if settings_sandbox_manager is None
+        else settings_sandbox_manager.apply_sandbox_archive_settings
     )
 
     capacity = _start_host_capacity_collector(backend)
@@ -3970,25 +4044,25 @@ def run_forever(
     # store holds nothing, which reads as "not collecting" -- a restart is a
     # Stop, never an accidental continuation.
     try:
-        # The broker client is the real one, built from this host's own
+        # The sandbox manager client is the real one, built from this host's own
         # environment. Without it the runner would know what to collect and the
-        # broker -- a separate container that shares no memory with it -- would
+        # sandbox manager -- a separate container that shares no memory with it -- would
         # never hear, so every file and terminal sample would arrive with its
-        # container sub-stages missing. A host that has no broker configured
+        # container sub-stages missing. A host that has no sandbox manager configured
         # passes ``None`` and still syncs its own configuration.
         try:
-            broker_client: SessionSupervisorClient | None = _session_supervisor_from_env()
+            sandbox_manager_client: SessionSupervisorClient | None = _session_supervisor_from_env()
         except Exception:
-            broker_client = None
+            sandbox_manager_client = None
             logger.info(
-                "agent_profiling_broker_unconfigured",
-                extra={"event": "agent_profiling_broker_unconfigured"},
+                "agent_profiling_sandbox_manager_unconfigured",
+                extra={"event": "agent_profiling_sandbox_manager_unconfigured"},
             )
         policy_sync = ProfilingPolicySync(
             base_url=base_url,
             credential=identity.credential,
             host=identity.host,
-            broker=broker_client,
+            sandbox_manager=sandbox_manager_client,
         )
         policy_sync.install()
     except Exception:
@@ -4015,7 +4089,7 @@ def run_forever(
     pool = HostHeartbeat(
         base_url=base_url,
         identity=identity,
-        broker_url=_broker_url_from_env(),
+        sandbox_manager_url=_sandbox_manager_url_from_env(),
         # Read per beat: the limit is what this host will actually allow, and
         # the control plane admits claims against the lower of it and the
         # operator's number.
@@ -4074,8 +4148,8 @@ def run_forever(
             policy_sync.stop()
         if capacity is not None:
             capacity.stop()
-        if settings_broker is not None:
-            settings_broker.close()
+        if settings_sandbox_manager is not None:
+            settings_sandbox_manager.close()
 
     print(
         f"agent runner {worker_id} serving host {identity.host} (enrolled; "
@@ -4185,7 +4259,7 @@ def run_forever(
             if not runtime_settings.adopted and time.monotonic() < settings_deadline:
                 time.sleep(idle_wait)
                 continue
-            # Archive policy is a stop-safety boundary. The broker must
+            # Archive policy is a stop-safety boundary. The sandbox manager must
             # explicitly confirm the complete DB revision, including an
             # explicit disabled policy, before this process creates work.
             if not archive_settings.ready:
@@ -4217,6 +4291,7 @@ def run_forever(
                         attestation=_claim_attestation(
                             backend,
                             sandbox_archive_settings_applied_revision=archive_settings.report(),
+                            host_settings=runtime_settings.turn_settings(),
                         ),
                     )
             except ClaimUnreachable as exc:

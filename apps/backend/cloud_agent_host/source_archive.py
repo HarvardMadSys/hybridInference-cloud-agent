@@ -15,7 +15,7 @@ and no test imports ``cloud_agent_host.source_archive``. That is exactly the
 set a scan of ``cloud_agent_host/**`` and ``tests/**`` for
 ``cloud_agent_host.source_archive`` returns today: the host modules
 ``runner.py`` (``build_base_bundle``, ``build_source_archive``) and
-``workspace_broker.py`` (``DEFAULT_MAX_BASE_BUNDLE_BYTES``), plus the test file
+``sandbox_manager.py`` (``DEFAULT_MAX_BASE_BUNDLE_BYTES``), plus the test file
 ``tests/unit/test_source_archive.py``. The control plane is not in that set:
 the publisher already imports ``cloud_agent_shared.git.source_archive`` directly,
 which is the path every one of these callers is meant to end up on.

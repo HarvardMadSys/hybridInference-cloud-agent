@@ -412,6 +412,61 @@ def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: P
     assert " up -d --remove-orphans" in docker_calls
 
 
+def test_private_override_is_the_last_compose_file_for_every_source_stack_call(
+    tmp_path: Path,
+) -> None:
+    override = tmp_path / "control-plane-private.yml"
+    override.write_text("services:\n  control-plane:\n    environment:\n      TEST_OVERRIDE: set\n")
+
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        dotenv=f"AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE={override}\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    compose_calls = [
+        line.split() for line in docker_calls.splitlines() if line.startswith("compose ")
+    ]
+    assert compose_calls
+    for arguments in compose_calls:
+        compose_files = [
+            arguments[index + 1] for index, argument in enumerate(arguments) if argument == "-f"
+        ]
+        assert compose_files[-1] == str(override)
+
+
+def test_private_override_path_must_be_absolute_before_source_compose_runs(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        dotenv="AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE=relative.yml\n",
+    )
+
+    assert result.returncode != 0
+    assert "must be an absolute path" in result.stderr
+    assert docker_calls == ""
+
+
+def test_private_override_path_must_name_a_regular_file_before_source_compose_runs(
+    tmp_path: Path,
+) -> None:
+    override = tmp_path / "private-override-directory"
+    override.mkdir()
+
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        dotenv=f"AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE={override}\n",
+    )
+
+    assert result.returncode != 0
+    assert "must name a regular file" in result.stderr
+    assert docker_calls == ""
+
+
 def test_a_cold_start_bootstraps_both_services_needed_for_host_readiness(
     tmp_path: Path,
 ) -> None:

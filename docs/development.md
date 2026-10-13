@@ -53,7 +53,7 @@ Choose the package based on who should own the behavior you are changing:
 | Package | Owns |
 |---|---|
 | [`cloud_agent/`](../apps/backend/cloud_agent/) | Control plane: HTTP APIs, admission and scheduling, persistence, Gateway adapters, and publication. |
-| [`cloud_agent_host/`](../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session broker, and Agent CLI adapters. |
+| [`cloud_agent_host/`](../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session sandbox manager, and Agent CLI adapters. |
 | [`cloud_agent_shared/`](../apps/backend/cloud_agent_shared/) | Protocol versions, capability names, shared payloads and errors, profiling collection, and shared Git/archive algorithms. |
 
 Inside the control plane, look in `api/` for HTTP handlers, `application/` for
@@ -70,7 +70,7 @@ relative to `apps/backend/`.
 |---|---|
 | Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts the nine agent surfaces. |
 | A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an existing caller. |
-| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `workspace_broker_client.py`; host handling is in `cloud_agent_host/workspace_broker.py`. |
+| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/sandbox_manager.py`. |
 | A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
 | CLI behavior or version compatibility | `cloud_agent_host/runtimes.py` and `drivers.py`; shared pins are in `cloud_agent_shared/shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
@@ -189,6 +189,17 @@ does not wait for it and its failure does not affect CI's conclusion. Of the
 15 real-CLI MCP cases, a pull request runs Kilo's three as `MCP conformance
 (kilo, …)` jobs, one case each, and the other twelve in
 the sandbox image job; trusted events run all 15 in the sandbox image job.
+
+A pull request also splits the default test tier, the PostgreSQL tier, and the
+frontend unit tests over two hosted VMs each, shown as `Tests (1/2)` and so on.
+`scripts/ci_shard.py` deals whole test files to the pytest shards, and vitest
+splits its own with `--shard`. Trusted events run each tier as a single shard.
+To run one shard locally, pass its files to pytest:
+
+```bash
+uv run pytest -m "not external and not dbtest" \
+  $(uv run python scripts/ci_shard.py --shard 1/2 -- -m "not external and not dbtest")
+```
 
 GitHub issue [#464](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/464)
 tracks the remaining administrator work: the runner-group controls below,

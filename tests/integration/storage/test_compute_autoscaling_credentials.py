@@ -104,6 +104,11 @@ async def test_rotation_cannot_cross_autoscale_assertion_to_provider_resolution(
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return httpx.Response(
+                200,
+                json={"profiles": [{"name": "cloud-agent-node", "project": "research"}]},
+            )
         return httpx.Response(200, json={"id": str(uuid4())})
 
     resolver = _BarrierResolver(secrets)
@@ -168,7 +173,6 @@ async def test_rotation_cannot_cross_autoscale_assertion_to_provider_resolution(
     await client.aclose()
 
     assert receipt.outcome == "pending"
-    assert len(requests) == 1
-    assert requests[0].method == "POST"
-    assert requests[0].headers["X-Api-Token"] == old_token
-    assert new_token not in str(requests[0].headers)
+    assert [request.method for request in requests] == ["GET", "POST"]
+    assert all(request.headers["X-Api-Token"] == old_token for request in requests)
+    assert new_token not in str(requests[-1].headers)

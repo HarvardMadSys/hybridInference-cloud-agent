@@ -24,7 +24,7 @@
 传输使用 JSON null，不发送 Infinity，也不用虚假的遥远到期日期。
 
 采集器内部用无限单调期限表示不自动过期。原 manifest、操作范围、归属和配置版本照常
-随父子进程和 broker 调用传递。有限期限的旧 context 仍取所有上限中的最小值。
+随父子进程和 sandbox manager 调用传递。有限期限的旧 context 仍取所有上限中的最小值。
 缺少截止字段不等于无限期限：必须有明确的持续模式、null 值和合法 manifest。
 
 迁移 `0021_continuous_measurement` 仅允许 run 表的 expires_at 为 NULL；旧行不变。
@@ -45,7 +45,7 @@ Disable 停止选择新的根操作，已经开始的操作继续完成与投递
 
 ## 发布与兼容
 
-常规数据库迁移之后升级 CP、runner、broker 和 turn 子进程代码，不增加环境变量。
+常规数据库迁移之后升级 CP、runner、sandbox manager 和 turn 子进程代码，不增加环境变量。
 所有角色升级完成后再开启持续实验；旧 producer 不理解空截止，会拒绝该选择。
 定时实验、静态配置、显式禁用、旧样本和筛选接口继续兼容。
 
@@ -54,12 +54,12 @@ Disable 停止选择新的根操作，已经开始的操作继续完成与投递
 - 受控时钟前进一天、成功结束超过 100 个操作后仍能选择；Disable 后新操作不选，
   在途片段继续采集。context / manifest / record 均能用严格 JSON 编码。
 - 真实新解释器继承持续选择，保留 measurement id、起点、run 和空截止；禁用进程拒绝。
-- 真实 PostgreSQL + HTTP：启用 → CP / runner / broker 同步 → 文件请求采集并入库 →
+- 真实 PostgreSQL + HTTP：启用 → CP / runner / sandbox manager 同步 → 文件请求采集并入库 →
   Admin 读回 → Disable；停止时已在途的记录完整入库。定时实验同一链路保持通过。
 - 校验缺少期限、错误持续标志、非法额度仍被拒绝；NULL 与有限期限的 manifest 冲突仍拒绝。
 - 数据库迁移 upgrade → downgrade → re-upgrade；前后端质量门和页面回归测试通过。
 
-验收链使用真实 HTTP 和 PostgreSQL，文件执行由现有测试 broker 替身提供。
+验收链使用真实 HTTP 和 PostgreSQL，文件执行由现有测试 sandbox manager 替身提供。
 这不等于已完成 staging 上的真实沙盒性能验收。
 
 ## 本次本地验证
