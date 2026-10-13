@@ -1650,7 +1650,7 @@ def _run_git(
         git_status = process_status
     if git_status != 0:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    if exact_patch and "�" in patch:
+    if exact_patch and "\ufffd" in patch:
         # Command output is decoded with replacement, so a byte that is not
         # UTF-8 arrives here as U+FFFD: a captured patch holding one would
         # restore different bytes than the workspace holds. A file that really
