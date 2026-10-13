@@ -18,7 +18,7 @@ import asyncio
 import base64
 import contextlib
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
@@ -709,11 +709,19 @@ async def _mint_sandbox_grant(
             },
         )
 
-    linked = bool(grant_id) and await job_store.grants.record_attempt_grant(
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        grant_id=grant_id,
-    )
+    try:
+        linked = bool(grant_id) and await job_store.grants.record_attempt_grant(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            grant_id=grant_id,
+        )
+    except Exception:
+        # Not recorded, so nothing would ever renew or revoke it: withdraw it
+        # here, and let the claim's own failure path hand the job back.
+        if grant_id:
+            with contextlib.suppress(Exception):
+                await grants.revoke(grant_id)
+        raise
     if not linked:
         # Withdraw it before anything else. This is the one moment the grant id
         # is known to a process that is about to forget it, and after that only
@@ -801,6 +809,70 @@ async def worker_claim(
     )
     if claim is None:
         return None
+    try:
+        return await _hand_over_claim(
+            job_store,
+            claim,
+            background_tasks=background_tasks,
+            app_credentials=app_credentials,
+            grants=grants,
+            gateway=gateway,
+        )
+    except HTTPException:
+        # Every refusal below has already released or ended its claim.
+        raise
+    except Exception as exc:
+        # Anything else that fails between the claim and the answer — a store
+        # read, a malformed MCP binding, a grant link that raised — would
+        # otherwise escape as a 500 with the claim still held: the job would
+        # wait out a lease nothing is using, and the reaper would charge it a
+        # retry for a turn no agent ever started. A grant already linked to
+        # this attempt is revoked by the revocation pass once it is aborted.
+        logger.warning(
+            "agent_job_claim_failed",
+            exc_info=True,
+            extra={"event": "agent_job_claim_failed", "job_id": claim["id"]},
+        )
+        released = False
+        with contextlib.suppress(Exception):
+            released = await job_store.attempt_commands.release_claim(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                reason="claim_failed",
+                retry_after_seconds=30,
+            )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "type": "claim_failed",
+                    "message": (
+                        "This job's claim could not be prepared; it has been returned "
+                        "to the queue and no attempt was spent."
+                        if released
+                        else "This job's claim could not be prepared or returned to the "
+                        "queue; its lease decides what happens next."
+                    ),
+                }
+            },
+        ) from exc
+
+
+async def _hand_over_claim(
+    job_store: _WorkerStorage,
+    claim: dict[str, Any],
+    *,
+    background_tasks: BackgroundTasks,
+    app_credentials: Any | None,
+    grants: Any,
+    gateway: Any,
+) -> WorkerClaimResponse:
+    """Check, credential and describe one claimed turn for the host that took it.
+
+    Every refusal it raises has already released or ended the claim; any other
+    exception is handed back by ``worker_claim``.
+    """
     fence = {
         "job_id": claim["id"],
         "attempt_id": claim["attempt_id"],
@@ -1110,6 +1182,29 @@ async def worker_append_event(
     return WorkerEventResponse(event_id=event_id)
 
 
+#: How long after its attempt ends a startup measurement is still accepted.
+#: The runner sends the record from a background thread as soon as the startup
+#: window closes, retrying for seconds; a short turn can end before it lands,
+#: which is why no live lease is asked for. An hour is far past any delivery,
+#: and still a bound: a worker token carries no expiry of its own.
+MEASUREMENT_GRACE_S = 3600.0
+
+
+def _measurement_window_open(attempt: dict[str, Any], *, now: datetime) -> bool:
+    """Whether a measurement may still be filed against this attempt.
+
+    While it runs, always. Once it has ended, only within
+    :data:`MEASUREMENT_GRACE_S` of the end the store recorded — an ended
+    attempt without one says nothing about when it ended, so it is closed.
+    """
+    if attempt.get("status") == "running":
+        return True
+    finished_at = attempt.get("finished_at")
+    return isinstance(finished_at, datetime) and now - finished_at <= timedelta(
+        seconds=MEASUREMENT_GRACE_S
+    )
+
+
 @router.post(
     "/worker/jobs/{job_id}/measurements",
     response_model=WorkerMeasurementResponse,
@@ -1147,6 +1242,9 @@ async def worker_record_measurement(
         job_id=job_id, attempt_id=int(attempt_id)
     )
     if attempt is None or int(attempt["lease_generation"]) != int(generation):
+        raise _lease_lost()
+    now = datetime.now(UTC)
+    if not _measurement_window_open(attempt, now=now):
         raise _lease_lost()
     job = await job_store.conversation_queries.get_job(job_id)
     if job is None:
@@ -1186,7 +1284,7 @@ async def worker_record_measurement(
         record=body.record,
         owner=owner,
         run=body.run,
-        now=datetime.now(UTC),
+        now=now,
     )
     if result in {"conflict", "run_conflict"}:
         return WorkerMeasurementResponse(

@@ -105,6 +105,9 @@ class _Identity:
             "lease_generation": 3,
             "host_id": "host-that-ran-it",
             "status": "failed",
+            # Ended moments ago, as a real row that is no longer running
+            # always records: the record still has its delivery window.
+            "finished_at": datetime.now(UTC),
             "thread_id": THREAD_ID,
             "thread_sandbox": {"sandbox_id": "asbx_chain", "host": "host-that-ran-it"},
         }
