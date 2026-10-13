@@ -28,7 +28,9 @@ lost, cannot produce a token now.
 
 Both grounds fail closed. An unset allowlist allows nothing, and neither does a
 missing connection: a deployment nobody configured must refuse jobs, not accept
-every repository on the internet.
+every repository on the internet. A connection GitHub cannot be asked about
+right now raises :class:`RepoAccessUnavailable`, a refusal to retry rather than
+a verdict, and never access.
 """
 
 from __future__ import annotations
