@@ -84,6 +84,10 @@ _PREFLIGHT_CHECKS = {
 
 # How long past its recorded deadline a missing resource is taken as ended.
 _EXPIRY_GRACE = timedelta(minutes=10)
+# How long an extension the provider neither applies nor refuses is awaited.
+# Every other operation of the allocation waits for it meanwhile; afterwards
+# it blocks, so a move can start and a retry can send the same target again.
+_EXTENSION_CONFIRMATION = timedelta(minutes=10)
 # A node registers at first boot; provisioning plus boot fit well inside this.
 _REGISTRATION_TTL_SECONDS = 2 * 3600
 _HOST_KEY_PREFERENCE = (
@@ -756,6 +760,10 @@ class ComputeReconciler:
                 and observation.expires_at is not None
                 and observation.expires_at > initial
             )
+            # A request recorded before its send time was kept is timed from now.
+            requested_at = (
+                _moment(operation.get("result", {}).get("extension_requested_at")) or _now()
+            )
             if operation.get("result", {}).get("extension_response_received") or progressed:
                 await self._finish(
                     operation,
@@ -771,13 +779,36 @@ class ComputeReconciler:
                         else None,
                     },
                 )
+            elif _now() - requested_at >= _EXTENSION_CONFIRMATION:
+                # The deadline has not moved since the request. Stop holding
+                # the allocation's other work: the target is absolute, so a
+                # retry may safely send the same request again.
+                message = (
+                    "The provider neither applied nor refused the extension. "
+                    "Check the provider, then retry to request the same expiration."
+                )
+                await self._finish(
+                    operation,
+                    "blocked",
+                    "extension_unconfirmed",
+                    message,
+                    result={
+                        "external_pending": False,
+                        "extension_requested": False,
+                        "extension_response_received": False,
+                        "blocked_reasons": [{"code": "extension_unconfirmed", "message": message}],
+                    },
+                )
             else:
                 await self._finish(
                     operation,
                     "waiting",
                     "confirming_extension",
                     "Waiting to confirm the previous extension request.",
-                    result={"external_pending": True},
+                    result={
+                        "external_pending": True,
+                        "extension_requested_at": requested_at.isoformat(),
+                    },
                     retry=30,
                 )
             return
@@ -786,6 +817,7 @@ class ComputeReconciler:
             "extending",
             {
                 "extension_requested": True,
+                "extension_requested_at": _now().isoformat(),
                 "external_pending": True,
                 "extension_response_received": False,
                 "extension_initial_expires_at": observation.expires_at.isoformat()

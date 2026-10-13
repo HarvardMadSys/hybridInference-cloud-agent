@@ -468,6 +468,66 @@ async def test_unknown_or_pending_extension_is_only_queried_until_confirmed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_receipt", [False, True])
+async def test_an_extension_never_applied_stops_holding_the_allocation(
+    monkeypatch, pending_receipt
+):
+    """Every other operation of the server waits for it: the wait must end."""
+    h = harness(monkeypatch, kind="extend", identified=True)
+    if pending_receipt:
+        # Accepted, but the expiration never moves.
+        h.provider.extend.return_value = ProviderReceipt(
+            outcome="pending", resource=REF, observation=observed()
+        )
+    else:
+        # The adapter's answer to an HTTP 5xx or a timeout on the request.
+        h.provider.extend.return_value = ProviderReceipt(outcome="unknown", resource=REF)
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["result"]["external_pending"]) == ("waiting", True)
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW + timedelta(minutes=9))
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["result"]["external_pending"]) == ("waiting", True)
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW + timedelta(minutes=11))
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("blocked", "extension_unconfirmed")
+    assert h.operation["result"]["external_pending"] is False
+    assert [reason["code"] for reason in h.operation["result"]["blocked_reasons"]] == [
+        "extension_unconfirmed"
+    ]
+    h.provider.extend.assert_awaited_once()
+    # An administrator's retry queries first, then sends the same absolute target.
+    h.provider.extend.return_value = ProviderReceipt(
+        outcome="confirmed", resource=REF, observation=observed(expires=TARGET)
+    )
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    assert [call.args[1].target_expires_at for call in h.provider.extend.await_args_list] == [
+        TARGET,
+        TARGET,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_extension_recorded_without_its_send_time_is_timed_from_now(monkeypatch):
+    h = harness(monkeypatch, kind="extend", identified=True)
+    h.operation.update(
+        created_at=NOW - timedelta(days=1),
+        step="confirming_extension",
+        result={
+            "extension_requested": True,
+            "external_pending": True,
+            "extension_initial_expires_at": (NOW + timedelta(hours=4)).isoformat(),
+        },
+    )
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("waiting", "confirming_extension")
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW + timedelta(minutes=11))
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("blocked", "extension_unconfirmed")
+    h.provider.extend.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_partial_extension_is_not_reported_as_success(monkeypatch):
     h = harness(monkeypatch, kind="extend", identified=True)
     h.provider.extend.return_value = ProviderReceipt(
