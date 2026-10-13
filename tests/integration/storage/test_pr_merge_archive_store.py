@@ -291,6 +291,49 @@ async def test_retries_persist_schedule_failures_and_terminal_skips(pool, store)
         assert await conn.fetchval("SELECT archived_at FROM agent_threads") is None
 
 
+async def test_access_recovery_resumes_a_terminal_skipped_check(pool, store):
+    """A repaired GitHub installation must resume a skipped archival check.
+
+    Access denial becomes terminal only after the configured failure budget.
+    Once the installation is restored, the durable obligation must become
+    eligible again without operator SQL; the worker then revalidates owner,
+    publication, PR identity, merge state and archival fencing as usual.
+    """
+    await _published_job(pool, store)
+    first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    for attempt in range(10):
+        await _release(
+            store,
+            first,
+            delay_s=0,
+            error_code="github_access_denied",
+            terminal=attempt == 9,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
+        if attempt == 9:
+            break
+        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, failures, completed_at FROM agent_pr_archive_checks"
+        )
+        assert row["state"] == "skipped" and row["failures"] == 10
+        assert row["completed_at"] is not None
+
+    # Simulate the repaired installation: the next poll must reclaim and then
+    # verify the still-current published PR before archiving it.
+    recovered = (await store.pr_archive.claim_pr_archive_checks())[0]
+    assert await _finish(store, recovered) is not None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, completed_at, archived_at FROM agent_pr_archive_checks"
+        )
+        assert row["state"] == "archived"
+        assert row["completed_at"] is not None
+        assert await conn.fetchval("SELECT archived_at FROM agent_threads") is not None
+
+
 async def test_merge_goal_pause_and_receipt_roll_back_if_event_write_fails(
     pool, store, monkeypatch
 ):
@@ -491,3 +534,83 @@ async def test_github_poll_archives_real_session_and_restore_is_not_reprocessed(
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT archived_at FROM agent_threads") is None
         assert await conn.fetchrow("SELECT * FROM agent_sandboxes") == sandbox_before
+
+
+async def test_concurrent_recovery_workers_claim_exactly_once(pool, store):
+    """Two workers racing a recovered access-denied check get one live claim."""
+    await _published_job(pool, store)
+    first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    for attempt in range(10):
+        await _release(
+            store, first, delay_s=0, error_code="github_access_denied", terminal=attempt == 9
+        )
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
+        if attempt == 9:
+            break
+        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+
+    import asyncio
+
+    results = await asyncio.gather(
+        store.pr_archive.claim_pr_archive_checks(),
+        store.pr_archive.claim_pr_archive_checks(),
+    )
+    claimed = [check for batch in results for check in batch]
+    assert len(claimed) == 1
+    assert claimed[0]["claim_token"] != first["claim_token"]
+
+
+async def test_stale_lease_after_recovery_cannot_archive_or_reschedule(pool, store):
+    """A stale claim token after lease expiry cannot mutate the recovered row."""
+    await _published_job(pool, store)
+    first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    for attempt in range(10):
+        await _release(
+            store, first, delay_s=0, error_code="github_access_denied", terminal=attempt == 9
+        )
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
+        if attempt == 9:
+            break
+        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+
+    recovered = (await store.pr_archive.claim_pr_archive_checks())[0]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_pr_archive_checks SET lease_expires_at = NOW() - interval '1 second' "
+            "WHERE thread_id = $1 AND pr_url = $2",
+            recovered["thread_id"],
+            recovered["pr_url"],
+        )
+    assert not await _release(store, recovered)
+    assert await _finish(store, recovered) is None
+
+
+async def test_new_turn_after_recovery_blocks_archival(pool, store):
+    """A newer unpublished turn prevents a recovered merged PR from archiving."""
+    job = await _published_job(pool, store, retain=True)
+    first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    for attempt in range(10):
+        await _release(
+            store, first, delay_s=0, error_code="github_access_denied", terminal=attempt == 9
+        )
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
+        if attempt == 9:
+            break
+        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+
+    recovered = (await store.pr_archive.claim_pr_archive_checks())[0]
+    newer = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="Start the next change"
+    )
+    assert newer is not None and "error" not in newer
+    assert await _finish(store, recovered) is None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT archived_at FROM agent_threads WHERE id = $1", job["thread_id"]
+            )
+            is None
+        )

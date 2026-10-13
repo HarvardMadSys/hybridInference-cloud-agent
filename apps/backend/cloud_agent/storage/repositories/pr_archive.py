@@ -53,6 +53,9 @@ class PostgresPrArchiveRepository:
         job_id, user_id, repo, pr_url,
         claim_token and failures. Expired claims can be claimed again, and a
         completed session/PR pair is never reseeded after a manual restore.
+        A skipped check whose last error was a recoverable access failure
+        is reclaimed so the worker can revalidate authorization and the
+        still-current publication after an installation is repaired.
         """
         if limit < 1:
             return []
@@ -99,7 +102,9 @@ class PostgresPrArchiveRepository:
                     WHERE latest.thread_id = t.id AND latest.user_id = t.user_id
                     ORDER BY latest.turn_no DESC LIMIT 1
                 ) j ON TRUE
-                WHERE checks.state = 'pending'
+                WHERE (checks.state = 'pending'
+                   OR (checks.state = 'skipped'
+                       AND checks.last_error = 'github_access_denied'))
                   AND checks.next_check_at <= NOW()
                   AND (checks.lease_expires_at IS NULL
                        OR checks.lease_expires_at <= clock_timestamp())
@@ -122,6 +127,7 @@ class PostgresPrArchiveRepository:
                     UPDATE agent_pr_archive_checks
                     SET job_id = $3, claim_token = $4,
                         lease_expires_at = clock_timestamp() + make_interval(secs => $5),
+                        state = 'pending', completed_at = NULL,
                         updated_at = NOW()
                     WHERE thread_id = $1 AND pr_url = $2
                     """,
