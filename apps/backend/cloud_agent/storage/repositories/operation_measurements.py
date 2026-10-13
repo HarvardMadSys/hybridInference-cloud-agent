@@ -146,6 +146,8 @@ class PostgresOperationMeasurementRepository:
                         """,
                         str(run["run_id"]),
                     )
+                    if locked is None:  # pragma: no cover - run rows are never deleted
+                        return "conflict"
                     merged = _merge_admissions(locked, run)
                     if merged is None:
                         return "run_conflict"
