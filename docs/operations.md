@@ -3429,6 +3429,21 @@ Keep this host state across broker restarts. Installation succeeds once per fixe
 workspace; startup runs once per actual boot. A failed step remains visible in
 the Environment tab and can be retried against the original binding.
 
+Manual-action receipts live next to preparation state under `environment-actions`.
+They reserve the run before launching a command and retain its masked result after
+PTY eviction. Keep this directory across broker restarts; deleting it removes the
+host's replay fence for requests whose control-plane acknowledgement was lost.
+An interrupted launch without a recoverable result is reported as `unknown` and
+is never automatically replayed. Inspect external effects before starting a new
+run with a different idempotency key. These receipts do not promise exactly-once
+side effects in external services.
+
+Empty bindings still pin the original task's selection, but require neither
+`environment-v1` nor preparation. Each environment test reserves one local slot
+on a background worker so other free slots continue claiming coding tasks. Host
+orphan queries are read-only and throttled; the control-plane reaper owns lease
+expiry and history maintenance.
+
 Cancellation fences the result immediately but keeps the test's host slot until
 cleanup is confirmed. The reaper expires leases/30-minute executions. On reconnect
 the enrolled host receives only its own expired test IDs and removes the exact

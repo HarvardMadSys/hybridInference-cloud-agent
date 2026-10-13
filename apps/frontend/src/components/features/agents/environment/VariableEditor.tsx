@@ -30,6 +30,7 @@ export function VariableEditor({
     <div className="space-y-3">
       <p className="text-xs text-muted">{t('environment.visibleToCode')}</p>
       <p className="text-xs text-muted">{t('environment.reservedKeys')}</p>
+      <p className="text-xs text-muted">{t('environment.shortSecret')}</p>
       {inherited.length > 0 && (
         <details className="text-sm">
           <summary>{t('environment.globalVariables')}</summary>

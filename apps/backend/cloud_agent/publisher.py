@@ -37,6 +37,7 @@ from cloud_agent_shared.git.patch_gate import (
     validate_patch,
 )
 from cloud_agent_shared.git.source_archive import build_base_bundle
+from cloud_agent_shared.secret_redaction import secret_patterns
 
 logger = get_logger(__name__)
 
@@ -324,7 +325,7 @@ def _validate_staged_blobs(
     for blob, size in zip(blobs, sizes, strict=True):
         content = _read_blob(repo, blob.sha, size)
         for name, value in (known_secrets or {}).items():
-            for pattern in (value, *value.splitlines()):
+            for pattern in secret_patterns(value):
                 if not pattern:
                     continue
                 token = pattern.encode("utf-8")

@@ -100,3 +100,21 @@ it('does not admit a task while the environment selection cannot be loaded', asy
   expect(change).toHaveBeenCalledWith(null);
   expect(change).not.toHaveBeenCalledWith(expect.objectContaining({ environment_id: 'env' }));
 });
+
+it('leaves loading on failure and recovers through retry without silently dropping defaults', async () => {
+  const status = vi.fn();
+  const change = vi.fn();
+  vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Temporary outage'));
+  render(<EnvironmentPicker repo="org/repo" onChange={change} onStatusChange={status} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('Temporary outage');
+  expect(status).toHaveBeenLastCalledWith('error');
+  expect(change).toHaveBeenLastCalledWith(null);
+  fireEvent.click(screen.getByRole('button', { name: 'environment.retry' }));
+  await waitFor(() => expect(status).toHaveBeenLastCalledWith('ready'));
+  await waitFor(() =>
+    expect(change).toHaveBeenLastCalledWith(
+      expect.objectContaining({ environment_id: 'env', global_revision: 2 }),
+    ),
+  );
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});

@@ -2495,6 +2495,7 @@ def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
     exit only joins a send that already finished, so it was lost for good.
     """
     import json as _json
+    import threading
 
     from cloud_agent_shared import operation_profiling
 
@@ -2518,22 +2519,43 @@ def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, _json.dumps(_descriptor()))
     operation_profiling.reset_cache()
 
-    # The record is frozen into the exporter while the file does not exist.
-    frozen = operation_profiling.start_operation(
-        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
-    )
-    assert frozen is not None
-    operation_profiling.finish(frozen, outcome="dispatched")
-    assert not sink.exists(), "the exporter has not written it yet"
+    # Keep the real exporter pending until delivery drains it. Without this
+    # gate, its thread can create the file before the precondition assertion.
+    release = threading.Event()
+    publish = operation_profiling._Exporter._publish
+    flush = operation_profiling.flush_sink
 
-    control = _Recorder()
-    counts = runner_mod.deliver_measurements(
-        control=control, job_id="ajob_1", measurement_ids=[frozen.measurement_id]
-    )
+    def _publish_after_drain(exporter, line, destination):
+        release.wait()
+        publish(exporter, line, destination)
 
-    assert counts["delivered"] == 1, "the queued record must still be delivered"
-    assert [body["record"]["measurement_id"] for body in control.sent] == [frozen.measurement_id]
-    operation_profiling.reset_cache()
+    def _release_and_flush(timeout=2.0):
+        release.set()
+        flush(timeout)
+
+    monkeypatch.setattr(operation_profiling._Exporter, "_publish", _publish_after_drain)
+    monkeypatch.setattr(operation_profiling, "flush_sink", _release_and_flush)
+    try:
+        # The record is frozen into the exporter while the file does not exist.
+        frozen = operation_profiling.start_operation(
+            operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+        )
+        assert frozen is not None
+        operation_profiling.finish(frozen, outcome="dispatched")
+        assert not sink.exists(), "the exporter has not written it yet"
+
+        control = _Recorder()
+        counts = runner_mod.deliver_measurements(
+            control=control, job_id="ajob_1", measurement_ids=[frozen.measurement_id]
+        )
+
+        assert counts["delivered"] == 1, "the queued record must still be delivered"
+        assert [body["record"]["measurement_id"] for body in control.sent] == [
+            frozen.measurement_id
+        ]
+    finally:
+        release.set()
+        operation_profiling.reset_cache()
 
 
 def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeypatch, tmp_path):

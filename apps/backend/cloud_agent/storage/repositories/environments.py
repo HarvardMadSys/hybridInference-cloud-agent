@@ -10,14 +10,18 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from cloud_agent.environments import EnvironmentBusy, EnvironmentConflict, EnvironmentNotFound
+from cloud_agent.environments import (
+    EnvironmentBusy,
+    EnvironmentCipher,
+    EnvironmentConflict,
+    EnvironmentNotFound,
+)
 from cloud_agent.execution_profiles import default_execution_profile, shared_sandbox_claim_attested
-from cloud_agent.source_control import SourceControlCipher
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent_shared.environment import (
-    ENVIRONMENT_DOMAIN,
     MAX_VARIABLES,
     BoundEnvironment,
+    EnvironmentInputError,
     EnvironmentScripts,
     EnvironmentVariable,
     VariableEdit,
@@ -38,8 +42,8 @@ def _id() -> str:
     return str(uuid.uuid4())
 
 
-def _cipher() -> SourceControlCipher:
-    return SourceControlCipher(domain=ENVIRONMENT_DOMAIN)
+def _cipher() -> EnvironmentCipher:
+    return EnvironmentCipher()
 
 
 class PostgresEnvironmentRepository:
@@ -231,7 +235,7 @@ class PostgresEnvironmentRepository:
         candidate: builtins.list[EnvironmentVariable],
     ) -> None:
         if len(candidate) > MAX_VARIABLES:
-            raise ValueError("An environment accepts at most 100 variables")
+            raise EnvironmentInputError("An environment accepts at most 100 variables")
         if repo is None:
             merge_variables(candidate)
             rows = await conn.fetch(
@@ -249,7 +253,7 @@ class PostgresEnvironmentRepository:
                         ),
                     )
                 except ValueError:
-                    raise ValueError(
+                    raise EnvironmentInputError(
                         f"Combined limits exceeded for environment {row['name']}"
                     ) from None
         else:
@@ -317,12 +321,12 @@ class PostgresEnvironmentRepository:
         scripts = EnvironmentScripts.model_validate(document).model_dump(mode="json")
         name = name.strip()
         if not 1 <= len(name) <= 80:
-            raise ValueError("Environment name must have 1-80 characters")
+            raise EnvironmentInputError("Environment name must have 1-80 characters")
         if repo is None and any(scripts.values()):
-            raise ValueError("Global scope accepts only variables")
+            raise EnvironmentInputError("Global scope accepts only variables")
         parsed = [VariableEdit.model_validate(e) for e in edits]
         if len(parsed) != len({e.name for e in parsed}):
-            raise ValueError("Duplicate variable edit")
+            raise EnvironmentInputError("Duplicate variable edit")
         try:
             async with self._pool.acquire() as conn, conn.transaction():
                 await self._environment_lock(conn, user_id)
@@ -348,7 +352,7 @@ class PostgresEnvironmentRepository:
                 if environment_id:
                     row = await self._environment_row(conn, user_id, environment_id)
                     if row["repo"] != repo:
-                        raise ValueError("Environment repository cannot be changed")
+                        raise EnvironmentInputError("Environment repository cannot be changed")
                 else:
                     if revision != 0:
                         raise EnvironmentConflict("Environment changed", current_revision=0)
@@ -380,7 +384,7 @@ class PostgresEnvironmentRepository:
                         values.pop(edit.name, None)
                     elif edit.operation == "keep":
                         if prior is None or (prior["secret"] and not edit.secret):
-                            raise ValueError(
+                            raise EnvironmentInputError(
                                 "Secret values must be replaced when changing to ordinary variables"
                             )
                         values[edit.name] = {**prior, "secret": edit.secret, "phase": edit.phase}
@@ -512,7 +516,7 @@ class PostgresEnvironmentRepository:
             await self._environment_lock(conn, user_id)
             name = name.strip()
             if not 1 <= len(name) <= 80:
-                raise ValueError("Environment name must have 1-80 characters")
+                raise EnvironmentInputError("Environment name must have 1-80 characters")
             fingerprint = (
                 __import__("hashlib")
                 .sha256(
@@ -617,7 +621,7 @@ class PostgresEnvironmentRepository:
         )
         overrides = [EnvironmentVariable.model_validate(v) for v in selection.get("overrides", [])]
         if len(overrides) > 50 or len(overrides) != len({v.name for v in overrides}):
-            raise ValueError("Task overrides must have at most 50 distinct variables")
+            raise EnvironmentInputError("Task overrides must have at most 50 distinct variables")
         merge_variables(
             self._environment_decode(
                 await self._environment_stored_variables(
@@ -837,8 +841,7 @@ class PostgresEnvironmentRepository:
         return await self.get_environment_run(user_id, run_id)
 
     async def list_environment_orphans(self, host: str) -> builtins.list[dict[str, Any]]:
-        """Fence expired tests and name only this enrolled host's cleanup work."""
-        await self.maintain_environments()
+        """Read only this enrolled host's tests already fenced by the reaper."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete AND state IN ('failed','cancelled')",
@@ -897,9 +900,6 @@ class PostgresEnvironmentRepository:
                 or (policy and policy["active_host"] not in (None, host))
             ):
                 return None
-            await conn.execute(
-                "UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND lease_expires_at<NOW()"
-            )
             host_row = await conn.fetchrow(
                 "SELECT * FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
             )
@@ -950,14 +950,14 @@ class PostgresEnvironmentRepository:
             if len(output) > 10000:
                 step["output"] = "[output truncated]\n" + output[-10000:]
         if len(json.dumps(steps).encode()) > 262144:
-            raise ValueError("Environment output exceeds limit")
+            raise EnvironmentInputError("Environment output exceeds limit")
         state = (
             row["state"]
             if row["state"] in {"failed", "cancelled"}
             else update.get("state", "running")
         )
         if state not in {"running", "succeeded", "failed", "cancelled"}:
-            raise ValueError("Invalid environment run state")
+            raise EnvironmentInputError("Invalid environment run state")
         cleanup = bool(update.get("cleanup_complete", False))
         if state != "running" and not cleanup:
             state = "running"
@@ -1038,7 +1038,7 @@ class PostgresEnvironmentRepository:
         output = SecretRedactor(bound.secrets()).text(str(update.get("output", row["output"])))
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE agent_environment_action_runs SET terminal_id=$3,state=$4,exit_code=$5,output=$6,updated_at=NOW() WHERE id=$1 AND user_id=$2",
+                "UPDATE agent_environment_action_runs SET terminal_id=$3,state=$4,exit_code=$5,output=$6,updated_at=NOW() WHERE id=$1 AND user_id=$2 AND state NOT IN ('succeeded','failed','closed','cancelled','stopped','unknown')",
                 run_id,
                 user_id,
                 update.get("terminal_id", row["terminal_id"]),

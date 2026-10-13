@@ -190,7 +190,9 @@ def _chat_idle_timeout_from_env() -> float:
     return float(raw) if raw else DEFAULT_CHAT_IDLE_TIMEOUT_S
 
 
+from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
+from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
@@ -612,6 +614,7 @@ class _TerminalSession:
         on_closed: Callable[[float], None] | None = None,
         limits: _TerminalLimits | None = None,
         secrets: dict[str, str] | None = None,
+        on_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.id = terminal_id
         self.shell = getattr(process, "shell", "sh")
@@ -631,6 +634,7 @@ class _TerminalSession:
         self._exit_code: int | None = None
         self._workdir = workdir
         self._on_closed = on_closed
+        self._on_result = on_result
         self._activity_released = False
         self._events: deque[_TerminalEvent] = deque()
         self._buffer_bytes = 0
@@ -723,6 +727,14 @@ class _TerminalSession:
                 os.utime(self._workdir, None)
 
     def _release_activity(self) -> None:
+        if self._on_result is not None:
+            try:
+                self._on_result(self.safe_output())
+            except Exception:
+                # The durable launch tombstone still prevents a replay. A
+                # failed result write must not retain the workspace activity
+                # token after the process has already exited.
+                logger.warning("workspace_action_result_persist_failed")
         callback: Callable[[float], None] | None = None
         last_activity_at = 0.0
         with self._condition:
@@ -996,7 +1008,9 @@ class _TerminalManager:
         max_sessions: int,
         max_sessions_per_workspace: int = MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
         limits: _TerminalLimits | None = None,
+        action_receipts: ActionReceipts | None = None,
     ) -> None:
+        self._action_receipts = action_receipts or ActionReceipts()
         self._idle_ttl_s = idle_ttl_s
         self._hard_ttl_s = hard_ttl_s
         self._max_sessions = max_sessions
@@ -1105,6 +1119,8 @@ class _TerminalManager:
                     raise HTTPException(status_code=409, detail="terminal workspace is not ready")
                 group = self._sessions.setdefault(workspace_id, {})
                 if terminal_id in group:
+                    if on_closed is not None:
+                        on_closed(now)
                     return group[terminal_id].descriptor()
                 global_active = sum(
                     session.holds_process
@@ -1168,6 +1184,14 @@ class _TerminalManager:
                         ),
                     },
                 )
+                if action is not None and environment is not None:
+                    previous = self._action_receipts.reserve(
+                        workspace_id, terminal_id, environment.binding_id, action.id
+                    )
+                    if previous is not None:
+                        if on_closed is not None:
+                            on_closed(now)
+                        return previous
                 try:
                     process = backend.spawn_terminal(spec, rows=rows, cols=cols)
                 except TerminalNotSupportedError as exc:
@@ -1192,6 +1216,13 @@ class _TerminalManager:
                     on_closed=on_closed,
                     secrets=environment.secrets() if environment else {},
                     limits=self._limits,
+                    on_result=(
+                        lambda result: self._action_receipts.finish(
+                            workspace_id, terminal_id, result
+                        )
+                    )
+                    if action
+                    else None,
                 )
                 evicted.extend(self._unlist_exited_locked(workspace_id))
                 session.operation_uid = int(spec.env["AGENT_ACTION_UID"]) if action else None
@@ -1369,6 +1400,22 @@ class _TerminalManager:
             raise HTTPException(status_code=404, detail="terminal does not exist")
         return session
 
+    def output(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
+        """Read a live summary or the action's durable terminal result."""
+        try:
+            session = self.get(workspace_id, terminal_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            receipt = self._action_receipts.read(workspace_id, terminal_id)
+            if receipt is None:
+                raise
+            return receipt
+        output = session.safe_output()
+        if session._suspended:
+            output["state"] = "paused"
+        return output
+
     def get_for_control(self, workspace_id: str, terminal_id: str) -> _TerminalSession:
         """Resolve a terminal only while its workspace-level fence is open."""
         self.reap()
@@ -1386,6 +1433,11 @@ class _TerminalManager:
             group = self._sessions.get(workspace_id, {})
             session = group.get(terminal_id)
         if session is None:
+            # Action run ids are UUIDs; ephemeral interactive terminal ids are not.
+            if re.fullmatch(
+                r"term_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", terminal_id
+            ):
+                self._action_receipts.stop(workspace_id, terminal_id)
             return {
                 "id": terminal_id,
                 "shell": "sh",
@@ -2844,38 +2896,8 @@ def create_app(
             * 1024
             * 1024,
         )
-        if body.environment and body.environment.secrets():
-            import base64
-
-            patterns = {
-                f"AGENT_SECRET_PATTERN_{i}": base64.b64encode(value.encode()).decode()
-                for i, value in enumerate(body.environment.secrets().values())
-                if value
-            }
-            # Repository paths and file reads stay in the sandbox; only the match boolean returns.
-            script = r"""import base64,json,os,pathlib,subprocess,sys
-root=pathlib.Path('/workspace')
-patterns=[base64.b64decode(v) for k,v in os.environ.items() if k.startswith("AGENT_SECRET_PATTERN_")]
-paths=subprocess.check_output(['git','diff','--name-only','-z','--diff-filter=ACMRT',sys.argv[1]],cwd=root).split(b'\0')
-for raw in paths:
- if not raw: continue
- path=root / raw.decode('utf-8')
- if path.is_symlink(): continue
- data=path.read_bytes()
- old=subprocess.run(['git','show',sys.argv[1]+':'+raw.decode('utf-8')],cwd=root,capture_output=True).stdout
- if any(data.count(p)>old.count(p) for value in patterns for p in (value,*value.splitlines()) if p): sys.exit(3)
-"""
-            check = backend.manager.exec_capture(
-                backend.spec,
-                ["python3", "-c", script, body.base_sha],
-                env=patterns,
-                workdir=CHAT_WORKDIR,
-                timeout_s=60,
-            )
-            if check.returncode:
-                raise SandboxError(
-                    "Snapshot contains a Secret value or could not be safely checked"
-                )
+        if body.environment is not None:
+            check_snapshot_secrets(backend, body.base_sha, body.environment)
         return result
 
     def capture_environment_snapshot(
@@ -3126,7 +3148,7 @@ for raw in paths:
         body: TerminalRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        if body.environment:
+        if body.environment is not None and body.environment.required:
             await endpoint_calls.run(
                 retained_owner(workspace_id).prepare_environment,
                 workspace_id,
@@ -3160,6 +3182,13 @@ for raw in paths:
         owner = retained_owner(workspace_id)
         terminal_token: str | None = None
         try:
+            if body.environment is not None and body.environment.required:
+                await endpoint_calls.run(
+                    owner.prepare_environment,
+                    workspace_id,
+                    body.environment,
+                    environment_preparation,
+                )
             with call.stage("admission"):
                 token, descriptor = await endpoint_calls.run(owner.terminal_opened, workspace_id)
             terminal_token = token
@@ -3174,13 +3203,6 @@ for raw in paths:
                     last_activity_monotonic=last_activity,
                 )
 
-            if body.environment:
-                await endpoint_calls.run(
-                    owner.prepare_environment,
-                    workspace_id,
-                    body.environment,
-                    environment_preparation,
-                )
             with call.stage("pty_spawn"):
                 body_out = await endpoint_calls.run(
                     terminals.create,
@@ -3208,9 +3230,11 @@ for raw in paths:
     async def terminal_output(
         workspace_id: str, terminal_id: str, _: None = Depends(authenticate)
     ) -> dict[str, Any]:
-        session = terminals.get(terminal_scope(workspace_id), terminal_id)
-        output = session.safe_output()
-        if session._suspended or retained_owner(workspace_id).status(workspace_id).snapshotting:
+        output = terminals.output(terminal_scope(workspace_id), terminal_id)
+        if (
+            output["state"] == "running"
+            and retained_owner(workspace_id).status(workspace_id).snapshotting
+        ):
             output["state"] = "paused"
         return output
 

@@ -24,14 +24,16 @@ from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import (
     EnvironmentBusy,
     EnvironmentConflict,
+    EnvironmentEncryptionError,
     EnvironmentNotFound,
 )
 from cloud_agent.schemas import REPO_PATTERN
-from cloud_agent.source_control import SourceControlError
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     MAX_IMPORT_BYTES,
+    MIN_SECRET_CHARS,
+    EnvironmentInputError,
     EnvironmentScripts,
     VariableEdit,
     parse_env,
@@ -49,16 +51,21 @@ class CredentialSafeRoute(APIRoute):
             try:
                 response = await original(request)
             except RequestValidationError as exc:
-                message = "Check the environment fields, reserved names and size limits."
+                errors = []
+                for error in exc.errors():
+                    message = error["msg"]
+                    cause = error.get("ctx", {}).get("error")
+                    if isinstance(cause, EnvironmentInputError):
+                        message = str(cause)
+                    elif error["type"] in {"value_error", "assertion_error"}:
+                        message = "Invalid field value"
+                    errors.append({"loc": error["loc"], "type": error["type"], "msg": message})
+                detail: Any = errors
                 if any(
-                    "execution_profile is server-owned" in error.get("msg", "")
-                    for error in exc.errors()
+                    "execution_profile is server-owned" in e.get("msg", "") for e in exc.errors()
                 ):
-                    message = "execution_profile is server-owned"
-                response = JSONResponse(
-                    status_code=422,
-                    content={"detail": message},
-                )
+                    detail = "execution_profile is server-owned"
+                response = JSONResponse(status_code=422, content={"detail": detail})
             except HTTPException as exc:
                 response = JSONResponse(
                     status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers
@@ -89,7 +96,7 @@ class CredentialSafeRoute(APIRoute):
                         ),
                     },
                 )
-            except SourceControlError:
+            except EnvironmentEncryptionError:
                 response = JSONResponse(
                     status_code=503,
                     content={
@@ -100,7 +107,7 @@ class CredentialSafeRoute(APIRoute):
                 response = JSONResponse(
                     status_code=422, content={"detail": "Invalid environment variable or script"}
                 )
-            except ValueError as exc:
+            except EnvironmentInputError as exc:
                 response = JSONResponse(status_code=422, content={"detail": str(exc)})
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -158,6 +165,7 @@ class ImportInput(RevisionInput):
     environment_id: str | None = Field(None, max_length=80)
     global_revision: int | None = Field(None, ge=0)
     text: str = Field(max_length=MAX_IMPORT_BYTES, repr=False)
+    ordinary_names: list[str] = Field(default_factory=list, max_length=100)
 
 
 class TestInput(BaseModel):
@@ -453,11 +461,12 @@ async def preview_import(
         "variables": [
             {
                 "name": v.name,
-                "secret": True,
+                "secret": v.secret,
+                "secret_allowed": not v.value or len(v.value.strip()) >= MIN_SECRET_CHARS,
                 "phase": v.phase,
                 "operation": "replace" if v.name in names else "add",
             }
-            for v in parse_env(body.text)
+            for v in parse_env(body.text, ordinary_names=body.ordinary_names)
         ],
     }
 
@@ -492,7 +501,7 @@ async def import_variables(
         },
         edits=[
             {**v.model_dump(exclude={"source"}), "operation": "replace"}
-            for v in parse_env(body.text)
+            for v in parse_env(body.text, ordinary_names=body.ordinary_names)
         ],
         expected_global_revision=body.global_revision,
     )
@@ -712,11 +721,12 @@ async def start_action(
         action_id,
         idempotency_key,
     )
+    if run["state"] != "starting":
+        return run
     job, broker = await _terminal_owner_workspace(
         job_id=job_id, user=user, store=store, app_credentials=credentials, require_ready=True
     )
     bound = await store.environments.get_environment_binding(user["user_id"], run["binding_id"])
-    await broker.prepare_environment(str(job["thread_id"]), bound)
     terminal = await broker.create_terminal(
         str(job["thread_id"]),
         rows=24,
@@ -726,8 +736,27 @@ async def start_action(
         run_id=run["id"],
     )
     return await store.environments.update_environment_action_run(
-        user["user_id"], run["id"], {"terminal_id": terminal["id"], "state": "running"}
+        user["user_id"], run["id"], {"terminal_id": terminal["id"], **_action_result(terminal)}
     )
+
+
+def _action_result(terminal: dict[str, Any]) -> dict[str, Any]:
+    state = terminal.get("state", "running")
+    if state == "exited":
+        state = "succeeded" if terminal.get("exit_code") == 0 else "failed"
+    return {
+        "state": state,
+        "exit_code": terminal.get("exit_code"),
+        "output": str(terminal.get("output") or ""),
+    }
+
+
+def _missing_action_result() -> dict[str, Any]:
+    return {
+        "state": "unknown",
+        "exit_code": None,
+        "output": "Execution result is unavailable. This run will not be replayed; review external effects before starting a new run.",
+    }
 
 
 @router.get("/environment-action-runs/{run_id}")
@@ -740,21 +769,24 @@ async def action_status(
     """Read live terminal state and bounded masked output for an operation."""
     store = require_store(store)
     run = await store.environments.get_environment_action_run(user["user_id"], run_id)
-    if run["state"] in {"succeeded", "failed", "closed", "cancelled", "stopped"}:
+    if run["state"] in {"succeeded", "failed", "closed", "cancelled", "stopped", "unknown"}:
         return run
     job, broker, _bound = await _action_context(user, store, run, credentials, require_ready=False)
-    if not run["terminal_id"]:
-        return run
-    terminal = await broker.terminal_output(str(job["thread_id"]), run["terminal_id"])
-    state = terminal.get("state", "running")
-    if state == "exited":
-        state = "succeeded" if terminal.get("exit_code") == 0 else "failed"
-    output = str(terminal.get("output") or "")
-    run = await store.environments.update_environment_action_run(
-        user["user_id"],
-        run_id,
-        {"state": state, "exit_code": terminal.get("exit_code"), "output": output},
-    )
+    terminal_id = run["terminal_id"] or "term_" + run["id"]
+    try:
+        terminal = await broker.terminal_output(str(job["thread_id"]), terminal_id)
+        update = _action_result(terminal)
+    except WorkspaceBrokerError as exc:
+        if exc.status_code != 404:
+            raise
+        # A starting HTTP request can still be in flight. Do not fence it prematurely.
+        if run["state"] == "starting" and run.get("updated_at"):
+            from datetime import UTC, datetime
+
+            if (datetime.now(UTC) - run["updated_at"]).total_seconds() < 1200:
+                return run
+        update = _missing_action_result()
+    run = await store.environments.update_environment_action_run(user["user_id"], run_id, update)
     return {**run, "job_id": job["id"]}
 
 
@@ -768,17 +800,28 @@ async def stop_action(
     """Stop this operation's terminal without touching other group processes."""
     store = require_store(store)
     run = await store.environments.get_environment_action_run(user["user_id"], run_id)
-    if run["state"] in {"succeeded", "failed", "stopped"}:
+    if run["state"] in {"succeeded", "failed", "closed", "cancelled", "stopped", "unknown"}:
         return run
     job, broker, _ = await _action_context(
         user, store, run, credentials, require_ready=False, recheck_entitlement=False
     )
     update: dict[str, Any] = {"state": "stopped"}
-    if run["terminal_id"]:
-        output = await broker.terminal_output(str(job["thread_id"]), run["terminal_id"])
+    terminal_id = run["terminal_id"] or "term_" + run["id"]
+    try:
+        output = await broker.terminal_output(str(job["thread_id"]), terminal_id)
         update["output"] = output.get("output", "")
         update["exit_code"] = output.get("exit_code")
-        await broker.delete_terminal(str(job["thread_id"]), run["terminal_id"])
+        if output.get("state") in {"exited", "unknown", "failed"}:
+            update = _action_result(output)
+    except WorkspaceBrokerError as exc:
+        if exc.status_code != 404:
+            raise
+        update = _missing_action_result()
+    try:
+        await broker.delete_terminal(str(job["thread_id"]), terminal_id)
+    except WorkspaceBrokerError as exc:
+        if exc.status_code != 404:
+            raise
     return await store.environments.update_environment_action_run(user["user_id"], run_id, update)
 
 

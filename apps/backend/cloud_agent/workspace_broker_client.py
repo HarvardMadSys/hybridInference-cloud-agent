@@ -185,13 +185,20 @@ class WorkspaceBrokerClient:
 
     async def require_environment_capability(self) -> None:
         """Require the capability from the actual authenticated broker replica."""
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get(f"{self._base_url}/health", headers=self._headers)
-            response.raise_for_status()
-            if "environment-v1" not in response.json().get("capabilities", []):
-                raise WorkspaceBrokerError(
-                    503, "Workspace broker must be upgraded for environment configuration"
+        try:
+            async with self._http(5) as client:
+                response = await client.get(
+                    f"{self._base_url}/health", headers=self._headers, timeout=5
                 )
+                response.raise_for_status()
+                if "environment-v1" not in response.json().get("capabilities", []):
+                    raise WorkspaceBrokerError(
+                        503, "Workspace broker must be upgraded for environment configuration"
+                    )
+        except (httpx.HTTPError, ValueError, AttributeError):
+            raise WorkspaceBrokerError(
+                503, "Workspace broker environment capability is unavailable"
+            ) from None
 
     async def prepare_environment(self, workspace_id: str, environment: Any) -> dict[str, Any]:
         """Require actual broker support before sending value-bearing configuration."""
@@ -312,6 +319,10 @@ class WorkspaceBrokerClient:
         environment: Any = None,
     ) -> dict[str, Any]:
         """Execute one bounded command in an isolated workspace sandbox."""
+        if environment is not None and environment.required:
+            await self.require_environment_capability()
+        else:
+            environment = None
         return await self._request(
             "POST",
             workspace_id,
@@ -341,6 +352,10 @@ class WorkspaceBrokerClient:
         run_id: str | None = None,
     ) -> dict[str, Any]:
         """Open one interactive terminal in a durable workspace."""
+        if environment is not None and environment.required:
+            await self.require_environment_capability()
+        else:
+            environment = None
         return await self._request(
             "POST",
             workspace_id,

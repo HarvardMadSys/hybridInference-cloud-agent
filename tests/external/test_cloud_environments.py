@@ -192,3 +192,63 @@ def test_real_snapshot_freezes_and_thaws_environment_services_and_actions(
     assert checked.returncode == 0, checked.stderr
     action.kill()
     action.wait()
+
+
+def test_real_manual_action_keeps_one_execution_after_terminal_eviction_and_restart(
+    retained_command_container, tmp_path
+):
+    from cloud_agent_host.action_receipts import ActionReceipts
+    from cloud_agent_host.workspace_broker import _TerminalManager
+    from cloud_agent_shared.environment import EnvironmentAction
+
+    backend = retained_command_container
+    backend.manager.exec_capture(
+        backend.spec,
+        ["chmod", "2770", "/workspace"],
+        user_uid=backend.manager.backend.uid,
+        user_gid=backend.manager.backend.gid,
+        timeout_s=10,
+    )
+    bound = BoundEnvironment(
+        binding_id="action-receipt-binding",
+        variables=[EnvironmentVariable(name="TOKEN", value="action-private-example")],
+        actions=[
+            EnvironmentAction(
+                id="deploy",
+                name="Deploy",
+                command='printf x >> /workspace/action-count; printf "%s" "$TOKEN"',
+            )
+        ],
+    )
+    receipts = ActionReceipts(tmp_path)
+    manager = _TerminalManager(
+        idle_ttl_s=60, hard_ttl_s=120, max_sessions=4, action_receipts=receipts
+    )
+    arguments = {
+        "rows": 24,
+        "cols": 80,
+        "backend": backend,
+        "environment": bound,
+        "action_id": "deploy",
+        "run_id": str(uuid.uuid4()),
+    }
+    result = manager.create("workspace", "/workspace", **arguments)
+    try:
+        deadline = time.monotonic() + 30
+        while receipts.read("workspace", result["id"])["state"] != "exited":
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        manager.delete("workspace", result["id"])
+        restarted = _TerminalManager(
+            idle_ttl_s=60, hard_ttl_s=120, max_sessions=4, action_receipts=ActionReceipts(tmp_path)
+        )
+        repeated = restarted.create("workspace", "/workspace", **arguments)
+        assert repeated["state"] == "exited" and repeated["exit_code"] == 0
+        assert "action-private-example" not in repeated["output"]
+        assert "[secret:TOKEN]" in repeated["output"]
+        count = backend.manager.exec_capture(
+            backend.spec, ["cat", "/workspace/action-count"], timeout_s=10
+        )
+        assert count.returncode == 0 and count.stdout == b"x"
+    finally:
+        manager.delete("workspace", result["id"])

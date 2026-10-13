@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 
 from cloud_agent.api.environments import CredentialSafeRoute
 
-router = APIRouter(prefix="/v1/agent", route_class=CredentialSafeRoute)
+router = APIRouter(prefix="/v1/agent")
 
 #: The moved handlers keep logging under the aggregator's logger name: the
 #: deployment's log pipeline selects on ``cloud_agent.api.routes``, and a
@@ -146,7 +146,6 @@ async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
     return usage
 
 
-@router.post("/jobs", response_model=AgentJobResponse, status_code=201)
 async def create_agent_job(
     body: AgentJobCreate,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
@@ -673,3 +672,13 @@ async def unpin_agent_thread(
 ) -> AgentThreadPinResponse:
     """Unpin the entire task thread containing an owned job."""
     return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
+
+
+router.add_api_route(
+    "/jobs",
+    create_agent_job,
+    methods=["POST"],
+    response_model=AgentJobResponse,
+    status_code=201,
+    route_class_override=CredentialSafeRoute,
+)

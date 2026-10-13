@@ -70,7 +70,7 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
             if getattr(store, "environments", None)
             else None
         )
-        if environment:
+        if environment is not None and environment.required:
             snapshot = {**snapshot, "environment": environment.model_dump(mode="json")}
         receipt = await broker.capture_shared_snapshot(snapshot)
         expected = {

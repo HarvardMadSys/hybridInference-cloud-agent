@@ -6,13 +6,23 @@
 
 | 检查 | 环境及结果 |
 | --- | --- |
-| `make check` | Linux、Python 3.12、Git/C 编译器/zstd；格式、lint、pydocstyle、mypy 通过，8,904 个测试通过、9 个跳过 |
-| `make ci-frontend` | Node.js 22；eslint、prettier、TypeScript、Vitest、server-only 和 runtime-config 全部通过，3,513 个测试通过 |
-| `make ci-database` | 每次新建 PostgreSQL 15，1,309 个测试通过、0 个跳过 |
-| Docker 实际生命周期验收 | 5 个测试通过，无推理请求、无外部网络请求；见下文 |
+| `make check` | Linux、Python 3.12、Git/C 编译器/zstd；格式、lint、pydocstyle、mypy 通过，8,934 个测试通过、9 个跳过 |
+| `make ci-frontend` | Node.js 22；eslint、prettier、TypeScript、Vitest、server-only 和 runtime-config 全部通过，3,516 个测试通过 |
+| `make ci-database` | 每次新建 PostgreSQL 15，1,312 个测试通过、0 个跳过 |
+| Docker 实际生命周期验收 | 6 个测试通过，无推理请求、无外部网络请求；见下文 |
 | 仓库检查 | `git diff --check`、提交内容的凭据扫描通过 |
 
 后端在 Linux 容器执行，因为进程冻结/清理测试需要真实 `/proc`。Git 元数据只读挂载，依赖由 `uv sync --frozen` 安装。9 个跳过来自已有测试：1 个需要 OpenSSH server parser，8 个需要 Docker Compose CLI；不是跳过本功能的新测试。数据库门禁使用独立临时数据库及四个 worker 数据库，不复用生产数据。
+
+## PR #576 评审回归覆盖
+
+- 非空短 Secret 在持久化前拒绝；`.env` 预览不回显值，需用户明确将 `DEBUG=1` 选为普通变量。多行短片段/通用头尾不误伤正常输出，完整值跨 chunk 仍被遮蔽。
+- 在真实 Git 仓库执行生产扫描脚本，覆盖未跟踪、已暂存、已跟踪、二进制、符号链接、忽略文件与删除旧值；保持用户 index 字节不变。
+- 空绑定固定旧任务选择但不要求环境协议；终端带有效配置时只有能力检查和终端创建两个 broker 请求，旧 broker 收不到值。
+- 后台测试执行可取消、单次占一个槽位、不会同步阻塞调用线程，孤儿查询节流且不执行全局写库维护。
+- 快捷操作保留 host 私有执行记录，回收和重启后的重试不重跑；缺失结果明确标为 unknown，迟到状态不能覆盖数据库终态。
+- 普通标题字段仍返回原字段校验错误；未知 ValueError 不作为 422 回显；SourceControlError 不误报环境加密故障。
+- 环境请求失败退出忙碌状态，编辑/仓库选择可用；恢复后不漏掉默认环境。
 
 ## 本功能覆盖
 
@@ -23,7 +33,7 @@
 - 独立环境测试的额度、host 槽位与 autoscaler 队列、lease、取消/完成竞争、清理确认；测试没有推理/MCP/仓库写凭据。
 - 流式跨 chunk/多行脱敏、控制字段保护、脱敏幂等与截断；受信发布扫描识别二进制/历史 Secret，允许只删除既有 Secret 内容。
 - 前端变量序列化、任务选择/临时覆盖、默认与基础环境选择，以及现有设置、工作区标签、菜单和页面的回归测试。
-- 环境维护失败不会中断原有 attempt 或上传清理；修改既有迁移/fixture、数据库时钟与统计快照用法时保留原断言。
+- 环境维护失败不会中断原有 attempt 或上传清理；修改既有迁移/fixture、数据库时钟与统计快照用法时保留原断言。日志导出测试用事件控制后台写入时序，避免把线程尚未调度当成测试前提。
 
 ## 实际 Docker 验收
 
@@ -34,6 +44,7 @@
 3. 操作在指定子目录执行；停止会清理其 detached 子进程，保留另一身份的进程。
 4. 快照冻结及解冻包含启动服务与手动操作身份，使用相同 UID 信号，不增加 capabilities。
 5. 一次性命令超时和输出溢出只清理该命令，保留容器及运行中的 sibling。
+6. 操作写入计数文件后，回收终端并重建管理器；同一运行重试的计数仍为 1，退出码和脱敏输出从持久记录恢复。
 
 镜像来自本地缓存 sandbox，仅在构建时把工作区/agent 目录所有权调整为当前生产 Dockerfile 的设置。执行时使用 non-root、`--cap-drop ALL` 和 no-new-privileges；测试容器采用 `network=none`，不代表重新验证了生产公网出口。容器均由独立标签与名称创建并清理。
 

@@ -38,12 +38,13 @@ def request_fingerprint(kind: str, payload: dict[str, Any], *, sensitive: bool =
         {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
     )
     if sensitive:
+        from cloud_agent.environments import EnvironmentEncryptionError
         from cloud_agent.settings import setting_env
-        from cloud_agent.source_control import ENV_ENCRYPTION_KEY, SourceControlError
+        from cloud_agent.source_control import ENV_ENCRYPTION_KEY
 
         material = setting_env(ENV_ENCRYPTION_KEY, "")
         if not material:
-            raise SourceControlError("Environment encryption is unavailable")
+            raise EnvironmentEncryptionError("Environment encryption is unavailable")
         key = hashlib.sha256(
             b"hybridinference/environment-request/v1\0" + material.encode()
         ).digest()

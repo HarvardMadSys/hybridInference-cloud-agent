@@ -44,12 +44,12 @@ def test_reserved_names_cannot_change_host_or_platform_credentials(name):
 
 
 def test_phase_override_replaces_global_definition_before_filtering():
-    global_value = EnvironmentVariable(name="TOKEN", value="global", phase="runtime")
-    local = EnvironmentVariable(name="TOKEN", value="build", phase="setup")
+    global_value = EnvironmentVariable(name="TOKEN", value="global-token", phase="runtime")
+    local = EnvironmentVariable(name="TOKEN", value="build-token", phase="setup")
     temporary = EnvironmentVariable(name="APP_ENV", value="test", secret=False)
     merged = merge_variables([global_value], [local], [temporary])
     bound = BoundEnvironment(binding_id="bound", variables=merged)
-    assert bound.values("setup") == {"TOKEN": "build", "APP_ENV": "test"}
+    assert bound.values("setup") == {"TOKEN": "build-token", "APP_ENV": "test"}
     assert bound.values("runtime") == {"APP_ENV": "test"}
     assert {v.name: v.source for v in bound.variables} == {
         "TOKEN": "environment",

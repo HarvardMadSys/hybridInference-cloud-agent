@@ -10,6 +10,8 @@ from typing import Literal
 from dotenv.parser import parse_stream
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS
+
 ENVIRONMENT_CAPABILITY = "environment-v1"
 MAX_VARIABLES = 100
 MAX_EFFECTIVE_VARIABLES = 150
@@ -78,14 +80,27 @@ RESERVED_PREFIXES = (
 Phase = Literal["setup", "runtime", "both"]
 
 
+class EnvironmentInputError(ValueError):
+    """A safe environment validation message containing no supplied value."""
+
+
+def validate_secret(name: str, value: str, secret: bool) -> None:
+    """Refuse ambiguous short credentials instead of silently disabling their protection."""
+    if secret and value and len(value.strip()) < MIN_SECRET_CHARS:
+        raise EnvironmentInputError(
+            f"Secret {name} must contain at least {MIN_SECRET_CHARS} characters; "
+            "use Ordinary only for a non-sensitive value"
+        )
+
+
 def validate_name(name: str) -> str:
     """Refuse names that affect platform credentials or host executables."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
-        raise ValueError("Invalid variable name")
+        raise EnvironmentInputError("Invalid variable name")
     if name in RESERVED_NAMES | DOCKER_CLIENT_ENV or name.startswith(RESERVED_PREFIXES):
-        raise ValueError(f"Variable {name} is reserved by the platform")
+        raise EnvironmentInputError(f"Variable {name} is reserved by the platform")
     if name.lower() in PROXY_ENV:
-        raise ValueError(f"Variable {name} is reserved by the platform")
+        raise EnvironmentInputError(f"Variable {name} is reserved by the platform")
     return name
 
 
@@ -110,7 +125,9 @@ class EnvironmentVariable(BaseModel):
     def valid_value(cls, value: str) -> str:
         """Bound process environment strings without including rejected values."""
         if "\0" in value or len(value.encode("utf-8")) > MAX_VALUE_BYTES:
-            raise ValueError("Variable values must be UTF-8 without NUL and at most 32 KiB")
+            raise EnvironmentInputError(
+                "Variable values must be UTF-8 without NUL and at most 32 KiB"
+            )
         return value
 
 
@@ -130,12 +147,13 @@ class VariableEdit(BaseModel):
         validate_name(self.name)
         if self.operation == "replace":
             if self.value is None:
-                raise ValueError("Replacement variables require a value")
+                raise EnvironmentInputError("Replacement variables require a value")
             EnvironmentVariable(
                 name=self.name, value=self.value, secret=self.secret, phase=self.phase
             )
+            validate_secret(self.name, self.value, self.secret)
         elif self.value is not None:
-            raise ValueError("Only replacement operations accept a value")
+            raise EnvironmentInputError("Only replacement operations accept a value")
         return self
 
 
@@ -154,7 +172,7 @@ class EnvironmentAction(BaseModel):
         """Keep action paths relative to the shared workspace."""
         path = PurePosixPath(value)
         if path.is_absolute() or ".." in path.parts or "\0" in value:
-            raise ValueError("Action directory must be relative to the workspace")
+            raise EnvironmentInputError("Action directory must be relative to the workspace")
         return str(path)
 
     @field_validator("command")
@@ -162,7 +180,7 @@ class EnvironmentAction(BaseModel):
     def valid_command(cls, value: str) -> str:
         """Reject process command strings with NUL."""
         if "\0" in value:
-            raise ValueError("Command cannot contain NUL")
+            raise EnvironmentInputError("Command cannot contain NUL")
         return value
 
 
@@ -179,9 +197,9 @@ class EnvironmentScripts(BaseModel):
     def valid_scripts(self) -> EnvironmentScripts:
         """Refuse duplicate operation identities and invalid shell text."""
         if len({a.id for a in self.actions}) != len(self.actions):
-            raise ValueError("Duplicate action id")
+            raise EnvironmentInputError("Duplicate action id")
         if any("\0" in v for v in (self.setup_script, self.start_script, self.verify_script)):
-            raise ValueError("Scripts cannot contain NUL")
+            raise EnvironmentInputError("Scripts cannot contain NUL")
         return self
 
 
@@ -217,12 +235,12 @@ class BoundEnvironment(EnvironmentScripts):
 def validate_effective(variables: list[EnvironmentVariable]) -> None:
     """Bound the effective union before either persistence or execution."""
     if len(variables) != len({v.name for v in variables}):
-        raise ValueError("Duplicate variable name")
+        raise EnvironmentInputError("Duplicate variable name")
     if len(variables) > MAX_EFFECTIVE_VARIABLES:
-        raise ValueError("Effective environment exceeds 150 variables")
+        raise EnvironmentInputError("Effective environment exceeds 150 variables")
     size = sum(len(v.name.encode()) + len(v.value.encode()) + 2 for v in variables)
     if size > MAX_ENVIRONMENT_BYTES:
-        raise ValueError("Effective environment exceeds 128 KiB")
+        raise EnvironmentInputError("Effective environment exceeds 128 KiB")
 
 
 def merge_variables(*scopes: list[EnvironmentVariable]) -> list[EnvironmentVariable]:
@@ -234,27 +252,37 @@ def merge_variables(*scopes: list[EnvironmentVariable]) -> list[EnvironmentVaria
         for v in scope
     }
     result = list(merged.values())
+    for variable in result:
+        validate_secret(variable.name, variable.value, variable.secret)
     validate_effective(result)
     return result
 
 
-def parse_env(text: str) -> list[EnvironmentVariable]:
+def parse_env(text: str, *, ordinary_names: list[str] | None = None) -> list[EnvironmentVariable]:
     """Parse dotenv syntax without interpolation or shell execution."""
     if len(text.encode("utf-8")) > MAX_IMPORT_BYTES:
-        raise ValueError("Import exceeds 1 MiB")
+        raise EnvironmentInputError("Import exceeds 1 MiB")
     result: list[EnvironmentVariable] = []
     names: set[str] = set()
     for binding in parse_stream(io.StringIO(text)):
         if binding.error or (binding.key is not None and binding.value is None):
-            raise ValueError(f"Invalid dotenv syntax at line {binding.original.line}")
+            raise EnvironmentInputError(f"Invalid dotenv syntax at line {binding.original.line}")
         if binding.key is None:
             continue
         if binding.key in names:
-            raise ValueError(f"Duplicate variable {binding.key}")
+            raise EnvironmentInputError(f"Duplicate variable {binding.key}")
         names.add(binding.key)
-        result.append(EnvironmentVariable(name=binding.key, value=binding.value or ""))
+        result.append(
+            EnvironmentVariable(
+                name=binding.key,
+                value=binding.value or "",
+                secret=binding.key not in (ordinary_names or []),
+            )
+        )
+    if set(ordinary_names or []) - names:
+        raise EnvironmentInputError("Ordinary selections must name variables in this import")
     if len(result) > MAX_VARIABLES:
-        raise ValueError("An environment accepts at most 100 variables")
+        raise EnvironmentInputError("An environment accepts at most 100 variables")
     validate_effective(result)
     return result
 
@@ -263,6 +291,7 @@ def environment_limits() -> dict[str, int | str | list[str]]:
     """Expose the same limits and reserved vocabulary used by execution."""
     return {
         "capability": ENVIRONMENT_CAPABILITY,
+        "secret_min_chars": MIN_SECRET_CHARS,
         "variables": MAX_VARIABLES,
         "effective_variables": MAX_EFFECTIVE_VARIABLES,
         "value_bytes": MAX_VALUE_BYTES,

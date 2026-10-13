@@ -191,13 +191,17 @@ def create_app() -> FastAPI:
     app.include_router(skills.router)
     from fastapi.responses import JSONResponse
 
-    from cloud_agent.environments import EnvironmentBusy, EnvironmentConflict, EnvironmentNotFound
-    from cloud_agent.source_control import SourceControlError
+    from cloud_agent.environments import (
+        EnvironmentBusy,
+        EnvironmentConflict,
+        EnvironmentEncryptionError,
+        EnvironmentNotFound,
+    )
 
     async def environment_failure(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, EnvironmentNotFound):
             code, detail = 404, "Environment not found"
-        elif isinstance(exc, SourceControlError):
+        elif isinstance(exc, EnvironmentEncryptionError):
             code, detail = 503, "Environment encryption is unavailable"
         else:
             code, detail = 409, str(exc)
@@ -205,7 +209,12 @@ def create_app() -> FastAPI:
             status_code=code, content={"detail": detail}, headers={"Cache-Control": "no-store"}
         )
 
-    for failure in (EnvironmentNotFound, EnvironmentConflict, EnvironmentBusy, SourceControlError):
+    for failure in (
+        EnvironmentNotFound,
+        EnvironmentConflict,
+        EnvironmentBusy,
+        EnvironmentEncryptionError,
+    ):
         app.add_exception_handler(failure, environment_failure)
 
     app.include_router(environments.router)

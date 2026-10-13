@@ -12,6 +12,8 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  'environment.shortSecret': 'Secret 至少需要 8 个字符。DEBUG=1 等非敏感配置请选择“普通变量”。',
+  'environment.loadFailed': '环境配置加载失败。请重试或切换仓库；已保存的变量不会被静默跳过。',
   'environment.title': '环境',
   'environment.description': '配置一次、测试通过，之后在新工作区重复使用。',
   'environment.editor': '编辑环境',

@@ -53,6 +53,7 @@ from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
+from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
@@ -883,7 +884,7 @@ async def worker_claim(
                     raise SourceControlError("Workspace broker must be upgraded") from None
             else:
                 environment = None
-        except SourceControlError:
+        except (SourceControlError, EnvironmentEncryptionError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for environment-capable host or available encryption"

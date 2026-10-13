@@ -420,8 +420,8 @@ async def run_agent_job_terminal_command(
         if job.get("environment_binding_id")
         else None
     )
-    if environment:
-        await broker.prepare_environment(_workspace_id(job), environment)
+    if environment is not None and not environment.required:
+        environment = None
     try:
         result = await broker.terminal(
             _workspace_id(job),
@@ -467,8 +467,8 @@ async def create_agent_job_terminal(
         if job.get("environment_binding_id")
         else None
     )
-    if environment:
-        await broker.prepare_environment(_workspace_id(job), environment)
+    if environment is not None and not environment.required:
+        environment = None
     scope = root_scope(TERMINAL_OPEN, job, service=ROUTE_TERMINALS)
     with measured_operation(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)

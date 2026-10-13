@@ -130,6 +130,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker.
   const [repo, setRepo] = useState(draft?.repo ?? '');
+  const [environmentStatus, setEnvironmentStatus] = useState<'loading' | 'ready' | 'error'>(
+    'loading',
+  );
   const [environmentSelection, setEnvironmentSelection] = useState<EnvironmentSelection | null>(
     null,
   );
@@ -379,12 +382,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     submitting ||
     goalCommand.busy ||
     rewriting ||
-    Boolean(config?.environment_limits && repo && !environmentSelection);
+    Boolean(config?.environment_limits && repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
     config?.github_connected === true &&
     task.trim().length > 0 &&
     !busy &&
+    !(config?.environment_limits && repo && !environmentSelection) &&
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&
@@ -735,7 +739,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         )}
 
         {config?.environment_limits && (
-          <EnvironmentPicker repo={repo} onChange={setEnvironmentSelection} />
+          <EnvironmentPicker
+            repo={repo}
+            onChange={setEnvironmentSelection}
+            onStatusChange={setEnvironmentStatus}
+          />
         )}
         <div className="flex min-w-0 flex-wrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
           {disconnected ? (

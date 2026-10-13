@@ -3435,7 +3435,7 @@
         "type": "object"
       },
       "AgentConfigResponse": {
-        "description": "What this deployment will actually accept, for the task composer.\n\nThe composer used to show a repository, a branch, a runtime and a model as\nstatic labels while submitting different hardcoded values — so the UI\ndescribed a job nobody was running. These are the real answers.",
+        "description": "What this deployment will actually accept, for the task composer.\n\nThe composer used to show a repository, a branch, a runtime and a model as\nstatic labels while submitting different hardcoded values \u2014 so the UI\ndescribed a job nobody was running. These are the real answers.",
         "properties": {
           "attachment_limits": {
             "$ref": "#/components/schemas/AttachmentLimits"
@@ -3496,12 +3496,12 @@
               },
               "type": "array"
             },
-            "description": "Effort levels each model accepts, from the gateway's registry. The composer offers the intersection with the chosen runtime's, and no control at all when that is empty — which is also what it shows against a gateway too old to answer this.",
+            "description": "Effort levels each model accepts, from the gateway's registry. The composer offers the intersection with the chosen runtime's, and no control at all when that is empty \u2014 which is also what it shows against a gateway too old to answer this.",
             "title": "Model Reasoning Efforts",
             "type": "object"
           },
           "models": {
-            "description": "Model ids an agent job can actually call for this user — the same predicate the create endpoint enforces, not the /v1/models list.",
+            "description": "Model ids an agent job can actually call for this user \u2014 the same predicate the create endpoint enforces, not the /v1/models list.",
             "items": {
               "type": "string"
             },
@@ -3707,7 +3707,7 @@
         "type": "object"
       },
       "AgentHostCapacity": {
-        "description": "A stored observation as the admin page reads it.\n\nThe runner's own fields, plus the server's accounting: when the block\narrived, when the observation was taken, how old that makes it now, and\nwhether it is fresh enough to render as a current value. ``freshness`` is\n``unavailable`` only in the sense the page renders when this object is\nabsent altogether — a host that has never sent a usable block.",
+        "description": "A stored observation as the admin page reads it.\n\nThe runner's own fields, plus the server's accounting: when the block\narrived, when the observation was taken, how old that makes it now, and\nwhether it is fresh enough to render as a current value. ``freshness`` is\n``unavailable`` only in the sense the page renders when this object is\nabsent altogether \u2014 a host that has never sent a usable block.",
         "properties": {
           "cpu_logical_count": {
             "anyOf": [
@@ -4038,7 +4038,7 @@
         "type": "object"
       },
       "AgentHostCapacityPoint": {
-        "description": "One minute of the history: an observation, or an explicit gap.\n\nA bucket with no observation carries nulls rather than zeroes, and that is\nthe whole point of the shape — a machine that was measured at 3% and a\nmachine nobody measured are different facts, and a zero would draw the\nsecond one as the first.",
+        "description": "One minute of the history: an observation, or an explicit gap.\n\nA bucket with no observation carries nulls rather than zeroes, and that is\nthe whole point of the shape \u2014 a machine that was measured at 3% and a\nmachine nobody measured are different facts, and a zero would draw the\nsecond one as the first.",
         "properties": {
           "bucket_at": {
             "format": "date-time",
@@ -4228,7 +4228,7 @@
                 "type": "null"
               }
             ],
-            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha — a branch moves, and the publisher applies onto a pinned commit. The draft PR targets this branch; jobs that name none target the deployment default.",
+            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha \u2014 a branch moves, and the publisher applies onto a pinned commit. The draft PR targets this branch; jobs that name none target the deployment default.",
             "title": "Base Ref"
           },
           "base_sha": {
@@ -4359,7 +4359,7 @@
                 "type": "null"
               }
             ],
-            "description": "How hard the model should think. Null is Auto — no instruction, whatever the runtime and model do by default. A value must be one both the runtime and the chosen model accept (the intersection reported by /config); anything else is a 400 rather than a silently dropped or nearest-value setting.",
+            "description": "How hard the model should think. Null is Auto \u2014 no instruction, whatever the runtime and model do by default. A value must be one both the runtime and the chosen model accept (the intersection reported by /config); anything else is a 400 rather than a silently dropped or nearest-value setting.",
             "title": "Reasoning Effort"
           },
           "repo": {
@@ -5785,7 +5785,7 @@
                 "type": "null"
               }
             ],
-            "description": "The last accepted host observation, with the server's own received/sampled times and freshness. Null means no usable observation has ever arrived — which is not the same as an idle machine, and is rendered as unavailable rather than as zero."
+            "description": "The last accepted host observation, with the server's own received/sampled times and freshness. Null means no usable observation has ever arrived \u2014 which is not the same as an idle machine, and is rendered as unavailable rather than as zero."
           },
           "capacity_epoch": {
             "anyOf": [
@@ -5897,7 +5897,7 @@
                 "type": "null"
               }
             ],
-            "description": "Why this host is claiming nothing despite having room — it could not start the process a turn runs in, repeatedly. Empty means nothing is wrong; null means this host does not report it.",
+            "description": "Why this host is claiming nothing despite having room \u2014 it could not start the process a turn runs in, repeatedly. Empty means nothing is wrong; null means this host does not report it.",
             "title": "Launch Error"
           },
           "runner_version": {
@@ -5923,7 +5923,7 @@
                 "type": "null"
               }
             ],
-            "description": "The *default* CLI version per runtime id — what a job runs when nothing has been selected.",
+            "description": "The *default* CLI version per runtime id \u2014 what a job runs when nothing has been selected.",
             "title": "Runtime Versions"
           },
           "runtime_versions_available": {
@@ -6005,7 +6005,7 @@
                 "type": "null"
               }
             ],
-            "description": "The runtime settings this host reported applying on its last heartbeat. Null means it has never reported — a runner that predates admin settings, or one that has not beaten since it enrolled.",
+            "description": "The runtime settings this host reported applying on its last heartbeat. Null means it has never reported \u2014 a runner that predates admin settings, or one that has not beaten since it enrolled.",
             "title": "Settings Applied"
           },
           "settings_desired": {
@@ -6546,7 +6546,7 @@
         "type": "object"
       },
       "AgentThreadEvent": {
-        "description": "One event, with the turn it belongs to.\n\nThe per-job stream needs no such label — every row is the turn being\nwatched. Across a thread it is what lets a reader see where one turn\nended and the next began.",
+        "description": "One event, with the turn it belongs to.\n\nThe per-job stream needs no such label \u2014 every row is the turn being\nwatched. Across a thread it is what lets a reader see where one turn\nended and the next began.",
         "properties": {
           "attempt_id": {
             "title": "Attempt Id",
@@ -7094,7 +7094,7 @@
         "type": "object"
       },
       "AgentThreadStatsResponse": {
-        "description": "Aggregate numbers for a thread, derived from its stored events.\n\nOptional fields are ``null`` when the thread's runtime does not report\nthe underlying measure — never ``0``, which a reader would take as a\nmeasured fact. ``timing_source`` and ``tokens_source`` tell a client how\nmuch to trust the rest, so the UI can label what it renders.",
+        "description": "Aggregate numbers for a thread, derived from its stored events.\n\nOptional fields are ``null`` when the thread's runtime does not report\nthe underlying measure \u2014 never ``0``, which a reader would take as a\nmeasured fact. ``timing_source`` and ``tokens_source`` tell a client how\nmuch to trust the rest, so the UI can label what it renders.",
         "properties": {
           "cache_hit_ratio": {
             "anyOf": [
@@ -9748,7 +9748,7 @@
         "type": "object"
       },
       "GoalInput": {
-        "description": "An owner's completion condition for one conversation.\n\n``max_rounds`` is **tri-state**, and the three states mean three different\nthings. Omitted — the ordinary case, and what every client sends — leaves\nwhatever bound the goal already carries exactly as it is, so a caller that\nonly changes the words cannot silently delete a limit its owner stated.\nA number states a bound; an explicit ``null`` lifts one. That is why no\nwriter reads the field directly: what the request *said* is\n:attr:`states_max_rounds`, and absence is not the same fact as ``None``.",
+        "description": "An owner's completion condition for one conversation.\n\n``max_rounds`` is **tri-state**, and the three states mean three different\nthings. Omitted \u2014 the ordinary case, and what every client sends \u2014 leaves\nwhatever bound the goal already carries exactly as it is, so a caller that\nonly changes the words cannot silently delete a limit its owner stated.\nA number states a bound; an explicit ``null`` lifts one. That is why no\nwriter reads the field directly: what the request *said* is\n:attr:`states_max_rounds`, and absence is not the same fact as ``None``.",
         "properties": {
           "max_rounds": {
             "anyOf": [
@@ -10378,7 +10378,7 @@
         "properties": {
           "duplicate_sandbox_id": {
             "default": false,
-            "description": "One sandbox id was seen on more than one container. Both are counted — both hold resources — and the anomaly is surfaced.",
+            "description": "One sandbox id was seen on more than one container. Both are counted \u2014 both hold resources \u2014 and the anomaly is surfaced.",
             "title": "Duplicate Sandbox Id",
             "type": "boolean"
           },
@@ -10685,7 +10685,7 @@
         "type": "object"
       },
       "HostCapacityStorage": {
-        "description": "The filesystem that holds sandbox writable layers, as one runner read it.\n\nBlock space in the ``df`` sense: ``total`` is the filesystem's size,\n``free`` includes the blocks reserved for root, ``available`` excludes\nthem. All three are kept because the percentage is taken over\n``used + available`` — collapsing ``free`` into ``total - available`` would\nreport every healthy filesystem as partly full with blocks nobody wrote.\n\nStrict integers on purpose: a JSON ``true`` or ``\"1024\"`` coerced to a\nnumber would put a figure on an operator's screen that no machine ever\nmeasured, and the coercion is invisible by the time it is rendered.",
+        "description": "The filesystem that holds sandbox writable layers, as one runner read it.\n\nBlock space in the ``df`` sense: ``total`` is the filesystem's size,\n``free`` includes the blocks reserved for root, ``available`` excludes\nthem. All three are kept because the percentage is taken over\n``used + available`` \u2014 collapsing ``free`` into ``total - available`` would\nreport every healthy filesystem as partly full with blocks nobody wrote.\n\nStrict integers on purpose: a JSON ``true`` or ``\"1024\"`` coerced to a\nnumber would put a figure on an operator's screen that no machine ever\nmeasured, and the coercion is invisible by the time it is rendered.",
         "properties": {
           "available_bytes": {
             "maximum": 9007199254740991.0,
@@ -10718,7 +10718,7 @@
                 "type": "null"
               }
             ],
-            "description": "Human-readable label for the filesystem measured — the host mount root the deployment attested, not the Docker data root, which can be a different disk. Tooltip only; no logic reads it.",
+            "description": "Human-readable label for the filesystem measured \u2014 the host mount root the deployment attested, not the Docker data root, which can be a different disk. Tooltip only; no logic reads it.",
             "title": "Target"
           },
           "total_bytes": {
@@ -10820,7 +10820,7 @@
                 "type": "null"
               }
             ],
-            "description": "The hot sandboxes this host still holds, generation-scoped. Each listed residency's lease is extended; one that no longer holds its generation comes back in residencies_lost and the host tears that sandbox down (design §7).",
+            "description": "The hot sandboxes this host still holds, generation-scoped. Each listed residency's lease is extended; one that no longer holds its generation comes back in residencies_lost and the host tears that sandbox down (design \u00a77).",
             "title": "Residencies"
           },
           "retained_sandboxes": {
@@ -10892,7 +10892,7 @@
                 "type": "null"
               }
             ],
-            "description": "Every CLI version this image holds, keyed by runtime id, default first — the menu an admin may select from. Null means not reported and leaves the control plane's last knowledge in place.",
+            "description": "Every CLI version this image holds, keyed by runtime id, default first \u2014 the menu an admin may select from. Null means not reported and leaves the control plane's last knowledge in place.",
             "title": "Runtime Versions Available"
           },
           "sandbox_archive_settings_applied_revision": {
@@ -10931,7 +10931,7 @@
                 "type": "null"
               }
             ],
-            "description": "The container runtime jobs actually execute under, e.g. 'io.containerd.kata.v2'. Empty string is a positive statement — shared-kernel runc — where omitting the field means 'not reported' and keeps the last known value. This is the isolation attestation the scheduler and admin read; it must say what runs, not what the deployment intended.",
+            "description": "The container runtime jobs actually execute under, e.g. 'io.containerd.kata.v2'. Empty string is a positive statement \u2014 shared-kernel runc \u2014 where omitting the field means 'not reported' and keeps the last known value. This is the isolation attestation the scheduler and admin read; it must say what runs, not what the deployment intended.",
             "title": "Sandbox Runtime"
           },
           "settings_applied": {
@@ -10954,7 +10954,7 @@
                 "type": "null"
               }
             ],
-            "description": "The runtime settings this host is applying now, by key — the workspace broker's as it last confirmed them. Null means not reported and keeps what is stored.",
+            "description": "The runtime settings this host is applying now, by key \u2014 the workspace broker's as it last confirmed them. Null means not reported and keeps what is stored.",
             "title": "Settings Applied"
           },
           "settings_local": {
@@ -11022,7 +11022,7 @@
             "type": "string"
           },
           "residencies_lost": {
-            "description": "The reported beats whose generation no longer holds its residency — echoed back with the generation, so a late answer to an old beat cannot end the successor the host has since established. The host fences those member processes; the retained container still owns their native session files.",
+            "description": "The reported beats whose generation no longer holds its residency \u2014 echoed back with the generation, so a late answer to an old beat cannot end the successor the host has since established. The host fences those member processes; the retained container still owns their native session files.",
             "items": {
               "$ref": "#/components/schemas/ResidencyBeat"
             },
@@ -11100,7 +11100,7 @@
             "type": "string"
           },
           "capabilities": {
-            "description": "What this machine can run — runtime tiers, sandbox backends, whatever a job may ask for. A job goes to a host only when the host declares everything the job requires.",
+            "description": "What this machine can run \u2014 runtime tiers, sandbox backends, whatever a job may ask for. A job goes to a host only when the host declares everything the job requires.",
             "items": {
               "maxLength": 256,
               "type": "string"
@@ -11128,7 +11128,7 @@
             "type": "object"
           },
           "name": {
-            "description": "This machine's name in the pool. It must be the name the token was issued for — the token names its host, so a machine cannot register under a name an admin did not choose for it.",
+            "description": "This machine's name in the pool. It must be the name the token was issued for \u2014 the token names its host, so a machine cannot register under a name an admin did not choose for it.",
             "maxLength": 253,
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
             "title": "Name",
@@ -11175,7 +11175,7 @@
                 "type": "null"
               }
             ],
-            "description": "Set when the control plane could not use the broker_url this host reported: unreachable from here, or refusing the shared broker credential. Enrolment still succeeds — a broker is often still starting — but every file, terminal and git request for this host's jobs will fail until it is fixed.",
+            "description": "Set when the control plane could not use the broker_url this host reported: unreachable from here, or refusing the shared broker credential. Enrolment still succeeds \u2014 a broker is often still starting \u2014 but every file, terminal and git request for this host's jobs will fail until it is fixed.",
             "title": "Broker Error"
           },
           "credential": {
@@ -11497,6 +11497,14 @@
             ],
             "title": "Global Revision"
           },
+          "ordinary_names": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Ordinary Names",
+            "type": "array"
+          },
           "revision": {
             "minimum": 0.0,
             "title": "Revision",
@@ -11804,7 +11812,7 @@
         "description": "Admin request for a one-time host enrollment token.",
         "properties": {
           "host": {
-            "description": "The name this token may register, chosen here rather than by the machine that redeems it. Registration upserts, so a name already in use has its credential revoked and its row reset to 'enrolling' — a typo on a machine being set up would otherwise evict a live host from the pool. Naming an existing host is how a rebuilt machine is deliberately re-enrolled.",
+            "description": "The name this token may register, chosen here rather than by the machine that redeems it. Registration upserts, so a name already in use has its credential revoked and its row reset to 'enrolling' \u2014 a typo on a machine being set up would otherwise evict a live host from the pool. Naming an existing host is how a rebuilt machine is deliberately re-enrolled.",
             "maxLength": 253,
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
             "title": "Host",
@@ -11829,7 +11837,7 @@
         "description": "The enrollment token, shown exactly once.",
         "properties": {
           "enroll_token": {
-            "description": "Single-use. Only its hash is stored, so this value cannot be recovered — issue another one rather than looking it up.",
+            "description": "Single-use. Only its hash is stored, so this value cannot be recovered \u2014 issue another one rather than looking it up.",
             "title": "Enroll Token",
             "type": "string"
           },
@@ -12212,7 +12220,7 @@
         "type": "object"
       },
       "McpIntegrationResponse": {
-        "description": "One catalogue MCP server, and whether this user has connected it.\n\nCarries no credential and no upstream URL — the same rule as\n:class:`McpConnectionSummary`, for the same reason, and enforced the same way:\nthere is no field either could occupy. ``account_label`` is what the\nprovider calls the connected account, which is the user's own name for it\nand the only way to tell two connections apart in the UI.",
+        "description": "One catalogue MCP server, and whether this user has connected it.\n\nCarries no credential and no upstream URL \u2014 the same rule as\n:class:`McpConnectionSummary`, for the same reason, and enforced the same way:\nthere is no field either could occupy. ``account_label`` is what the\nprovider calls the connected account, which is the user's own name for it\nand the only way to tell two connections apart in the UI.",
         "properties": {
           "account_label": {
             "anyOf": [
@@ -15192,7 +15200,7 @@
         "type": "object"
       },
       "TurnResourceSummary": {
-        "description": "One attempt's whole-turn member execution window, as stored and read.\n\nDerived from the stored snapshot rather than recomputed: the list view, the\ndetail view and any later aggregation share one reducer. ``state`` is\nderived too — a stored ``collecting`` snapshot for an attempt that is\nalready terminal reads as ``interrupted``, with ``observed_through_ms``\nkept so the UI can say how far it actually got instead of rounding it up\nto the end of the task.",
+        "description": "One attempt's whole-turn member execution window, as stored and read.\n\nDerived from the stored snapshot rather than recomputed: the list view, the\ndetail view and any later aggregation share one reducer. ``state`` is\nderived too \u2014 a stored ``collecting`` snapshot for an attempt that is\nalready terminal reads as ``interrupted``, with ``observed_through_ms``\nkept so the UI can say how far it actually got instead of rounding it up\nto the end of the task.",
         "properties": {
           "cpu": {
             "$ref": "#/components/schemas/TurnCpuResources"
@@ -15282,7 +15290,7 @@
         "type": "object"
       },
       "TurnStorageIoResources": {
-        "description": "Storage I/O the kernel charged to the member's own tasks.\n\nThis is task I/O accounting, not what the host disk physically did: page\ncache, writeback, the filesystem and Kata virtiofs can all move where a\nbyte is attributed. ``rchar``/``wchar`` are deliberately absent — they\ncount pipes, sockets and terminals too, so they cannot stand in for\nstorage I/O.",
+        "description": "Storage I/O the kernel charged to the member's own tasks.\n\nThis is task I/O accounting, not what the host disk physically did: page\ncache, writeback, the filesystem and Kata virtiofs can all move where a\nbyte is attributed. ``rchar``/``wchar`` are deliberately absent \u2014 they\ncount pipes, sockets and terminals too, so they cannot stand in for\nstorage I/O.",
         "properties": {
           "method": {
             "const": "task_io_accounting",
@@ -16356,7 +16364,7 @@
           },
           "mcp_token": {
             "default": "",
-            "description": "The sandbox's *second* credential, for this service's MCP relay. Scoped `mcp`, so it opens the relay and nothing else — not the worker surface, and not the gateway. The relay's address is the claiming host's own, the one its network rules admit; the claim names none.",
+            "description": "The sandbox's *second* credential, for this service's MCP relay. Scoped `mcp`, so it opens the relay and nothing else \u2014 not the worker surface, and not the gateway. The relay's address is the claiming host's own, the one its network rules admit; the claim names none.",
             "title": "Mcp Token",
             "type": "string"
           },
@@ -16496,7 +16504,7 @@
         "type": "object"
       },
       "WorkerContinuityRequest": {
-        "description": "Which continuity rung this attempt is running on (design §9).\n\n``hot`` means a matching supervisor-owned resident process accepted this\nturn. ``warm_native`` means the Docker-owned native session was resumed in\na replacement process. The rung remains diagnostic; NEW/LIVE/RESTORED/LOST\nis the product-facing context contract.",
+        "description": "Which continuity rung this attempt is running on (design \u00a79).\n\n``hot`` means a matching supervisor-owned resident process accepted this\nturn. ``warm_native`` means the Docker-owned native session was resumed in\na replacement process. The rung remains diagnostic; NEW/LIVE/RESTORED/LOST\nis the product-facing context contract.",
         "properties": {
           "context_status": {
             "anyOf": [
@@ -16602,7 +16610,7 @@
                 "type": "null"
               }
             ],
-            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha — a branch moves, and the publisher applies onto a pinned commit. The draft PR targets this branch; jobs that name none target the deployment default.",
+            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha \u2014 a branch moves, and the publisher applies onto a pinned commit. The draft PR targets this branch; jobs that name none target the deployment default.",
             "title": "Base Ref"
           },
           "base_sha": {
@@ -16615,7 +16623,7 @@
                 "type": "null"
               }
             ],
-            "description": "The commit the agent actually worked from. Recorded only when the job did not already carry one — the publisher cannot apply a patch without knowing its base, and a job may be submitted without naming a commit.",
+            "description": "The commit the agent actually worked from. Recorded only when the job did not already carry one \u2014 the publisher cannot apply a patch without knowing its base, and a job may be submitted without naming a commit.",
             "title": "Base Sha"
           },
           "detail": {
@@ -16957,7 +16965,7 @@
         "description": "A claimed turn handed back because it provably never began.",
         "properties": {
           "reason": {
-            "description": "Why the turn was never started, in the audit trail's own vocabulary — 'launch_failed' when the process that would have run it could not be started or exited without taking delivery. This is not a way to abandon a turn that is running: the control plane refuses the release once the turn has been admitted.",
+            "description": "Why the turn was never started, in the audit trail's own vocabulary \u2014 'launch_failed' when the process that would have run it could not be started or exited without taking delivery. This is not a way to abandon a turn that is running: the control plane refuses the release once the turn has been admitted.",
             "maxLength": 64,
             "minLength": 1,
             "pattern": "^[a-z][a-z0-9_]*$",
@@ -21278,7 +21286,7 @@
     },
     "/admin/agent/runner-hosts/enroll-token": {
       "post": {
-        "description": "Mint a one-time token that lets one named machine join the pool.\n\nReturned in full here and **nowhere else** — only its hash is stored, so\nthere is no endpoint that can show it again and no database read that can\nrecover it. An operator who loses it issues another.\n\n**The token names its host, and the caller here is the one who names it.**\nIt did not, once, and the name was therefore whatever the registering\nmachine typed — while registration upserts, so a name that already belongs\nto a live host revokes that host's credential and drops it back to\n``enrolling``. A mistyped name evicted a working, busy machine from the\nclaim pool. Refusing names already in use was the other candidate, but it\nbreaks the case the upsert exists for (a rebuilt machine coming back under\nits own name) and leaves the naming decision on the unauthenticated side\nanyway. Registration always needs a freshly minted token, so binding the\nname costs the operator nothing and moves the decision to the party this\nendpoint has already authenticated.\n\nThe TTL stays short for the reason it always was: the window is one\nmachine, once, for as long as it takes to finish a setup already under way.",
+        "description": "Mint a one-time token that lets one named machine join the pool.\n\nReturned in full here and **nowhere else** \u2014 only its hash is stored, so\nthere is no endpoint that can show it again and no database read that can\nrecover it. An operator who loses it issues another.\n\n**The token names its host, and the caller here is the one who names it.**\nIt did not, once, and the name was therefore whatever the registering\nmachine typed \u2014 while registration upserts, so a name that already belongs\nto a live host revokes that host's credential and drops it back to\n``enrolling``. A mistyped name evicted a working, busy machine from the\nclaim pool. Refusing names already in use was the other candidate, but it\nbreaks the case the upsert exists for (a rebuilt machine coming back under\nits own name) and leaves the naming decision on the unauthenticated side\nanyway. Registration always needs a freshly minted token, so binding the\nname costs the operator nothing and moves the decision to the party this\nendpoint has already authenticated.\n\nThe TTL stays short for the reason it always was: the window is one\nmachine, once, for as long as it takes to finish a setup already under way.",
         "operationId": "issue_host_enroll_token_admin_agent_runner_hosts_enroll_token_post",
         "parameters": [
           {
@@ -21391,7 +21399,7 @@
     },
     "/admin/agent/runner-hosts/{host}/capacity-history": {
       "get": {
-        "description": "Read one host's stored CPU and memory history.\n\nSeparate from the pool endpoint on purpose. The table is the page's main\ninformation and it loads on every poll; a 24-hour curve is wanted only when\nan operator opens one machine, and folding it into the poll would make\nevery thirty seconds cost a day of rows per host.\n\nOnly the current epoch is served. A rebuilt machine inherits its name, so\nan older generation's points describe hardware that is no longer there —\nthe response carries the epoch so a client can tell that its curve is\nstale rather than let it appear to continue into the new machine.\n\nEvery point is one observation of one minute, and a minute nobody measured\ncomes back as an explicit null rather than as an interpolated value: the\nchart exists to show when a machine was in trouble, and a filled-in gap is\nthe one thing that would hide it.",
+        "description": "Read one host's stored CPU and memory history.\n\nSeparate from the pool endpoint on purpose. The table is the page's main\ninformation and it loads on every poll; a 24-hour curve is wanted only when\nan operator opens one machine, and folding it into the poll would make\nevery thirty seconds cost a day of rows per host.\n\nOnly the current epoch is served. A rebuilt machine inherits its name, so\nan older generation's points describe hardware that is no longer there \u2014\nthe response carries the epoch so a client can tell that its curve is\nstale rather than let it appear to continue into the new machine.\n\nEvery point is one observation of one minute, and a minute nobody measured\ncomes back as an explicit null rather than as an interpolated value: the\nchart exists to show when a machine was in trouble, and a filled-in gap is\nthe one thing that would hide it.",
         "operationId": "get_agent_runner_host_capacity_history_admin_agent_runner_hosts__host__capacity_history_get",
         "parameters": [
           {
@@ -21666,7 +21674,7 @@
     },
     "/admin/agent/runner-hosts/{host}/slots": {
       "put": {
-        "description": "Ask one host to run this many turns at once, without touching its deployment.\n\nThe host runs one long-lived service and starts a process per turn as it\nclaims one, so this is a limit rather than a fleet size: nothing is started\nor stopped when it changes. The host reads it off its next heartbeat answer\nand serves it from then on, reporting it back as ``slots_total``.\n\nThe claim admits against the lower of the requested and reported numbers.\nLowering therefore takes effect immediately, before the host has even heard\nabout it, and turns already running are untouched — they finish, and the\nhost simply claims nothing more until it is under the new limit. Raising\ntakes effect when the host confirms, which is one heartbeat away.\n\n**Saving is not applying.** This stores the number and says so; the page\nshows whether the host has confirmed it, and says when a host is offline or\nwhen its runner predates remote sizing and needs a redeploy to change.\n``null`` returns the host to its own ``AGENT_HOST_SLOTS`` default.",
+        "description": "Ask one host to run this many turns at once, without touching its deployment.\n\nThe host runs one long-lived service and starts a process per turn as it\nclaims one, so this is a limit rather than a fleet size: nothing is started\nor stopped when it changes. The host reads it off its next heartbeat answer\nand serves it from then on, reporting it back as ``slots_total``.\n\nThe claim admits against the lower of the requested and reported numbers.\nLowering therefore takes effect immediately, before the host has even heard\nabout it, and turns already running are untouched \u2014 they finish, and the\nhost simply claims nothing more until it is under the new limit. Raising\ntakes effect when the host confirms, which is one heartbeat away.\n\n**Saving is not applying.** This stores the number and says so; the page\nshows whether the host has confirmed it, and says when a host is offline or\nwhen its runner predates remote sizing and needs a redeploy to change.\n``null`` returns the host to its own ``AGENT_HOST_SLOTS`` default.",
         "operationId": "set_agent_runner_host_slots_admin_agent_runner_hosts__host__slots_put",
         "parameters": [
           {
@@ -23861,7 +23869,7 @@
     },
     "/healthz": {
       "get": {
-        "description": "Liveness only — deliberately not readiness.\n\nA readiness probe here would have to decide what a degraded control\nplane is (no gateway? no git credential?), and every answer to that\nbelongs to whoever operates it.",
+        "description": "Liveness only \u2014 deliberately not readiness.\n\nA readiness probe here would have to decide what a degraded control\nplane is (no gateway? no git credential?), and every answer to that\nbelongs to whoever operates it.",
         "operationId": "healthz_healthz_get",
         "responses": {
           "200": {
@@ -23987,17 +23995,17 @@
     },
     "/v1/agent/config": {
       "get": {
-        "description": "What this deployment will actually accept.\n\nThe composer showed a repository, a branch, a runtime and a model as static\nlabels while submitting different hardcoded values, so the UI described a\njob nobody was running. A picker has to be built from the same answers the\ncreate endpoint enforces, or it is decoration.\n\nAnswers while the GitHub App is unavailable — the models, runtimes and MCP\nconnections are all still true — and says so in ``github_load_status``.",
+        "description": "What this deployment will actually accept.\n\nThe composer showed a repository, a branch, a runtime and a model as static\nlabels while submitting different hardcoded values, so the UI described a\njob nobody was running. A picker has to be built from the same answers the\ncreate endpoint enforces, or it is decoration.\n\nAnswers while the GitHub App is unavailable \u2014 the models, runtimes and MCP\nconnections are all still true \u2014 and says so in ``github_load_status``.",
         "operationId": "get_agent_config_v1_agent_config_get",
         "parameters": [
           {
-            "description": "Ask GitHub again for this user's repositories instead of reusing the last minute's answer — for a repository just given to the App.",
+            "description": "Ask GitHub again for this user's repositories instead of reusing the last minute's answer \u2014 for a repository just given to the App.",
             "in": "query",
             "name": "fresh",
             "required": false,
             "schema": {
               "default": false,
-              "description": "Ask GitHub again for this user's repositories instead of reusing the last minute's answer — for a repository just given to the App.",
+              "description": "Ask GitHub again for this user's repositories instead of reusing the last minute's answer \u2014 for a repository just given to the App.",
               "title": "Fresh",
               "type": "boolean"
             }
@@ -25628,7 +25636,7 @@
     },
     "/v1/agent/github/connect": {
       "post": {
-        "description": "Record the installations this user proved they can reach.\n\nThe browser sends the code GitHub handed it; the platform exchanges it for\na token that speaks *as that user* and asks GitHub which installations they\ncan see. Nothing the browser asserts is trusted — an installation id posted\ndirectly would be exactly the confused deputy this whole path exists to\nprevent, so the id is only ever taken from GitHub's own answer.",
+        "description": "Record the installations this user proved they can reach.\n\nThe browser sends the code GitHub handed it; the platform exchanges it for\na token that speaks *as that user* and asks GitHub which installations they\ncan see. Nothing the browser asserts is trusted \u2014 an installation id posted\ndirectly would be exactly the confused deputy this whole path exists to\nprevent, so the id is only ever taken from GitHub's own answer.",
         "operationId": "connect_github_v1_agent_github_connect_post",
         "parameters": [
           {
@@ -25741,7 +25749,7 @@
     },
     "/v1/agent/host/heartbeat": {
       "post": {
-        "description": "Report liveness, and whatever about this machine has changed.\n\nPromotes ``enrolling`` and ``offline`` hosts to ``online``: a machine that\ncomes back from a partition needs no operator to put it back to work.\nDeliberately does **not** promote a ``draining`` one — a heartbeat says \"I\nam here\", not \"I should be taking work\" — and a ``disabled`` host cannot\nget this far, because its credential no longer authenticates.",
+        "description": "Report liveness, and whatever about this machine has changed.\n\nPromotes ``enrolling`` and ``offline`` hosts to ``online``: a machine that\ncomes back from a partition needs no operator to put it back to work.\nDeliberately does **not** promote a ``draining`` one \u2014 a heartbeat says \"I\nam here\", not \"I should be taking work\" \u2014 and a ``disabled`` host cannot\nget this far, because its credential no longer authenticates.",
         "operationId": "heartbeat_host_v1_agent_host_heartbeat_post",
         "parameters": [
           {
@@ -25801,7 +25809,7 @@
     },
     "/v1/agent/host/register": {
       "post": {
-        "description": "Spend a one-time enrollment token and receive a host credential.\n\nThe token is consumed before the credential is minted, and both happen\nbefore the response is written — so a machine that crashes mid-registration\nhas burnt its token and needs a new one. That is the right way round: the\nalternative leaves a token that looks unused but may have already produced\na credential.\n\nThe host starts at ``enrolling`` and claims nothing until it heartbeats.\nA machine that registers and never comes up therefore never receives work,\nwhich is the difference between a pool entry and a promise.\n\n``name`` is checked against the name the token was issued for, inside the\nsame statement that spends it. Registration upserts, so a name already held\nby a live host loses its credential and drops back to ``enrolling``; before\nthe binding, one typo here evicted a working machine from the pool. A\nmismatch does not consume the token, so a typo is retried rather than\nre-issued.",
+        "description": "Spend a one-time enrollment token and receive a host credential.\n\nThe token is consumed before the credential is minted, and both happen\nbefore the response is written \u2014 so a machine that crashes mid-registration\nhas burnt its token and needs a new one. That is the right way round: the\nalternative leaves a token that looks unused but may have already produced\na credential.\n\nThe host starts at ``enrolling`` and claims nothing until it heartbeats.\nA machine that registers and never comes up therefore never receives work,\nwhich is the difference between a pool entry and a promise.\n\n``name`` is checked against the name the token was issued for, inside the\nsame statement that spends it. Registration upserts, so a name already held\nby a live host loses its credential and drops back to ``enrolling``; before\nthe binding, one typo here evicted a working machine from the pool. A\nmismatch does not consume the token, so a typo is retried rather than\nre-issued.",
         "operationId": "register_host_v1_agent_host_register_post",
         "requestBody": {
           "content": {
@@ -25913,7 +25921,7 @@
     },
     "/v1/agent/integrations": {
       "get": {
-        "description": "Return configured and connected state for source control and MCP.\n\nOne response for one page, deliberately: the settings screen shows both\nkinds of connection together, and two requests would let it render a\nhalf-refreshed state after a disconnect. The MCP half is a summary — adding,\ntesting and selecting a connection live under ``/v1/agent/mcp``.\n\nAnswers while the GitHub App is unavailable, and says so, rather than\nfailing the whole page: that is the one place a user sees the outage.",
+        "description": "Return configured and connected state for source control and MCP.\n\nOne response for one page, deliberately: the settings screen shows both\nkinds of connection together, and two requests would let it render a\nhalf-refreshed state after a disconnect. The MCP half is a summary \u2014 adding,\ntesting and selecting a connection live under ``/v1/agent/mcp``.\n\nAnswers while the GitHub App is unavailable, and says so, rather than\nfailing the whole page: that is the one place a user sees the outage.",
         "operationId": "list_source_control_integrations_v1_agent_integrations_get",
         "parameters": [
           {
@@ -25960,7 +25968,7 @@
     },
     "/v1/agent/integrations/github": {
       "delete": {
-        "description": "Forget this user's GitHub connection: the account, its token, every grant.\n\nThe stored token is why this exists: removing installations one by one\nleaves it behind. GitHub is also asked to withdraw the App's authorization,\nbest effort — the local rows go whether or not it answers. Works while the\nApp is unavailable: these are this service's own rows.",
+        "description": "Forget this user's GitHub connection: the account, its token, every grant.\n\nThe stored token is why this exists: removing installations one by one\nleaves it behind. GitHub is also asked to withdraw the App's authorization,\nbest effort \u2014 the local rows go whether or not it answers. Works while the\nApp is unavailable: these are this service's own rows.",
         "operationId": "disconnect_github_account_v1_agent_integrations_github_delete",
         "parameters": [
           {
@@ -26233,7 +26241,7 @@
     },
     "/v1/agent/jobs": {
       "get": {
-        "description": "List jobs from the authenticated user's active or archived threads.\n\n``repo`` narrows the page to one project. It is a filter over what the\ncaller already owns, not an access grant, so an unentitled repo is not an\nerror here — it simply matches none of their rows.",
+        "description": "List jobs from the authenticated user's active or archived threads.\n\n``repo`` narrows the page to one project. It is a filter over what the\ncaller already owns, not an access grant, so an unentitled repo is not an\nerror here \u2014 it simply matches none of their rows.",
         "operationId": "list_agent_jobs_v1_agent_jobs_get",
         "parameters": [
           {
@@ -26715,7 +26723,7 @@
     },
     "/v1/agent/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47).",
+        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit \u2014 Stop does not start\nthe next one \u2014 and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47).",
         "operationId": "cancel_agent_job_v1_agent_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -27233,7 +27241,7 @@
     },
     "/v1/agent/jobs/{job_id}/stream": {
       "get": {
-        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off — which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection.",
+        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off \u2014 which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection.",
         "operationId": "stream_agent_job_events_v1_agent_jobs__job_id__stream_get",
         "parameters": [
           {
@@ -30768,7 +30776,7 @@
     },
     "/v1/agent/service/oncall/jobs": {
       "post": {
-        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.",
+        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt \u2014 and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.",
         "operationId": "create_oncall_job_v1_agent_service_oncall_jobs_post",
         "parameters": [
           {
@@ -30881,7 +30889,7 @@
     },
     "/v1/agent/service/oncall/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one on-call job.\n\nThe relay calls this when its await deadline passes or the incident\nresolves while the analysis is still running — the answer is already\nstale, so the tokens it would keep spending buy nothing.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition at its next heartbeat, after which\nthe reaper stops renewing the attempt's grant and the sandbox credential\ndies on its own TTL. Unlike the owner route there is no terminal-resume\nsettling here: on-call jobs open no interactive terminals, and reaching for\nthe workspace broker would couple this door to a service it never needs.",
+        "description": "Request cancellation of one on-call job.\n\nThe relay calls this when its await deadline passes or the incident\nresolves while the analysis is still running \u2014 the answer is already\nstale, so the tokens it would keep spending buy nothing.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition at its next heartbeat, after which\nthe reaper stops renewing the attempt's grant and the sandbox credential\ndies on its own TTL. Unlike the owner route there is no terminal-resume\nsettling here: on-call jobs open no interactive terminals, and reaching for\nthe workspace broker would couple this door to a service it never needs.",
         "operationId": "cancel_oncall_job_v1_agent_service_oncall_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -31832,7 +31840,7 @@
         "summary": "Get Agent Goal"
       },
       "put": {
-        "description": "Create, replace or edit the conversation's completion condition.\n\nA new objective is a new authorization: it mints a new goal identity, starts\nthe round count over, and becomes active. Editing the bound of an active\ngoal leaves the identity and the rounds spent alone; editing a paused one\nleaves it paused, because changing the words is not resuming it.\n\n``max_rounds`` is the owner's own bound and is *optional*: omitted — what\nevery client sends — means the goal runs until it is finished, stopped,\ncleared, blocked on the owner, or an existing run-time limit applies. There\nis no default and no maximum. An explicit value is honored exactly, and is\ndistinguishable from its absence because absence is ``null``, never a large\ninteger.\n\n``revision`` is what makes two edits from two tabs resolvable — the second is\nrefused with a 409 rather than silently overwriting the first. Omitted means\n\"write it whatever it currently says\", which is what a first set wants.",
+        "description": "Create, replace or edit the conversation's completion condition.\n\nA new objective is a new authorization: it mints a new goal identity, starts\nthe round count over, and becomes active. Editing the bound of an active\ngoal leaves the identity and the rounds spent alone; editing a paused one\nleaves it paused, because changing the words is not resuming it.\n\n``max_rounds`` is the owner's own bound and is *optional*: omitted \u2014 what\nevery client sends \u2014 means the goal runs until it is finished, stopped,\ncleared, blocked on the owner, or an existing run-time limit applies. There\nis no default and no maximum. An explicit value is honored exactly, and is\ndistinguishable from its absence because absence is ``null``, never a large\ninteger.\n\n``revision`` is what makes two edits from two tabs resolvable \u2014 the second is\nrefused with a 409 rather than silently overwriting the first. Omitted means\n\"write it whatever it currently says\", which is what a first set wants.",
         "operationId": "set_agent_goal_v1_agent_threads__thread_id__goal_put",
         "parameters": [
           {
@@ -31971,7 +31979,7 @@
     },
     "/v1/agent/threads/{thread_id}/goal/resume": {
       "post": {
-        "description": "Start a paused goal moving again, and record the obligation to schedule.\n\nThe owner's authorization is the trigger: no model report is needed to start\nworking again, and the wakeup this writes is what makes the next round\nhappen — the request does not wait for it, and does not need to.\n\nA goal that paused because it reached a bound the *owner* set is resumed\nwithout that bound, and the response says so: ``max_rounds`` comes back\n``null``. Refusing instead would leave the only Resume control in the\nproduct pointing at a state nothing can clear — the round bound has no\nconfiguration surface — which is the dead end this endpoint exists to\nremove.",
+        "description": "Start a paused goal moving again, and record the obligation to schedule.\n\nThe owner's authorization is the trigger: no model report is needed to start\nworking again, and the wakeup this writes is what makes the next round\nhappen \u2014 the request does not wait for it, and does not need to.\n\nA goal that paused because it reached a bound the *owner* set is resumed\nwithout that bound, and the response says so: ``max_rounds`` comes back\n``null``. Refusing instead would leave the only Resume control in the\nproduct pointing at a state nothing can clear \u2014 the round bound has no\nconfiguration surface \u2014 which is the dead end this endpoint exists to\nremove.",
         "operationId": "resume_agent_goal_v1_agent_threads__thread_id__goal_resume_post",
         "parameters": [
           {
@@ -32098,7 +32106,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or the workspace is\nunpublished at the locked write. An accepted idle-only action creates its\nturn in that same transaction without entering the pending queue.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn \u2014 the same checks a follow-up always passed \u2014 and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made \u2014 the turn if it has become one, the waiting message if\nnot \u2014 and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or the workspace is\nunpublished at the locked write. An accepted idle-only action creates its\nturn in that same transaction without entering the pending queue.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {
@@ -32329,7 +32337,7 @@
     },
     "/v1/agent/threads/{thread_id}/messages/{message_id}/send-now": {
       "post": {
-        "description": "Send one waiting message into the live turn.\n\nThe owner's choice, kept: the message goes in front of the model before\nits next tool call, and joins the transcript where the turn's own stream\nsays the turn took it. Until then it is ``sending``. A turn no host has\ntaken yet is given it once one has. A turn that answers without another\ntool call never takes it, and it goes as the next turn, as any waiting\nmessage does. A turn that cannot have it at all — its host is out of\nreach, or it just ended — leaves it waiting where it was, and\n``not_delivered_reason`` says why. With nothing live, this is an ordinary\nsend.",
+        "description": "Send one waiting message into the live turn.\n\nThe owner's choice, kept: the message goes in front of the model before\nits next tool call, and joins the transcript where the turn's own stream\nsays the turn took it. Until then it is ``sending``. A turn no host has\ntaken yet is given it once one has. A turn that answers without another\ntool call never takes it, and it goes as the next turn, as any waiting\nmessage does. A turn that cannot have it at all \u2014 its host is out of\nreach, or it just ended \u2014 leaves it waiting where it was, and\n``not_delivered_reason`` says why. With nothing live, this is an ordinary\nsend.",
         "operationId": "send_pending_message_now_v1_agent_threads__thread_id__messages__message_id__send_now_post",
         "parameters": [
           {
@@ -33056,7 +33064,7 @@
     },
     "/v1/agent/worker/claim": {
       "post": {
-        "description": "Claim the next queued job and mint this attempt's capability token.\n\nReturns ``null`` (HTTP 200) when the queue is empty, and equally when an\noperator has pinned agent jobs to a different host than the one this runner\nreports. The two are deliberately the same answer on the wire: a runner\nthat has been switched away from should idle exactly as it does when there\nis no work, not treat it as an error worth retrying differently. Which host\nis active is an admin question, answered on the admin surface.\n\n**Enrolled-host only.** ``claim_job`` takes the oldest queued job across all\ntenants, and the response carries that job's repo, prompt, and metadata\nplus a working capability token for it — so ordinary API-key auth here\nwould let any customer dequeue and read another customer's job, and drain\nthe queue besides.\n\nThe per-host credential opens registration/heartbeat/claim surfaces and\nnever enters the sandbox; only the returned per-attempt tokens go in.",
+        "description": "Claim the next queued job and mint this attempt's capability token.\n\nReturns ``null`` (HTTP 200) when the queue is empty, and equally when an\noperator has pinned agent jobs to a different host than the one this runner\nreports. The two are deliberately the same answer on the wire: a runner\nthat has been switched away from should idle exactly as it does when there\nis no work, not treat it as an error worth retrying differently. Which host\nis active is an admin question, answered on the admin surface.\n\n**Enrolled-host only.** ``claim_job`` takes the oldest queued job across all\ntenants, and the response carries that job's repo, prompt, and metadata\nplus a working capability token for it \u2014 so ordinary API-key auth here\nwould let any customer dequeue and read another customer's job, and drain\nthe queue besides.\n\nThe per-host credential opens registration/heartbeat/claim surfaces and\nnever enters the sandbox; only the returned per-attempt tokens go in.",
         "operationId": "worker_claim_v1_agent_worker_claim_post",
         "parameters": [
           {
@@ -33436,7 +33444,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/continuity": {
       "post": {
-        "description": "Record which continuity rung this attempt runs on (design §9).\n\nObservability, deliberately fenced like every other worker write: a\nsuperseded attempt must not be able to relabel how the live one ran.",
+        "description": "Record which continuity rung this attempt runs on (design \u00a79).\n\nObservability, deliberately fenced like every other worker write: a\nsuperseded attempt must not be able to relabel how the live one ran.",
         "operationId": "worker_report_continuity_v1_agent_worker_jobs__job_id__continuity_post",
         "parameters": [
           {
@@ -33766,7 +33774,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/release": {
       "post": {
-        "description": "Hand a claimed turn back to the queue, having never started it.\n\nThe one path from a claim back to ``queued`` without spending an attempt.\nA host claims a turn and then starts the process that will run it; when\nthat process cannot be started, or exits without taking delivery, the turn\nhas provably not begun and the person waiting on it should not wait out a\nlease that nothing is holding.\n\nA short retry delay lets other queued work proceed while the host recovers\nfrom a temporary refusal, including work that can resume an existing sandbox.\n\n**Not an escape hatch for a turn that is running.** The release is refused\nonce the turn has been admitted to the CLI, and the check is the database's\nrather than the caller's: replaying an admitted prompt executes the same\ninstruction twice, which is what the retained-session rules exist to\nprevent. A caller that is refused has lost nothing — the lease was always\nthe backstop, and it still is.",
+        "description": "Hand a claimed turn back to the queue, having never started it.\n\nThe one path from a claim back to ``queued`` without spending an attempt.\nA host claims a turn and then starts the process that will run it; when\nthat process cannot be started, or exits without taking delivery, the turn\nhas provably not begun and the person waiting on it should not wait out a\nlease that nothing is holding.\n\nA short retry delay lets other queued work proceed while the host recovers\nfrom a temporary refusal, including work that can resume an existing sandbox.\n\n**Not an escape hatch for a turn that is running.** The release is refused\nonce the turn has been admitted to the CLI, and the check is the database's\nrather than the caller's: replaying an admitted prompt executes the same\ninstruction twice, which is what the retained-session rules exist to\nprevent. A caller that is refused has lost nothing \u2014 the lease was always\nthe backstop, and it still is.",
         "operationId": "worker_release_v1_agent_worker_jobs__job_id__release_post",
         "parameters": [
           {
@@ -34482,7 +34490,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/turn-resources": {
       "post": {
-        "description": "Record one cumulative whole-turn member execution window.\n\nA separate report from the legacy resource rollup, with its own semantics:\nit is cumulative rather than a closed window, so the same snapshot can\narrive more than once while ``report_seq`` stays the only thing that\norders it. ``stored`` and ``duplicate`` are both success — an acknowledged\ncheckpoint whose response was lost must be safe to resend unchanged.\n\nThe body is bounded before it is parsed. The contract caps one summary at\n16 KiB of UTF-8, and a rejected oversize report has to be cheap to reject;\nletting the model build first would let an unbounded body allocate before\nthe bound is ever checked. Measuring the raw body is also the only check\nthat counts what actually crossed the wire rather than what survived\nparsing.\n\nIdentity comes from the signed claims only. The body cannot name an\nattempt, a lease, or a job, so a snapshot can never be filed against\nanything but the caller's own fenced attempt.",
+        "description": "Record one cumulative whole-turn member execution window.\n\nA separate report from the legacy resource rollup, with its own semantics:\nit is cumulative rather than a closed window, so the same snapshot can\narrive more than once while ``report_seq`` stays the only thing that\norders it. ``stored`` and ``duplicate`` are both success \u2014 an acknowledged\ncheckpoint whose response was lost must be safe to resend unchanged.\n\nThe body is bounded before it is parsed. The contract caps one summary at\n16 KiB of UTF-8, and a rejected oversize report has to be cheap to reject;\nletting the model build first would let an unbounded body allocate before\nthe bound is ever checked. Measuring the raw body is also the only check\nthat counts what actually crossed the wire rather than what survived\nparsing.\n\nIdentity comes from the signed claims only. The body cannot name an\nattempt, a lease, or a job, so a snapshot can never be filed against\nanything but the caller's own fenced attempt.",
         "operationId": "worker_report_turn_resources_v1_agent_worker_jobs__job_id__turn_resources_post",
         "parameters": [
           {
@@ -34736,7 +34744,7 @@
     },
     "/v1/session/logout": {
       "post": {
-        "description": "Clear the session cookie.\n\nUnauthenticated on purpose: signing out must work when the session is\nalready expired or malformed, which is exactly when a browser most wants\nit. There is nothing to protect — the only effect is deleting a cookie the\ncaller already holds.\n\nThe attributes must match the ones the cookie was set with, or the browser\nkeeps the original and the user stays signed in.",
+        "description": "Clear the session cookie.\n\nUnauthenticated on purpose: signing out must work when the session is\nalready expired or malformed, which is exactly when a browser most wants\nit. There is nothing to protect \u2014 the only effect is deleting a cookie the\ncaller already holds.\n\nThe attributes must match the ones the cookie was set with, or the browser\nkeeps the original and the user stays signed in.",
         "operationId": "session_logout_v1_session_logout_post",
         "responses": {
           "200": {

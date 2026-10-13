@@ -4037,6 +4037,11 @@ def run_forever(
         )
     )
     turns = TurnPool(launch=launch)
+    from cloud_agent_host.environment_tests import EnvironmentTestWorker
+
+    environment_tests = (
+        EnvironmentTestWorker(base_url, backend) if isinstance(backend, ContainerBackend) else None
+    )
     # The limit this host is willing to serve right now. Held across beats so
     # a control plane that is briefly unreachable leaves the host running what
     # it last confirmed rather than falling back to a default nobody chose.
@@ -4165,6 +4170,8 @@ def run_forever(
         other, which is what keeps a shut-down runner from waiting on a Docker
         daemon it no longer needs.
         """
+        if environment_tests is not None:
+            environment_tests.close()
         pool.stop()
         retained_stop_worker.close()
         if policy_sync is not None:
@@ -4243,7 +4250,8 @@ def run_forever(
             if not pool.claimable:
                 time.sleep(idle_wait)
                 continue
-            if not turns.may_claim(limit):
+            test_slots = int(environment_tests is not None and environment_tests.busy)
+            if not turns.may_claim(max(0, limit - test_slots)):
                 # A freed local slot should be noticed promptly. This does
                 # not increase empty-queue polls or retry traffic to the API.
                 slot_wait = min(idle_wait, 1.0) if turns.running() >= limit else idle_wait
@@ -4337,16 +4345,8 @@ def run_forever(
                 # Nothing was claimed, so there is no startup to measure and
                 # the poll must not spend a slot.
                 operation_profiling.discard(measurement)
-                if isinstance(backend, ContainerBackend):
-                    from cloud_agent_host.environment_tests import claim_and_execute
-
-                    try:
-                        if claim_and_execute(
-                            base_url=base_url, credential=pool.credential, backend=backend
-                        ):
-                            continue
-                    except Exception:
-                        logger.warning("environment_test_poll_failed")
+                if environment_tests is not None:
+                    environment_tests.poll(pool.credential)
                 work.wait(pool.credential)
                 continue
 

@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+MIN_SECRET_CHARS = 8
+
+
+def secret_patterns(value: str) -> tuple[str, ...]:
+    """Match complete values and substantive multiline fragments, never PEM delimiters."""
+    if not value:
+        return ()
+    lines = (
+        line
+        for line in value.splitlines()
+        if len(line.strip()) >= MIN_SECRET_CHARS
+        and not re.fullmatch(r"-----[A-Z0-9 -]+-----", line.strip())
+    )
+    return tuple(dict.fromkeys((value, *lines)))
 
 
 class SecretRedactor:
@@ -14,7 +31,7 @@ class SecretRedactor:
     def __init__(self, secrets: Mapping[str, str]) -> None:
         patterns: dict[str, str] = {}
         for name, value in secrets.items():
-            for pattern in (value, *value.splitlines()):
+            for pattern in secret_patterns(value):
                 if pattern:
                     patterns.setdefault(pattern, f"[secret:{name}]")
         self._patterns = sorted(patterns.items(), key=lambda item: -len(item[0]))

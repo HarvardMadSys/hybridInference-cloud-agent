@@ -172,7 +172,9 @@ export const previewEnvironmentImport = (
   revision: number,
   text: string,
 ) =>
-  call<{ variables: { name: string; operation: string }[] }>('environment-import/preview', 'POST', {
+  call<{
+    variables: { name: string; operation: string; secret: boolean; secret_allowed: boolean }[];
+  }>('environment-import/preview', 'POST', {
     environment_id,
     revision,
     text,
@@ -182,12 +184,14 @@ export const importEnvironmentVariables = (
   revision: number,
   global_revision: number,
   text: string,
+  ordinary_names: string[] = [],
 ) =>
   call<EnvironmentConfig>('environment-import', 'POST', {
     environment_id,
     revision,
     global_revision,
     text,
+    ordinary_names,
   });
 export const suggestEnvironmentScript = (repo: string) =>
   call<{ suggestions: { file: string; script: string }[] }>(

@@ -10,6 +10,10 @@
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  'environment.shortSecret':
+    'Secrets must contain at least 8 characters. Mark non-sensitive flags such as DEBUG=1 as Ordinary.',
+  'environment.loadFailed':
+    'Environment configuration could not be loaded. Retry or choose another repository; saved variables will not be silently omitted.',
   'environment.title': 'Environment',
   'environment.description': 'Configure once, test it, and reuse it in new workspaces.',
   'environment.editor': 'Edit environment',

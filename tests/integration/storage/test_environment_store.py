@@ -168,26 +168,28 @@ async def test_restore_and_copy_do_not_mutate_existing_binding_or_share_future_e
 
 async def test_effective_limits_are_atomic_across_global_and_environment_writes(store, monkeypatch):
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
-    env = await _save(store, variables=[{"name": f"LOCAL{i}", "value": "v"} for i in range(75)])
+    env = await _save(
+        store, variables=[{"name": f"LOCAL{i}", "value": "test-value"} for i in range(75)]
+    )
     await _save(
         store,
         repo=None,
         name="Global",
-        variables=[{"name": f"GLOBAL{i}", "value": "v"} for i in range(75)],
+        variables=[{"name": f"GLOBAL{i}", "value": "test-value"} for i in range(75)],
     )
     results = await asyncio.gather(
         _save(
             store,
             environment_id=env["id"],
             revision=1,
-            variables=[{"name": "EXTRA_LOCAL", "value": "x"}],
+            variables=[{"name": "EXTRA_LOCAL", "value": "extra-value"}],
         ),
         _save(
             store,
             repo=None,
             name="Global",
             revision=1,
-            variables=[{"name": "EXTRA_GLOBAL", "value": "x"}],
+            variables=[{"name": "EXTRA_GLOBAL", "value": "extra-value"}],
         ),
         return_exceptions=True,
     )
@@ -372,3 +374,56 @@ async def test_copy_retry_and_concurrent_duplicate_create_one_identity(store, po
             )
             == 1
         )
+
+
+async def test_action_idempotency_and_terminal_state_are_durable(store, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await store.environments.save_environment(
+        "alice",
+        repo="org/repo",
+        name="Actions",
+        environment_id=None,
+        revision=0,
+        document={"actions": [{"id": "deploy", "name": "Deploy", "command": "deploy"}]},
+        edits=[],
+    )
+    job = await _job(store, env)
+    arguments = ("alice", job["thread_id"], job["environment_binding_id"], "deploy", "same-request")
+    run = await store.environments.create_environment_action_run(*arguments)
+    await store.environments.update_environment_action_run(
+        "alice", run["id"], {"state": "succeeded", "exit_code": 0, "output": "deployed"}
+    )
+    replay = await store.environments.create_environment_action_run(*arguments)
+    assert replay["id"] == run["id"] and replay["state"] == "succeeded"
+    late = await store.environments.update_environment_action_run(
+        "alice", run["id"], {"state": "running", "output": "late acknowledgement"}
+    )
+    assert late["state"] == "succeeded" and late["output"] == "deployed" and late["exit_code"] == 0
+
+
+async def test_empty_selection_is_frozen_but_requires_no_environment_protocol(store, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    job = await store.conversation_commands.create_job(
+        user_id="alice",
+        repo="org/repo",
+        task_prompt="work",
+        runtime="claude-code",
+        model="test-model",
+        environment_selection={},
+    )
+    assert job["environment_binding_id"]
+    bound = await store.environments.get_job_environment(job["id"])
+    assert bound.required is False
+    await _save(
+        store, repo=None, name="Global", variables=[{"name": "TOKEN", "value": "global-token"}]
+    )
+    assert (await store.environments.get_job_environment(job["id"])).required is False
+
+
+async def test_short_secret_is_rejected_before_any_configuration_is_written(store, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    with pytest.raises(ValueError, match="at least 8"):
+        await _save(store, variables=[{"name": "DEBUG", "value": "1"}])
+    assert await store.environments.list_environments("alice", "org/repo") == []
+    env = await _save(store, variables=[{"name": "DEBUG", "value": "1", "secret": False}])
+    assert env["variables"][0]["value"] == "1"

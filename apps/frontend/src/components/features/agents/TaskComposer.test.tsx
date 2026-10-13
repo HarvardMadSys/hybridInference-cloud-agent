@@ -49,6 +49,9 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/',
 }));
 
+import { listEnvironments } from '@/lib/api/environments';
+vi.mock('@/lib/api/environments', () => ({ listEnvironments: vi.fn() }));
+
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 
@@ -231,6 +234,36 @@ async function chooseRepository(name = 'owner/repository') {
 }
 
 describe('TaskComposer source-control onboarding', () => {
+  it('keeps repository switching usable after environment loading fails and can retry', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ environment_limits: {} }));
+    vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Environment unavailable'));
+    render(<TaskComposer />);
+    await chooseRepository();
+    expect(
+      await screen.findByText(/Environment configuration could not be loaded/),
+    ).toBeInTheDocument();
+    expect(await repositoryButton()).toBeEnabled();
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix tests' },
+    });
+    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled();
+    vi.mocked(listEnvironments).mockResolvedValueOnce({
+      environments: [],
+      globals: {
+        id: null,
+        name: 'Global',
+        repo: null,
+        revision: 0,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        verify_script: '',
+        actions: [],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
+  });
   beforeEach(() => {
     sessionStorage.clear();
     vi.mocked(githubAccessUrl).mockReset();

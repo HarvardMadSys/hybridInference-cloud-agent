@@ -71,7 +71,9 @@ export function EnvironmentEditor({
     null,
   );
   const [dotenv, setDotenv] = useState('');
-  const [preview, setPreview] = useState<{ name: string; operation: string }[] | null>(null);
+  const [preview, setPreview] = useState<
+    { name: string; operation: string; secret: boolean; secret_allowed: boolean }[] | null
+  >(null);
   const [history, setHistory] = useState<EnvironmentConfig[] | null>(null);
   const [run, setRun] = useState<EnvironmentRun | null>(null);
   const global = value.repo === null;
@@ -210,12 +212,31 @@ export function EnvironmentEditor({
               {preview.map((v) => (
                 <li key={v.name}>
                   <code>{v.name}</code> · {v.operation}
+                  <select
+                    aria-label={`${t('environment.type')} ${v.name}`}
+                    value={v.secret ? 'secret' : 'ordinary'}
+                    onChange={(event) =>
+                      setPreview(
+                        preview.map((item) =>
+                          item.name === v.name
+                            ? { ...item, secret: event.target.value === 'secret' }
+                            : item,
+                        ),
+                      )
+                    }
+                  >
+                    <option value="secret">{t('environment.secret')}</option>
+                    <option value="ordinary">{t('environment.ordinary')}</option>
+                  </select>
+                  {v.secret && !v.secret_allowed && (
+                    <span role="alert">{t('environment.shortSecret')}</span>
+                  )}
                 </li>
               ))}
             </ul>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || preview.some((item) => item.secret && !item.secret_allowed)}
               className="ui-button ui-button-primary"
               onClick={() =>
                 void perform(async () => {
@@ -226,6 +247,7 @@ export function EnvironmentEditor({
                       current.revision,
                       global ? current.revision : globals.revision,
                       dotenv,
+                      preview.filter((item) => !item.secret).map((item) => item.name),
                     ),
                   );
                   setDotenv('');

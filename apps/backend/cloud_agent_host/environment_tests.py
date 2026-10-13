@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 from typing import Any
@@ -19,7 +20,12 @@ ENVIRONMENT_TEST_LABEL = "hybridinference.environment-test"
 
 
 def claim_and_execute(
-    *, base_url: str, credential: str, backend: Any, stop: threading.Event | None = None
+    *,
+    base_url: str,
+    credential: str,
+    backend: Any,
+    stop: threading.Event | None = None,
+    cleanup_orphans: bool = True,
 ) -> bool:
     """Claim and clean up one test using a normal registered host slot."""
     from cloud_agent_host.runner import _claim_attestation
@@ -27,30 +33,33 @@ def claim_and_execute(
     with httpx.Client(
         base_url=base_url.rstrip("/"), headers={"Authorization": f"Bearer {credential}"}, timeout=30
     ) as client:
-        orphan_response = client.get("/v1/agent/worker/environment-runs/orphans")
-        orphan_response.raise_for_status()
-        manager = ChatSandboxManager(backend)
-        for orphan in orphan_response.json().get("runs", []):
-            spec = ChatSandboxSpec(
-                thread_id=f"athr_env_{orphan['id']}",
-                sandbox_id=f"aenv_{orphan['id']}",
-                generation=int(orphan["lease_generation"]),
-                runtime_id="claude-code",
-                sandbox_image_digest=orphan.get("image_digest"),
-                labels={ENVIRONMENT_TEST_LABEL: orphan["id"]},
-            )
-            inspection = manager.inspect(spec.container_name)
-            if inspection is not None:
-                manager.remove_environment_test(spec, container_id=inspection.container_id)
-            result = client.post(
-                f"/v1/agent/worker/environment-runs/{orphan['id']}",
-                json={
-                    "generation": orphan["lease_generation"],
-                    "state": orphan["state"],
-                    "cleanup_complete": True,
-                },
-            )
-            result.raise_for_status()
+        if cleanup_orphans:
+            orphan_response = client.get("/v1/agent/worker/environment-runs/orphans")
+            orphan_response.raise_for_status()
+            manager = ChatSandboxManager(backend)
+            for orphan in orphan_response.json().get("runs", []):
+                spec = ChatSandboxSpec(
+                    thread_id=f"athr_env_{orphan['id']}",
+                    sandbox_id=f"aenv_{orphan['id']}",
+                    generation=int(orphan["lease_generation"]),
+                    runtime_id="claude-code",
+                    sandbox_image_digest=orphan.get("image_digest"),
+                    labels={ENVIRONMENT_TEST_LABEL: orphan["id"]},
+                )
+                inspection = manager.inspect(spec.container_name)
+                if inspection is not None:
+                    manager.remove_environment_test(spec, container_id=inspection.container_id)
+                result = client.post(
+                    f"/v1/agent/worker/environment-runs/{orphan['id']}",
+                    json={
+                        "generation": orphan["lease_generation"],
+                        "state": orphan["state"],
+                        "cleanup_complete": True,
+                    },
+                )
+                result.raise_for_status()
+        if stop is not None and stop.is_set():
+            return False
         response = client.post(
             "/v1/agent/worker/environment-runs/claim",
             json={
@@ -122,6 +131,8 @@ def execute_test(
     outcome = "failed"
     detail = "Environment test interrupted"
     try:
+        if cancelled.is_set():
+            raise RuntimeError("Environment test cancelled")
         manager.create(spec)
         inspection = manager.start(spec)
         container_id = inspection.container_id
@@ -216,3 +227,50 @@ def execute_test(
 
         with contextlib.suppress(httpx.HTTPError):
             report(outcome, detail, cleanup_complete=True)
+
+
+class EnvironmentTestWorker:
+    """Keep test execution and orphan RPCs off the host's coding-task claim loop."""
+
+    def __init__(self, base_url: str, backend: Any) -> None:
+        self._base_url = base_url
+        self._backend = backend
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._next_poll = 0.0
+        self._next_cleanup = 0.0
+
+    @property
+    def busy(self) -> bool:
+        """Count an in-flight claim or test as one reserved local slot."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def poll(self, credential: str) -> None:
+        """Start at most one bounded poll without waiting for its HTTP or script work."""
+        if self._stop.is_set() or self.busy or time.monotonic() < self._next_poll:
+            return
+        self._next_poll = time.monotonic() + 5
+        cleanup = time.monotonic() >= self._next_cleanup
+        if cleanup:
+            self._next_cleanup = time.monotonic() + 60
+
+        def execute() -> None:
+            try:
+                claim_and_execute(
+                    base_url=self._base_url,
+                    credential=credential,
+                    backend=self._backend,
+                    stop=self._stop,
+                    cleanup_orphans=cleanup,
+                )
+            except Exception:
+                logging.getLogger(__name__).warning("environment_test_poll_failed")
+
+        self._thread = threading.Thread(target=execute, name="environment-test", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        """Cancel in-flight preparation and allow its fenced cleanup to finish."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=45)
