@@ -74,7 +74,7 @@ save the URL, then enter the token again.
 For the first deployment of this release, run `alembic upgrade head` through
 `0067_failed_snapshot_wake`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
-epoch. 0060 builds an index on `agent_jobs` concurrently: on a long job history
+epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
 simply be repeated. 0067 only replaces a trigger function. Once this release
 runs, a shared workspace that a failed snapshot left `dirty` publishes again:
