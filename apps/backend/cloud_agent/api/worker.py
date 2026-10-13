@@ -558,17 +558,23 @@ async def _mint_sandbox_grant(
     grants: Any,
     claim: dict[str, Any],
 ) -> str:
-    """Ask the gateway for the capability this attempt's sandbox runs with.
+    """Ask the gateway for this attempt's inference grant.
 
-    Scoped to exactly the model the job named and exactly the MCP servers it
-    was created with — not to everything the owner's role could reach. The
-    gateway may narrow that further, and what comes back is what is handed
-    over; the runner never sees what was asked for.
+    Scoped to exactly the model the job named — not to everything the owner's
+    role could reach. The gateway may narrow that further, and what comes back
+    is what is handed over; the runner never sees what was asked for.
 
-    **Transient failure hands the job back.** A grant that could not be minted means the
-    sandbox has no way to call a model, so starting the attempt would burn one
-    of the job's three tries producing an agent that fails at its first
-    request. Releasing the claim costs nothing — a released claim is not a
+    The sandbox CLI does not run on this grant. Each member's CLI runs on its
+    own residency grant, which ``worker_establish_shared_sandbox_residency``
+    mints before the CLI starts and host heartbeats renew. This one stays with
+    the attempt: the claim returns it as ``sandbox_token``, and the control
+    plane may spend it on the conversation's title.
+
+    **Transient failure hands the job back.** A grant that could not be minted
+    means the gateway is not minting for this owner and model right now, and the
+    member's residency grant comes from the same mint. Starting the attempt
+    would likely burn one of the job's three tries producing an agent that
+    cannot call a model. Releasing the claim costs nothing — a released claim is not a
     spent attempt — and its next claim waits briefly while later jobs can run.
     A definitive refusal of the subject or requested model ends this job with
     an actionable reason instead of retrying the same oldest row indefinitely.
@@ -591,7 +597,7 @@ async def _mint_sandbox_grant(
         claim: The row ``claim_job`` returned.
 
     Returns:
-        The grant's bearer token — the only credential that enters the sandbox.
+        The grant's bearer token. It does not enter the sandbox.
 
     Raises:
         HTTPException: 503, after releasing the claim, if no grant could be got
@@ -928,16 +934,18 @@ async def _hand_over_claim(
             detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
         ) from exc
 
-    # Two credentials with different powers. The runner keeps the full one and
-    # passes only the sandbox one inside, so a credential that leaks from inside
-    # the agent can make model calls the gateway already meters but cannot touch
-    # this job's event log, lifecycle, or terminal state.
+    # Two credentials with different powers. The runner keeps the full one. The
+    # sandbox gets neither: its CLI runs on the member's own residency grant
+    # (``worker_establish_shared_sandbox_residency``), so a credential that
+    # leaks from inside the agent can make model calls the gateway already
+    # meters but cannot touch this job's event log, lifecycle, or terminal
+    # state.
     #
     # Only the first is ours to mint. ``SCOPE_FULL`` is this service's own
     # control credential, signed with this service's own secret and verified by
-    # this service — correctly local. The sandbox's credential is not: it buys
-    # inference, which is the gateway's to authorize and the gateway's to meter,
-    # so it is asked for rather than minted. Before this, the claim minted
+    # this service — correctly local. A grant is not: it buys inference, which
+    # is the gateway's to authorize and the gateway's to meter, so it is asked
+    # for rather than minted. Before this, the claim minted
     # a ``SCOPE_MODEL`` token signed with a root the gateway does not know —
     # which bought nothing, and failed at the sandbox's first model call.)
     token = mint_worker_token(**fence, scope=SCOPE_FULL)

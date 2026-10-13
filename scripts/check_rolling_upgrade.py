@@ -83,7 +83,8 @@ async def check(base: str) -> None:
                     f"previous API failed after {stage}"
                 )
                 print(
-                    f"previous release {base}: business reads/writes pass after {stage}", flush=True
+                    f"previous release {base}: conversations and runner turns pass after {stage}",
+                    flush=True,
                 )
             assert await asyncio.wait_for(worker.wait(), 10) == 0
     finally:

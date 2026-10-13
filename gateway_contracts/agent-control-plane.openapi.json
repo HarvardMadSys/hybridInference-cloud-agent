@@ -15802,7 +15802,7 @@
           },
           "sandbox_token": {
             "default": "",
-            "description": "The inference credential that enters the sandbox: a gateway grant, scoped to the models this attempt may call.",
+            "description": "This attempt's gateway grant, scoped to the models it may call. It does not enter the sandbox: each member's CLI runs on its own residency grant from the sandbox residency route.",
             "title": "Sandbox Token",
             "type": "string"
           },

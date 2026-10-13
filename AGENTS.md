@@ -62,7 +62,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
 | `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
 | `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
-| `apps/backend/cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
+| `apps/backend/cloud_agent_host/runtimes.py`, `apps/backend/cloud_agent_shared/shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
 
 ## 3. Quality gates
 
@@ -121,11 +121,15 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   execution of it on one host. Attempts carry a lease with a fencing
   generation — a superseded attempt's writes are rejected by the store, which
   is what makes retries safe and stops duplicate pull requests.
-- **Grant.** A short-lived, per-attempt capability token minted by the gateway,
-  scoped to a user, a job, and a model allowlist. It authorizes inference and is
-  revoked when the attempt is superseded. MCP servers are resolved per user by
-  the control plane and reached through its MCP-only relay with a separate
-  scoped credential; they are no longer named in the inference grant.
+- **Grant.** A short-lived capability token minted by the gateway, scoped to a
+  user, a job or chat, and a model allowlist; it authorizes inference. Each
+  claim mints a per-attempt grant, revoked when the attempt is superseded or
+  ends. The sandbox CLI does not run on that grant: each chat member's CLI runs
+  on its own residency grant, minted before the CLI starts, renewed by host
+  heartbeats while the member stays resident (so it can outlive one turn), and
+  revoked with the residency. MCP servers are resolved per user by the control
+  plane and reached through its MCP-only relay with a separate scoped
+  credential; no inference grant names them.
   **There is no per-task dollar budget** — that design was considered and
   rejected. All inference spend stays subject to the gateway's existing
   per-user quota; a grant narrows *what* can be called, never re-implements

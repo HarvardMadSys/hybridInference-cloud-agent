@@ -1,8 +1,9 @@
 """Scaffold smoke tests.
 
-These assert that the control plane and host packages never import gateway
-code. Rule 5 in AGENTS.md is easy to violate by pasting a moved file that still
-references ``serving.*``; this catches it in CI rather than at deploy time.
+These assert that the control plane, the host agent, the shared package both
+images ship, and the migrations never import gateway code. Rule 5 in AGENTS.md
+is easy to violate by pasting a moved file that still references ``serving.*``;
+this catches it in CI rather than at deploy time.
 """
 
 from __future__ import annotations
@@ -15,6 +16,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGE_ROOTS = (
     _REPO_ROOT / "apps" / "backend" / "cloud_agent",
     _REPO_ROOT / "apps" / "backend" / "cloud_agent_host",
+    # Shipped in both images, so a gateway import here reaches the control
+    # plane and every host alike.
+    _REPO_ROOT / "apps" / "backend" / "cloud_agent_shared",
+    _REPO_ROOT / "migrations",
 )
 
 # Matches `import serving...` and `from serving... import ...`, which would mean
@@ -27,6 +32,11 @@ def test_no_gateway_imports() -> None:
     # The roots have moved once already (the src-layout flatten). Empty means
     # they are wrong again — and a guard that scans nothing passes forever.
     assert sources, f"no sources under {_PACKAGE_ROOTS}; update _PACKAGE_ROOTS"
+    # Root by root as well: one stale root beside valid ones scans nothing too.
+    empty = [
+        str(root.relative_to(_REPO_ROOT)) for root in _PACKAGE_ROOTS if not any(root.rglob("*.py"))
+    ]
+    assert not empty, f"no sources under {empty}; update _PACKAGE_ROOTS"
     offenders = [
         path.relative_to(_REPO_ROOT)
         for path in sources

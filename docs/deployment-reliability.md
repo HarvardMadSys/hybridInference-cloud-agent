@@ -151,10 +151,13 @@ The Postgres CI job finds the latest `agent-*` release tag reachable from the
 change's base and runs [`scripts/check_rolling_upgrade.py`](../scripts/check_rolling_upgrade.py).
 It creates a random `rolling_test_*` database, migrates it with the previous
 release's Alembic graph, and warms that release's storage pool with conversation
-reads and writes. While the old process remains alive, it applies the candidate
-migration and repeats those operations on the same database backend. It also
-tests an idempotent migration retry, then removes the database and archived
-source.
+reads and writes and with the writes a runner's turn makes through the worker
+routes: a host heartbeat, the claim, a lease heartbeat, an event, the sandbox
+reservation, residency, admission and settlement, and the terminal transition,
+for a new chat and for a follow-up in a retained one. While the old process
+remains alive, it applies the candidate migration and repeats those operations
+on the same database backend. It also tests an idempotent migration retry, then
+removes the database and archived source.
 
 Run it against disposable local Postgres. Replace the quoted placeholder with
 an existing prior `agent-*` release tag:
