@@ -326,19 +326,24 @@ def test_every_dependency_sync_refuses_a_stale_lock(workflow: Path) -> None:
 
     The images install the committed lock as it stands, so a job that tested a
     fresh resolution would vouch for packages no image ships. `--locked` makes
-    that job fail instead, on every event and in every workflow.
+    that job fail instead, on every event and in every workflow. Each job that
+    syncs installs the uv CI pins, so every one of them judges the lock alike.
     """
-    jobs = yaml.safe_load(workflow.read_text())["jobs"].values()
-    syncs = [
-        command
-        for job in jobs
-        for step in job.get("steps", [])
-        for command in _syncs(str(step.get("run", "")))
-    ]
+    document = yaml.safe_load(workflow.read_text())
+    syncing = []
+    for name, job in document["jobs"].items():
+        steps = job.get("steps", [])
+        syncs = [command for step in steps for command in _syncs(str(step.get("run", "")))]
+        for command in syncs:
+            assert "--locked" in command.split(), f"{workflow.name}: {command}"
+        if syncs:
+            syncing.append(name)
+            installs = [step for step in steps if "astral-sh/setup-uv@" in step.get("uses", "")]
+            versions = [step.get("with", {}).get("version") for step in installs]
+            assert versions == ["${{ env.UV_VERSION }}"], f"{workflow.name}: {name}"
+            assert document["env"]["UV_VERSION"] == _document()["env"]["UV_VERSION"]
     if workflow.name in {"ci.yml", "publish.yml", "pr-caches.yml"}:
-        assert syncs, f"{workflow.name} no longer syncs; the check would prove nothing"
-    for command in syncs:
-        assert "--locked" in command.split(), f"{workflow.name}: {command}"
+        assert syncing, f"{workflow.name} no longer syncs; the check would prove nothing"
 
 
 def test_the_local_launcher_refuses_a_stale_lock_like_ci() -> None:
