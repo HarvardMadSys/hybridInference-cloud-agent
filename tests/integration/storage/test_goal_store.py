@@ -1211,7 +1211,9 @@ async def test_a_finish_drains_its_own_conversation_and_leaves_the_others(
     from cloud_agent.goals.controller import consume_wakeup, continue_after_finish
 
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
-    elsewhere = await _create_job(store, task_prompt="another owner's conversation")
+    elsewhere = await _create_job(
+        store, user_id="user-2", task_prompt="another owner's conversation"
+    )
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", elsewhere["id"]

@@ -599,7 +599,7 @@ async def test_the_sixth_transient_failure_fails_instead_of_deferring(store, poo
     assert group["snapshot_state"] == "dirty"
     assert group["idle_deadline"] is not None
     assert dict(later) == {"state": "captured", "publish_attempt_count": 1, "waits": True}, (
-        "the later snapshot was published next, and deferred by the same outage"
+        "the later snapshot was tried next, and deferred by the same outage"
     )
     assert event_count == 1
     assert await store.snapshot.claim_for_publish() is None, (
