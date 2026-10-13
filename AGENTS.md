@@ -62,7 +62,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
 | `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
 | `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
-| `apps/backend/cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
+| `apps/backend/cloud_agent_host/runtimes.py`, `apps/backend/cloud_agent_shared/shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
 
 ## 3. Quality gates
 

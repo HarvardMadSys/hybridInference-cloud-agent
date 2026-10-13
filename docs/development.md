@@ -68,7 +68,7 @@ relative to `apps/backend/`.
 
 | Change | Start here |
 |---|---|
-| Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts the nine agent surfaces. |
+| Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts every agent surface listed in `SURFACE_ROUTERS`. |
 | A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an existing caller. |
 | Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `workspace_broker_client.py`; host handling is in `cloud_agent_host/workspace_broker.py`. |
 | A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `migrations/versions/` for schema changes. |
@@ -308,7 +308,7 @@ uv run pytest -q tests/unit/test_api_surface_contract.py tests/unit/test_contrac
 
 Review the generated diff and explain any compatibility implications. The
 surface tests also reject duplicate registrations and overlaps between the
-nine agent routers. A snapshot update records a change; the behavioral tests
+agent surface routers. A snapshot update records a change; the behavioral tests
 and review establish whether it is compatible. The
 [contract guide](../gateway_contracts/README.md) explains what these checks can
 verify and what still needs comparison with Gateway source.
