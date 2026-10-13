@@ -768,10 +768,16 @@ async def _publish_claimed(
             )
         raise
     finally:
+        owner = asyncio.current_task()
+        owner_cancellation_baseline = owner.cancelling() if owner is not None else 0
         heartbeat.cancel()
-        # Not `suppress(CancelledError)`: that would also swallow a shutdown
-        # cancelling this task while it waits for the heartbeat to stop.
-        await asyncio.gather(heartbeat, return_exceptions=True)
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            # The heartbeat's own cancellation is expected. Cancellation of
+            # this publisher while it joins the heartbeat must stop the loop.
+            if owner is not None and owner.cancelling() > owner_cancellation_baseline:
+                raise
 
 
 async def _publish_claimed_owned(

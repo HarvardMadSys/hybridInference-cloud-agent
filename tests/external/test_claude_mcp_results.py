@@ -23,6 +23,7 @@ from tests.servers.test_mcp_relay_host import FakeStore, _binding, _connection, 
 
 from cloud_agent.api import mcp_relay
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp import runtime as mcp_runtime
 from cloud_agent.mcp.host import McpHost
 from cloud_agent.mcp.net_policy import policy_from_environment
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, RuntimeMCPConfig
@@ -82,7 +83,7 @@ async def test_claude_receives_github_results_after_relay_and_owner_approval(
     monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
     monkeypatch.setattr(mcp_relay.web_search, "configured", lambda: False)
     actual_host = McpHost(policy=policy_from_environment())
-    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", actual_host)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", actual_host)
     result = {"structuredContent": value}
     if with_text:
         result["content"] = [{"type": "text", "text": json.dumps(value)}]

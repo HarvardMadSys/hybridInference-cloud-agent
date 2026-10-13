@@ -37,7 +37,7 @@ from cloud_agent.goals.models import (
     GoalInput,
 )
 from cloud_agent.goals.report import GoalReportEnvelope
-from cloud_agent.storage.repositories.goal_wakeups import is_exhausted, wakeup_backoff
+from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

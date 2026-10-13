@@ -49,6 +49,7 @@ Choose the path that matches what you want to do:
 |---|---|
 | Run the browser, API, host, and sandboxes locally | [Local Docker stack](deploy/local/README.md) |
 | Change the backend or frontend | [Developer guide](docs/development.md) |
+| Understand module ownership and dependencies | [Code structure](docs/code-structure.md) |
 | Operate a self-hosted deployment | [Operations runbook](docs/operations.md) |
 | Build or deploy a release | [Release guide](deploy/release/README.md) |
 | Find configuration or a feature guide | [Documentation index](docs/README.md) |

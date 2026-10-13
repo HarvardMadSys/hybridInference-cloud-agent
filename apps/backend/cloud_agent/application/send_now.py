@@ -30,6 +30,8 @@ from cloud_agent_shared.shared_protocol import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from cloud_agent.ports import ConversationQueries, HostPoolRepository, PendingMessageRepository
 
 logger = get_logger(__name__)
@@ -232,6 +234,33 @@ async def wait_for_handoff(
     )
 
 
+#: Hand-overs waiting for a host, kept so they are not collected mid-wait.
+_hand_overs: set[asyncio.Task[None]] = set()
+
+
+async def close_send_now_handovers() -> None:
+    """Cancel and join request-spawned handoffs before app resources close."""
+    tasks = tuple(_hand_overs)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        joined = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            # The owner still has to wait for task cleanup before closing the
+            # store and broker clients; propagate its cancellation afterwards.
+            await joined
+            raise
+
+
+def start_send_now_handover(handover: Coroutine[Any, Any, None]) -> None:
+    """Retain a request's eager handoff until it finishes or shutdown joins it."""
+    task = asyncio.create_task(handover)
+    _hand_overs.add(task)
+    task.add_done_callback(_hand_overs.discard)
+
+
 async def recover_handoffs(store: SendNowStorage, *, limit: int = 50) -> dict[str, int]:
     """Replay abandoned handoffs and return stale unclaimed work to its queue."""
     recovered = accepted = requeued = 0
@@ -344,9 +373,11 @@ __all__ = [
     "HAND_OVER_WAIT_S",
     "TARGET_ENDED",
     "HandoffOutcome",
+    "close_send_now_handovers",
     "deliver_handoff",
     "failure_status",
     "hand_over",
     "recover_handoffs",
+    "start_send_now_handover",
     "wait_for_handoff",
 ]

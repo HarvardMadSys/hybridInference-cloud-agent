@@ -26,7 +26,6 @@ from tests.integration.servers.test_pending_message_queue import (
     pool as pool,
 )
 
-from cloud_agent.api import turns
 from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared.shared_protocol import (
@@ -304,7 +303,7 @@ async def test_a_turn_no_host_has_taken_yet_gets_it_once_one_has(api, monkeypatc
     assert sandbox_manager.calls == []
 
     running = await api.start(second)
-    await asyncio.wait_for(asyncio.gather(*list(turns._hand_overs)), 10)
+    await asyncio.wait_for(asyncio.gather(*list(send_now_delivery._hand_overs)), 10)
 
     assert sandbox_manager.calls == [
         (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "and mind the tests")

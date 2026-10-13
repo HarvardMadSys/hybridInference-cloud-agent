@@ -19,6 +19,7 @@ from tests.servers.test_mcp_relay_host import (
 
 from cloud_agent.api import mcp_relay
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp import runtime as mcp_runtime
 from cloud_agent.mcp.host import arguments_digest, decode_arguments
 from cloud_agent.mcp.registry import invocation_cipher
 
@@ -50,7 +51,7 @@ async def client(store, monkeypatch):
     app.include_router(mcp_relay.router)
     app.dependency_overrides[get_storage] = lambda: store
     host = StubHost()
-    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", host)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", host)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
         yield api, host
 

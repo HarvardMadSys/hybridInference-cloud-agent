@@ -42,10 +42,10 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_INVALID,
+    TERMINAL_LIFECYCLES,
     ControlCommandResult,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage.repositories.profiling_control import TERMINAL_LIFECYCLES
 from cloud_agent_shared.operation_profiling import profile_mode
 
 if TYPE_CHECKING:

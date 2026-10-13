@@ -130,8 +130,8 @@ from cloud_agent.tokens import (
 from cloud_agent.user_memory import prompt_with_user_memory
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
-from cloud_agent_host.runtimes import runtimes_supporting_mcp
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
+from cloud_agent_shared.runtime_catalog import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine

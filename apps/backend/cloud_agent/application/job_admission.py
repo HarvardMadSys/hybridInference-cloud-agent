@@ -45,12 +45,12 @@ from cloud_agent.visible_models import (
     agent_model_reasoning_efforts,
     agent_visible_models,
 )
-from cloud_agent_host.runtimes import (
+from cloud_agent_shared.plugins import validate_sandbox_plugins
+from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
     runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
-from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:
     from typing import Any

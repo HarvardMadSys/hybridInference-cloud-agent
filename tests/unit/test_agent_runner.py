@@ -16,7 +16,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import control_plane_client, runner as runner_mod
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
@@ -1560,7 +1560,11 @@ def test_shared_turn_does_not_report_dispatch_when_prompt_handoff_is_rejected():
 
 
 def _virtual_clock(monkeypatch) -> SimpleNamespace:
-    """Make the runner's waits advance a fake clock instead of real time."""
+    """Make the runner's waits advance a fake clock instead of real time.
+
+    The ``time`` module is shared, so its control-plane client's event retries
+    wait on the same fake clock.
+    """
     clock = SimpleNamespace(now=0.0, sleeps=[])
 
     def sleep(seconds):
@@ -1690,8 +1694,8 @@ def test_event_upload_gives_up_inside_its_budget(monkeypatch):
         control.close()
 
     assert len(tries) > 2
-    assert max(clock.sleeps) == runner_mod._EVENT_RETRY_MAX_DELAY_S
-    assert clock.now <= runner_mod._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
+    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
+    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
