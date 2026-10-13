@@ -53,6 +53,10 @@
 //      rather than inferred from the shape of the loop.
 //  12. metadata and layout share one saved-settings fetch per request, while
 //      the next request sees saved edits without restarting the server.
+//  13. the document and a static script carry the security headers
+//      `next.config.js` declares, and no `X-Powered-By`, under each variant's
+//      prefix. The declaration is pinned by a unit test; only the built server
+//      shows that Next applies it to the whole mount.
 //
 // Run from `apps/frontend/`.
 // Use --saved-config-only to check request-scoped caching against an existing
@@ -152,9 +156,32 @@ const NEUTRAL = {
   rag: false,
 };
 
+// What `next.config.js` sends with every response. Written down twice for the
+// reason `NEUTRAL` is: `src/config/securityHeaders.test.ts` pins the
+// declaration, and this checks what the built server actually sends.
+const SECURITY_HEADERS = {
+  'content-security-policy': "frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
+  'x-frame-options': 'SAMEORIGIN',
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+};
+
 function fail(message) {
   console.error(`::error title=Runtime site config::${message}`);
   process.exit(1);
+}
+
+function assertSecurityHeaders(where, subject, headers) {
+  for (const [name, expected] of Object.entries(SECURITY_HEADERS)) {
+    const sent = headers.get(name);
+    if (sent !== expected) {
+      fail(
+        `${where}: ${subject} sends ${name} ${JSON.stringify(sent)}, expected ` +
+          `${JSON.stringify(expected)}`,
+      );
+    }
+  }
+  if (headers.has('x-powered-by')) fail(`${where}: ${subject} still sends X-Powered-By`);
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -418,7 +445,12 @@ async function render(variant, env, suffix = '/login') {
   try {
     const url = `http://127.0.0.1:${port}${variant.basePath}${suffix}`;
     const response = await waitForResponse(url);
-    return { status: response.status, html: await response.text(), logs: server.logs.join('') };
+    return {
+      status: response.status,
+      headers: response.headers,
+      html: await response.text(),
+      logs: server.logs.join(''),
+    };
   } finally {
     await server.stop();
   }
@@ -435,6 +467,31 @@ async function probePath(variant, path) {
   }
 }
 
+/**
+ * The security headers on a static script, not only on the document.
+ *
+ * `nosniff` matters most for scripts and styles, and Next serves them from a
+ * different handler than pages, so the document passing says nothing about
+ * them.
+ */
+async function assertAssetHeaders(variant, html) {
+  const where = `${variant.name} / static asset`;
+  const asset = firstMatch(html, /(?:src|href)="([^"]*\/_next\/static\/[^"]*\.js)"/);
+  if (!asset) fail(`${where}: no script URL in the document`);
+  const port = nextPort++;
+  const server = startServer(DEPLOYMENTS[0].env, port);
+  try {
+    const response = await waitForResponse(`http://127.0.0.1:${port}${asset}`);
+    await response.arrayBuffer();
+    if (response.status !== 200) {
+      fail(`${where}: GET ${asset} answered ${response.status}\n${server.logs.join('')}`);
+    }
+    assertSecurityHeaders(where, asset, response.headers);
+  } finally {
+    await server.stop();
+  }
+}
+
 function assertRendered(variant, target, rendered) {
   const where = `${variant.name} / ${target.name}`;
   const { html } = rendered;
@@ -442,6 +499,8 @@ function assertRendered(variant, target, rendered) {
   if (rendered.status !== 200) {
     fail(`${where}: GET ${variant.basePath}/login answered ${rendered.status}\n${rendered.logs}`);
   }
+
+  assertSecurityHeaders(where, 'the document', rendered.headers);
 
   const title = titleOf(html);
   if (title !== target.appName) {
@@ -755,6 +814,8 @@ async function main() {
           'runtime environments — the configuration is still resolved at build time',
       );
     }
+
+    await assertAssetHeaders(variant, alpha.html);
 
     for (const path of variant.foreignPaths) {
       const status = await probePath(variant, path);
