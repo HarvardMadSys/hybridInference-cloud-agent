@@ -1509,14 +1509,16 @@ class PiRuntime(GenericRuntime):
         if subtype == "text_end":
             # The one event the owner is actually waiting for: `message` is
             # what the control plane copies into agent_thread_messages, which
-            # is both the visible reply and the next turn's context.
+            # is both the visible reply and the next turn's context. Whole, as
+            # every other runtime's answer is: the goal report sits at the end
+            # of a final message, and only the shared event bound may clip it,
+            # marking it `truncated` when it does.
             preview_id = self._preview_id(update)
             self._preview.finish(preview_id)
             return NormalizedEvent(
                 MESSAGE,
                 {
-                    "text": _truncate(update.get("content")),
-                    "truncated": _clipped(update.get("content")),
+                    "text": _payload_text(update.get("content")),
                     "preview_id": preview_id,
                     **response,
                 },

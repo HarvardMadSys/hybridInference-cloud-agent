@@ -42,6 +42,17 @@ versions="${4:?comma-separated versions}"
 root="/opt/runtimes/${runtime_id}"
 default=""
 
+# Whether `--version` output names exactly this version, as a whole token:
+# `2.1` is not in `2.1.220`, nor `0.145.0` in `10.145.0` or `0.145.0-alpha.1`.
+# Shared, character for character, with the image's final check in
+# Dockerfile.agent-sandbox, which runs under `sh`.
+reports_version() {
+    case " $1 " in
+        *[!0-9.]"$2"[!0-9A-Za-z.+-]*) return 0 ;;
+    esac
+    return 1
+}
+
 # `read -a` on a comma-separated string, so an empty entry from a stray comma
 # becomes a loud failure below rather than an `npm install pkg@`.
 IFS=',' read -r -a wanted <<<"${versions}"
@@ -50,6 +61,16 @@ for version in "${wanted[@]}"; do
     if [ -z "${version}" ]; then
         echo "ERROR: ${runtime_id} has an empty version in '${versions}'." >&2
         echo "A stray comma would otherwise install whatever 'pkg@' resolves to." >&2
+        exit 1
+    fi
+    # npm reads a partial version such as `2.1` as a range, and a dist-tag or a
+    # range installs whatever it resolves to today; only an exact version is
+    # what its label claims.
+    if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+        echo "ERROR: ${runtime_id} version '${version}' is not an exact version." >&2
+        echo "Name MAJOR.MINOR.PATCH (optionally -PRERELEASE): a partial version, a" >&2
+        echo "range or a dist-tag makes the version label, and every record derived" >&2
+        echo "from it, a lie." >&2
         exit 1
     fi
 
@@ -66,15 +87,14 @@ for version in "${wanted[@]}"; do
     fi
 
     got="$("${prefix}/bin/${binary}" --version 2>&1 | tail -1)"
-    case "${got}" in
-        *"${version}"*) echo "${runtime_id} ${version}: ${got}" ;;
-        *)
-            echo "ERROR: ${runtime_id} ${version} installed a binary reporting '${got}'." >&2
-            echo "A runtime version must be exact — a dist-tag or a range makes the" >&2
-            echo "version label, and every record derived from it, a lie." >&2
-            exit 1
-            ;;
-    esac
+    if reports_version "${got}" "${version}"; then
+        echo "${runtime_id} ${version}: ${got}"
+    else
+        echo "ERROR: ${runtime_id} ${version} installed a binary reporting '${got}'." >&2
+        echo "A runtime version must be exact — a dist-tag or a range makes the" >&2
+        echo "version label, and every record derived from it, a lie." >&2
+        exit 1
+    fi
 
     if [ -z "${default}" ]; then
         default="${version}"

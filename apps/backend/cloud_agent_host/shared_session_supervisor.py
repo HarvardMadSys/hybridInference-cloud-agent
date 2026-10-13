@@ -420,6 +420,9 @@ class SharedChatSessionSupervisor:
         self._stopped_archive_hook = stopped_archive_hook
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
+        #: Sandboxes a registration is creating or adopting outside the lock.
+        #: The group does not exist yet, so this set is their admission barrier.
+        self._creating: set[str] = set()
         self._held_inputs: dict[str, list[_HeldInput]] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
@@ -1080,6 +1083,11 @@ class SharedChatSessionSupervisor:
             members: tuple[SharedMemberManifest, ...] = ()
             with self._lock:
                 group = self._groups.get(spec.sandbox_id)
+                if group is None and spec.sandbox_id in self._creating:
+                    # A registration in this process is creating or adopting
+                    # it right now and installs the group itself; it is not an
+                    # orphan of a previous broker.
+                    continue
                 if group is None:
                     # A replacement broker cannot reattach the old docker-exec
                     # pipes. Stop only a newly discovered orphan before
@@ -1463,98 +1471,145 @@ class SharedChatSessionSupervisor:
             seen_slots.add(manifest.resident_slot_id)
             validated_members.append((manifest, manifest.resident_slot_id))
         with self._lock:
+            deadline = time.monotonic() + 30.0
+            group = self._groups.get(spec.sandbox_id)
+            while group is None and spec.sandbox_id in self._creating:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SessionBusy("shared workspace creation is in progress")
+                self._condition.wait(timeout=min(remaining, 0.5))
+                group = self._groups.get(spec.sandbox_id)
+            if group is not None:
+                return self._install_manifest_locked(
+                    group,
+                    spec,
+                    members,
+                    validated_members,
+                    expected_container_id=expected_container_id,
+                )
+            self._creating.add(spec.sandbox_id)
+        # Docker create with its group bridge, or the exact adoption check, can
+        # take minutes. Only registrations of this sandbox wait for it; the
+        # metadata lock stays free for every other group and member.
+        try:
+            created = (
+                self._manager.require_existing(spec, container_id=expected_container_id)
+                if expected_container_id
+                else self._manager.create(spec, facts=facts, observer=observer)
+            )
+        except BaseException:
+            with self._lock:
+                self._creating.discard(spec.sandbox_id)
+                self._condition.notify_all()
+            raise
+        with self._lock:
+            self._creating.discard(spec.sandbox_id)
+            self._condition.notify_all()
             group = self._groups.get(spec.sandbox_id)
             if group is None:
-                inspection = (
-                    self._manager.require_existing(spec, container_id=expected_container_id)
-                    if expected_container_id
-                    else self._manager.create(spec, facts=facts, observer=observer)
-                )
-                group = _Group(spec=spec, inspection=inspection)
+                group = _Group(spec=spec, inspection=created)
                 self._groups[spec.sandbox_id] = group
-            elif group.spec != spec:
-                raise SandboxError("shared sandbox immutable identity/configuration changed")
-            if expected_container_id and group.inspection.container_id != expected_container_id:
-                raise RetainedChatLost("shared sandbox container identity changed")
-            if group.archive_request_id is not None:
-                raise SessionBusy("shared sandbox archive and deletion is in progress")
+            return self._install_manifest_locked(
+                group,
+                spec,
+                members,
+                validated_members,
+                expected_container_id=expected_container_id,
+            )
 
-            wanted = {item.thread_id for item in members}
-            for manifest, resident_slot_id in validated_members:
-                other_group = self._members.get(manifest.thread_id)
-                if other_group is not None and other_group is not group:
-                    raise SandboxError("chat membership points at two sandbox groups")
-                if manifest.thread_id != spec.thread_id and manifest.native_session_id is None:
-                    # Fork reserves a database membership before creating its
-                    # native child. Only the origin can start without native
-                    # context; installing the reservation here would make
-                    # fork_native reject its own target as already occupied.
-                    # A stale pending manifest must also preserve a child the
-                    # host has materialized but the database has not finalized.
-                    continue
-                member = group.members.get(manifest.thread_id)
-                if member is None:
-                    # A durable observation that the previous broker owned a
-                    # live process is not an attachable local transport. Docker
-                    # preserves the native session files, but the replacement
-                    # broker has no stdin/stdout pipes and must resume it before
-                    # claiming a HOT hit.
-                    resident_state: ResidentState = manifest.resident_state
-                    if resident_state == "live":
-                        resident_state = "restarting" if manifest.native_session_id else "stopped"
-                    member = _Member(
-                        thread_id=manifest.thread_id,
-                        native_session_id=manifest.native_session_id,
-                        context_status=manifest.context_status,
-                        activation_generation=manifest.activation_generation,
-                        process_generation=manifest.process_generation,
-                        residency_generation=manifest.residency_generation,
-                        resident_state=resident_state,
-                        resident_slot_id=resident_slot_id,
-                        last_settled_job_id=manifest.last_settled_job_id,
+    def _install_manifest_locked(
+        self,
+        group: _Group,
+        spec: ChatSandboxSpec,
+        members: builtins.list[SharedMemberManifest],
+        validated_members: builtins.list[tuple[SharedMemberManifest, int]],
+        *,
+        expected_container_id: str | None,
+    ) -> builtins.list[SharedSessionDescriptor]:
+        """Apply one validated manifest to its registered group, under the lock."""
+        if group.spec != spec:
+            raise SandboxError("shared sandbox immutable identity/configuration changed")
+        if expected_container_id and group.inspection.container_id != expected_container_id:
+            raise RetainedChatLost("shared sandbox container identity changed")
+        if group.archive_request_id is not None:
+            raise SessionBusy("shared sandbox archive and deletion is in progress")
+
+        wanted = {item.thread_id for item in members}
+        for manifest, resident_slot_id in validated_members:
+            other_group = self._members.get(manifest.thread_id)
+            if other_group is not None and other_group is not group:
+                raise SandboxError("chat membership points at two sandbox groups")
+            if manifest.thread_id != spec.thread_id and manifest.native_session_id is None:
+                # Fork reserves a database membership before creating its
+                # native child. Only the origin can start without native
+                # context; installing the reservation here would make
+                # fork_native reject its own target as already occupied.
+                # A stale pending manifest must also preserve a child the
+                # host has materialized but the database has not finalized.
+                continue
+            member = group.members.get(manifest.thread_id)
+            if member is None:
+                # A durable observation that the previous broker owned a
+                # live process is not an attachable local transport. Docker
+                # preserves the native session files, but the replacement
+                # broker has no stdin/stdout pipes and must resume it before
+                # claiming a HOT hit.
+                resident_state: ResidentState = manifest.resident_state
+                if resident_state == "live":
+                    resident_state = "restarting" if manifest.native_session_id else "stopped"
+                member = _Member(
+                    thread_id=manifest.thread_id,
+                    native_session_id=manifest.native_session_id,
+                    context_status=manifest.context_status,
+                    activation_generation=manifest.activation_generation,
+                    process_generation=manifest.process_generation,
+                    residency_generation=manifest.residency_generation,
+                    resident_state=resident_state,
+                    resident_slot_id=resident_slot_id,
+                    last_settled_job_id=manifest.last_settled_job_id,
+                )
+                group.members[manifest.thread_id] = member
+                self._members[manifest.thread_id] = group
+            else:
+                if member.resident_slot_id != manifest.resident_slot_id:
+                    raise SandboxError("member resident slot changed in place")
+                if member.lease_token is None and member.current_turn is None:
+                    member.native_session_id = manifest.native_session_id
+                    member.context_status = manifest.context_status
+                    member.activation_generation = max(
+                        member.activation_generation,
+                        manifest.activation_generation,
                     )
-                    group.members[manifest.thread_id] = member
-                    self._members[manifest.thread_id] = group
-                else:
-                    if member.resident_slot_id != manifest.resident_slot_id:
-                        raise SandboxError("member resident slot changed in place")
-                    if member.lease_token is None and member.current_turn is None:
-                        member.native_session_id = manifest.native_session_id
-                        member.context_status = manifest.context_status
-                        member.activation_generation = max(
-                            member.activation_generation,
-                            manifest.activation_generation,
+                    member.process_generation = max(
+                        member.process_generation,
+                        manifest.process_generation,
+                    )
+                    # A durable generation is not proof that the attached
+                    # process was launched with that generation's secret.
+                    # Advance it only when there is no local pipe; with a
+                    # live transport, leaving the old value makes
+                    # ``_ensure_transport`` perform the required re-keyed
+                    # native restart.
+                    if member.transport is None:
+                        member.residency_generation = max(
+                            member.residency_generation,
+                            manifest.residency_generation,
                         )
-                        member.process_generation = max(
-                            member.process_generation,
-                            manifest.process_generation,
-                        )
-                        # A durable generation is not proof that the attached
-                        # process was launched with that generation's secret.
-                        # Advance it only when there is no local pipe; with a
-                        # live transport, leaving the old value makes
-                        # ``_ensure_transport`` perform the required re-keyed
-                        # native restart.
-                        if member.transport is None:
-                            member.residency_generation = max(
-                                member.residency_generation,
-                                manifest.residency_generation,
+                    member.last_settled_job_id = manifest.last_settled_job_id
+                    if member.transport is None:
+                        member.resident_state = manifest.resident_state
+                        if member.resident_state == "live":
+                            member.resident_state = (
+                                "restarting" if member.native_session_id else "stopped"
                             )
-                        member.last_settled_job_id = manifest.last_settled_job_id
-                        if member.transport is None:
-                            member.resident_state = manifest.resident_state
-                            if member.resident_state == "live":
-                                member.resident_state = (
-                                    "restarting" if member.native_session_id else "stopped"
-                                )
-            # Removal is safe only for a manifest member with no live local
-            # ownership. A stale manifest never tears down an active process.
-            for thread_id, member in list(group.members.items()):
-                if thread_id in wanted or member.lease_token or member.transport:
-                    continue
-                group.members.pop(thread_id, None)
-                self._members.pop(thread_id, None)
-            return self._descriptors(group)
+        # Removal is safe only for a manifest member with no live local
+        # ownership. A stale manifest never tears down an active process.
+        for thread_id, member in list(group.members.items()):
+            if thread_id in wanted or member.lease_token or member.transport:
+                continue
+            group.members.pop(thread_id, None)
+            self._members.pop(thread_id, None)
+        return self._descriptors(group)
 
     def owns(self, thread_id: str) -> bool:
         """Whether this supervisor currently knows the membership alias."""
@@ -1618,16 +1673,20 @@ class SharedChatSessionSupervisor:
             # a stopped workspace only to be rejected after ``docker start``.
             if activation_generation < member.activation_generation:
                 raise SessionLeaseLost("member activation generation is stale")
-            current = self._manager.inspect(group.spec.container_name)
-            if current is None:
-                member.context_status = "lost"
-                member.resident_state = "lost"
-                raise RetainedChatLost("shared sandbox container is missing")
-            if expected_container_id and current.container_id != expected_container_id:
-                member.context_status = "lost"
-                member.resident_state = "lost"
-                raise RetainedChatLost("shared sandbox container identity changed")
             lifecycle_generation = group.lifecycle_generation
+        # Docker answers outside the metadata lock. The start below and the
+        # admission after it check again everything this observation stood for.
+        current = self._manager.inspect(group.spec.container_name)
+        if current is None or (
+            expected_container_id and current.container_id != expected_container_id
+        ):
+            with self._lock:
+                if self._members.get(thread_id) is group and group.members.get(thread_id) is member:
+                    member.context_status = "lost"
+                    member.resident_state = "lost"
+            if current is None:
+                raise RetainedChatLost("shared sandbox container is missing")
+            raise RetainedChatLost("shared sandbox container identity changed")
 
         inspection = self._start_group(
             group,
@@ -1699,9 +1758,13 @@ class SharedChatSessionSupervisor:
             group, member = self._leased_member(thread_id, token)
             self._require_mutation_admission(group)
         # CLI initialization may block. The member lock, not the group lock,
-        # leaves siblings able to initialize and execute simultaneously.
+        # leaves siblings able to initialize and execute simultaneously. The
+        # lease is checked again around the launch: an activation abandoned
+        # while it waited or launched must not install its process.
         with member.turn_lock:
-            resident_action = self._ensure_transport(group, member, launch, observer=recorder)
+            resident_action = self._ensure_transport(
+                group, member, launch, observer=recorder, lease_token=token
+            )
         with self._lock:
             return self._descriptor(
                 group,
@@ -1994,36 +2057,43 @@ class SharedChatSessionSupervisor:
                 },
                 exc_info=True,
             )
-        with self._lock:
-            _, member = self._leased_member(thread_id, token)
-            if member.current_turn is not turn:
-                raise SessionLeaseLost("member turn generation is stale")
-            member.current_turn = None
-            member.activation_processes = None
-            member.observer_cursor = None
-            member.tool_mark_reader = None
-            member.window = None
-            member.window_sampler = None
-            member.window_checkpoints = None
-            member.window_accumulator = None
-            transport = member.transport
-            if boundary_error is not None:
-                member.transport = None
-                member.resident_state = "restarting"
-            elif transport is None or not transport.alive:
-                member.resident_state = "restarting"
-                logger.warning(
-                    "shared member resident transport exited across activation boundary",
-                    extra={
-                        "event": "shared_member_transport_exited",
-                        "thread_id": thread_id,
-                        "resident_slot_id": slot_id,
-                        "activation_processes": activation_processes,
-                    },
-                )
-            else:
-                member.resident_state = "live"
-        member.turn_lock.release()
+        detached = False
+        try:
+            with self._lock:
+                _, member = self._leased_member(thread_id, token)
+                if member.current_turn is not turn:
+                    raise SessionLeaseLost("member turn generation is stale")
+                # Detaching the turn hands its member lock to this call, which
+                # releases it however the bookkeeping below ends.
+                member.current_turn = None
+                detached = True
+                member.activation_processes = None
+                member.observer_cursor = None
+                member.tool_mark_reader = None
+                member.window = None
+                member.window_sampler = None
+                member.window_checkpoints = None
+                member.window_accumulator = None
+                transport = member.transport
+                if boundary_error is not None:
+                    member.transport = None
+                    member.resident_state = "restarting"
+                elif transport is None or not transport.alive:
+                    member.resident_state = "restarting"
+                    logger.warning(
+                        "shared member resident transport exited across activation boundary",
+                        extra={
+                            "event": "shared_member_transport_exited",
+                            "thread_id": thread_id,
+                            "resident_slot_id": slot_id,
+                            "activation_processes": activation_processes,
+                        },
+                    )
+                else:
+                    member.resident_state = "live"
+        finally:
+            if detached:
+                member.turn_lock.release()
         if boundary_error is not None:
             if transport is not None:
                 with contextlib.suppress(Exception):
@@ -2619,11 +2689,13 @@ class SharedChatSessionSupervisor:
             group, member = self._leased_member(thread_id, token)
             transport = member.transport
             observer_cursor = member.observer_cursor
-            # ``complete_turn`` may have cleared ``current_turn`` and then
-            # failed before releasing the lock. Abandon owns this member's
-            # teardown, so the lock state itself is the authoritative cleanup
-            # signal here.
-            release_turn_lock = member.turn_lock.locked()
+            # An admitted turn holds the member lock until whoever detaches it
+            # releases it: ``complete_turn`` above, or, when that failed, this
+            # teardown. ``threading.Lock`` has no owner, so ``locked()`` cannot
+            # tell that from a resident start, a turn still in admission or a
+            # fork of this source, each of which releases its own acquisition.
+            # Releasing theirs would let a second launch or turn run beside it.
+            release_turn_lock = member.current_turn is not None
             member.transport = None
             member.current_turn = None
             member.activation_processes = None
@@ -2995,15 +3067,24 @@ class SharedChatSessionSupervisor:
                 raise SessionBusy("shared workspace snapshot capture is already in progress")
             if not self._is_quiescent(group):
                 raise SessionBusy("shared workspace still has active mutations")
-            current = self._manager.inspect(group.spec.container_name)
-            if current is None:
-                raise RetainedChatLost("shared sandbox container is missing")
-            self._accept_inspection_locked(group, current)
+            # The barrier goes up first, so Docker can be asked without the lock.
             group.snapshotting = True
             group.idle_deadline = None
             lifecycle_generation = group.lifecycle_generation
-            expected_container_id = group.inspection.container_id
             slots = [member.resident_slot_id for member in group.members.values()]
+        try:
+            current = self._manager.inspect(group.spec.container_name)
+            with self._lock:
+                if current is None:
+                    raise RetainedChatLost("shared sandbox container is missing")
+                self._accept_inspection_locked(group, current)
+                expected_container_id = group.inspection.container_id
+        except BaseException:
+            with self._lock:
+                group.snapshotting = False
+                self._arm_idle_if_quiescent(group)
+                self._condition.notify_all()
+            raise
 
         manifest: str | None = None
         capture_error: BaseException | None = None
@@ -3109,22 +3190,33 @@ class SharedChatSessionSupervisor:
                 for peer in group.members.values()
             ):
                 raise SessionBusy("a sibling member is active during initial archive capture")
-            current = self._manager.inspect(group.spec.container_name)
-            if current is None:
-                raise RetainedChatLost("shared sandbox container is missing")
-            if not current.running:
-                raise SandboxError("initial archive requires the prepared running sandbox")
-            if current.container_id != group.inspection.container_id:
-                raise RetainedChatLost("shared sandbox container identity changed")
-            group.inspection = current
+            # The barrier goes up first, so Docker can be asked without the lock.
             group.snapshotting = True
             group.idle_deadline = None
+            observed = group.inspection
             lifecycle_generation = group.lifecycle_generation
             authoritative_spec = group.spec
             authoritative_members = self._archive_members_locked(group)
             expected_container_id = group.inspection.container_id
             activation_generation = member.activation_generation
             slots = [peer.resident_slot_id for peer in group.members.values()]
+        try:
+            current = self._manager.inspect(group.spec.container_name)
+            if current is None:
+                raise RetainedChatLost("shared sandbox container is missing")
+            if not current.running:
+                raise SandboxError("initial archive requires the prepared running sandbox")
+            if current.container_id != expected_container_id:
+                raise RetainedChatLost("shared sandbox container identity changed")
+            with self._lock:
+                if group.inspection == observed:
+                    group.inspection = current
+        except BaseException:
+            with self._lock:
+                group.snapshotting = False
+                self._arm_idle_if_quiescent(group)
+                self._condition.notify_all()
+            raise
 
         manifest: str | None = None
         capture_error: BaseException | None = None
@@ -3357,16 +3449,30 @@ class SharedChatSessionSupervisor:
             return RetainedChatBackend(self._manager, group.spec)
 
     def status(self, thread_id: str) -> SharedSessionDescriptor:
-        """Return fresh Docker and member process state."""
+        """Return fresh Docker and member process state.
+
+        Docker is asked outside the metadata lock, which every terminal request
+        would otherwise hold across an inspect. An observation that a lifecycle
+        call superseded while it was in flight never replaces that call's own.
+        """
         stale_transport: ResidentTransport[DialectRuntime] | None = None
         with self._lock:
             group, member = self._member(thread_id)
-            current = self._manager.inspect(group.spec.container_name)
-            if current is None:
-                member.context_status = "lost"
-                member.resident_state = "lost"
-                raise RetainedChatLost("shared sandbox container is missing")
-            self._accept_inspection_locked(group, current)
+            observed = group.inspection
+            lifecycle_generation = group.lifecycle_generation
+        current = self._manager.inspect(group.spec.container_name)
+        with self._lock:
+            current_group, current_member = self._member(thread_id)
+            if current_group is not group or current_member is not member:
+                raise SessionLeaseLost("shared sandbox membership changed during observation")
+            if group.inspection == observed and group.lifecycle_generation == lifecycle_generation:
+                if current is None:
+                    member.context_status = "lost"
+                    member.resident_state = "lost"
+                    raise RetainedChatLost("shared sandbox container is missing")
+                self._accept_inspection_locked(group, current)
+            elif group.container_lost:
+                raise RetainedChatLost("shared sandbox container identity was lost")
             stale_transport = self._detach_dead_transport(member)
             descriptor = self._descriptor(group, member)
         if stale_transport is not None:
@@ -3951,12 +4057,20 @@ class SharedChatSessionSupervisor:
         launch: ResidentLaunch,
         *,
         observer: StageRecorder | None = None,
+        lease_token: str | None = None,
     ) -> str:
-        """Open or reuse this member's transport, reporting which one it was."""
+        """Open or reuse this member's transport, reporting which one it was.
+
+        ``lease_token`` names the activation a leased caller opens it for; the
+        process is installed only while that lease is still the member's. A
+        fork opens its unleased source and target without one.
+        """
         with self._lock:
             current_group, current_member = self._member(member.thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("member identity changed before process launch")
+            if lease_token is not None and member.lease_token != lease_token:
+                raise SessionLeaseLost("shared member activation lease is stale")
             self._require_mutation_admission(group)
             # The retained member owns the locator. An omitted field in a
             # later activation must not turn a restart into a fresh chat.
@@ -4018,6 +4132,7 @@ class SharedChatSessionSupervisor:
                 or rechecked_member is not member
                 or group.stopping
                 or group.lifecycle_generation != lifecycle_generation
+                or (lease_token is not None and member.lease_token != lease_token)
             )
             if not launch_invalid:
                 member.transport = transport

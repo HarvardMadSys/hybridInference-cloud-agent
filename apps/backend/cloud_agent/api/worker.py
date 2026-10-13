@@ -1956,8 +1956,8 @@ async def _goal_envelope_for_turn(
     rather than being quietly treated as silence.
 
     A *clipped* message is the case that distinction exists for. The report
-    block sits at the end of a final message, so a runtime that bound its text
-    — Pi cuts at 4,000 characters — removes exactly the part a reader needs.
+    block sits at the end of a final message, so a bound on its text — the
+    shared 256 KiB event payload limit — removes exactly the part a reader needs.
     Reading the clipped text as "no report" would keep a goal working forever
     on a turn that may well have reported completion, so the completeness
     marker the runtime recorded travels back with the text.

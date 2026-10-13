@@ -520,6 +520,10 @@ class HarnessTurn(Generic[_RuntimeT]):
         """Every event one stdout line stands for; usually exactly one."""
         return [self.event_for_line(line)]
 
+    def flush_events(self) -> list[HarnessEvent]:
+        """Rows still gathered from earlier lines; none unless a driver batches."""
+        return []
+
     def event_for_line(self, line: str) -> HarnessEvent:
         """Map one stdout line to its event; :data:`LINE` when there is none."""
         event = self._runtime.parse_event(line)
@@ -798,6 +802,123 @@ class _InputReceipt:
         return self._outcome
 
 
+@dataclass(frozen=True)
+class StreamDelta:
+    """One native record that only adds a few characters to a stream.
+
+    ``path`` leads to the added text inside ``value``; ``render`` turns a
+    record and its line into the row the platform stores for it.
+    """
+
+    value: dict[str, Any]
+    path: tuple[str, ...]
+    delta: str
+    line: str
+    render: Callable[[dict[str, Any], str], HarnessEvent]
+
+
+def _with_delta(value: dict[str, Any], path: tuple[str, ...], delta: str) -> dict[str, Any]:
+    """A copy of ``value`` whose text at ``path`` is ``delta``."""
+    head, *rest = path
+    inner = value.get(head)
+    if rest and isinstance(inner, dict):
+        return {**value, head: _with_delta(inner, tuple(rest), delta)}
+    return {**value, head: delta}
+
+
+def _escaped_chars(text: str) -> int:
+    """How many characters ``text`` takes inside a JSON string."""
+    return len(json.dumps(text)) - 2
+
+
+def _codex_raw_row(value: dict[str, Any], line: str) -> HarnessEvent:
+    """A Codex app-server notification stored as it came, for the trajectory."""
+    return HarnessEvent(
+        RAW,
+        {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
+        raw_line=line,
+    )
+
+
+def _bridge_raw_row(value: dict[str, Any], line: str) -> HarnessEvent:
+    """An OpenCode/Kilo bridge record stored as its bounded line."""
+    return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+
+
+class DeltaBatcher:
+    """Merge adjacent per-token deltas of one native stream into fewer rows.
+
+    Codex's reasoning and command-output deltas and OpenCode/Kilo's reasoning
+    deltas arrive a few characters at a time, and every row the runner gets is
+    a stored event and a synchronous control-plane request. Only *adjacent*
+    deltas of the *same* stream are merged, so no text is dropped or
+    reordered: the first piece of a quiet stream goes out at once, later ones
+    at most once per :attr:`INTERVAL_S`, and any other protocol line -- the
+    item's completion, the turn's boundary, an interrupt's settlement --
+    first flushes what is gathered (see ``_JsonResidentTurn.events_for_line``).
+    """
+
+    INTERVAL_S = ReplyPreview.INTERVAL_S
+    #: A merged row's line stays within the 4,000 characters a raw row keeps
+    #: of its line, so merging never clips text that separate rows kept whole.
+    MAX_LINE_CHARS = 4000
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        """``clock`` is for tests; it defaults to ``time.monotonic``."""
+        self._clock = clock or time.monotonic
+        self._first: StreamDelta | None = None
+        self._key = ""
+        self._pieces: list[str] = []
+        self._line_chars = 0
+        self._reported_at: dict[str, float] = {}
+
+    @property
+    def holding(self) -> bool:
+        """Whether the latest delta is gathered rather than reported yet."""
+        return self._first is not None
+
+    def add(self, item: StreamDelta) -> list[HarnessEvent]:
+        """Gather ``item``; return the rows now due, in stream order."""
+        empty = _with_delta(item.value, item.path, "")
+        key = json.dumps(empty, sort_keys=True)
+        added = _escaped_chars(item.delta)
+        rows: list[HarnessEvent] = []
+        if self._first is not None and (
+            key != self._key or self._line_chars + added > self.MAX_LINE_CHARS
+        ):
+            rows.extend(self.flush())
+        now = self._clock()
+        if self._first is None:
+            reported_at = self._reported_at.get(key)
+            if reported_at is None or now - reported_at >= self.INTERVAL_S:
+                self._reported_at[key] = now
+                rows.append(item.render(item.value, item.line))
+                return rows
+            self._first, self._key = item, key
+            self._pieces = [item.delta]
+            self._line_chars = len(json.dumps(empty, separators=(",", ":"))) + added
+            return rows
+        self._pieces.append(item.delta)
+        self._line_chars += added
+        if now - self._reported_at[key] >= self.INTERVAL_S:
+            rows.extend(self.flush())
+        return rows
+
+    def flush(self) -> list[HarnessEvent]:
+        """Report whatever is gathered, as one row."""
+        first = self._first
+        if first is None:
+            return []
+        if len(self._pieces) == 1:
+            value, line = first.value, first.line
+        else:
+            value = _with_delta(first.value, first.path, "".join(self._pieces))
+            line = json.dumps(value, separators=(",", ":"))
+        self._reported_at[self._key] = self._clock()
+        self._first, self._key, self._pieces, self._line_chars = None, "", [], 0
+        return [first.render(value, line)]
+
+
 class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
     """One framed activation on a process whose stdout survives the turn."""
 
@@ -815,6 +936,9 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         self.reported_tools: set[str] = set()
         #: Batches the answer text the model is writing, for the same reason.
         self.preview = ReplyPreview()
+        #: Merges the other per-token streams, which are stored rather than
+        #: previewed: reasoning text and command output.
+        self.deltas = DeltaBatcher()
         # Answers to requests sent while the turn runs. Only the stream reads
         # stdout, so it hands each one over instead of the sender reading it.
         self._replies: dict[str, _ProtocolReply] = {}
@@ -861,14 +985,26 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
 
     def iter_events(self) -> Iterator[HarnessEvent]:
         yield HarnessEvent(TURN_STARTED)
-        for line in self.raw_lines():
-            yield from self.events_for_line(line)
+        try:
+            for line in self.raw_lines():
+                yield from self.events_for_line(line)
+        except Exception:
+            yield from self.flush_events()
+            raise
         yield self.finish_event()
 
     def events_for_line(self, line: str) -> list[HarnessEvent]:
+        delta = self._session.stream_delta(line, self)
+        if delta is not None:
+            rows = self.deltas.add(delta)
+            if self.deltas.holding:
+                rows.append(HarnessEvent(LINE, raw_line=line))
+            return rows
+        # Anything else ends the gathered piece first, so it stays in order.
+        flushed = self.deltas.flush()
         reply = self._reply_event(line)
         if reply is not None:
-            return [reply]
+            return [*flushed, reply]
         events = self._session.events_for_protocol_line(line, self)
         for event in events:
             parent_tool_use_id = event.payload.get("parent_tool_use_id")
@@ -878,7 +1014,11 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
                 text = str(event.payload.get("text", ""))
                 if text.strip():
                     self._final_messages.append(text)
-        return events
+        return [*flushed, *events]
+
+    def flush_events(self) -> list[HarnessEvent]:
+        """Report the deltas still gathered, as a stream that broke must."""
+        return self.deltas.flush()
 
     def event_for_line(self, line: str) -> HarnessEvent:
         return self.events_for_line(line)[0]
@@ -1159,6 +1299,10 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
             return HarnessEvent(LINE, raw_line=line)
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
 
+    def stream_delta(self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]) -> StreamDelta | None:
+        """The per-token delta ``line`` is, if it is one to merge; see :class:`DeltaBatcher`."""
+        return None
+
     def events_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]
     ) -> list[HarnessEvent]:
@@ -1301,6 +1445,36 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         status = str(completed.get("status") or "").lower()
         return True, status not in {"completed", "interrupted"}, True
 
+    #: Notifications Codex sends per token (reasoning) or per output chunk
+    #: (commands). Each stays a stored ``raw`` notification -- the trajectory
+    #: view rebuilds reasoning and live command output from them -- merged with
+    #: the deltas beside it rather than stored one row per token.
+    _STREAM_DELTAS = frozenset(
+        {
+            "item/reasoning/summaryTextDelta",
+            "item/reasoning/textDelta",
+            "item/commandExecution/outputDelta",
+        }
+    )
+
+    def stream_delta(self, line: str, turn: _JsonResidentTurn[CodexRuntime]) -> StreamDelta | None:
+        """Recognize a reasoning or command-output delta notification."""
+        if "Delta" not in line:
+            return None
+        value = self._object(line)
+        if value is None or value.get("method") not in self._STREAM_DELTAS:
+            return None
+        params = value.get("params")
+        if (
+            "id" in value
+            or value.get("error") is not None
+            or not isinstance(params, dict)
+            or not params.get("itemId")
+            or not isinstance(params.get("delta"), str)
+        ):
+            return None
+        return StreamDelta(value, ("params", "delta"), params["delta"], line, _codex_raw_row)
+
     def event_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[CodexRuntime]
     ) -> HarnessEvent:
@@ -1320,11 +1494,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         # identity. Trajectory can join deltas to this item without inventing a
         # provider request or attributing turn-wide usage to one reply.
         identity = {"native_item_id": str(item["id"])} if item.get("id") else {}
-        raw_notification = HarnessEvent(
-            RAW,
-            {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
-            raw_line=line,
-        )
+        raw_notification = _codex_raw_row(value, line)
         if method == "item/tool/requestUserInput":
             native_id = value.get("id")
             questions = _question_choices(params.get("questions"), dialect="codex")
@@ -1781,6 +1951,42 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             if bridge == "fatal" or command_id in {"", turn.protocol_turn_id}:
                 return True, True, False
         return False, False, False
+
+    def stream_delta(
+        self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
+    ) -> StreamDelta | None:
+        """Recognize this turn's per-token delta of a part other than answer text.
+
+        Reasoning arrives one ``message.part.delta`` per token, like the answer;
+        the answer's own deltas only feed its preview and are not stored.
+        """
+        assert isinstance(turn, HttpAgentLiveTurn)
+        if "message.part.delta" not in line:
+            return None
+        value = self._object(line)
+        if (
+            value is None
+            or value.get("bridge") != "event"
+            or value.get("turn_id") != turn.protocol_turn_id
+        ):
+            return None
+        event = value.get("event")
+        properties = event.get("properties") if isinstance(event, dict) else None
+        if (
+            not isinstance(event, dict)
+            or event.get("type") != "message.part.delta"
+            or not isinstance(properties, dict)
+            or not isinstance(properties.get("delta"), str)
+        ):
+            return None
+        if (
+            properties.get("field") == "text"
+            and turn.part_types.get(str(properties.get("partID") or "")) == "text"
+        ):
+            return None
+        return StreamDelta(
+            value, ("event", "properties", "delta"), properties["delta"], line, _bridge_raw_row
+        )
 
     def event_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
