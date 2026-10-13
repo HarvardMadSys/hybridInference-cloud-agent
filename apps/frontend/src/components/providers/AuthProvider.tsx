@@ -109,12 +109,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [state.user?.id]);
 
   const logout = useCallback(async () => {
-    try {
-      await endSession();
-    } finally {
-      clearSideChatDrafts(state.user?.id);
-      setState(SIGNED_OUT);
-    }
+    // Signed out once the server has dropped the cookie, and not before. A
+    // failed request leaves the session working, and a signed-out page over it
+    // would hand this account to the next person at this browser. The caller
+    // gets the failure and says so.
+    await endSession();
+    clearSideChatDrafts(state.user?.id);
+    setState(SIGNED_OUT);
   }, [state.user?.id]);
 
   const value: AuthContextValue = { state, logout, refreshUser };

@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentAccessApi } from '@/lib/api/session';
 
 vi.mock('@/lib/api/session', () => ({ getSessionUser: vi.fn(), endSession: vi.fn() }));
 
 import { sideChatKeys } from '@/components/features/agents/sideChatStorage';
-import { getSessionUser } from '@/lib/api/session';
+import { endSession, getSessionUser } from '@/lib/api/session';
+import { APIError } from '@/lib/utils/errors';
 import { AuthProvider, hasAgentPermission, useAuth } from './AuthProvider';
 
 const getMe = vi.mocked(getSessionUser);
@@ -169,4 +170,36 @@ it('clears only the signing-out user’s unsent side drafts', async () => {
   await waitFor(() => expect(current().isAuthenticated).toBe(false));
   expect(sessionStorage.getItem(own)).toBeNull();
   expect(sessionStorage.getItem(other)).toBe('other draft');
+});
+
+// The session is a signed token, and only the server's answer deletes the
+// cookie carrying it. Showing a signed-out app after a failed request left
+// the session working for whoever next opened this browser.
+it('stays signed in, drafts kept, when the server did not end the session', async () => {
+  getMe.mockResolvedValue({ id: 'draft-owner' });
+  vi.mocked(endSession).mockRejectedValueOnce(
+    new APIError('SERVICE_UNAVAILABLE', 'HTTP 502: Bad Gateway', 502),
+  );
+  const own = sideChatKeys('draft-owner', 'main').draft;
+  sessionStorage.setItem(own, 'private draft');
+  let logout: (() => Promise<void>) | undefined;
+  function Capture() {
+    const auth = useAuth();
+    logout = auth.logout;
+    return <output data-testid="auth">{JSON.stringify(auth.state)}</output>;
+  }
+  render(
+    <AuthProvider>
+      <Capture />
+    </AuthProvider>,
+  );
+  await waitFor(() => expect(current().loading).toBe(false));
+
+  await act(async () => {
+    await expect(logout!()).rejects.toMatchObject({ statusCode: 502 });
+  });
+
+  expect(current().isAuthenticated).toBe(true);
+  expect(current().user.id).toBe('draft-owner');
+  expect(sessionStorage.getItem(own)).toBe('private draft');
 });

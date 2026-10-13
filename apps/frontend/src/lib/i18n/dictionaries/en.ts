@@ -170,6 +170,7 @@ export const en = {
   'nav.admin': 'Admin',
   'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
+  'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
