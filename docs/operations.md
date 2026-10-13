@@ -75,7 +75,13 @@ preservation rule.
 
 Later deployments keep the saved admin values, and resetting a field never
 restores an old `.env` value. Listeners synchronize saved changes every five
-seconds. The web server reads saved public appearance fields on every request.
+seconds. The web server reads saved public appearance fields on every request,
+with a 400 ms budget for the response and its body. A timeout, unavailable
+backend, or invalid response uses the last valid public appearance read by that
+web process for the same control-plane URL; before its first successful read,
+it uses neutral display defaults. Successful reads show saved edits on the next
+page request. This fallback contains no session or access decisions and does
+not survive a web-process restart.
 Apply changes to subsequent operations as described beside each setting.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by

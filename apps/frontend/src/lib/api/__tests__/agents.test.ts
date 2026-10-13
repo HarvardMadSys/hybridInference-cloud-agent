@@ -203,6 +203,69 @@ describe('agents api', () => {
     );
   });
 
+  it('publishes immutable activity snapshots and forwards cancellation to every page', async () => {
+    const first = Array.from({ length: 1000 }, (_, index) => ({ id: index + 1 }));
+    const last = { id: 1001 };
+    fetchWithAuth
+      .mockResolvedValueOnce(jsonResponse({ events: first, next_cursor: 1000 }))
+      .mockResolvedValueOnce(jsonResponse({ events: [last], next_cursor: 1001 }));
+    const controller = new AbortController();
+    const onPage = vi.fn();
+    const result = await listAllAgentThreadEvents('job/one', { signal: controller.signal, onPage });
+    expect(onPage).toHaveBeenCalledTimes(2);
+    expect(onPage.mock.calls[0][0]).toEqual(first);
+    expect(onPage.mock.calls[1][0]).toEqual([...first, last]);
+    expect(result).toEqual([...first, last]);
+    expect(onPage.mock.calls[0][0]).not.toBe(onPage.mock.calls[1][0]);
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      1,
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/thread/events?after=0&limit=1000',
+      { signal: controller.signal },
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/thread/events?after=1000&limit=1000',
+      { signal: controller.signal },
+    );
+  });
+
+  it('stops fetching further activity pages when the reader is cancelled', async () => {
+    const first = Array.from({ length: 1000 }, (_, index) => ({ id: index + 1 }));
+    fetchWithAuth.mockResolvedValue(jsonResponse({ events: first, next_cursor: 1000 }));
+    const controller = new AbortController();
+    const onPage = vi.fn(() => controller.abort());
+    await expect(
+      listAllAgentThreadEvents('job', { signal: controller.signal, onPage }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchWithAuth).toHaveBeenCalledOnce();
+    expect(onPage).toHaveBeenCalledOnce();
+  });
+
+  it('does not publish an in-flight page after cancellation even if transport ignores abort', async () => {
+    let answer!: (response: Response) => void;
+    fetchWithAuth.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    const controller = new AbortController();
+    const onPage = vi.fn();
+    const pending = listAllAgentThreadEvents('job', { signal: controller.signal, onPage });
+    const outcome = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    answer(jsonResponse({ events: [{ id: 1 }], next_cursor: 1 }));
+    await outcome;
+    expect(onPage).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenCalledOnce();
+  });
+
+  it('does not fetch history for an already cancelled reader', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      listAllAgentThreadEvents('job', { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
   it('archives and restores a whole task conversation', async () => {
     fetchWithAuth.mockResolvedValue(
       jsonResponse({ thread_id: 'athr_1', archived: true, archived_at: '2026-07-29T12:00:00Z' }),

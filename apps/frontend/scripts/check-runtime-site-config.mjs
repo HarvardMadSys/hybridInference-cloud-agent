@@ -53,6 +53,9 @@
 //      rather than inferred from the shape of the loop.
 //  12. metadata and layout share one saved-settings fetch per request, while
 //      the next request sees saved edits without restarting the server.
+//  13. stalled settings headers or bodies cannot delay pages for seconds:
+//      cold processes render neutral branding and warmed processes retain the
+//      last valid appearance, with successful edits still visible on recovery.
 //
 // Run from `apps/frontend/`.
 // Use --saved-config-only to check request-scoped caching against an existing
@@ -668,6 +671,8 @@ async function assertNeutralDeployment(variant) {
 async function assertSavedConfigRequestScope(variant) {
   let target = DEPLOYMENTS[0];
   let reads = 0;
+  let mode = 'slow headers';
+  const fallbackTimings = [];
   const controlPlane = createServer((request, response) => {
     if (request.url !== '/v1/agent/site-config') {
       response.writeHead(404).end();
@@ -678,42 +683,118 @@ async function assertSavedConfigRequestScope(variant) {
       branding: expectedIdentity(target),
       features: { rag: target.rag },
     };
+    if (mode === 'http') {
+      response.writeHead(503).end();
+      return;
+    }
+    if (mode === 'invalid') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ...saved, features: { rag: 'invalid' } }));
+      return;
+    }
+    if (mode === 'slow body') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write(JSON.stringify(saved).slice(0, 1));
+    }
     // Keep the two readers overlapping: a module cache or Next's fetch
     // deduplication behaving differently must still satisfy the request count.
-    setTimeout(() => {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(saved));
-    }, 20);
+    const slowBody = mode === 'slow body';
+    const timer = setTimeout(
+      () => {
+        if (slowBody) response.end(JSON.stringify(saved).slice(1));
+        else {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify(saved));
+        }
+      },
+      mode.startsWith('slow') ? 5_000 : 20,
+    );
+    response.on('close', () => clearTimeout(timer));
   });
   await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
 
   const port = nextPort++;
   const server = startServer(
-    { AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}` },
+    {
+      ...DEPLOYMENTS[0].env,
+      AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
+    },
     port,
   );
   const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
-  try {
-    for (const deployment of DEPLOYMENTS) {
-      target = deployment;
-      const before = reads;
-      const response = await waitForResponse(url);
-      const html = await response.text();
-      const where = `${variant.name} / saved ${target.name}`;
-      if (response.status !== 200) {
-        throw new Error(`${where}: page answered ${response.status}\n${server.logs.join('')}`);
-      }
-      if (reads - before !== 1) {
-        throw new Error(`${where}: rendered one page with ${reads - before} settings fetches`);
-      }
-      if (titleOf(html) !== target.appName || textOf(html, 'h1') !== target.appName) {
-        throw new Error(`${where}: metadata and layout did not read the current saved name`);
-      }
-      const identity = serializedIdentity(flightPayload(html));
-      if (JSON.stringify(identity) !== JSON.stringify(expectedIdentity(target))) {
-        throw new Error(`${where}: hydration did not receive the current saved identity`);
+
+  async function assertSnapshot(expected, label, bounded = false) {
+    const before = reads;
+    const started = performance.now();
+    const response = await fetch(url, { signal: AbortSignal.timeout(2_500) });
+    const html = await response.text();
+    const elapsed = performance.now() - started;
+    const where = `${variant.name} / ${label}`;
+    if (response.status !== 200) {
+      throw new Error(`${where}: page answered ${response.status}\n${server.logs.join('')}`);
+    }
+    if (reads - before !== 1) {
+      throw new Error(`${where}: rendered one page with ${reads - before} settings fetches`);
+    }
+    if (titleOf(html) !== expected.appName || textOf(html, 'h1') !== expected.appName) {
+      throw new Error(`${where}: metadata and layout did not read the expected saved name`);
+    }
+    const identity = serializedIdentity(flightPayload(html));
+    if (JSON.stringify(identity) !== JSON.stringify(expected)) {
+      throw new Error(`${where}: hydration did not receive the expected saved identity`);
+    }
+    // This includes the complete HTML, not merely streamed response headers.
+    // Allow rendering/CI overhead beyond the unit-tested 400ms read budget,
+    // while rejecting the previous five-second configuration bottleneck.
+    if (bounded) {
+      fallbackTimings.push(elapsed);
+      if (elapsed > 1_500) {
+        throw new Error(`${where}: fallback page took ${elapsed.toFixed(0)}ms (limit 1500ms)`);
       }
     }
+  }
+
+  try {
+    // Start the production process through an asset request, so its startup
+    // time cannot hide the appearance budget or prime the public fallback.
+    const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
+      /^main-app-.*\.js$/.test(file),
+    );
+    if (!chunk) throw new Error('No main-app chunk to check production server readiness');
+    const asset = await waitForResponse(
+      `http://127.0.0.1:${port}${variant.basePath}/_next/static/chunks/${chunk}`,
+    );
+    await asset.arrayBuffer();
+    if (asset.status !== 200 || reads !== 0) {
+      throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
+    }
+
+    const neutral = {
+      appName: NEUTRAL.appName,
+      orgName: '',
+      orgUrl: '',
+      statusUrl: '',
+      gatewayUrl: '',
+    };
+    for (const stalled of ['slow headers', 'slow body']) {
+      mode = stalled;
+      await assertSnapshot(neutral, `cold ${mode}`, true);
+    }
+
+    mode = 'success';
+    for (const deployment of DEPLOYMENTS) {
+      target = deployment;
+      await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
+    }
+
+    for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
+      mode = failure;
+      await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
+    }
+
+    mode = 'success';
+    target = DEPLOYMENTS[0];
+    await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
 
     // Separate concurrent page requests must each read their own settings,
     // rather than sharing a process-wide in-flight promise.
@@ -723,6 +804,10 @@ async function assertSavedConfigRequestScope(variant) {
     if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
       throw new Error(`${variant.name}: concurrent pages did not each read one settings snapshot`);
     }
+    console.log(
+      `${variant.name}: cold and retained appearance fallbacks rendered within ` +
+        `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
+    );
   } finally {
     await server.stop();
     await new Promise((done, reject) =>
