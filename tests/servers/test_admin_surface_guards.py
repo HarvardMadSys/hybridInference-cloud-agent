@@ -7,9 +7,9 @@ the source modules: it sees the routes ``create_app`` actually serves, prefix
 composition included, and fails naming the exact path that would answer
 without the guard.
 
-The owner surface has its own registry-driven check in
-``test_owner_revalidation.py``; the two agree that a browser session reaches
-exactly the surfaces mounted on the main application.
+The owner surface has its own check in ``test_owner_revalidation.py``, which
+walks the same assembled application with this module's ``_flatten``: every
+route, of every method, must revalidate or carry a machine credential.
 """
 
 from __future__ import annotations

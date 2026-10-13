@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 from typing import Any
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.routing import APIRoute
+from fastapi import Depends, FastAPI, Header
 from httpx import ASGITransport, AsyncClient
+from tests.servers.test_admin_surface_guards import _flatten
 
 from cloud_agent import identity
-from cloud_agent.api import admin_hosts as admin_hosts_router, routes as agent_jobs_router
 from cloud_agent.api._owner_auth import (
     authenticate_agent_owner,
     require_agent_owner,
 )
 from cloud_agent.api.deps import get_gateway_client, verify_admin_access
+from cloud_agent.api.hosts import authenticate_host
+from cloud_agent.api.service_jobs import verify_oncall_dispatch
+from cloud_agent.api.worker import _worker_claims, verify_claiming_host
 from cloud_agent.gateway import GatewayError
 
 pytestmark = pytest.mark.asyncio
@@ -132,18 +136,24 @@ async def test_permission_is_rechecked_after_every_successful_read():
     assert gateway.asked == [_OWNER, _OWNER, _OWNER]
 
 
-def _gates(route: Any) -> set[str]:
-    """Every dependency function name reachable from a route."""
-    names: set[str] = set()
+def _gates(route: Any) -> list[Any]:
+    """Every dependency callable reachable from a route, inherited ones included."""
+    calls: list[Any] = []
     stack = list(getattr(route.dependant, "dependencies", []))
     while stack:
         dependant = stack.pop()
         call = getattr(dependant, "call", None)
         if call is not None:
-            names.add(getattr(call, "__name__", ""))
-        stack.extend(getattr(dependant, "dependencies", []))
-    return names
+            calls.append(call)
+        stack.extend(getattr(dependant, "dependencies", None) or [])
+    return calls
 
+
+#: Gates that re-ask the gateway before they allow a request. Compared by
+#: identity, so a dependency that merely shares the name does not count.
+#: verify_admin_access is a browser gate too: its session path requires a fresh
+#: agent.admin decision, even though ADMIN_TOKEN needs no user lookup.
+REVALIDATING_GATES = (require_agent_owner, verify_admin_access)
 
 #: What a machine-to-machine route authenticates with instead. These carry
 #: their own capability credential and have no browser session behind them to
@@ -151,66 +161,147 @@ def _gates(route: Any) -> set[str]:
 #: wrong thing. Named by the call each route actually makes, not by URL prefix:
 #: a prefix exempts whatever is put under it, which is the same "the next one
 #: falls off the list" failure this test exists to catch.
-#: verify_admin_access is also a browser gate: its session path requires a
-#: fresh agent.admin decision, even though ADMIN_TOKEN needs no user lookup.
-MACHINE_GATES = frozenset(
-    {
-        "_worker_claims",
-        "verify_claiming_host",
-        "verify_dispatcher_access",
-    }
-)
+MACHINE_GATES = (verify_claiming_host, authenticate_host, verify_oncall_dispatch)
 
-#: Both routers a browser reaches with a session. The admin router is a second
-#: mount point, not a second kind of caller.
-SESSION_ROUTERS = (*agent_jobs_router.SURFACE_ROUTERS, admin_hosts_router.router)
-
-#: Every route that answers a session, flattened. ``SURFACE_ROUTERS`` are the
-#: leaves the aggregator mounts; the handlers that have not moved out of it yet
-#: are still plain routes on ``router``, and the filter is what finds them — after
-#: an include, ``router.routes`` also holds lazy wrapper objects with no
-#: ``methods`` and no ``dependant``, and walking those would skip every moved
-#: route silently, which is the failure this test exists to catch. Once the last
-#: surface moves the generator yields nothing and the registry is the whole set.
-SESSION_ROUTES = (
-    *(route for router in SESSION_ROUTERS for route in router.routes),
-    *(route for route in agent_jobs_router.router.routes if isinstance(route, APIRoute)),
-)
-
-#: Gates that re-ask the gateway before they allow a write.
-REVALIDATING_GATES = frozenset({"require_agent_owner", "verify_admin_access"})
+#: Routes that answer without a session or a machine credential, on purpose.
+#: Keyed by method and served path, so nothing inherits an exemption by sharing
+#: a prefix, and each one says why it needs none.
+PUBLIC_ROUTES = {
+    ("GET", "/healthz"): "liveness only; it reads nothing about anyone",
+    ("GET", "/v1/agent/site-config"): "the deployment's public appearance, read before sign-in",
+    ("GET", "/v1/session/login"): "starts sign-in, so there is no session yet",
+    ("GET", "/v1/session/callback"): "finishes sign-in, creating the session",
+    ("POST", "/v1/session/logout"): "only ends the session it was sent with",
+    ("GET", "/v1/session/me"): "asks the gateway for a fresh decision in its handler",
+    ("POST", "/v1/agent/host/register"): "redeems a one-time enrollment token",
+    ("POST", "/v1/compute/node-registrations"): "redeems a node's one-time registration token",
+    ("GET", "/v1/agent/mcp/oauth/callback/{provider}"): (
+        "finishes only the OAuth flow the signed-in account started"
+    ),
+}
 
 
-async def test_every_mutating_route_a_session_can_reach_revalidates():
-    """No route gets to skip this by being added later.
+def _calls_worker_claims(endpoint: Any) -> bool:
+    """Whether the handler itself verifies a worker token.
 
-    The method rule is only as good as its coverage: a mutating route wired to
+    Worker routes check their capability token in the handler rather than
+    through a dependency, so the dependency tree cannot see it. A call is
+    required, not a mention: a comment or a docstring naming the gate verifies
+    nothing.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(endpoint)))
+    except (OSError, TypeError):  # pragma: no cover - defensive
+        return False
+    calls = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_worker_claims"
+        for node in ast.walk(tree)
+    )
+    return calls and getattr(endpoint, "__globals__", {}).get("_worker_claims") is _worker_claims
+
+
+def _unguarded(routes: list[Any]) -> list[str]:
+    """``METHOD path`` for each route no gate covers and no exemption names."""
+    unguarded: list[str] = []
+    for route in routes:
+        calls = _gates(route)
+        if any(call is gate for call in calls for gate in (*REVALIDATING_GATES, *MACHINE_GATES)):
+            continue
+        if _calls_worker_claims(route.endpoint):
+            continue
+        unguarded.extend(
+            f"{method} {route.path}"
+            for method in sorted(route.methods)
+            if (method, route.path) not in PUBLIC_ROUTES
+        )
+    return unguarded
+
+
+def _served_routes() -> list[Any]:
+    """Every route the main application serves, with include-time settings."""
+    from cloud_agent.app import create_app
+
+    return _flatten(create_app().routes)
+
+
+async def test_every_route_a_session_can_reach_revalidates():
+    """No route gets to skip this by being added later, or by being a read.
+
+    Walks the application ``create_app`` assembles, every route and every
+    method, rather than a list of routers: usage, skills, uploads and the MCP
+    connections are mounted directly on the app, and a hand-kept list is the
+    thing the next router falls off. A route wired to
     ``authenticate_agent_owner`` directly, or to nothing at all, is one that
     never re-asks.
     """
-    mutating = {"POST", "PUT", "PATCH", "DELETE"}
+    routes = _served_routes()
+    served = {(method, route.path) for route in routes for method in route.methods}
+    # The walk is not answering an empty question: owner reads and writes from
+    # surfaces mounted in different places are all in it.
+    for expected in (
+        ("POST", "/v1/agent/jobs"),
+        ("GET", "/v1/agent/jobs/{job_id}"),
+        ("GET", "/v1/agent/mcp/connections"),
+        ("GET", "/v1/agent/jobs/{job_id}/usage"),
+        ("GET", "/v1/agent/skills"),
+        ("POST", "/v1/agent/uploads"),
+    ):
+        assert expected in served, f"{expected} is not served; the walk cannot see it"
+    stale = sorted(set(PUBLIC_ROUTES) - served)
+    assert not stale, f"exempted but no longer served; drop the exemption: {stale}"
 
-    unguarded = []
-    for route in SESSION_ROUTES:
-        methods = getattr(route, "methods", set()) or set()
-        if not (methods & mutating):
-            continue
-        if _gates(route) & REVALIDATING_GATES:
-            continue
-        # Worker routes verify their capability token in the handler rather
-        # than through a dependency, so the dependency tree cannot see it.
-        try:
-            body = inspect.getsource(route.endpoint)
-        except (OSError, TypeError):  # pragma: no cover - defensive
-            body = ""
-        if any(gate in body for gate in MACHINE_GATES):
-            continue
-        unguarded.append(f"{sorted(methods)} {route.path}")
-
+    unguarded = _unguarded(routes)
     assert not unguarded, (
-        "these mutating routes authenticate nothing that can go stale — wire "
-        f"them to a revalidating gate or to a machine credential: {unguarded}"
+        "these routes authenticate nothing that can go stale — wire them to a "
+        f"revalidating gate or to a machine credential: {unguarded}"
     )
+
+
+def _probe_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/v1/agent/stale-session")
+    async def stale_session(user: dict[str, Any] = Depends(authenticate_agent_owner)):
+        return user
+
+    async def impostor() -> dict[str, Any]:
+        return {}
+
+    impostor.__name__ = require_agent_owner.__name__
+
+    @app.post("/v1/agent/impostor", dependencies=[Depends(impostor)])
+    async def impersonated():
+        return {}
+
+    @app.post("/v1/agent/worker/jobs/{job_id}/mentioned")
+    async def mentioned(job_id: str, authorization: str | None = Header(None)):
+        """Claims to be checked by _worker_claims, which it never calls."""
+        return {"job_id": job_id}
+
+    @app.post("/v1/agent/worker/jobs/{job_id}/checked")
+    async def checked(job_id: str, authorization: str | None = Header(None)):
+        claims = _worker_claims(authorization)
+        return {"job_id": job_id, "claims": claims}
+
+    return app
+
+
+async def test_the_walk_sees_a_read_a_name_and_a_mention_for_what_they_are():
+    """Negative cases for the check above, which passes on the tree either way.
+
+    A read behind the non-revalidating gate, a dependency named like the
+    revalidating one, and a worker route that only mentions its gate are all
+    unguarded; a worker route that calls the real gate is not.
+    """
+    unguarded = _unguarded(_flatten(_probe_app().routes))
+
+    assert sorted(unguarded) == [
+        "GET /v1/agent/stale-session",
+        "POST /v1/agent/impostor",
+        "POST /v1/agent/worker/jobs/{job_id}/mentioned",
+    ]
 
 
 @pytest.fixture()
