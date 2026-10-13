@@ -95,7 +95,8 @@ class _JobsStorage(Protocol):
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
-    store to `_workspace_access._workspace_broker_for_job`, and `create_agent_job`
+    store (through `_resume_terminals_after_cancel`) to
+    `_workspace_access._workspace_broker_for_job`, and `create_agent_job`
     hands it to `application.job_admission._create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
@@ -260,7 +261,8 @@ async def cancel_agent_job(
     performs the fenced terminal transition when it next heartbeats. Messages
     the owner has waiting are paused by the same commit — Stop does not start
     the next one — and stay until the owner continues. Stop answers whether or
-    not the GitHub App can be loaded right now (issue #47).
+    not the GitHub App can be loaded right now (issue #47), and whether or not
+    the workspace's host can be reached.
     """
     job_store = _require_store(store)
     owned = await _owned_job(job_store.conversation_queries, job_id, user)
@@ -272,16 +274,7 @@ async def cancel_agent_job(
         github_app=None if source_control is None else source_control.github,
     )
     if state in TERMINAL_STATES:
-        resumed = True
-        if owned.get("thread_sandbox") is not None:
-            settled_broker = await _workspace_broker_for_job(job_store, owned)
-            resumed = await resume_settled_terminal(
-                _workspace_id(owned),
-                job_id=job_id,
-                broker=settled_broker,
-            )
-        if resumed:
-            await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
+        await _resume_terminals_after_cancel(job_store, owned)
     job = await job_store.conversation_queries.get_job(job_id)
     return AgentJobCancelResponse(
         id=job_id,
@@ -322,6 +315,34 @@ async def _settle_after_cancel(
                 "job_id": job.get("id"),
                 "thread_id": thread_id,
             },
+            exc_info=True,
+        )
+
+
+async def _resume_terminals_after_cancel(job_store: _JobsStorage, job: dict[str, Any]) -> None:
+    """Resume the terminals of a turn the cancel ended; the reaper retries a failure.
+
+    Best effort, like the settlement before it: the cancel has committed, and
+    Stop must report it. A host broker that cannot be reached or hydrated must
+    not turn into a 503 for a job that is already cancelled. The durable
+    resume marker stays set instead, so the reaper's next pass resumes it (as
+    does the owner's next terminal request).
+    """
+    job_id = str(job["id"])
+    try:
+        resumed = True
+        if job.get("thread_sandbox") is not None:
+            resumed = await resume_settled_terminal(
+                _workspace_id(job),
+                job_id=job_id,
+                broker=await _workspace_broker_for_job(job_store, job),
+            )
+        if resumed:
+            await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
+    except Exception:
+        logger.warning(
+            "agent_terminal_settled_resume_failed",
+            extra={"event": "agent_terminal_settled_resume_failed", "job_id": job_id},
             exc_info=True,
         )
 

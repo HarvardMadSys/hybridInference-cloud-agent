@@ -4707,6 +4707,38 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
     assert store.jobs[job_id]["terminal_resume_pending"] is False
 
 
+async def test_cancel_reports_its_commit_when_the_workspace_host_cannot_be_reached(
+    store: FakeStorage,
+    monkeypatch,
+):
+    """Stop answers with the cancel it committed, not with the host it could not reach.
+
+    The retained group's broker cannot be hydrated, so the terminals are not
+    resumed now; the durable marker stays set for the reaper's next pass.
+    """
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+
+    broker = _TerminalSessionBroker()
+
+    async def unreachable(_sandbox: dict[str, Any]) -> None:
+        raise WorkspaceBrokerError(503, "The shared chat supervisor is temporarily unavailable.")
+
+    monkeypatch.setattr(broker, "register_shared_sandbox", unreachable)
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        store.jobs[job_id]["current_attempt_id"] = 100
+        response = await client.post(f"/v1/agent/jobs/{job_id}/cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "cancelled"
+    assert response.json()["cancel_requested"] is True
+    assert broker.calls == []
+    assert store.jobs[job_id]["terminal_resume_pending"] is True, "left for the reaper"
+
+
 async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeStorage):
     """The worker path is claim → token → event → fenced finish."""
     job_id = await _create_job(client)
