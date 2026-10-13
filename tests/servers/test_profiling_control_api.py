@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
@@ -523,6 +525,50 @@ def test_stop_is_idempotent_and_states_what_it_stopped() -> None:
     stops = [e for e in storage.audit.entries if e["action"] == "agent.profiling.stop"]
     assert [e["details"]["outcome"] for e in stops] == ["applied", "replayed"]
     assert all(e["success"] is True for e in stops)
+
+
+def test_an_accepted_start_or_stop_wakes_this_processs_policy_loop() -> None:
+    """The process that took the command applies it now, not at its next poll.
+
+    The loop's ``wake`` had no caller: a Start waited out the 30-second idle
+    interval even on the process that wrote it. A refused command changed
+    nothing, so it wakes nothing.
+    """
+    storage = _FakeStorage()
+    app = _control_app(storage)
+    worker = SimpleNamespace(wake=Mock())
+    app.state.profiling_policy_worker = worker
+    with TestClient(app, headers=ADMIN) as client:
+        refused = client.post(
+            "/admin/agent/profiling-runs",
+            json={
+                "request_id": "req-0",
+                "expected_revision": 7,
+                "operations": ["files.open"],
+                "target": {},
+                "duration_seconds": 600,
+            },
+        )
+        assert refused.status_code == 409, refused.text
+        worker.wake.assert_not_called()
+        started = client.post(
+            "/admin/agent/profiling-runs",
+            json={
+                "request_id": "req-1",
+                "expected_revision": 0,
+                "operations": ["files.open"],
+                "target": {},
+                "duration_seconds": 600,
+            },
+        )
+        assert started.status_code == 201, started.text
+        assert worker.wake.call_count == 1
+        stopped = client.post(
+            f"/admin/agent/profiling-runs/{started.json()['run_id']}/stop",
+            json={"request_id": "stop-1"},
+        )
+        assert stopped.status_code == 200, stopped.text
+    assert worker.wake.call_count == 2
 
 
 def test_a_retried_stop_of_an_old_experiment_leaves_the_new_one_running() -> None:
