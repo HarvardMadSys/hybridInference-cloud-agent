@@ -2,9 +2,9 @@
 
 The previous release's API keeps serving while a deploy migrates the database
 under it: owners reading and writing conversations, and runners driving the
-turns already in flight. So each check does both, through the old release's
-own ``Storage`` and over the one connection it held before the migration, so
-the old code's prepared statements meet the candidate schema.
+turns already in flight. Each check does both, through the old release's own
+``Storage`` and over the one connection it held before the migration, so the
+old code's prepared statements meet the candidate schema.
 
 The calls below are the previous release's storage API, not this checkout's.
 A change to one of their signatures has to keep the old spelling working here
