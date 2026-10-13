@@ -8,6 +8,7 @@ the stable control-plane/gateway machines and supplied through the profile.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -377,6 +378,11 @@ from pathlib import Path
 params = json.loads(sys.argv[1])
 root = Path(params['root'])
 identity = params['identity']
+# Every refusal is a reason code on stdout with exit status 0: the transport
+# reports any other exit as an opaque failure and never returns stderr.
+def blocked(step):
+    print(json.dumps({'ready': False, 'blocked_reasons': [step]}))
+    raise SystemExit(0)
 owned_storage = deployment_storage_owned({'root': str(root), 'identity': identity})
 def storage_available(base):
     try:
@@ -399,10 +405,10 @@ if params.get('data_mount') and not storage_state_compatible(Path(params['data_m
     raise SystemExit(0)
 root.parent.mkdir(parents=True, exist_ok=True)
 if root.is_symlink() or root.resolve() != root:
-    raise SystemExit('unsafe deployment root')
+    blocked('unsafe_deployment_path')
 lock_path = root.parent / ('.' + root.name + '.compute-lock')
 if lock_path.is_symlink():
-    raise SystemExit('unsafe lock')
+    blocked('unsafe_deployment_path')
 with open(lock_path, 'a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     marker = root / '.compute-identity.json'
@@ -413,7 +419,7 @@ with open(lock_path, 'a') as lock:
         raise SystemExit(0)
     if root.exists() and any(root.iterdir()):
         if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != identity:
-            raise SystemExit('existing deployment identity conflict')
+            blocked('deployment_identity_conflict')
     root.mkdir(mode=0o700, exist_ok=True)
     root.chmod(0o700)
     marker.write_text(json.dumps(identity))
@@ -422,20 +428,17 @@ with open(lock_path, 'a') as lock:
         for member in archive.getmembers():
             parts = Path(member.name).parts
             if member.name.startswith('/') or '..' in parts or not (member.isfile() or member.isdir()):
-                raise SystemExit('invalid deployment archive')
+                blocked('invalid_deployment_archive')
             target = root / member.name
             # Never traverse a link from an earlier, unexpected remote change.
             if target.resolve() != target or target.is_symlink():
-                raise SystemExit('unsafe existing deployment path')
+                blocked('unsafe_deployment_path')
         archive.extractall(root, filter='data')
     environment = os.environ.copy()
     environment.update({'DEBIAN_FRONTEND': 'noninteractive', 'AGENT_DEPLOYMENT_SHA': params['sha'], 'DOCKER_HOST': 'unix:///var/run/docker.sock', 'DOCKER_CONTEXT': 'default'})
     for name in ('DOCKER_TLS', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
         environment.pop(name, None)
     quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
-    def blocked(step):
-        print(json.dumps({'ready': False, 'blocked_reasons': [step]}))
-        raise SystemExit(0)
     def run(step, args):
         if subprocess.run(args, cwd=root, env=environment, **quiet).returncode:
             blocked(step)
@@ -593,6 +596,112 @@ _FORBIDDEN_ENV = {
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
+# The reason codes the remote scripts report. A node does not get to name its
+# own failure: anything else it prints becomes the caller's generic code, so
+# remote text never reaches operation records, public diagnostics or alerts.
+_REMOTE_REASONS = frozenset(
+    {
+        "data_mount_conflict",
+        "data_mount_failed",
+        "data_mount_unavailable",
+        "deployment_identity_conflict",
+        "docker_start_failed",
+        "host_deployment_failed",
+        "host_readiness_failed",
+        "host_stop_failed",
+        "invalid_deployment_archive",
+        "kata_install_failed",
+        "prerequisites_install_failed",
+        "prerequisites_update_failed",
+        "transfer_failed",
+        "unsafe_deployment_path",
+    }
+)
+
+
+def _remote_reason(value: object, default: str) -> str:
+    """Return a reason a remote script may report, or ``default`` for anything else."""
+    return value if isinstance(value, str) and value in _REMOTE_REASONS else default
+
+
+def _remote_reasons(result: dict[str, Any], default: str) -> tuple[str, ...]:
+    """Map a remote result's reasons into our vocabulary, each at most once."""
+    reasons = result.get("blocked_reasons")
+    if not isinstance(reasons, list):
+        return ()
+    return tuple(dict.fromkeys(_remote_reason(reason, default) for reason in reasons))
+
+
+def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
+    """Rebuild a verified release bundle with this deployment's private files.
+
+    CPU-bound and synchronous: callers run it in a worker thread.
+    """
+    output = io.BytesIO()
+    try:
+        with (
+            tarfile.open(fileobj=io.BytesIO(source), mode="r:*") as archive,
+            tarfile.open(fileobj=output, mode="w:gz") as payload,
+        ):
+            found = set()
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if not name or name == ".":
+                    continue
+                if (
+                    name.startswith("/")
+                    or ".." in name.split("/")
+                    or not (member.isdir() or member.isfile())
+                ):
+                    raise ProviderError(
+                        "deployment_profile_invalid",
+                        "Deployment bundle contains an unsafe path",
+                    )
+                if name in {".env", ".compute-identity.json"} or name.startswith(
+                    (".compute-secrets/", ".git/")
+                ):
+                    raise ProviderError(
+                        "deployment_profile_invalid",
+                        "Deployment bundle contains private deployment state",
+                    )
+                if name == ".dockerignore":
+                    original = archive.extractfile(member)
+                    ignored = (
+                        original.read() if original else b""
+                    ) + b"\n.compute-secrets\n.compute-identity.json\n"
+                    member.size = len(ignored)
+                    member.name = name
+                    payload.addfile(member, io.BytesIO(ignored))
+                    found.add(name)
+                    continue
+                member.name = name
+                found.add(name)
+                payload.addfile(member, archive.extractfile(member) if member.isfile() else None)
+            required_files = {
+                "deploy/host/sandbox_host.sh",
+                "deploy/host/setup_kata_runtime.sh",
+                "deploy/host/docker-compose.sandbox.yml",
+                "pyproject.toml",
+            }
+            if not required_files <= found:
+                raise ProviderError(
+                    "deployment_profile_invalid",
+                    "Deployment bundle does not contain the host recipe",
+                )
+            if ".dockerignore" not in found:
+                assets = {
+                    **assets,
+                    ".dockerignore": b".env\n.compute-secrets\n.compute-identity.json\n",
+                }
+            for name, data in assets.items():
+                member = tarfile.TarInfo(name)
+                member.size, member.mode = len(data), 0o600
+                payload.addfile(member, io.BytesIO(data))
+    except (tarfile.TarError, OSError):
+        raise ProviderError(
+            "deployment_profile_invalid", "Trusted deployment bundle could not be read"
+        ) from None
+    return output.getvalue()
 
 
 class SshHostBootstrap:
@@ -705,16 +814,19 @@ class SshHostBootstrap:
         intent: BootstrapIntent,
         enrollment_token: SecretStr | None,
     ) -> bytes:
+        # The compute worker shares the API's event loop. Reading, hashing and
+        # repacking a bundle of up to 64 MiB takes seconds, so it runs in a
+        # thread: requests and Host heartbeats are served meanwhile.
         try:
             if profile.source_bundle.startswith("stored-profile:"):
                 source = await self._resolver.bundle(profile.source_bundle)
             else:
-                source = Path(profile.source_bundle).read_bytes()
+                source = await asyncio.to_thread(Path(profile.source_bundle).read_bytes)
         except (OSError, ComputeSecretError):
             raise ProviderError(
                 "deployment_profile_invalid", "Trusted deployment bundle is unavailable"
             ) from None
-        if hashlib.sha256(source).hexdigest() != profile.source_sha256:
+        if (await asyncio.to_thread(hashlib.sha256, source)).hexdigest() != profile.source_sha256:
             raise ProviderError(
                 "deployment_profile_invalid",
                 "Trusted deployment bundle digest differs from its profile",
@@ -802,70 +914,7 @@ class SshHostBootstrap:
                         "deployment_profile_invalid",
                         "Relay credentials must refer to this profile's dedicated deployed files",
                     )
-        output = io.BytesIO()
-        try:
-            with (
-                tarfile.open(fileobj=io.BytesIO(source), mode="r:*") as archive,
-                tarfile.open(fileobj=output, mode="w:gz") as payload,
-            ):
-                found = set()
-                for member in archive.getmembers():
-                    name = member.name.removeprefix("./")
-                    if not name or name == ".":
-                        continue
-                    if (
-                        name.startswith("/")
-                        or ".." in name.split("/")
-                        or not (member.isdir() or member.isfile())
-                    ):
-                        raise ProviderError(
-                            "deployment_profile_invalid",
-                            "Deployment bundle contains an unsafe path",
-                        )
-                    if name in {".env", ".compute-identity.json"} or name.startswith(
-                        (".compute-secrets/", ".git/")
-                    ):
-                        raise ProviderError(
-                            "deployment_profile_invalid",
-                            "Deployment bundle contains private deployment state",
-                        )
-                    if name == ".dockerignore":
-                        original = archive.extractfile(member)
-                        ignored = (
-                            original.read() if original else b""
-                        ) + b"\n.compute-secrets\n.compute-identity.json\n"
-                        member.size = len(ignored)
-                        member.name = name
-                        payload.addfile(member, io.BytesIO(ignored))
-                        found.add(name)
-                        continue
-                    member.name = name
-                    found.add(name)
-                    payload.addfile(
-                        member, archive.extractfile(member) if member.isfile() else None
-                    )
-                required_files = {
-                    "deploy/host/sandbox_host.sh",
-                    "deploy/host/setup_kata_runtime.sh",
-                    "deploy/host/docker-compose.sandbox.yml",
-                    "pyproject.toml",
-                }
-                if not required_files <= found:
-                    raise ProviderError(
-                        "deployment_profile_invalid",
-                        "Deployment bundle does not contain the host recipe",
-                    )
-                if ".dockerignore" not in found:
-                    assets[".dockerignore"] = b".env\n.compute-secrets\n.compute-identity.json\n"
-                for name, data in assets.items():
-                    member = tarfile.TarInfo(name)
-                    member.size, member.mode = len(data), 0o600
-                    payload.addfile(member, io.BytesIO(data))
-        except (tarfile.TarError, OSError):
-            raise ProviderError(
-                "deployment_profile_invalid", "Trusted deployment bundle could not be read"
-            ) from None
-        return output.getvalue()
+        return await asyncio.to_thread(_repack, source, assets)
 
     async def deploy(
         self,
@@ -933,7 +982,7 @@ class SshHostBootstrap:
             ready=result.get("ready") is True,
             host=intent.host,
             deployment_sha=profile.deployment_sha,
-            blocked_reasons=tuple(result.get("blocked_reasons", ())),
+            blocked_reasons=_remote_reasons(result, "host_deployment_failed"),
         )
 
     async def readiness(
@@ -955,7 +1004,7 @@ class SshHostBootstrap:
             ready=result.get("ready") is True,
             host=intent.host,
             deployment_sha=profile.deployment_sha,
-            blocked_reasons=tuple(result.get("blocked_reasons", ())),
+            blocked_reasons=_remote_reasons(result, "host_readiness_failed"),
         )
 
     async def inventory(
@@ -978,7 +1027,7 @@ class SshHostBootstrap:
         result = self._json(await self._transport.run(self._connection(node), script, timeout=900))
         if result.get("stopped") is not True:
             raise ProviderError(
-                str(result.get("reason") or "host_stop_failed"),
+                _remote_reason(result.get("reason"), "host_stop_failed"),
                 "The Host could not be stopped",
                 retryable=result.get("reason") == "host_stop_failed",
             )
@@ -1036,7 +1085,7 @@ class SshHostBootstrap:
         )
         if authorized.get("authorized") is not True:
             raise ProviderError(
-                str(authorized.get("reason") or "transfer_failed"),
+                _remote_reason(authorized.get("reason"), "transfer_failed"),
                 "The target node cannot receive the Host's state",
             )
         push = {
@@ -1082,7 +1131,7 @@ class SshHostBootstrap:
         if result.get("wiped") is not True:
             reason = result.get("reason")
             raise ProviderError(
-                str(reason or "wipe_failed"),
+                _remote_reason(reason, "wipe_failed"),
                 "The node's container state could not be removed",
                 retryable=reason is None,
             )

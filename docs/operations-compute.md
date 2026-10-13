@@ -291,8 +291,12 @@ membership.
 If an operation stays at `waiting_for_registration` and ends with
 `registration_expired`, inspect `/var/lib/cloud-agent-node/registration`
 through the CloudLab console and verify that the node can reach the registration
-URL. `registration_unavailable` means no public HTTPS control-plane address
-is configured.
+URL. After fixing the cause, retry the operation: the node's own token gets
+another two hours. Then restart the node from CloudLab so its boot script posts
+the token again; it stops trying after an hour or a refusal. Alternatively,
+release the server: nothing ran on a node that never registered, so its release
+needs no SSH inventory. `registration_unavailable` means no public HTTPS
+control-plane address is configured.
 
 ## Enable legacy file-backed profiles
 
@@ -383,7 +387,7 @@ creates a new command.
 | Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. |
 | UUID saved, later observation failed | Repair access and resume the same resource. |
 | Installation or readiness failed | Inspect deployment checks, repair prerequisites/profile and retry the same resource. Failure does not destroy it. |
-| Extension pending or unknown | Check actual expiry. Retries retain the fixed absolute target; shorter extensions are not successful. The provider may reject or limit extensions. |
+| Extension pending or unknown | Check actual expiry. Retries retain the fixed absolute target; shorter extensions are not successful. The provider may reject or limit extensions. An expiry that has not moved ten minutes after the request blocks as `extension_unconfirmed`, so the server's other operations and a replacement can proceed; retry sends the same target again. |
 | Retained state remains | Keep the resource available or manage its chat lifecycle. Stopped containers and archived chats remain dependencies. |
 | Release committed, response unknown | Keep admission closed and confirm the exact immutable resource ID. Cancellation cannot undo release. |
 
@@ -418,7 +422,9 @@ Pool and resource actions have different effects:
 Release requires complete scope, no global placement reference, no running,
 in-flight or retained dependencies, and fresh broker and machine inventory.
 Stopped or unrecognized containers, orphan networks/volumes, offline brokers
-and incomplete inventory block it. There is no force bypass.
+and incomplete inventory block it. There is no force bypass. The only machine
+without an inventory is a CloudLab node whose host-key registration never
+completed: this control plane never connected to it.
 
 ## Automatic CloudLab node replacement
 
@@ -445,7 +451,10 @@ Before enabling replacement:
    events remain in structured logs and operation status.
 
 Within the renewal window, extension is tried first. Refusal or unconfirmed
-extension starts replacement; maximum-age nodes move instead of extending.
+extension starts replacement; maximum-age nodes move instead of extending
+while the move is on time. A move still unfinished at its drain deadline, one
+that blocked, failed or was cancelled, keeps the old node extended so the
+move cannot outlast its lease.
 Failed candidates are released before trying the next type. Configuration or
 credential errors stop immediately; the same failure class across three types
 stops with an alert. Retry resumes the saved operation.
@@ -465,10 +474,14 @@ cannot restore its stale copy over new work.
 
 Before confirmed takeover, failures restore the source. If the replacement
 cannot be confirmed stopped, claims stay paused and the operation blocks for
-attention. Cancellation is available before the stop begins; later failures
-use recovery/retry. Cleanup failures retry without interrupting the replacement
-and remain visible as failures. Source release still passes retained-state and
-allocation guards.
+attention. A source restart that loses its SSH connection or times out is
+retried for ten minutes; a restart that still fails, or any unexpected error
+after the source began stopping, blocks with the urgent
+`compute_rotation_failed` alert and keeps claims paused. An unexpected error
+before the stop blocks and resumes claims. Cancellation is available before
+the stop begins; later failures use recovery/retry. Cleanup failures retry
+without interrupting the replacement and remain visible as failures. Source
+release still passes retained-state and allocation guards.
 
 ### Acceptance before enabling production traffic
 
