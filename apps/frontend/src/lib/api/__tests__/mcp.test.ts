@@ -305,6 +305,22 @@ describe('mcp api', () => {
     );
   });
 
+  it('sends Always allow with the decision in one request', async () => {
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ id: 9, status: 'approved', always_allow_status: 'pending' }),
+    );
+    await decideMcpInvocation(9, true, true);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/mcp/invocations/9/decision',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approve: true, always_allow: true }),
+      },
+    );
+  });
+
   it('decides a held call with a boolean', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ id: 9, status: 'denied' }));
 

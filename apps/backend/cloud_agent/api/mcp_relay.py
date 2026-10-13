@@ -1296,6 +1296,11 @@ async def maintain_host_sessions(store: _McpRelayStorage) -> None:
                 await store.mcp.expire_mcp_invocations()
         except Exception:
             logger.warning("agent_mcp_invocation_expiry_failed", exc_info=True)
+        try:
+            async with asyncio.timeout(5.0):
+                await store.mcp.apply_pending_mcp_allow_rules()
+        except Exception:
+            logger.warning("agent_mcp_remembered_approval_failed", exc_info=True)
         await reap_host_sessions(store)
 
 

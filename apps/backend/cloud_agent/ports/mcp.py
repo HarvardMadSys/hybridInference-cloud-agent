@@ -429,7 +429,12 @@ class McpConnectionRepository(Protocol):
         ...
 
     async def decide_mcp_invocation(
-        self, *, invocation_id: int, approve: bool, decided_by: str
+        self,
+        *,
+        invocation_id: int,
+        approve: bool,
+        decided_by: str,
+        always_allow_rule: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Approve or deny one pending call.
 
@@ -438,6 +443,12 @@ class McpConnectionRepository(Protocol):
         must not revive it, and a check-then-write would let exactly that race
         through.
         """
+        ...
+
+    async def apply_pending_mcp_allow_rules(
+        self, *, thread_id: str | None = None, connection_id: int | None = None
+    ) -> int:
+        """Save queued Always allow decisions once their held calls have advanced."""
         ...
 
     async def claim_mcp_invocation(

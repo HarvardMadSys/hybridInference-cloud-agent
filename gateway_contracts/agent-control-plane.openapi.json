@@ -9314,6 +9314,11 @@
         "additionalProperties": false,
         "description": "Approve or deny one pending call.",
         "properties": {
+          "always_allow": {
+            "default": false,
+            "title": "Always Allow",
+            "type": "boolean"
+          },
           "approve": {
             "title": "Approve",
             "type": "boolean"
@@ -11277,6 +11282,17 @@
       "InvocationView": {
         "description": "One call that needed a decision.",
         "properties": {
+          "always_allow_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Always Allow Status"
+          },
           "arguments": {
             "anyOf": [
               {

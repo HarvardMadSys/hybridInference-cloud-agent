@@ -23,15 +23,20 @@ The Tools panel also shows request history. Choose **Load older requests** to
 continue beyond its first page. Loaded history stays available through refreshes
 and displays overdue requests as expired.
 
-## Current Always allow limitation
+## Always allow
 
-The Tools panel saves **Always allow** after the approved call advances and no
-pending or approved call remains on that connection. This avoids invalidating a
-held request by changing its policy while it waits. The deferred save currently
-lives in the panel: leaving the conversation before it runs can lose the rule.
-Keep the conversation open until the panel confirms that the capability can run
-without asking, or save its permission explicitly in Tools afterward. The
-one-time approval remains recorded even if the deferred rule is lost.
+The conversation's **Always allow** action records the current approval and its
+future permission intent in one server-side transaction. You can navigate away
+or refresh after submitting it. The server saves the permission once no calls
+on that conversation's connection are waiting for approval or dispatch.
+
+The saved rule covers only the named capability in this conversation. Other
+rules and default confirmation behavior remain unchanged. Before saving, the
+server checks the owner, connection and policy revisions, and the capability
+fingerprint again. Reconnecting, disabling the connection, changing permissions
+or changing the capability definition discards a stale intent instead of
+restoring a revoked permission. The call history shows whether the save is
+pending, applied, or discarded.
 
 ## Waiting and expiry
 

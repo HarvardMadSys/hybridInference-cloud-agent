@@ -546,13 +546,20 @@ class FakeStore(AllCapabilities):
         return self.jobs.get(job_id, {"id": job_id, "user_id": _OWNER, "thread_id": "thread-1"})
 
     async def decide_mcp_invocation(
-        self, *, invocation_id: int, approve: bool, decided_by: str
+        self,
+        *,
+        invocation_id: int,
+        approve: bool,
+        decided_by: str,
+        always_allow_rule: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         row = self.invocations.get(invocation_id)
         if row is None or row["status"] != "pending":
             return None
         row["status"] = "approved" if approve else "denied"
         row["decided_by"] = decided_by
+        row["always_allow_rule"] = always_allow_rule
+        row["always_allow_status"] = "pending" if always_allow_rule else None
         return dict(row)
 
 
@@ -2294,6 +2301,70 @@ class TestInvocationDecisions:
         assert listed.status_code == decided.status_code == 200
         assert listed.json()["invocations"][0]["attempt_id"] == attempt_id
         assert decided.json()["attempt_id"] == attempt_id
+
+    @pytest.mark.parametrize("kind", ["tool", "prompt", "resource", "resource_template"])
+    def test_always_allow_records_the_exact_held_capability(self, kind) -> None:
+        """An approval carries its server-derived permission intent in the same write."""
+        from cloud_agent.mcp.models import Capability, CapabilityKind
+
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        row = store.invocations[invocation_id]
+        row.update(capability_revision=1, capability_kind=kind)
+        surfaces = {
+            "tool": "tools",
+            "prompt": "prompts",
+            "resource": "resources",
+            "resource_template": "resource_templates",
+        }
+        entry = {
+            "name": "create_issue",
+            "description": "Review this capability",
+            "input_schema": {"type": "object"},
+        }
+        store.capabilities[connection_id] = {
+            "capability_revision": 1,
+            surfaces[kind]: [entry],
+        }
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision",
+                json={"approve": True, "always_allow": True},
+            )
+        assert response.status_code == 200
+        assert response.json()["always_allow_status"] == "pending"
+        assert store.invocations[invocation_id]["always_allow_rule"] == {
+            "policy": "allow",
+            "fingerprint": Capability(
+                kind=CapabilityKind(kind),
+                name="create_issue",
+                description=entry["description"],
+                input_schema=entry["input_schema"],
+            ).fingerprint(),
+        }
+        assert store.bindings == {}
+
+    @pytest.mark.parametrize("change", ["missing", "revision", "deny", "other-owner"])
+    def test_invalid_always_allow_does_not_write_a_decision(self, change) -> None:
+        """Neither stale definitions nor a client assertion authorize a saved permission."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        invocation_id = self._pending(store, connection_id)
+        store.invocations[invocation_id]["capability_revision"] = 1
+        store.capabilities[connection_id] = {
+            "capability_revision": 2 if change == "revision" else 1,
+            "tools": [] if change == "missing" else [{"name": "create_issue"}],
+        }
+        with _client(store, user_id=_OTHER if change == "other-owner" else _OWNER) as client:
+            response = client.post(
+                f"/v1/agent/mcp/invocations/{invocation_id}/decision",
+                json={"approve": change != "deny", "always_allow": True},
+            )
+        assert response.status_code == (
+            404 if change == "other-owner" else 422 if change == "deny" else 409
+        )
+        assert store.invocations[invocation_id]["status"] == "pending"
 
     def test_an_approval_records_who_made_it(self) -> None:
         """A write's audit trail names the person, not the session."""
