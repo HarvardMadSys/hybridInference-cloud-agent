@@ -469,7 +469,7 @@ class _ArchiveController(_ArchiveService):
     def complete_start(self, *_args, **_kwargs) -> None:
         return
 
-    def prepare_markerless_final_if_disabled(self, *_args, **_kwargs) -> bool:
+    def prepare_markerless_final(self, *_args, **_kwargs) -> bool:
         return self.revision is not None and not self.enabled
 
 

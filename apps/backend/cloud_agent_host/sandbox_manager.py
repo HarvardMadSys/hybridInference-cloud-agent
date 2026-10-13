@@ -1870,7 +1870,7 @@ def create_app(
                 archive_controller.complete_start if archive_controller is not None else None
             ),
             markerless_final_prepare_hook=(
-                archive_controller.prepare_markerless_final_if_disabled
+                archive_controller.prepare_markerless_final
                 if archive_controller is not None
                 else None
             ),
@@ -1913,7 +1913,7 @@ def create_app(
                 invalidate_final=archive_controller.invalidate_final,
                 prepare_start=archive_controller.prepare_start,
                 complete_start=archive_controller.complete_start,
-                prepare_markerless_final=(archive_controller.prepare_markerless_final_if_disabled),
+                prepare_markerless_final=archive_controller.prepare_markerless_final,
             )
         configure_archive_hook(final_archive_hook)
     terminals = _TerminalManager(

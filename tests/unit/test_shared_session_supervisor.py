@@ -641,76 +641,121 @@ def test_sandbox_manager_reconcile_blocks_an_unmarked_running_orphan_before_acce
         supervisor.operation_opened(spec.thread_id)
 
 
+class _FinalMarkerManager(_Manager):
+    """Keep one final marker with the exact running/stopped writer contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.marker: bytes | None = None
+        self.running_marker_writes = 0
+        self.stopped_marker_writes = 0
+        self.marker_clears = 0
+
+    def read_running_final_archive_marker(self, spec, *, expected_container_id):
+        assert self.items[spec.container_name].container_id == expected_container_id
+        return self.marker
+
+    def read_stopped_final_archive_marker_optional(
+        self,
+        spec,
+        *,
+        expected_container_id,
+    ):
+        assert self.items[spec.container_name].container_id == expected_container_id
+        return self.marker
+
+    def read_final_archive_marker(self, spec, *, expected_container_id):
+        assert self.items[spec.container_name].container_id == expected_container_id
+        if self.marker is None:
+            raise SandboxError("final archive marker is missing")
+        return self.marker
+
+    def write_final_archive_marker(self, spec, payload, *, expected_container_id) -> None:
+        current = self.items[spec.container_name]
+        assert current.container_id == expected_container_id
+        assert current.running is True
+        self.marker = payload
+        self.running_marker_writes += 1
+
+    def write_stopped_final_archive_marker(
+        self,
+        spec,
+        payload,
+        *,
+        expected_container_id,
+    ) -> None:
+        current = self.items[spec.container_name]
+        assert current.container_id == expected_container_id
+        assert current.running is False
+        self.marker = payload
+        self.stopped_marker_writes += 1
+
+    def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
+        assert self.items[spec.container_name].container_id == expected_container_id
+        self.marker = None
+        self.marker_clears += 1
+
+
+class _NoUploadArchiveService:
+    """An enabled archive service that fails the test if anything uploads."""
+
+    def __init__(self, _config) -> None:
+        return
+
+    def start(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def status(self):
+        return {"enabled": True, "running": True}
+
+    def queue_final(self, *_args, **_kwargs):
+        raise AssertionError("unknown native history must never upload")
+
+
+def _enabled_archive_policy() -> SandboxArchivePolicy:
+    return SandboxArchivePolicy(
+        enabled=True,
+        region="us-east-1",
+        kms_key_arn="arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789abc",
+        expected_bucket_owner="123456789012",
+        revision=1,
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["disabled", "enabled"])
 @pytest.mark.parametrize("running", [True, False])
-def test_disabled_policy_reconcile_cleans_a_markerless_orphan(running: bool) -> None:
-    class MarkerManager(_Manager):
-        def __init__(self) -> None:
-            super().__init__()
-            self.marker: bytes | None = None
-            self.running_marker_writes = 0
-            self.stopped_marker_writes = 0
-            self.marker_clears = 0
+def test_reconcile_finishes_a_markerless_orphan_without_upload(
+    running: bool,
+    enabled: bool,
+) -> None:
+    """A crash, reboot or stop behind the broker's back must not strand the chat.
 
-        def read_running_final_archive_marker(self, spec, *, expected_container_id):
-            assert self.items[spec.container_name].container_id == expected_container_id
-            return self.marker
-
-        def read_stopped_final_archive_marker_optional(
-            self,
-            spec,
-            *,
-            expected_container_id,
-        ):
-            assert self.items[spec.container_name].container_id == expected_container_id
-            return self.marker
-
-        def read_final_archive_marker(self, spec, *, expected_container_id):
-            assert self.items[spec.container_name].container_id == expected_container_id
-            if self.marker is None:
-                raise SandboxError("final archive marker is missing")
-            return self.marker
-
-        def write_final_archive_marker(self, spec, payload, *, expected_container_id) -> None:
-            current = self.items[spec.container_name]
-            assert current.container_id == expected_container_id
-            assert current.running is True
-            self.marker = payload
-            self.running_marker_writes += 1
-
-        def write_stopped_final_archive_marker(
-            self,
-            spec,
-            payload,
-            *,
-            expected_container_id,
-        ) -> None:
-            current = self.items[spec.container_name]
-            assert current.container_id == expected_container_id
-            assert current.running is False
-            self.marker = payload
-            self.stopped_marker_writes += 1
-
-        def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
-            assert self.items[spec.container_name].container_id == expected_container_id
-            self.marker = None
-            self.marker_clears += 1
-
-    manager = MarkerManager()
+    With archives enabled the unknown native history is never archived: the
+    controller records a skipped final and the group starts again.
+    """
+    manager = _FinalMarkerManager()
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=running)
     controller = SandboxArchiveController(
         manager,  # type: ignore[arg-type]
         namespace="pool-east",
+        service_factory=_NoUploadArchiveService,  # type: ignore[arg-type]
     )
     controller.start()
-    controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
+    policy = (
+        _enabled_archive_policy() if enabled else SandboxArchivePolicy(enabled=False, revision=1)
+    )
+    controller.apply(policy.as_dict())
     supervisor = SharedChatSessionSupervisor(
         manager,
         stopped_archive_prepare_hook=controller.prepare_final,
         stopped_archive_invalidate_hook=controller.invalidate_final,
         starting_archive_prepare_hook=controller.prepare_start,
         started_archive_hook=controller.complete_start,
-        markerless_final_prepare_hook=controller.prepare_markerless_final_if_disabled,
+        markerless_final_prepare_hook=controller.prepare_markerless_final,
         stopped_archive_hook=controller.queue_final,
     )
 
@@ -722,6 +767,8 @@ def test_disabled_policy_reconcile_cleans_a_markerless_orphan(running: bool) -> 
     assert manager.running_marker_writes == int(running)
     assert manager.stopped_marker_writes == int(not running)
     assert manager.marker is not None
+    expected_state = b'"state":"skipped"' if enabled else b'"state":"pending"'
+    assert expected_state in manager.marker
     group = supervisor._members[spec.thread_id]
     assert group.stop_archive_pending is False
     assert group.stop_archive_blocked is False
@@ -866,7 +913,8 @@ def test_unreadable_running_orphan_stop_failure_cannot_become_a_clean_archive() 
     assert prepared == []
     assert archived == []
 
-    with pytest.raises(SandboxError, match="blocked by native flush failure"):
+    # Without an invalidate hook nothing can record a skip, so it stays fenced.
+    with pytest.raises(SandboxError, match="skip could not be persisted"):
         supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
     assert prepared == []
     assert archived == []
@@ -1468,6 +1516,50 @@ def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
     assert all(item.running is False for item in descriptors)
     with pytest.raises(SessionBusy, match="native flush failure"):
         supervisor.operation_opened("athr_source")
+
+
+def test_externally_stopped_group_under_enabled_archives_skips_and_continues():
+    """Docker stopped this group without the broker, e.g. a node move or reboot."""
+    manager = _FinalMarkerManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace="pool-east",
+        service_factory=_NoUploadArchiveService,  # type: ignore[arg-type]
+    )
+    controller.start()
+    controller.apply(_enabled_archive_policy().as_dict())
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=controller.prepare_final,
+        stopped_archive_invalidate_hook=controller.invalidate_final,
+        starting_archive_prepare_hook=controller.prepare_start,
+        started_archive_hook=controller.complete_start,
+        markerless_final_prepare_hook=controller.prepare_markerless_final,
+        stopped_archive_hook=controller.queue_final,
+    )
+    supervisor.register_manifest(spec, _members(), expected_container_id="container-shared")
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+
+    descriptors = supervisor.list()
+
+    assert all(item.running is False for item in descriptors)
+    assert manager.marker is not None and b'"state":"skipped"' in manager.marker
+    assert manager.items[spec.container_name].networks == ()
+    lease = supervisor.acquire(
+        spec,
+        thread_id=spec.thread_id,
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    assert lease.token
+    assert manager.items[spec.container_name].running is True
+    assert manager.marker is None
+    controller.close()
 
 
 def test_acquire_starts_a_settled_context_on_its_group():
@@ -3221,14 +3313,28 @@ def _archive_shutdown_group(
         assert inspection.running is True
         events.append("prepare")
 
+    skipped_markers: list[bytes] = []
+
     def invalidate(_spec, inspection) -> None:
         assert inspection.running is True
         events.append("invalidate")
         if fail_invalidate:
-            raise RuntimeError("blocked marker write failed")
+            raise RuntimeError("skipped marker write failed")
+        skipped_markers.append(b'{"state":"skipped"}')
+
+    def read_stopped_marker(_spec, *, expected_container_id):
+        del expected_container_id
+        # Like the controller, a recorded skip stays readable after the stop.
+        return skipped_markers[-1] if skipped_markers else None
+
+    manager.read_stopped_final_archive_marker_optional = read_stopped_marker  # type: ignore[method-assign]
 
     def archive(_spec, inspection, _members) -> None:
         assert inspection.running is False
+        if skipped_markers:
+            # The controller reads the skipped marker and uploads nothing.
+            events.append("archive:skipped")
+            return
         assert manager.network_for(_spec) in inspection.networks
         events.append("archive")
 
@@ -3314,7 +3420,7 @@ def test_shutdown_flushes_then_prepares_stops_archives_and_releases_bridge() -> 
     assert manager.items[_spec().container_name].networks == ()
 
 
-def test_shutdown_flush_failure_stops_with_bridge_but_never_prepares_archives_or_releases() -> None:
+def test_shutdown_flush_failure_skips_the_final_archive_and_finishes_the_stop() -> None:
     events: list[str] = []
     manager, supervisor = _archive_shutdown_group(
         events=events,
@@ -3322,25 +3428,24 @@ def test_shutdown_flush_failure_stops_with_bridge_but_never_prepares_archives_or
     )
 
     supervisor.quiesce()
-    with pytest.raises(SandboxError, match="shutdown stop/archive"):
-        supervisor.stop_all_for_shutdown()
+    supervisor.stop_all_for_shutdown()
 
+    # The invalidate hook records a skipped final before Docker stop and never
+    # prepares an archive. The final hook still runs to finish the lifecycle.
     assert events == [
         "transport.close:0",
         "transport.close:1",
         "invalidate",
         "stop:retain",
+        "archive:skipped",
+        "stop:release",
     ]
-    assert manager.stop_count == 1
     current = manager.items[_spec().container_name]
     assert current.running is False
-    assert manager.network_for(_spec()) in current.networks
-    with pytest.raises(SandboxError, match="blocked by native flush failure"):
-        supervisor.stop_if_idle("athr_source", generation=1)
-    with pytest.raises(SessionBusy, match="final archive"):
-        supervisor.operation_opened("athr_source")
-    with pytest.raises(SessionBusy, match="final archive"):
-        supervisor.terminal_opened("athr_source")
+    assert current.networks == ()
+    group = supervisor._members["athr_source"]
+    assert group.stop_archive_pending is False
+    assert group.stop_archive_blocked is False
 
 
 def test_flush_failure_blocks_mutations_even_when_docker_stop_raises() -> None:
@@ -3376,11 +3481,12 @@ def test_flush_failure_blocks_mutations_even_when_docker_stop_raises() -> None:
         supervisor.capture_snapshot("athr_source", capture=capture)
     assert captured is False
 
+    # Once Docker stop works, the recorded skip lets the stop finish.
     manager.stop = original_stop  # type: ignore[method-assign]
-    with pytest.raises(SandboxError, match="shutdown stop/archive"):
-        supervisor.stop_all_for_shutdown()
+    supervisor.stop_all_for_shutdown()
     assert manager.items[_spec().container_name].running is False
-    assert manager.items[_spec().container_name].networks == ("agent-net",)
+    assert manager.items[_spec().container_name].networks == ()
+    assert supervisor._members["athr_source"].stop_archive_blocked is False
 
 
 def test_network_guard_exact_stops_a_running_native_flush_blocked_group() -> None:
@@ -3401,13 +3507,13 @@ def test_network_guard_exact_stops_a_running_native_flush_blocked_group() -> Non
 
     manager.stop = original_stop  # type: ignore[method-assign]
     manager.host_rule_failures = 2
-    assert supervisor.guard_network() == []
+    stopped = supervisor.guard_network()
 
+    assert [item.thread_id for item in stopped] == ["athr_source"]
     current = manager.items[_spec().container_name]
     assert current.running is False
-    assert current.networks == ("agent-net",)
-    with pytest.raises(SessionBusy, match="native flush failure"):
-        supervisor.operation_opened("athr_source")
+    assert current.networks == ()
+    assert supervisor._members["athr_source"].stop_archive_blocked is False
 
 
 def test_network_guard_stops_every_group_before_the_first_final_upload_completes() -> None:
@@ -3549,7 +3655,7 @@ def test_network_guard_stages_a_running_pending_group_before_its_upload() -> Non
     assert manager.items[second.container_name].networks == ()
 
 
-def test_network_guard_prepare_failure_exact_stops_and_blocks_without_upload() -> None:
+def test_network_guard_prepare_failure_exact_stops_and_skips_the_upload() -> None:
     manager = _Manager()
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
@@ -3560,11 +3666,21 @@ def test_network_guard_prepare_failure_exact_stops_and_blocks_without_upload() -
         events.append("prepare")
         raise SandboxError("marker preparation failed")
 
+    skipped: list[bytes] = []
+
     def invalidate(_spec, inspection) -> None:
         events.append("invalidate:running" if inspection.running else "invalidate:stopped")
+        skipped.append(b'{"state":"skipped"}')
+
+    def read_stopped_marker(_spec, *, expected_container_id):
+        del expected_container_id
+        return skipped[-1] if skipped else None
+
+    manager.read_stopped_final_archive_marker_optional = read_stopped_marker  # type: ignore[method-assign]
 
     def archive(*_args) -> None:
-        events.append("archive")
+        # The controller reads the skipped marker and uploads nothing.
+        events.append("archive:skipped")
 
     supervisor = SharedChatSessionSupervisor(
         manager,
@@ -3579,14 +3695,15 @@ def test_network_guard_prepare_failure_exact_stops_and_blocks_without_upload() -
     )
     manager.host_rule_failures = 2
 
-    assert supervisor.guard_network() == []
+    stopped = supervisor.guard_network()
 
+    assert [item.thread_id for item in stopped] == [spec.thread_id]
     current = manager.items[spec.container_name]
     assert current.running is False
-    assert current.networks == ("agent-net",)
-    assert events == ["prepare", "invalidate:running"]
-    with pytest.raises(SessionBusy, match="native flush failure"):
-        supervisor.operation_opened(spec.thread_id)
+    assert current.networks == ()
+    # Phase two finds the completed skip and only releases what remains.
+    assert events == ["prepare", "invalidate:running", "archive:skipped", "archive:skipped"]
+    assert supervisor._members[spec.thread_id].stop_archive_blocked is False
 
 
 def test_flush_block_persistence_failure_still_stops_and_fences_admission() -> None:
@@ -3642,7 +3759,7 @@ def test_restart_reconcile_stops_a_blocked_running_orphan_without_archiving() ->
         supervisor.operation_opened(spec.thread_id)
 
 
-def test_durable_flush_block_survives_stop_failure_and_replacement_controller() -> None:
+def test_durable_flush_skip_survives_stop_failure_and_replacement_controller() -> None:
     class DurableManager(_Manager):
         def __init__(self) -> None:
             super().__init__()
@@ -3698,7 +3815,7 @@ def test_durable_flush_block_survives_stop_failure_and_replacement_controller() 
 
         def queue_final(self, *_args, **_kwargs):
             self.final_calls += 1
-            raise AssertionError("blocked native history must never upload")
+            raise AssertionError("skipped native history must never upload")
 
     manager = DurableManager()
     services: list[Service] = []
@@ -3756,8 +3873,9 @@ def test_durable_flush_block_survives_stop_failure_and_replacement_controller() 
     with pytest.raises(SandboxError, match="docker stop response lost"):
         first.stop_if_idle("athr_source", generation=1)
     assert manager.final_marker is not None
-    assert b'"state":"blocked"' in manager.final_marker
+    assert b'"state":"skipped"' in manager.final_marker
     assert manager.items[_spec().container_name].running is True
+    # Until an exact stop completes, this broker still fences the group.
     with pytest.raises(SessionBusy, match="native flush failure"):
         first.operation_opened("athr_source")
     first_controller.close()
@@ -3774,12 +3892,25 @@ def test_durable_flush_block_survives_stop_failure_and_replacement_controller() 
 
     descriptors = replacement.reconcile()
 
+    # The durable skip lets the replacement finish the stop without upload and
+    # release the bridge, so the chat can start and resume again.
     assert descriptors[0].running is False
-    assert manager.stop_count == 2
-    assert manager.items[_spec().container_name].networks == ("agent-net",)
+    assert manager.items[_spec().container_name].networks == ()
     assert all(service.final_calls == 0 for service in services)
-    with pytest.raises(SessionBusy, match="native flush failure"):
-        replacement.operation_opened(_spec().thread_id)
+    group = replacement._members[_spec().thread_id]
+    assert group.stop_archive_pending is False
+    assert group.stop_archive_blocked is False
+    lease = replacement.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    assert lease.token
+    assert manager.items[_spec().container_name].running is True
     replacement_controller.close()
 
 

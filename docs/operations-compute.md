@@ -501,9 +501,9 @@ transfers the database binding, starts the replacement and verifies deployment,
 fresh heartbeat and sandbox manager access. The stop takes the runner first,
 then the sandbox manager alone for up to 10 minutes: its shutdown stops each running
 sandbox cleanly and, when lifecycle archives are enabled, stores its final
-archive. Remaining containers stop afterwards. While archives are enabled, the
-replacement's sandbox manager quarantines a sandbox that Docker stopped without
-the sandbox manager, so its chat cannot continue. Claims resume only after successful takeover
+archive. Remaining containers stop afterwards. A sandbox that Docker stopped
+without the sandbox manager gets no final archive for that stop, but its chat continues
+on the replacement. Claims resume only after successful takeover
 is recorded durably. Recovery after that boundary can clean up the source; it
 cannot restore its stale copy over new work.
 

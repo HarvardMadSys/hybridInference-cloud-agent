@@ -808,11 +808,14 @@ class SharedChatSessionSupervisor:
                 try:
                     if blocked:
                         self._stop_blocked_group(group)
-                        failures.append(
-                            SandboxError(
-                                "shared sandbox final archive remains blocked by native flush failure"
+                        with self._lock:
+                            still_blocked = group.stop_archive_blocked
+                        if still_blocked:
+                            failures.append(
+                                SandboxError(
+                                    "shared sandbox final archive skip could not be persisted"
+                                )
                             )
-                        )
                     else:
                         self._retry_stopped_archive(group)
                 except Exception as exc:
@@ -990,13 +993,16 @@ class SharedChatSessionSupervisor:
                     if not persist:
                         # Network fail-stop phase one cannot leave a group
                         # running merely because its prepared marker is no
-                        # longer usable. Persist the blocked state and retain
-                        # the bridge; this group must never upload.
+                        # longer usable. Skip this lifecycle's final archive:
+                        # this group must never upload unproven history.
                         with self._lock:
                             group.stop_archive_blocked = True
                             group.stop_archive_pending = True
                             group.stop_archive_members = members
                         self._stop_blocked_group(group, inspection)
+                        with self._lock:
+                            if not group.stop_archive_blocked:
+                                return
                     raise
             inspection = self._manager.stop(
                 group.spec,
@@ -1023,7 +1029,14 @@ class SharedChatSessionSupervisor:
         group: _Group,
         inspection: ChatSandboxInspection | None = None,
     ) -> ChatSandboxInspection:
-        """Exact-stop a native-flush-blocked group without upload or release."""
+        """Exact-stop a group whose native history is unproven, then finish without upload.
+
+        The invalidate hook durably records a skipped final. Once it has, the
+        group finishes its lifecycle like any clean stop: the bridge is released
+        and the group can start and resume again. Without that durable record
+        (the hook failed, or a static archive service cannot write one) the
+        group stays fenced with its bridge retained, and reconciliation retries.
+        """
         current = inspection or self._require_current_inspection(group)
         marker_persisted = False
         if self._stopped_archive_invalidate_hook is not None:
@@ -1040,16 +1053,18 @@ class SharedChatSessionSupervisor:
                     },
                 )
         if current.running:
+            # Without archive hooks there is no retry marker to keep.
             current = self._manager.stop(
                 group.spec,
                 expected_container_id=current.container_id,
-                release_networks=False,
+                release_networks=self._stopped_archive_hook is None,
             )
             with self._lock:
                 self._accept_inspection_locked(group, current)
         if not marker_persisted and self._stopped_archive_invalidate_hook is not None:
             try:
                 self._stopped_archive_invalidate_hook(group.spec, current)
+                marker_persisted = True
             except Exception:
                 logger.exception(
                     "stopped sandbox block marker retry failed",
@@ -1059,7 +1074,13 @@ class SharedChatSessionSupervisor:
                         "generation": group.spec.generation,
                     },
                 )
-        return current
+        if not marker_persisted and self._stopped_archive_hook is not None:
+            return current
+        with self._lock:
+            members = group.stop_archive_members or self._archive_members_locked(group)
+        # The skipped marker makes the final hook a no-op, so this only
+        # releases the bridge and clears the fences.
+        return self._persist_stopped_archive(group, current, members)
 
     def _start_group(
         self,
@@ -3774,13 +3795,14 @@ class SharedChatSessionSupervisor:
                     retry_pending = False
                 elif self._prepare_markerless_final_locked(group.spec, current):
                     # The dynamic controller atomically wrote an explicit
-                    # disabled-policy marker.  Finish that no-upload lifecycle
-                    # through the normal retry path and release its bridge.
+                    # disabled-policy or skipped-final marker.  Finish that
+                    # no-upload lifecycle through the normal retry path and
+                    # release its bridge.
                     retry_pending = True
                 else:
-                    # A stopped non-CREATED container with no durable record is
-                    # unclassified native history. Persist the blocked state and
-                    # retain its bridge; never fabricate a clean final archive.
+                    # No policy has been delivered (or a static archive service
+                    # cannot record a skip). Unclassified native history stays
+                    # fenced with its bridge; never fabricate a final archive.
                     blocked = True
                     group.stop_archive_blocked = True
                     group.stop_archive_pending = True
@@ -3865,7 +3887,10 @@ class SharedChatSessionSupervisor:
                 with self._lock:
                     group.stopping = False
                     self._condition.notify_all()
-            raise SandboxError("shared sandbox final archive is blocked by native flush failure")
+            with self._lock:
+                if group.stop_archive_blocked:
+                    raise SandboxError("shared sandbox final archive skip could not be persisted")
+                return self._descriptor(group, requested)
 
         if retry_pending:
             try:
@@ -3903,59 +3928,23 @@ class SharedChatSessionSupervisor:
                 with contextlib.suppress(RuntimeError):
                     turn_lock.release()
             if flush_error is not None:
+                # Native history may be incomplete, so this lifecycle is never
+                # archived. Record the skip, exact-stop, and finish without
+                # upload; the next resume relies on the ordinary native checks.
                 with self._lock:
                     group.stop_archive_pending = self._stopped_archive_hook is not None
                     group.stop_archive_blocked = True
                     group.stop_archive_members = (
                         archive_members if self._stopped_archive_hook is not None else None
                     )
-                invalidate_error: Exception | None = None
-                if self._stopped_archive_invalidate_hook is not None:
-                    try:
-                        self._stopped_archive_invalidate_hook(group.spec, current)
-                    except Exception as exc:
-                        invalidate_error = exc
-                try:
-                    inspection = self._manager.stop(
-                        group.spec,
-                        expected_container_id=expected_container_id,
-                        release_networks=(
-                            self._stopped_archive_hook is None and invalidate_error is None
-                        ),
-                    )
-                except BaseException:
-                    if (
-                        invalidate_error is not None
-                        and self._stopped_archive_invalidate_hook is not None
-                    ):
-                        retry_current = self._require_current_inspection(group)
-                        if retry_current.running:
-                            try:
-                                self._stopped_archive_invalidate_hook(group.spec, retry_current)
-                            except Exception:
-                                logger.exception(
-                                    "running sandbox block marker retry failed after stop error",
-                                    extra={
-                                        "event": "sandbox_archive_block_retry_after_stop_failed",
-                                        "sandbox_id": group.spec.sandbox_id,
-                                        "generation": group.spec.generation,
-                                    },
-                                )
-                    raise
+                inspection = self._stop_blocked_group(group, current)
                 with self._lock:
-                    self._accept_inspection_locked(group, inspection)
-                if invalidate_error is not None:
-                    assert self._stopped_archive_invalidate_hook is not None
-                    try:
-                        self._stopped_archive_invalidate_hook(group.spec, inspection)
-                    except Exception:
-                        raise SandboxError(
-                            "native flush failure archive block could not be persisted"
-                        ) from invalidate_error
-                raise SandboxError(
-                    "native session history could not be flushed before final archive"
-                ) from flush_error
-            if created_cleanup:
+                    skip_persisted = not group.stop_archive_blocked
+                if not skip_persisted:
+                    raise SandboxError(
+                        "native flush failure archive skip could not be persisted"
+                    ) from flush_error
+            elif created_cleanup:
                 inspection = self._manager.stop(
                     group.spec,
                     expected_container_id=expected_container_id,
@@ -3974,63 +3963,32 @@ class SharedChatSessionSupervisor:
                             raise
                         # Network proof is already lost. Archive preparation
                         # failure cannot leave this group running while later
-                        # groups wait. Convert it to the durable blocked state,
-                        # exact-stop with the bridge retained, and never upload.
+                        # groups wait. Skip this lifecycle's final archive and
+                        # finish the exact stop without upload.
                         with self._lock:
                             group.stop_archive_pending = True
                             group.stop_archive_blocked = True
                             group.stop_archive_members = archive_members
-                        marker_persisted = False
-                        if self._stopped_archive_invalidate_hook is not None:
-                            try:
-                                self._stopped_archive_invalidate_hook(group.spec, current)
-                                marker_persisted = True
-                            except Exception:
-                                logger.exception(
-                                    "unguarded sandbox block marker could not be persisted",
-                                    extra={
-                                        "event": "shared_chat_network_block_marker_failed",
-                                        "sandbox_id": group.spec.sandbox_id,
-                                        "generation": group.spec.generation,
-                                    },
-                                )
-                        inspection = self._manager.stop(
-                            group.spec,
-                            expected_container_id=expected_container_id,
-                            release_networks=False,
-                        )
+                        inspection = self._stop_blocked_group(group, current)
                         with self._lock:
-                            self._accept_inspection_locked(group, inspection)
-                        if (
-                            not marker_persisted
-                            and self._stopped_archive_invalidate_hook is not None
-                        ):
-                            try:
-                                self._stopped_archive_invalidate_hook(group.spec, inspection)
-                            except Exception:
-                                logger.exception(
-                                    "stopped unguarded sandbox block marker could not be persisted",
-                                    extra={
-                                        "event": "shared_chat_network_stopped_block_marker_failed",
-                                        "sandbox_id": group.spec.sandbox_id,
-                                        "generation": group.spec.generation,
-                                    },
-                                )
-                        raise
-                inspection = self._manager.stop(
-                    group.spec,
-                    expected_container_id=expected_container_id,
-                    release_networks=self._stopped_archive_hook is None,
-                )
-                # This is synchronous and fail-closed. A failed upload remains
-                # pinned to the same policy revision and leaves the stopped
-                # container/network as the durable retry marker.
-                if not defer_archive:
-                    inspection = self._persist_stopped_archive(
-                        group,
-                        inspection,
-                        archive_members,
+                            skip_persisted = not group.stop_archive_blocked
+                        if not skip_persisted:
+                            raise
+                if inspection is None:
+                    inspection = self._manager.stop(
+                        group.spec,
+                        expected_container_id=expected_container_id,
+                        release_networks=self._stopped_archive_hook is None,
                     )
+                    # This is synchronous and fail-closed. A failed upload remains
+                    # pinned to the same policy revision and leaves the stopped
+                    # container/network as the durable retry marker.
+                    if not defer_archive:
+                        inspection = self._persist_stopped_archive(
+                            group,
+                            inspection,
+                            archive_members,
+                        )
         except BaseException:
             failed_inspection: ChatSandboxInspection | None = None
             with contextlib.suppress(Exception):
