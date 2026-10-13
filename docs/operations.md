@@ -253,6 +253,24 @@ gateway and standalone edge need no new public route or port. Every request
 requires current `agent.admin` permission. pgAdmin retains its own login and
 CSRF checks; Agent cookies and bearer credentials are never sent upstream.
 
+pgAdmin's pages run on the Agent's own origin, where the administrator's Agent
+session authorizes every admin route. The proxy therefore adds a second
+`Content-Security-Policy` to each pgAdmin response, enforced alongside
+pgAdmin's own: pgAdmin may fetch, submit forms, open frames and start workers
+only under the public pgAdmin path. It also sends
+`Cross-Origin-Opener-Policy: same-origin`, so a pgAdmin page holds no handle on
+another Agent page it opens, and the proxy's own error answers are sandboxed.
+This narrows what a script injected into pgAdmin could do with the session; it
+is not an origin boundary. pgAdmin still shares the origin's browser storage,
+and an error page that an edge in front of the control plane serves under the
+pgAdmin path without these headers is outside the policy. Only a separate
+origin, with its own hostname, TLS and edge route and a proxy credential other
+than the Agent session cookie, would remove the shared session; this release
+does not provide one. Until then, keep the pinned pgAdmin image and its default
+security headers (its own policy refuses inline scripts without its per-request
+nonce), enable the profile only where it is used, and grant `agent.admin` only
+to operators.
+
 Enable the optional service in the control-plane deployment's `.env`:
 
 ```dotenv
@@ -279,6 +297,19 @@ before setup if the API has a different public prefix. Later changes use
 Existing `AGENT_PGADMIN_URL` and
 `AGENT_PGADMIN_PUBLIC_URL` values are imported once along with other runtime settings.
 
+**Private pgAdmin URL** selects a pgAdmin service the deployment names; it
+cannot name any other address. The bundled `http://pgadmin:5050` is always
+allowed, and so are the scheme, host and port of `AGENT_PGADMIN_URL` and
+`AGENT_PGADMIN_BOOTSTRAP_URL` in the control plane's environment. Any other
+saved URL makes the dashboard, the launch link and the proxy answer 503 without
+contacting it: the proxy forwards every method, path and body and returns the
+reply, so an address an administrator could choose freely would reach a cloud
+metadata endpoint or any other private service the control plane can reach.
+To run pgAdmin elsewhere, set its address as `AGENT_PGADMIN_URL` in the
+control plane's environment, restart the control plane, and select the same
+address in **Private pgAdmin URL**. Keep the variable set after it has been
+imported.
+
 Open **Admin → Database** and choose an administrator email and a password of
 at least 12 characters. Only a current Agent administrator can complete setup.
 The service waits for that first setup; the page then checks readiness and
@@ -302,7 +333,9 @@ If the dashboard reports unavailable, inspect `docker compose logs pgadmin`
 and its health state. Before setup, a waiting container is healthy and logs
 `Waiting for first-time setup in Admin -> Database.` After setup, unreadable
 bootstrap storage or unavailable PostgreSQL prevent startup. Setup records
-`agent.database.pgadmin.setup`; opening pgAdmin records
+`agent.database.pgadmin.setup`. A setup that cannot write the bootstrap volume
+is recorded as failed; fix the volume and set up again from the same page.
+Opening pgAdmin records
 `agent.database.pgadmin.open` in the Agent audit log; pgAdmin manages SQL
 activity itself. Resetting **Private pgAdmin URL** in Admin Settings disables
 access after the listeners synchronize; removing the profile and stopping

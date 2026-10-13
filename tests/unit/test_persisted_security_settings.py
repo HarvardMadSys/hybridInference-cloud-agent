@@ -110,6 +110,8 @@ def test_pgadmin_uses_saved_urls_and_a_saved_reset_ignores_stale_environment(mon
     settings.apply_settings(1, encoded)
     monkeypatch.setenv("AGENT_PGADMIN_URL", "http://stale.example")
     monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://stale.example")
+    # Settings may select only a service the deployment names; this one is named.
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_URL", "http://database-tools:5050")
     config = pgadmin_config()
     assert config is not None
     assert str(config.upstream) == "http://database-tools:5050"
