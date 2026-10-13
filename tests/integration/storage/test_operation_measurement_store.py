@@ -490,6 +490,57 @@ async def test_catalogue_recency_advances_when_a_new_sample_arrives(store):
     assert run["received_at"] > old
 
 
+async def _run_row_version(pool: Any) -> tuple[str, str]:
+    """Return the run row's ``xmin`` and ``xmax``.
+
+    A rewrite of the row gives it a new ``xmin``; a ``SELECT ... FOR UPDATE``
+    stamps the locker in ``xmax``. Together they say whether a write touched the
+    row at all, which no column value can.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT xmin::text AS xmin, xmax::text AS xmax "
+            "FROM agent_operation_profiling_runs WHERE run_id = $1",
+            "run-1",
+        )
+    assert row is not None
+    return row["xmin"], row["xmax"]
+
+
+async def test_a_sample_from_a_listed_instance_neither_locks_nor_rewrites_its_run(store):
+    """A run's samples must not queue behind each other on its catalogue row.
+
+    Regression: every sample took ``FOR UPDATE`` on the run row, rewrote its
+    admission list even when nothing was added, and rewrote it again to bump
+    ``received_at`` -- so all the samples of a run serialized on one row lock
+    held to commit, and each left two dead versions of the row behind.
+    """
+    first = await store.record_operation_measurement(measurement=_measurement(), run=_run())
+    assert first == "stored"
+    # As if recency had just been bumped -- stamped ahead of anything the
+    # samples below can be, however slowly this machine runs them, so the
+    # once-a-second bump cannot be what this test observes.
+    async with store.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_operation_profiling_runs "
+            "SET received_at = NOW() + INTERVAL '1 hour' WHERE run_id = $1",
+            "run-1",
+        )
+    before = await _run_row_version(store.pool)
+
+    for index in range(3):
+        result = await store.record_operation_measurement(
+            measurement=_measurement(measurement_id=f"msm_more_{index}", payload_hash=f"h-{index}"),
+            run=_run(),
+        )
+        assert result == "stored"
+
+    assert await _run_row_version(store.pool) == before
+    run = await store.get_profiling_run("run-1")
+    assert run is not None
+    assert run["admission_instances"] == [{"instance": "cp-1", "max_operations": 200}]
+
+
 async def test_a_measurement_without_a_run_row_is_still_stored(store):
     """A producer that never sent its manifest still contributes its sample."""
     assert (
