@@ -312,7 +312,7 @@ def _prepare(
     async def close_sandbox_managers() -> None:
         events.append("sandbox_managers")
 
-    monkeypatch.setattr("cloud_agent.api.mcp_relay.close_host", close_host)
+    monkeypatch.setattr("cloud_agent.mcp.runtime.close_host", close_host)
     monkeypatch.setattr(
         "cloud_agent.sandbox_manager_routing.close_sandbox_manager_clients", close_sandbox_managers
     )
@@ -337,7 +337,7 @@ def _prepare(
         ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.publish_worker.publish_loop", "publish_task"),
         ("cloud_agent.workers.pr_archive.pr_archive_loop", "pr_archive_task"),
-        ("cloud_agent.api.mcp_relay.maintain_host_sessions", "mcp_maintenance_task"),
+        ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
     monkeypatch.setattr(
@@ -358,7 +358,7 @@ def _prepare(
         async def fail_maintenance(*_args: object, **_kwargs: object) -> None:
             raise RuntimeError(maintenance_error)
 
-        monkeypatch.setattr("cloud_agent.api.mcp_relay.maintain_host_sessions", fail_maintenance)
+        monkeypatch.setattr("cloud_agent.mcp.runtime.maintain_host_sessions", fail_maintenance)
 
     _inject(monkeypatch, stage)
     return _Prepared(FastAPI(), pool, clients, events, resets, writer_resets)
@@ -421,7 +421,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
         "publisher": ("cloud_agent.publish_worker.publish_loop", _boom(stage)),
         "pr_archiver": ("cloud_agent.workers.pr_archive.pr_archive_loop", _boom(stage)),
-        "mcp_maintenance": ("cloud_agent.api.mcp_relay.maintain_host_sessions", _boom(stage)),
+        "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
         "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),
     }
@@ -609,7 +609,7 @@ async def test_a_failed_background_task_cannot_skip_later_cleanup(
 
 async def test_shutdown_cancellation_joins_send_now_before_closing_resources() -> None:
     """Cancellation is restored only after eager handoffs and later cleanup finish."""
-    from cloud_agent.api import turns
+    from cloud_agent.application import send_now
 
     events: list[str] = []
     unwinding = asyncio.Event()
@@ -624,8 +624,8 @@ async def test_shutdown_cancellation_joins_send_now_before_closing_resources() -
             events.append("handoff")
 
     handoff_task = asyncio.create_task(handoff())
-    turns._hand_overs.add(handoff_task)
-    handoff_task.add_done_callback(turns._hand_overs.discard)
+    send_now._hand_overs.add(handoff_task)
+    handoff_task.add_done_callback(send_now._hand_overs.discard)
     await asyncio.sleep(0)
 
     async def close_host() -> None:

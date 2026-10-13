@@ -23,13 +23,11 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_ALREADY_FINISHED,
     CONTROL_REFUSED_CONFLICTING_REQUEST,
     CONTROL_REFUSED_STALE_REVISION,
-    ControlCommandResult,
-)
-from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_ACTIVE,
     LIFECYCLE_EXPIRED,
     LIFECYCLE_PENDING,
     LIFECYCLE_STOPPED,
+    ControlCommandResult,
 )
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)

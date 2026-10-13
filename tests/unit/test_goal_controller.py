@@ -18,7 +18,7 @@ import pytest
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.controller import client_request_id_for, consume_wakeup, run_goal_wakeups
 from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
-from cloud_agent.storage.repositories.goal_wakeups import wakeup_backoff
+from cloud_agent.goals.retry_policy import wakeup_backoff
 from cloud_agent.storage.repositories.goals import _action_columns
 
 pytestmark = pytest.mark.asyncio

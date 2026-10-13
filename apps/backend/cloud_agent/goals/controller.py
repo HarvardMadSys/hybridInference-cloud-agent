@@ -34,6 +34,7 @@ from cloud_agent.goals.models import (
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
 from cloud_agent.goals.report import GoalReport, GoalReportParse
+from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
 from cloud_agent.owner_access import (
     AGENT_ACCESS_WITHDRAWN,
     AgentAccessUnavailable,
@@ -868,8 +869,6 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
     while the platform retries forever. It gets a bounded number of attempts,
     and then the owner is told.
     """
-    from cloud_agent.storage.repositories.goal_wakeups import is_exhausted, wakeup_backoff
-
     attempts = int(wakeup.get("attempts") or 0)
     if not is_exhausted(attempts):
         await store.goal_wakeups.release_wakeup(

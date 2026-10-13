@@ -29,11 +29,9 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_ALREADY_ACTIVE,
     CONTROL_REFUSED_ALREADY_FINISHED,
     CONTROL_REFUSED_STALE_REVISION,
-    ControlCommandResult,
-)
-from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_PENDING,
     LIFECYCLE_STOPPED,
+    ControlCommandResult,
 )
 from cloud_agent_shared import operation_profiling
 

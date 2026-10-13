@@ -61,20 +61,24 @@ reusable flows, `ports/` for persistence interfaces, and `storage/` for their
 database implementations. Background maintenance and reconciliation belong in
 `workers/`. Resource construction and lifecycle behavior belong in
 `bootstrap/`. Finally, `app.py` assembles the main API and the separate MCP-only
-listener.
+listener. The [code structure guide](code-structure.md) maps the schema domains,
+runtime adapters, shared profiling, frontend API clients, and job-detail UI.
 
 For common changes, start with the files below. Backend paths in this table are
 relative to `apps/backend/`.
 
 | Change | Start here |
 |---|---|
-| Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts the nine agent surfaces. |
+| Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts the ten agent surfaces. |
+| Request or response validation | The owning module in `cloud_agent/schemas/`; public imports use `cloud_agent.schemas`. |
 | A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an existing caller. |
 | Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/sandbox_manager.py`. |
 | A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
-| CLI behavior or version compatibility | `cloud_agent_host/runtimes.py` and `drivers.py`; shared pins are in `cloud_agent_shared/shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
-| Browser UI or a BFF route | `apps/frontend/src/`; browser API clients are in `src/lib/api/`. |
+| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `runner.py`. |
+| Retained-container values or lifecycle | `cloud_agent_host/chat_sandbox_models.py` for value types; `chat_sandbox.py` for Docker lifecycle. |
+| CLI behavior or version compatibility | `cloud_agent_host/runtimes/` and `drivers.py`; discovery facts are in `cloud_agent_shared/runtime_catalog.py`, shared pins in `shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
+| Browser UI or a BFF route | `apps/frontend/src/`; browser API clients are in `src/lib/api/agents/`, job-page components and hooks in `components/features/agents/job-detail/`. |
 
 Keep your change in the module that owns the behavior. Extract a flow when it
 needs an independent test boundary, or extract a rule when multiple entry
@@ -96,18 +100,23 @@ checkout can still fail in production. Follow these boundaries:
 - The host must not import the control plane, and the shared package must
   import neither implementation package. Shared Git subprocess and archive I/O
   belongs in `cloud_agent_shared/git/`.
-- The control plane has three remaining host runtime-registry imports, pinned
-  by [the import-boundary tests](../tests/unit/test_import_boundary.py). This
-  transition allowlist may only shrink. Put new shared facts in
-  `cloud_agent_shared/`.
+- The control plane must not import the host implementation. Runtime discovery
+  facts live in `cloud_agent_shared/runtime_catalog.py`; host adapters and the
+  control plane both consume them. The
+  [import-boundary tests](../tests/unit/test_import_boundary.py) enforce both
+  directions of the service boundary.
 - The Gateway is reached over HTTP only. Use the contracts in
   `gateway_contracts/`; do not import `serving.*`, access the Gateway database,
   or use its `API_KEY_SECRET` or `JWT_SECRET_KEY`. This service uses its own
   `AGENT_CONTROL_TOKEN_SECRET` and `AGENT_SESSION_SECRET`.
 
-Bootstrap owns cross-component wiring. Its existing calls into
-`api/mcp_relay.py` for MCP session lifecycle are a specific exception; application
-flows and workers must keep the route-module boundary.
+Bootstrap owns cross-component wiring. MCP session lifecycle lives in
+`mcp/runtime.py`, and eager send-now handoff task lifecycle lives in
+`application/send_now.py`. Bootstrap, application flows, workers, and domain
+modules must not import HTTP route modules. Domain rules and ports must not
+import storage implementations or HTTP frameworks. Callers outside storage
+must not import `storage/repositories/`; shared policies belong to their domain
+or owning service.
 
 Changes to sandbox networking, credential scope, or isolation also need review
 against [the security boundaries in AGENTS.md](../AGENTS.md#7-security-boundaries--do-not-relax-without-review).
@@ -308,7 +317,7 @@ uv run pytest -q tests/unit/test_api_surface_contract.py tests/unit/test_contrac
 
 Review the generated diff and explain any compatibility implications. The
 surface tests also reject duplicate registrations and overlaps between the
-nine agent routers. A snapshot update records a change; the behavioral tests
+ten agent routers. A snapshot update records a change; the behavioral tests
 and review establish whether it is compatible. The
 [contract guide](../gateway_contracts/README.md) explains what these checks can
 verify and what still needs comparison with Gateway source.

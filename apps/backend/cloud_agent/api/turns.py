@@ -19,7 +19,6 @@ without an HTTP request. What stays is the anchor validation, the store's
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -691,26 +690,6 @@ def _mid_turn_input_unsupported() -> HTTPException:
     )
 
 
-#: Hand-overs waiting for a host, kept so they are not collected mid-wait.
-_hand_overs: set[asyncio.Task[None]] = set()
-
-
-async def close_send_now_handovers() -> None:
-    """Cancel and join request-spawned handoffs before app resources close."""
-    tasks = tuple(_hand_overs)
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        joined = asyncio.gather(*tasks, return_exceptions=True)
-        try:
-            await asyncio.shield(joined)
-        except asyncio.CancelledError:
-            # The owner still has to wait for task cleanup before closing the
-            # store and sandbox manager clients; propagate its cancellation afterwards.
-            await joined
-            raise
-
-
 async def _hand_over_once_claimed(
     job_store: _TurnsStorage,
     *,
@@ -791,7 +770,7 @@ async def send_pending_message_now(
         raise _send_now_refused(began)
     message = began["message"]
     if began["attempt_id"] is None:
-        task = asyncio.create_task(
+        send_now_delivery.start_send_now_handover(
             _hand_over_once_claimed(
                 job_store,
                 thread_id=thread_id,
@@ -802,8 +781,6 @@ async def send_pending_message_now(
                 signal=signal,
             )
         )
-        _hand_overs.add(task)
-        task.add_done_callback(_hand_overs.discard)
         return await _queue_result(
             job_store,
             thread_id=thread_id,

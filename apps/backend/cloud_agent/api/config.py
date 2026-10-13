@@ -26,12 +26,12 @@ from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
-from cloud_agent_host.runtimes import (
+from cloud_agent_shared.plugins import supported_plugin_runtimes
+from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
     runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
-from cloud_agent_shared.plugins import supported_plugin_runtimes
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (

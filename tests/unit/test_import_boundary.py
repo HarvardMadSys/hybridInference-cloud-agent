@@ -1,12 +1,10 @@
 """The import boundary between the shared packages and the two implementations.
 
 ``cloud_agent_shared`` and ``cloud_agent_shared.git`` are the packages both images
-ship, so neither may import an implementation package. The control plane may
-still reach into ``cloud_agent_host`` for what has not moved yet, but only
-through a transition allowlist that may shrink and never grow. In the other
-direction the host may not reach into ``cloud_agent`` at all: the runner image
-does not ship it, so such an import fails at run time rather than at review
-time.
+ship, so neither may import an implementation package. The control plane and
+host do not import one another: shared runtime discovery facts live in the
+shared catalog, and host command builders and output parsers remain on the
+host. Each deployment can therefore load its own package independently.
 """
 
 from __future__ import annotations
@@ -38,25 +36,12 @@ IO_MODULES = frozenset({"subprocess", "tarfile"})
 #: one direction of the boundary no compatibility shim can bridge.
 CONTROL_PLANE_PACKAGE = "cloud_agent"
 
-#: The host package, which the control plane may only reach into by name.
+#: The host package, which the control plane must not import.
 HOST_PACKAGE = "cloud_agent_host"
 
 #: Top-level packages that depend on the host side of the deployment; a shared
 #: package can never import one of these.
 IMPLEMENTATION_PACKAGES = frozenset({"cloud_agent", "cloud_agent_host"})
-
-#: What the control plane may still import from ``cloud_agent_host``, as
-#: ``(module, symbol)``. This is a transition allowlist: it may only shrink,
-#: one entry per name that moves to a shared package. What is left is the
-#: runtime registry, whose five classes and their ``_REGISTRY`` stay in the
-#: host's ``runtimes.py``.
-HOST_IMPORT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("cloud_agent_host.runtimes", "registered_runtimes"),
-        ("cloud_agent_host.runtimes", "runtime_reasoning_efforts"),
-        ("cloud_agent_host.runtimes", "runtimes_supporting_mcp"),
-    }
-)
 
 
 def _parse(path: Path) -> ast.Module:
@@ -80,10 +65,9 @@ def _host_module_imports(path: Path) -> set[str]:
     """Modules one file imports *whole* from ``cloud_agent_host``.
 
     A scan of its own because it is a different node: ``import a.b as c`` is an
-    ``ast.Import``, and walking only ``ast.ImportFrom`` never saw one. The
-    allowlist below is a set of symbols, and importing the module hands over
-    every name it holds — strictly more than any single entry permits — so these
-    cannot be expressed as pairs and are reported separately.
+    ``ast.Import``, and walking only ``ast.ImportFrom`` would miss it. Whole
+    modules are reported separately from symbol imports so either violation
+    points to the dependency that must move into the shared package.
     """
     modules: set[str] = set()
     for node in ast.walk(_parse(path)):
@@ -108,18 +92,11 @@ def _imported_modules(path: Path) -> set[str]:
     return modules
 
 
-def test_control_plane_host_imports_are_the_transition_allowlist() -> None:
-    """The control plane's reach into ``cloud_agent_host`` may only shrink.
+def test_control_plane_imports_no_host_package() -> None:
+    """The control plane imports shared vocabulary instead of host adapters.
 
-    The comparison is equality and not a subset check on purpose: an allowlist
-    that is never re-derived from the tree goes stale, so a subset check would
-    keep blessing a moved module's phantom entry forever and the boundary would
-    only ever appear to improve. Equality makes both directions speak — a new
-    import fails, and an entry left behind by work that already moved fails.
-
-    Both import forms are scanned. ``from cloud_agent_host.x import y`` is the
-    allowlist's subject; ``import cloud_agent_host.x`` is reported separately
-    because no symbol entry can bound it.
+    Both symbol imports and whole-module imports are scanned, including
+    ``TYPE_CHECKING`` blocks. No transition exceptions remain.
     """
     scanned = set()
     whole_modules: dict[str, set[str]] = {}
@@ -130,17 +107,11 @@ def test_control_plane_host_imports_are_the_transition_allowlist() -> None:
             whole_modules[str(path.relative_to(REPO_ROOT))] = imported
 
     assert whole_modules == {}, (
-        "these files import a cloud_agent_host module whole, which reaches every "
-        "name in it and is more than the symbol allowlist below can grant; import "
-        "the name you need instead:\n"
+        "the control plane must not import host implementation modules:\n"
         + "\n".join(f"{path}: {sorted(modules)}" for path, modules in sorted(whole_modules.items()))
     )
 
-    allowlist = set(HOST_IMPORT_ALLOWLIST)
-    assert scanned == allowlist, (
-        f"imports missing from the allowlist: {sorted(scanned - allowlist)}\n"
-        f"stale allowlist entries to delete: {sorted(allowlist - scanned)}"
-    )
+    assert scanned == set(), f"the control plane imports host symbols: {sorted(scanned)}"
 
 
 def test_only_the_git_subpackage_reaches_outside_the_process() -> None:
@@ -173,19 +144,30 @@ def test_only_the_git_subpackage_reaches_outside_the_process() -> None:
     )
 
 
-def test_the_scanner_sees_a_whole_module_import(tmp_path: Path) -> None:
-    """The negative case for the check above.
-
-    ``import cloud_agent_host.sandbox as host_impl`` is an ``ast.Import``. The
-    file used to walk only ``ast.ImportFrom``, so a line exactly like this one
-    left the allowlist equal to itself and the boundary unbroken as far as the
-    test could tell.
-    """
+@pytest.mark.parametrize(
+    ("source", "pairs", "modules"),
+    [
+        (
+            "import cloud_agent_host.sandbox as host_impl\n",
+            set(),
+            {"cloud_agent_host.sandbox"},
+        ),
+        (
+            "from cloud_agent_host.runtimes import get_runtime\n",
+            {("cloud_agent_host.runtimes", "get_runtime")},
+            set(),
+        ),
+    ],
+)
+def test_the_scanner_sees_both_host_import_forms(
+    tmp_path: Path, source: str, pairs: set[tuple[str, str]], modules: set[str]
+) -> None:
+    """Both whole modules and individual host symbols violate the boundary."""
     offender = tmp_path / "offender.py"
-    offender.write_text("import cloud_agent_host.sandbox as host_impl\n", encoding="utf-8")
+    offender.write_text(source, encoding="utf-8")
 
-    assert _host_import_pairs(offender) == set()
-    assert _host_module_imports(offender) == {"cloud_agent_host.sandbox"}
+    assert _host_import_pairs(offender) == pairs
+    assert _host_module_imports(offender) == modules
 
 
 @pytest.mark.parametrize("package", sorted(SHARED_ROOTS))

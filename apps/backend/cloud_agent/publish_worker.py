@@ -715,9 +715,16 @@ async def _publish_claimed(
             allow_workflow_changes=allow_workflow_changes,
         )
     finally:
+        owner = asyncio.current_task()
+        owner_cancellation_baseline = owner.cancelling() if owner is not None else 0
         heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await heartbeat
+        except asyncio.CancelledError:
+            # The heartbeat's own cancellation is expected. Cancellation of
+            # this publisher while it joins the heartbeat must stop the loop.
+            if owner is not None and owner.cancelling() > owner_cancellation_baseline:
+                raise
 
 
 async def _publish_claimed_owned(

@@ -1,26 +1,12 @@
-"""The control plane as its own service.
+"""Assemble the public API and the separate MCP-only listener.
 
-In the gateway this was forty lines inside a much larger ``bootstrap`` that
-also built routers, adapters and observability. Here it is the whole process,
-and the lifecycle is the same three things it always was: a store, a reaper,
-and a publisher.
+Bootstrap owns resources, background workers, and shutdown. This module mounts
+HTTP surfaces and installs shared exception and response policies. The MCP
+listener exposes sandbox tools separately from the owner and admin API.
 
-**The reaper is what makes a vanished sandbox recoverable.** It supersedes
-attempts whose lease expired and requeues, fails or cancels the job per the
-store's policy. It never dies on an error, because a transient database blip
-must not permanently stop reaping — a stopped reaper is invisible until jobs
-start hanging.
-
-**The snapshot coordinator** asks an owning sandbox manager for short,
-quiescent Git captures. It has its own schedule so a slow Docker/Git operation
-cannot delay grant renewal or attempt recovery.
-
-**The publisher is the only component holding a git credential**, which is
-precisely what keeps the sandbox credential-free. A deployment without one
-simply never publishes, rather than failing to start.
-
-All three are background tasks held in a module-level set: a task the loop can
-garbage-collect mid-run is a task that stops silently.
+Source-control account credentials remain in the control plane; hosts may mint
+short-lived repository-scoped credentials for a sandbox member as described in
+AGENTS.md. Session recovery requires the retained container and native CLI state.
 """
 
 from __future__ import annotations

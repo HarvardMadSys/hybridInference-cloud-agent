@@ -39,7 +39,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
@@ -57,6 +57,15 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatBackend,
 )
+
+# Preserve the runner's public value/client API and its factory patch points.
+from cloud_agent_host.claimed_job import (
+    ClaimedJob as ClaimedJob,
+    ClaimUnreachable as ClaimUnreachable,
+    LeaseLost as LeaseLost,
+    WorkWaitUnsupported as WorkWaitUnsupported,
+)
+from cloud_agent_host.control_plane_client import ControlPlane as ControlPlane
 from cloud_agent_host.drivers import (
     LINE,
     DriverError,
@@ -92,7 +101,7 @@ from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
     DELIVERY_QUEUE_MAX,
-    DELIVERY_TIMEOUT_S,
+    DELIVERY_TIMEOUT_S as DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
     classify_response,
@@ -134,7 +143,7 @@ from cloud_agent_host.shared_protocol import (
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
-from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_upload_archive,
@@ -144,7 +153,6 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
-from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -165,16 +173,12 @@ FIRST_SETTINGS_WAIT_S = 30.0
 # control request cannot consume the remaining lease in normal cadence sleeps.
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
-_HEARTBEAT_TIMEOUT_S = 10.0
 #: How long a host polls before asking again for the wait endpoint a control
 #: plane did not have. Hosts deploy first, so this is the rest of a rollout.
 WORK_WAIT_RETRY_S = 300.0
 #: Added to a wait's own timeout for the client's, so the control plane always
 #: answers first.
 _WORK_WAIT_GRACE_S = 10.0
-#: One upload is capped at 5 MB by the control plane, but the connection can be
-#: slow; the default 30 s client timeout is too tight for a file transfer.
-_ATTACHMENT_TIMEOUT_S = 120.0
 DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -287,489 +291,8 @@ _SAFE_DIRECTORY_ENV = {
 }
 
 
-class LeaseLost(Exception):
-    """Raised when this attempt no longer owns the job and must stop."""
-
-
-class ClaimUnreachable(Exception):
-    """The gateway could not be reached *to claim*, so no job was taken.
-
-    Distinct from a transport failure later in the run: that one leaves an
-    attempt running until its lease expires, and an operator needs to be sent
-    to the job rather than told nothing was claimed.
-    """
-
-
-class WorkWaitUnsupported(Exception):
-    """The control plane has no wait endpoint, so an idle host polls instead."""
-
-
 class WorktreeError(Exception):
     """Raised when the job's repository could not be materialized."""
-
-
-@dataclass
-class ClaimedJob:
-    """What the control plane handed the enrolled host."""
-
-    job_id: str
-    thread_id: str
-    attempt_id: int
-    attempt_no: int
-    repo: str
-    base_sha: str | None
-    task_prompt: str
-    runtime: str
-    model: str
-    worker_token: str
-    # The inference credential that enters the sandbox: a gateway grant.
-    sandbox_token: str
-    execution_profile: str = "trusted-v1"
-    # The MCP credential. A *second* credential, because tools and inference
-    # are two services now: a leaked MCP token buys no inference and a leaked
-    # grant buys no tools. The relay it opens is this host's own, from
-    # `_sandbox_mcp_url`, not anything the claim says.
-    mcp_token: str = ""
-    # How hard the model should think on this turn, in the runtime's own
-    # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
-    # Defaulted rather than required, because absent and Auto are the same
-    # state — there is nothing a caller could pass to mean "unknown".
-    reasoning_effort: str | None = None
-    # Shell run in the sandbox before the agent, on the group's one network.
-    # Optional, so it carries a default rather than forcing every caller to
-    # pass one.
-    setup_script: str | None = None
-    environment: BoundEnvironment | None = field(default=None, repr=False)
-    # Explicit CLI plugins installed in this chat's private member state.
-    plugins: list[dict[str, str]] = field(default_factory=list)
-    # Read-only, single-repo, short-lived: what the runner clones with. Never
-    # put in .git/config or the sandbox environment.
-    clone_token: str | None = None
-    # A separate repository-scoped contents/PR write token for sandbox gh.
-    github_token: str | None = field(default=None, repr=False)
-    parent_job_id: str | None = None
-    turn_no: int = 1
-    # MCP connection aliases this job was granted. Aliases only: the runner
-    # learns nothing about where they actually are or how they authenticate,
-    # because the sandbox reaches them through this service's MCP-only relay
-    # rather than directly.
-    mcp_bindings: list[str] = field(default_factory=list)
-    # The CLI version the control plane stamped on this attempt, resolved from
-    # the thread's pin, the deployment's selection, or this host's default.
-    # ``None`` from a control plane that predates selection — the image's
-    # symlinked default then applies, which is what that control plane means.
-    runtime_version: str | None = None
-    # Durable shared-container membership. It is absent only until the first
-    # claimed turn reserves its sandbox; every executable claim uses this
-    # topology and remains pinned to the owning host afterwards.
-    thread_sandbox: dict[str, Any] | None = None
-    # How many uploads this whole conversation holds, counted by the control
-    # plane. Zero means skip the fetch, which is every turn of every task that
-    # attached nothing. Absent from a control plane that predates uploads, and
-    # absent means the same thing as none.
-    thread_attachment_count: int = 0
-    # How many this turn itself added. A retained container already holds the
-    # earlier turns' files, so only a new container or a turn that attached
-    # something needs the import to run.
-    turn_attachment_count: int = 0
-
-    @classmethod
-    def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
-        """Build from the claim endpoint's response."""
-        raw_plugins = body.get("plugins", [])
-        if not isinstance(raw_plugins, list) or len(raw_plugins) > MAX_SANDBOX_PLUGINS:
-            raise ValueError("claim plugins must be a bounded list")
-        plugins = validate_sandbox_plugins(body["runtime"], raw_plugins)
-        return cls(
-            job_id=body["job_id"],
-            thread_id=body["thread_id"],
-            parent_job_id=body.get("parent_job_id"),
-            turn_no=int(body.get("turn_no") or 1),
-            attempt_id=body["attempt_id"],
-            attempt_no=body["attempt_no"],
-            repo=body["repo"],
-            base_sha=body.get("base_sha"),
-            task_prompt=body["task_prompt"],
-            setup_script=body.get("setup_script"),
-            environment=BoundEnvironment.model_validate(body["environment"])
-            if body.get("environment")
-            else None,
-            plugins=plugins,
-            runtime=body["runtime"],
-            model=body["model"],
-            execution_profile=body.get("execution_profile") or "trusted-v1",
-            # Absent from a control plane that predates the control, which is
-            # the same thing as Auto — no separate "unknown" state to carry.
-            reasoning_effort=body.get("reasoning_effort"),
-            worker_token=body["worker_token"],
-            sandbox_token=body["sandbox_token"],
-            mcp_token=body.get("mcp_token") or "",
-            clone_token=body.get("clone_token") or None,
-            github_token=body.get("github_token") or None,
-            mcp_bindings=list(body.get("mcp_bindings") or []),
-            runtime_version=body.get("runtime_version") or None,
-            thread_sandbox=(
-                dict(body["thread_sandbox"])
-                if isinstance(body.get("thread_sandbox"), dict)
-                else None
-            ),
-            thread_attachment_count=int(body.get("thread_attachment_count") or 0),
-            turn_attachment_count=int(body.get("turn_attachment_count") or 0),
-        )
-
-
-class ControlPlane:
-    """Thin client for the worker endpoints, using the capability token."""
-
-    def __init__(self, base_url: str, token: str, *, timeout: float = 30.0) -> None:
-        self._base = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=timeout, headers={"Authorization": f"Bearer {token}"})
-        # This client serves exactly one attempt (one claim, one token), so a
-        # plain counter is the whole numbering scheme. It makes each upload
-        # idempotent server-side, which is what licenses the retry below.
-        self._event_seq = 0
-        self._redactor = SecretRedactor({})
-        self._preview_redactors: dict[str, SecretRedactor] = {}
-        self._preview_contexts: dict[str, tuple[str, dict[str, Any]]] = {}
-        self._secret_values: dict[str, str] = {}
-
-    def close(self) -> None:
-        """Release the HTTP connection pool."""
-        self._client.close()
-
-    def _post(
-        self,
-        path: str,
-        payload: dict[str, Any] | None = None,
-        *,
-        timeout: float | None = None,
-        already_redacted: bool = False,
-    ) -> dict[str, Any]:
-        response = self._client.post(
-            f"{self._base}{path}",
-            json=(payload or {}) if already_redacted else self._redactor.payload(payload or {}),
-            timeout=self._client.timeout if timeout is None else timeout,
-        )
-        if response.status_code == 409:
-            raise LeaseLost(response.text[:200])
-        response.raise_for_status()
-        return response.json() if response.content else {}
-
-    def record_measurement(self, job_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        """Post one measurement and return its status and body.
-
-        Returns the answer rather than raising on a non-2xx, because delivery
-        decides what a status means: a 409 here is a *measurement* conflict,
-        not a lost lease, and the shared ``_post`` would raise ``LeaseLost``
-        for it and end a turn that had already succeeded.
-        """
-        response = self._client.post(
-            f"{self._base}/v1/agent/worker/jobs/{job_id}/measurements",
-            json=self._redactor.payload(body),
-            timeout=DELIVERY_TIMEOUT_S,
-        )
-        try:
-            parsed = response.json() if response.content else {}
-        except ValueError:
-            parsed = {}
-        return response.status_code, parsed if isinstance(parsed, dict) else {}
-
-    def append_event(self, event: NormalizedEvent) -> None:
-        """Report one normalized event, retrying once now that replay is safe.
-
-        The retry exists *because of* ``event_seq``: before it, a response
-        lost on the wire left the runner unable to tell "never stored" from
-        "stored, answer dropped", and re-sending risked a duplicate row in the
-        owner's stream. With the number attached, the server answers a replay
-        with the already-stored id, so one transport error no longer kills an
-        otherwise healthy turn.
-        """
-        payload = self._redactor.payload(event.payload)
-        if isinstance(event.payload, dict) and isinstance(event.payload.get("delta"), str):
-            stream_id = str(
-                event.payload.get("preview_id") or event.payload.get("id") or event.event_type
-            )
-            if event.payload.get("reset") or stream_id not in self._preview_redactors:
-                self._preview_redactors[stream_id] = SecretRedactor(self._secret_values)
-            payload["delta"] = self._preview_redactors[stream_id].feed(event.payload["delta"])
-            self._preview_contexts[stream_id] = (
-                event.event_type,
-                {k: v for k, v in payload.items() if k not in {"delta", "reset"}},
-            )
-        self._event_seq += 1
-        body = {
-            "event_type": event.event_type,
-            "payload": payload,
-            "event_seq": self._event_seq,
-        }
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True)
-        except httpx.TransportError:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True)
-
-    def _get(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
-        """Read from the worker surface, with the same fencing as a write."""
-        response = self._client.get(
-            f"{self._base}{path}",
-            timeout=self._client.timeout if timeout is None else timeout,
-        )
-        if response.status_code == 409:
-            raise LeaseLost(response.text[:200])
-        response.raise_for_status()
-        return response.json() if response.content else {}
-
-    def list_attachments(self) -> list[dict[str, Any]]:
-        """Every upload in this conversation, without the bytes."""
-        body = self._get(f"/v1/agent/worker/jobs/{self.job_id}/attachments")
-        return list(body.get("attachments") or [])
-
-    def read_attachment(self, attachment_id: int) -> tuple[str, bytes]:
-        """One upload's path and bytes."""
-        body = self._get(
-            f"/v1/agent/worker/jobs/{self.job_id}/attachments/{attachment_id}",
-            timeout=_ATTACHMENT_TIMEOUT_S,
-        )
-        return str(body["path"]), base64.b64decode(body["content_base64"])
-
-    def heartbeat(self, ttl: float) -> dict[str, Any]:
-        """Renew the lease and learn whether cancellation is pending."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/heartbeat",
-            {"lease_ttl_seconds": ttl},
-            timeout=_HEARTBEAT_TIMEOUT_S,
-        )
-
-    def report_continuity(self, mode: str, *, context_status: str | None = None) -> None:
-        """Record this attempt's continuity rung. Best-effort observability."""
-        try:
-            body = {"mode": mode}
-            if context_status is not None:
-                body["context_status"] = context_status
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/continuity", body)
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def report_context_status(self, context_status: str) -> None:
-        """Record NEW/LIVE/RESTORED/LOST without inventing a continuity rung."""
-        try:
-            self._post(
-                f"/v1/agent/worker/jobs/{self.job_id}/continuity",
-                {"context_status": context_status},
-            )
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def report_resources(self, rollup: dict[str, Any]) -> None:
-        """Report one closed attempt's resource and timing telemetry. Best-effort.
-
-        Swallowed like every other observability write: a turn that ran must
-        not fail because the platform could not record its telemetry.
-        """
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/resources", rollup)
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def report_turn_resources(self, payload: dict[str, Any]) -> None:
-        """Report one cumulative whole-turn member execution snapshot.
-
-        The same method serves a running ``collecting`` checkpoint and the
-        closing ``final`` snapshot: the body carries its own state and
-        ``report_seq``, and the endpoint treats a resend at the same sequence
-        as the same report. Swallowed like every other observability write --
-        a turn that ran must not fail because the platform could not record
-        its telemetry -- with the loss of the lease still fatal.
-
-        There is deliberately no retry here. The payload is a cumulative
-        snapshot with a monotonic ``report_seq``, so a checkpoint lost to a
-        transport error is superseded by the next one: retrying would upload
-        a stale picture while the current one is already being assembled.
-        """
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/turn-resources", payload)
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def reserve_chat_sandbox(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Reserve immutable thread/container identity under this attempt fence."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/reserve",
-            payload,
-        )
-
-    def mark_chat_sandbox_running(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        container_id: str,
-        context_status: str,
-    ) -> dict[str, Any]:
-        """Record that Docker started the reserved activation."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/running",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "container_id": container_id,
-                "context_status": context_status,
-            },
-        )
-
-    def record_chat_process(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        residency_generation: int,
-        process_generation: int,
-    ) -> None:
-        """Record a CLI process rotation inside the same chat container."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/process",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-                "process_generation": process_generation,
-            },
-        )
-
-    def establish_shared_residency(
-        self,
-        *,
-        sandbox_id: str,
-        runtime_id: str,
-        runtime_version: str | None,
-    ) -> dict[str, Any]:
-        """Obtain the member-scoped renewable credential owned by the sandbox manager."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/residency",
-            {
-                "sandbox_id": sandbox_id,
-                "runtime_id": runtime_id,
-                "runtime_version": runtime_version,
-            },
-        )
-
-    def admit_chat_turn(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        residency_generation: int,
-    ) -> None:
-        """Reserve this job before its prompt may reach Agent CLI stdin."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/admit",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-            },
-            timeout=10.0,
-        )
-
-    def settle_chat_sandbox(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        residency_generation: int,
-        context_status: str,
-        native_session_id: str | None,
-        idle_timeout_seconds: float,
-        base_sha: str | None = None,
-    ) -> dict[str, Any]:
-        """Persist a native context boundary before the host starts its idle timer."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/settle",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-                "context_status": context_status,
-                "native_session_id": native_session_id,
-                "base_sha": base_sha,
-                "idle_timeout_seconds": idle_timeout_seconds,
-            },
-            timeout=10.0,
-        )
-
-    def abandon_chat_sandbox(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        lost: bool,
-        detail: str | None,
-        idle_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        """Release a failed activation without claiming context continuity."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/abandon",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "lost": lost,
-                "detail": detail,
-                "idle_timeout_seconds": idle_timeout_seconds,
-            },
-        )
-
-    def suspend_terminals(self, phase: str) -> None:
-        """Freeze owner PTYs before workspace preparation or group snapshot capture."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/terminals/suspend",
-            {"phase": phase},
-        )
-
-    def resume_terminals(self) -> None:
-        """Resume retained PTYs and publish readiness for this attempt."""
-        self._post(f"/v1/agent/worker/jobs/{self.job_id}/terminals/resume")
-
-    def finish(self, state: str, detail: str | None = None, base_sha: str | None = None) -> None:
-        """Drive the fenced terminal transition.
-
-        ``base_sha`` reports the commit the agent actually worked from. A job
-        may be submitted without one, and the publisher cannot apply a patch
-        without knowing its base — so the runner, which resolves it when it
-        checks the repository out, is the component that knows.
-        """
-        for stream_id, redactor in tuple(self._preview_redactors.items()):
-            final = redactor.flush()
-            if final:
-                event_type, payload = self._preview_contexts[stream_id]
-                self._event_seq += 1
-                body = {
-                    "event_type": event_type,
-                    "payload": {**payload, "delta": final},
-                    "event_seq": self._event_seq,
-                }
-                try:
-                    self._post(
-                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
-                    )
-                except httpx.TransportError:
-                    self._post(
-                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
-                    )
-        self._preview_redactors.clear()
-        self._preview_contexts.clear()
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/finish",
-            {"state": state, "detail": detail, "base_sha": base_sha},
-        )
-
-    job_id: str = ""
 
 
 class Heartbeater:

@@ -1049,6 +1049,59 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
     assert app.scoped is True
 
 
+async def test_loop_cancellation_during_heartbeat_cleanup_still_stops_the_publisher(monkeypatch):
+    """An owner's stop cannot be mistaken for the heartbeat's expected stop."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    _patch_pr(monkeypatch)
+    heartbeat_started = asyncio.Event()
+    heartbeat_joining = asyncio.Event()
+
+    async def heartbeat(*_args, **_kwargs):
+        heartbeat_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            heartbeat_joining.set()
+            # Hold the join open until the owner is cancelled, so the test
+            # exercises the race directly without relying on timer alignment.
+            await asyncio.Event().wait()
+
+    async def scoped_credential():
+        await heartbeat_started.wait()
+        return "ghs_from_app"
+
+    class App:
+        async def token_for(self, _repo, **_kwargs):
+            return await scoped_credential()
+
+    class LoadedApp:
+        def get(self):
+            return App()
+
+    monkeypatch.setattr(publish_worker, "_heartbeat_snapshot_publish", heartbeat)
+    task = asyncio.create_task(
+        publish_loop(
+            store,
+            credential_provider=lambda: None,
+            github_app=LoadedApp(),
+            interval_seconds=0.001,
+        )
+    )
+    try:
+        await asyncio.wait_for(heartbeat_joining.wait(), timeout=1.0)
+        assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+        assert task.cancelled()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_the_running_loop_waits_out_an_unloaded_app_and_then_publishes_once(monkeypatch):
     """Issue #47: an App that failed to load is waited for, by the same loop.
 

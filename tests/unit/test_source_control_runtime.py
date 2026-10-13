@@ -523,7 +523,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         "cloud_agent.ledger.collect_usage_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",
         "cloud_agent.operational_health.monitor_queue",
-        "cloud_agent.api.mcp_relay.maintain_host_sessions",
+        "cloud_agent.mcp.runtime.maintain_host_sessions",
         "cloud_agent.mcp.catalog.McpCatalog.run",
         "cloud_agent.workers.profiling_control.ProfilingPolicyWorker.run",
     ):

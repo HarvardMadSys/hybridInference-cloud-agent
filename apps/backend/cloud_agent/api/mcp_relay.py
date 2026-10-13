@@ -52,7 +52,6 @@ from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
 from cloud_agent.mcp.host import (
     HostError,
-    McpHost,
     SessionKey,
     arguments_digest,
     encode_arguments,
@@ -86,6 +85,7 @@ from cloud_agent.mcp.resources import (
     scope_resource_result,
     split_resource_uri,
 )
+from cloud_agent.mcp.runtime import get_host as _host
 from cloud_agent.mcp.transports import TransportError, guard_target, pinned_transport
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
@@ -1235,81 +1235,6 @@ async def _stream_sse(
 # its namespaced name and normalizes what comes back. Which is why the
 # authorization path is *shared* rather than reimplemented: the merged route is
 # a second door onto the same decision function, never a second decision.
-
-
-def _host() -> McpHost:
-    """The process-wide protocol host, built once against the deployment policy."""
-    global _HOST_INSTANCE
-    if _HOST_INSTANCE is None:
-        _HOST_INSTANCE = McpHost(policy=policy_from_environment())
-    return _HOST_INSTANCE
-
-
-_HOST_INSTANCE: McpHost | None = None
-_HOST_MAINTENANCE_INTERVAL_S = 30.0
-
-
-async def reap_host_sessions(store: _McpRelayStorage) -> None:
-    """Reclaim sockets whose job or selected connection is no longer live."""
-
-    async def is_live(key: SessionKey) -> bool:
-        job_id, attempt_id = key.job_attempt
-        identity = await store.credential_queries.resolve_model_credential(
-            job_id=job_id,
-            attempt_id=int(attempt_id),
-            lease_generation=key.owner_lease_generation,
-        )
-        if identity is None:
-            return False
-        binding = next(
-            (
-                row
-                for row in identity.get("mcp_bindings") or []
-                if str(row["connection_id"]) == key.connection_id
-            ),
-            None,
-        )
-        if (
-            binding is None
-            or not binding.get("enabled", True)
-            or binding.get("deleted_at") is not None
-            or binding.get("owner_id") != identity["user_id"]
-        ):
-            return False
-        connection = await store.mcp.get_mcp_connection(connection_id=int(key.connection_id))
-        return (
-            connection is not None
-            and connection.get("status") != "disabled"
-            and connection.get("deleted_at") is None
-        )
-
-    if _HOST_INSTANCE is not None:
-        await _HOST_INSTANCE.reap_inactive(is_live)
-
-
-async def maintain_host_sessions(store: _McpRelayStorage) -> None:
-    """Run process-local socket cleanup and expire overdue approval rows."""
-    while True:
-        await asyncio.sleep(_HOST_MAINTENANCE_INTERVAL_S)
-        try:
-            async with asyncio.timeout(5.0):
-                await store.mcp.expire_mcp_invocations()
-        except Exception:
-            logger.warning("agent_mcp_invocation_expiry_failed", exc_info=True)
-        try:
-            async with asyncio.timeout(5.0):
-                await store.mcp.apply_pending_mcp_allow_rules()
-        except Exception:
-            logger.warning("agent_mcp_remembered_approval_failed", exc_info=True)
-        await reap_host_sessions(store)
-
-
-async def close_host() -> None:
-    """Release this listener's protocol host before its database pool closes."""
-    global _HOST_INSTANCE
-    instance, _HOST_INSTANCE = _HOST_INSTANCE, None
-    if instance is not None:
-        await instance.aclose()
 
 
 async def _host_catalogue(

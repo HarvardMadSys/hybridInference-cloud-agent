@@ -41,6 +41,17 @@ CONTROL_OUTCOME_APPLIED = "applied"
 CONTROL_OUTCOME_REPLAYED = "replayed"
 CONTROL_OUTCOME_REFUSED = "refused"
 
+#: Lifecycle values, in the order an experiment moves through them.
+LIFECYCLE_PENDING = "pending"
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_STOPPED = "stopped"
+LIFECYCLE_EXPIRED = "expired"
+LIFECYCLE_FAILED = "failed"
+
+#: Lifecycles that are over: nothing more will be collected for the run, and a
+#: new experiment may start. The service and persistence share this vocabulary.
+TERMINAL_LIFECYCLES = frozenset({LIFECYCLE_STOPPED, LIFECYCLE_EXPIRED, LIFECYCLE_FAILED})
+
 
 @dataclass(frozen=True)
 class ControlCommandResult:
@@ -87,5 +98,11 @@ __all__ = [
     "CONTROL_REFUSED_NOT_ADMIN_MODE",
     "CONTROL_REFUSED_STALE_REVISION",
     "CONTROL_REFUSED_UNKNOWN_RUN",
+    "LIFECYCLE_ACTIVE",
+    "LIFECYCLE_EXPIRED",
+    "LIFECYCLE_FAILED",
+    "LIFECYCLE_PENDING",
+    "LIFECYCLE_STOPPED",
+    "TERMINAL_LIFECYCLES",
     "ControlCommandResult",
 ]

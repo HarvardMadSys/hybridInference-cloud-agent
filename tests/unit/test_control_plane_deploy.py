@@ -200,6 +200,7 @@ def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict)
         for root, pattern in (
             (REPO_ROOT / "apps" / "backend" / "cloud_agent", "*.py"),
             (REPO_ROOT / "apps" / "backend" / "cloud_agent_shared", "operation_profiling.py"),
+            (REPO_ROOT / "apps" / "backend" / "cloud_agent_shared" / "profiling", "*.py"),
         )
         for path in root.rglob(pattern)
         if "__pycache__" not in str(path)

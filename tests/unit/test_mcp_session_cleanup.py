@@ -13,9 +13,8 @@ from tests.unit.test_mcp_host_sessions_and_results import Transport, session
 from tests.unit.test_mcp_protocol_and_authorization import _connection
 from tests.unit.test_mcp_transports import _client, _config
 
-from cloud_agent.api import mcp_relay
 from cloud_agent.app import lifespan
-from cloud_agent.mcp import host, protocol, transports
+from cloud_agent.mcp import host, protocol, runtime as mcp_runtime, transports
 
 pytestmark = pytest.mark.asyncio
 
@@ -267,12 +266,12 @@ async def test_maintenance_checks_current_job_and_connection_authority(monkeypat
             expire_mcp_invocations=AsyncMock(),
         ),
     )
-    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", built)
-    await mcp_relay.reap_host_sessions(store)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", built)
+    await mcp_runtime.reap_host_sessions(store)
     assert current.transport.closed is (state != "live")
-    await mcp_relay.close_host()
+    await mcp_runtime.close_host()
     assert current.transport.closed
-    assert mcp_relay._HOST_INSTANCE is None
+    assert mcp_runtime._HOST_INSTANCE is None
 
 
 async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monkeypatch):
@@ -290,9 +289,9 @@ async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monk
     store = SimpleNamespace(
         mcp=SimpleNamespace(expire_mcp_invocations=expiry, apply_pending_mcp_allow_rules=remembered)
     )
-    monkeypatch.setattr(mcp_relay, "_HOST_MAINTENANCE_INTERVAL_S", 0.001)
-    monkeypatch.setattr(mcp_relay, "reap_host_sessions", reap)
-    task = asyncio.create_task(mcp_relay.maintain_host_sessions(store))
+    monkeypatch.setattr(mcp_runtime, "_HOST_MAINTENANCE_INTERVAL_S", 0.001)
+    monkeypatch.setattr(mcp_runtime, "reap_host_sessions", reap)
+    task = asyncio.create_task(mcp_runtime.maintain_host_sessions(store))
     try:
         await asyncio.wait_for(swept_twice.wait(), timeout=0.5)
     finally:
@@ -305,7 +304,7 @@ async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monk
 
 async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(monkeypatch):
     built, (current,) = await _opened(monkeypatch, "job:1")
-    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", built)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", built)
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
     monkeypatch.setattr("asyncpg.create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
@@ -318,7 +317,7 @@ async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(mo
         started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(mcp_relay, "maintain_host_sessions", maintain)
+    monkeypatch.setattr(mcp_runtime, "maintain_host_sessions", maintain)
     app = FastAPI()
     async with lifespan(app, background=False):
         await asyncio.wait_for(started.wait(), timeout=0.5)

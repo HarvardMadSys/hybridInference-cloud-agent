@@ -19,11 +19,11 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.attachments.models import AttachmentError, AttachmentLimits
 from cloud_agent.attachments.selection import check_selection as check_attachments
+from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
 from cloud_agent.skills.imports import parse_skill_document
 from cloud_agent.skills.models import SkillContent, SkillError, SkillLimits
 from cloud_agent.skills.selection import check_selection as check_skills
 from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepository
-from cloud_agent.storage.repositories.goal_wakeups import is_exhausted, wakeup_backoff
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
 

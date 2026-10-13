@@ -10,6 +10,7 @@ otherwise.
 | Guide | Use it to |
 |---|---|
 | [Developer guide](development.md) | Set up a checkout, find the code that owns a change, and run checks |
+| [Code structure](code-structure.md) | Follow dependencies, locate domain modules, and extend the codebase |
 | [Contributing](../CONTRIBUTING.md) | Follow branch, pull-request, and CI requirements |
 | [Repository rules](../AGENTS.md) | Understand package boundaries, execution concepts, and security requirements |
 | [Local Docker stack](../deploy/local/README.md) | Run the browser, API, gateway fixture, hosts, and retained sandboxes locally |

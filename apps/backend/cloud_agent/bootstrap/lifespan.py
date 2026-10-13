@@ -230,7 +230,7 @@ async def _shutdown_lifespan(
     # Eager request waiters share the store, signal, and sandbox manager clients. Their
     # durable rows are the recovery owner, so join them before those resources.
     try:
-        from cloud_agent.api.turns import close_send_now_handovers
+        from cloud_agent.application.send_now import close_send_now_handovers
 
         await close_send_now_handovers()
     except BaseException as exc:
@@ -316,13 +316,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     import asyncpg
     import httpx
 
-    from cloud_agent.api.mcp_relay import close_host, maintain_host_sessions
     from cloud_agent.application.profiling_control import ProfilingControlService
     from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.mcp.catalog import McpCatalog
+    from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
     from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
     from cloud_agent.operational_health import monitor_queue
     from cloud_agent.profiling_control_config import profiling_control_deployment
