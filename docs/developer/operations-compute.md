@@ -3,7 +3,7 @@
 Use Admin → Servers to deploy existing SSH machines or CloudLab allocations,
 manage their leases, and choose where new sandboxes run. Durable operations and
 renewal run in the control plane, so closing the browser does not stop them.
-The [compute lifecycle design](../specs/2026-10-04-compute-resource-lifecycle-design.zh-CN.md)
+The [compute lifecycle design](../agents/specs/2026-10-04-compute-resource-lifecycle-design.zh-CN.md)
 records the underlying protocol; [ENVIRONMENT.md](../../ENVIRONMENT.md#optional-compute-resource-management)
 lists its configuration.
 
@@ -548,7 +548,7 @@ without credentials.
   alerts, cleanup and retained chats. Unit tests and a manual migration do not
   replace elapsed-time acceptance.
 
-The [2026-10-10 manual staging drill](../specs/2026-10-10-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging)
+The [2026-10-10 manual staging drill](../agents/specs/2026-10-10-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging)
 moved real sessions from Clemson to Utah with a 161-second pause. It preceded
 the automatic workflow. Abrupt loss of the only source disk or unavailable
 replacement capacity before expiry can still lose sessions; keep separate

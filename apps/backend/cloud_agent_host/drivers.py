@@ -1,7 +1,7 @@
 """Driver → Session → Turn: the platform's handle on an Agent CLI.
 
 This is the object model used by the retained native-session design
-(``docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md``),
+(``docs/agents/specs/2026-08-31-native-session-fork-shared-workspace-design.md``),
 layered over the dialect adapters in :mod:`cloud_agent_host.runtimes`:
 
 - **runtimes.py** stays the *dialect* layer — how one CLI is invoked and how

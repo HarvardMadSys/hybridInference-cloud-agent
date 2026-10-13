@@ -3,7 +3,7 @@
 
 ``scripts/bench_startup_profiling_overhead.py`` measures the collector against a
 synthetic attempt sequence. This script measures the other half of the claim in
-``docs/specs/2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md``
+``docs/agents/specs/2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md``
 §9: that switching the profiler *on*, and persisting what it produces, does not
 show up in the latency of the requests users wait on.
 

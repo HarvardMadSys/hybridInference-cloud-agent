@@ -17,8 +17,8 @@
 **相关文档：**
 
 - [Agent 会话连续性与共享沙盒架构](2026-09-01-agent-session-continuity-architecture.zh.md)
-- [仓库开发与安全边界](../../AGENTS.md)
-- [部署环境与隔离档位](../../ENVIRONMENT.md)
+- [仓库开发与安全边界](../../../AGENTS.md)
+- [部署环境与隔离档位](../../../ENVIRONMENT.md)
 - [Native session fork 与 shared workspace 设计](2026-08-31-native-session-fork-shared-workspace-design.md)
 
 ## 1. 安全目标

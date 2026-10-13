@@ -11,7 +11,7 @@ found models claiming that history was missing even when the request was
 complete.
 
 For session architecture, see the
-[native Fork/shared-workspace design](../specs/2026-08-31-native-session-fork-shared-workspace-design.md).
+[native Fork/shared-workspace design](../agents/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
 The dated findings below are local acceptance evidence. They do not describe
 the current state of a remote deployment.
 

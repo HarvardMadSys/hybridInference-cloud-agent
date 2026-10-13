@@ -9,7 +9,7 @@
 具体身份、预算、持久化、版本与交付契约见
 [存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。
 `e77e3e6` 的历史
-[五项 review 问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)已经关闭；
+[五项 review 问题](../reviews/2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)已经关闭；
 身份已拆为 interaction_id 与每请求唯一 measurement_id。
 
 目标：在按需开启的 profiling 实验中，每个主要用户操作都能回答：
@@ -58,7 +58,7 @@
 
 部署级主开关为 `AGENT_OPERATION_PROFILING_ENABLED`，缺省为 `false`。
 **2026-09-14 已实现**（`apps/backend/cloud_agent_shared/operation_profiling.py`，目前接入 runner 的
-`attempt.startup`；变量说明见 [ENVIRONMENT.md](../../ENVIRONMENT.md)）。仅设为 `true`
+`attempt.startup`；变量说明见 [ENVIRONMENT.md](../../../ENVIRONMENT.md)）。仅设为 `true`
 不代表所有请求自动被采集；还需配置有明确范围和截止时间的 profiling run
 （`AGENT_OPERATION_PROFILING_RUN`，未配置或不合法时开关不生效并只记一条 warning）。
 第一版通过测试/运维配置提供 run descriptor，
@@ -207,8 +207,8 @@ input HTTP 确认只能证明写入链路完成，不能证明字符已回显或
 ### 文件
 
 [文件 API](../../cloud_agent/api/routes.py) 会做 ownership、repo entitlement 与 sandbox manager
-解析。[sandbox manager](../../apps/backend/cloud_agent_host/sandbox_manager.py) 为文件读取打开 workspace
-operation、验证网络，再通过 [retained_workspace](../../apps/backend/cloud_agent_host/retained_workspace.py)
+解析。[sandbox manager](../../../apps/backend/cloud_agent_host/sandbox_manager.py) 为文件读取打开 workspace
+operation、验证网络，再通过 [retained_workspace](../../../apps/backend/cloud_agent_host/retained_workspace.py)
 在 guest 内执行固定 Python helper。文件读取的 wall time 包含容器 exec 和解释器启动；
 不能把 API 总耗时直接命名为磁盘 read latency。
 
@@ -222,7 +222,7 @@ operation、验证网络，再通过 [retained_workspace](../../apps/backend/clo
 
 ### 沙盒被其他操作唤醒
 
-[supervisor](../../apps/backend/cloud_agent_host/shared_session_supervisor.py) 的 `operation_opened()`
+[supervisor](../../../apps/backend/cloud_agent_host/shared_session_supervisor.py) 的 `operation_opened()`
 和 `terminal_opened()` 都会调用 `_ensure_running()`。因此点文件和点终端也可能触发
 容器唤醒，无需有新的 agent attempt。现有 attempt-only measurement 无法覆盖全部操作。
 

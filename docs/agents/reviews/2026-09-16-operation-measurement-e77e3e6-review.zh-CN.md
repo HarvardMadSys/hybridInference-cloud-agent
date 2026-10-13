@@ -4,7 +4,7 @@
 parent `3a191e5`。本轮仅 review 与设计，**未修改实现、未 rebase、未 push**。
 
 结论：服务端接入方向可继续，但下面五项需要修复。把这份 review 与
-[存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)
+[存储/Admin 整合设计](../specs/2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)
 一起作为下一轮实现输入；不是先把当前记录原样存入数据库。
 
 ## R1 · P2：并发 continuation 共用可变对象，丢请求还报告完整
@@ -98,7 +98,7 @@ stored/log record: truncated=true, measurement_complete=false
 ## R5 · P2：子目录被当作 files.open，files.list 实验漏测展开
 
 位置：[routes.py:2979](../../cloud_agent/api/routes.py#L2979) 与
-[sandbox_manager.py:1926](../../apps/backend/cloud_agent_host/sandbox_manager.py#L1926)。
+[sandbox_manager.py:1926](../../../apps/backend/cloud_agent_host/sandbox_manager.py#L1926)。
 
 CP 和 sandbox manager 都按 path 是否为空分类。配置只选 `files.list`，依次请求根目录与
 `path=src`，让 sandbox manager 对两者都返回 kind=directory，真实 CP HTTP 路由复现：

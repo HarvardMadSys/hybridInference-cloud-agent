@@ -168,12 +168,12 @@ the rollback window closes.
 
 ## Where this differs from the design document
 
-The [original release design](../../docs/specs/2026-09-10-cloud-agent-release-fi-deploy-design.zh.md)
+The [original release design](../../docs/agents/specs/2026-09-10-cloud-agent-release-fi-deploy-design.zh.md)
 is historical. The implemented differences are:
 
 - **Deployment protocol v4.** `shared-live-exact-sha-v4` replaced the design's
   v2. v3 introduced the schema baseline rewrite; v4 introduced the
-  [single sandbox network](../../docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
+  [single sandbox network](../../docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
   It retired the Squid `egress` artifact and requires
   `AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` on every runner
   host. v3 deployers cannot install v4 releases, and rollback does not cross

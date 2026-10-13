@@ -6,7 +6,7 @@
 
 实现位置核对基线：本地 `dev`，提交 `d01f13d7bb2c61c1590189c557025293fb99fda9`，使用 `apps/backend`、`apps/frontend` 布局；不是对远端最新代码的实现状态声明。
 
-相关：[AGENTS.md](../../AGENTS.md) §6–§7、[Agent 统一公网出口](2026-09-23-agent-public-egress-design.zh-CN.md)、[沙盒安全模型](2026-09-01-agent-sandbox-security-model.zh.md)、[原生会话与共享工作区](2026-08-31-native-session-fork-shared-workspace-design.md)。本文取代 [#230](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/230) 中的 setup script 方案。
+相关：[AGENTS.md](../../../AGENTS.md) §6–§7、[Agent 统一公网出口](2026-09-23-agent-public-egress-design.zh-CN.md)、[沙盒安全模型](2026-09-01-agent-sandbox-security-model.zh.md)、[原生会话与共享工作区](2026-08-31-native-session-fork-shared-workspace-design.md)。本文取代 [#230](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/230) 中的 setup script 方案。
 
 ## 1. 产品目标与完整交付范围
 

@@ -7,7 +7,7 @@
 `9c02a26`、[#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
 历史基线 `3a191e5` 与后续提交 `e77e3e6`。后者加入文件和终端的
 服务端测量；当时的 review 见
-[e77e3e6 review](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)。
+[e77e3e6 review](../reviews/2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)。
 
 本文记录已经采用的实现：**保留 #258 的唯一采集器，把 #218 的持久化、读取和
 Admin 展示接到同一份测量记录上。** 文件和终端与启动共用这条数据链路。
@@ -307,7 +307,7 @@ schema v1/v2 startup 日志可经明确适配器转换边界后离线导入；e7
 
 以下依赖步骤均已在 #258 分支完成：
 
-1. 修复 [review 的五项问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)，
+1. 修复 [review 的五项问题](../reviews/2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)，
    定下 v3 身份、scope/边界和 continuation 规则；更新测试，不能通过改弱断言过关。
 2. 合并当前 dev 并解决路由抽取冲突；测量路由落在新的 workspace/worker leaf，
    migration 接到当前单一 head。

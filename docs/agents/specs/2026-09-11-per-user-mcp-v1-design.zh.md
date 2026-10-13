@@ -1,7 +1,7 @@
 # Cloud Agent 通用 MCP 接入设计
 
 - 日期：2026-09-11。
-- 状态：原始设计提案；当前实现与验证范围见[实现对照记录](2026-09-11-per-user-mcp-v1-conformance.md)，真实部署验收仍待完成。
+- 状态：原始设计提案；当前实现与验证范围见[实现对照记录](../reviews/2026-09-11-per-user-mcp-v1-conformance.md)，真实部署验收仍待完成。
 - 实现仓库：`HarvardMadSys/hybridInference-cloud-agent`。
 - 调研代码基线：`b7a24c610a1185b0b288dce32eabd8fe487d710f`。
 - 已明确的产品目标：**平台全部 coding agent 共用通用 MCP 能力；用户可以添加自己的 MCP 服务，接入不以品牌白名单为前提。**
@@ -140,7 +140,7 @@ Connector 注册、连接绑定、心跳、路由与撤销由 Agent 管理。用
 
 ## 6. 连接模型与授权版本
 
-使用 Agent 数据库和现有[最小身份 / issuer 命名空间](../developer/minimal-identity.md)，不复制 Gateway 用户表。
+使用 Agent 数据库和现有[最小身份 / issuer 命名空间](../../developer/minimal-identity.md)，不复制 Gateway 用户表。
 
 | 记录 | 主要内容 |
 | --- | --- |
@@ -212,12 +212,12 @@ Invocation 持久状态至少有 pending、approved、denied、expired、dispatc
 
 ### 8.2 五种 coding agent
 
-当前 registry 与 pin 见 [runtimes.py](../../cloud_agent_host/runtimes.py) 和 [sandbox image](../../deploy/sandbox/Dockerfile.agent-sandbox)。这些是基线状态，不是线上验证。
+当前 registry 与 pin 见 [runtimes.py](../../cloud_agent_host/runtimes.py) 和 [sandbox image](../../../deploy/sandbox/Dockerfile.agent-sandbox)。这些是基线状态，不是线上验证。
 
 | Runtime / 默认 pin | 必交付适配 |
 | --- | --- |
 | Claude Code / 2.1.220 | 复用 relay / strict config，补动态连接、确认、核心能力与实际协议验收 |
-| Codex / 0.145.0 | 同时接 exec / resume 与 app-server；把[空 requirements](../../deploy/sandbox/codex-requirements.toml)改为精确平台入口策略，验证项目配置无法旁路 |
+| Codex / 0.145.0 | 同时接 exec / resume 与 app-server；把[空 requirements](../../../deploy/sandbox/codex-requirements.toml)改为精确平台入口策略，验证项目配置无法旁路 |
 | pi / 0.73.1 | 镜像固定的受控 MCP 扩展 / 工具适配，只显式加载它；验证 JSON / RPC |
 | OpenCode / 1.18.9 | Wrapper 注入平台配置并保留其他来源 / 插件关闭策略，验证 run / serve |
 | Kilo / 7.4.17 | 独立验证本家 wrapper、配置、run / serve 与确认，不因同源省略 |

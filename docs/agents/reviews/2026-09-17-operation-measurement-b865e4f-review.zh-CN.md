@@ -86,4 +86,4 @@ python -m pytest -q tests/servers/test_operation_measurement_routes.py \
 
 修复两项后继续既定的 worker endpoint、有界后台投递、run catalogue、Admin API/UI
 及端到端验收，不需要重新确认这些既定范围。原始设计仍见
-[整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。
+[整合设计](../specs/2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。

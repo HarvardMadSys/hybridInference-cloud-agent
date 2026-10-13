@@ -719,7 +719,7 @@ history.
 The admin console shows tool-call measurements in Resources and model records
 in LLM requests. To inspect raw runtime events for support or abuse
 investigations, use the two admin routes below. See the amendment in
-[the admin observability spec](../specs/2026-09-10-admin-observability-v1.md).
+[the admin observability spec](../agents/specs/2026-09-10-admin-observability-v1.md).
 
 **Metadata.** `GET /admin/agent/runs/{job_id}/activity` returns event
 envelopes ordered by execution: `event_type`, `created_at`, `is_error`,
@@ -800,7 +800,7 @@ user to Test to discover the connection's tools.
 The relay, connection API, discovery path and all five coding-agent adapters
 are implemented and tested for remote MCP. The remaining stdio and optional
 protocol capabilities are described below and in the
-[conformance record](../specs/2026-09-11-per-user-mcp-v1-conformance.md).
+[conformance record](../agents/reviews/2026-09-11-per-user-mcp-v1-conformance.md).
 
 ### Authorization and routing
 
@@ -817,7 +817,7 @@ The relay enforces these rules:
   treated as an aged approval.
 - **`confirm` holds the original call.** The relay records a pending invocation
   and waits for the owner's decision in the conversation's Tools panel or the
-  account's [Approvals inbox](../mcp-approvals.md). Approval
+  account's [Approvals inbox](../user/mcp-approvals.md). Approval
   dispatches that request once under the current attempt and permission fence;
   the CLI receives the result without asking the model to retry. Denial, expiry
   or changed authorization prevents dispatch.
@@ -2223,7 +2223,7 @@ transaction. It refuses active jobs, other clients and an already-converted copy
    and reconcile the new data. Prefer a tested compatible artifact recovery.
 
 The complete conversion contract is
-[the legacy database copy plan](../plans/2026-09-18-legacy-database-copy.md).
+[the legacy database copy plan](../agents/specs/2026-09-18-legacy-database-copy.md).
 
 ### Rebuilding the agent database
 
@@ -3004,7 +3004,7 @@ supports those guards; explicitly selected plugins are loaded through the native
 runtime mechanism, alongside the platform's MCP configuration.
 
 There is one network, the same for every task and every phase, and nothing
-selects it ([design](../specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
+selects it ([design](../agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
 Each sandbox group — setup, the agent and every Fork sibling — gets one
 routable Docker bridge, a `/29` from `AGENT_EGRESS_CHAT_NETWORK_POOL`. Its host
 interface is named with this deployment's prefix, `ca` and five hex digits
@@ -3587,7 +3587,7 @@ to date.
   a claim that a new deployment gate has been exercised. Current component
   ownership and operating instructions use the post-split topology.
 - **Cutover inventory.** Secret provenance and one-time migration steps remain
-  in [cutover.md](../cutover.md) and `ENVIRONMENT.md`; this page documents the
+  in [cutover.md](../agents/specs/cutover.md) and `ENVIRONMENT.md`; this page documents the
   resulting runtime topology.
 
 

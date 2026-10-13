@@ -12,8 +12,8 @@ new selection, while expiry truncates already selected work. Log and JSONL
 writes happen on the export thread.
 
 Field semantics and boundaries are specified in
-``docs/specs/2026-09-14-sandbox-startup-measurement-design.zh-CN.md`` and
-``docs/specs/2026-09-14-platform-operation-measurement-inventory.zh-CN.md``.
+``docs/agents/specs/2026-09-14-sandbox-startup-measurement-design.zh-CN.md`` and
+``docs/agents/specs/2026-09-14-platform-operation-measurement-inventory.zh-CN.md``.
 """
 
 from __future__ import annotations

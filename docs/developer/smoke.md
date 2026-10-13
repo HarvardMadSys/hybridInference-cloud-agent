@@ -23,7 +23,7 @@ tool-calling execution, success, four grant renewals, and revocation after
 settlement. That record did not verify real PR publication, mid-run
 cancellation, or the full fail-closed sequence. See
 [MIGRATION.md](../../MIGRATION.md),
-[cutover.md](../cutover.md) and the dated baseline below. Newer local lifecycle
+[cutover.md](../agents/specs/cutover.md) and the dated baseline below. Newer local lifecycle
 checks do not fill those staging acceptance gaps.
 
 ## What a passing run proves
@@ -34,7 +34,7 @@ revision and environment. A successful job alone does not prove publication,
 because the publisher processes an immutable workspace snapshot asynchronously.
 
 The run does not cover migrated ownership/data, concurrency, host loss, or every
-isolation boundary. Use [cutover](../cutover.md),
+isolation boundary. Use [cutover](../agents/specs/cutover.md),
 [deployment reliability](deployment-reliability.md) and
 [native context recall](context-recall.md) for those separate checks. The Gateway
 contracts belong to the Gateway; verify its deployed routes before starting.

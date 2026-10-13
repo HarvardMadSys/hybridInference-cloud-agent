@@ -4,7 +4,7 @@
 - Baseline: PR #207's generic MCP foundation, integrated with the current
   capability-based storage architecture on `dev`. Migration order:
   `0007_attempt_turn_resources → 0008_generic_mcp_connections → 0009_mcp_refresh_lease → 0010_mcp_policy_revisions`.
-- Design: [`2026-09-11-per-user-mcp-v1-design.zh.md`](2026-09-11-per-user-mcp-v1-design.zh.md).
+- Design: [`2026-09-11-per-user-mcp-v1-design.zh.md`](../specs/2026-09-11-per-user-mcp-v1-design.zh.md).
 
 This is an audit, not a plan. It states, dimension by dimension, what the code
 does, where the evidence is, and what is missing — because "we implemented the

@@ -23,7 +23,7 @@ colors and details follow recent work. Memory updates from your latest 50
 requests; explicit preferences can guide later tasks in the same project.
 You can pause memory or clear it so older requests are no longer used. Avatars
 and memory require no additional model calls. See the
-[avatar and memory guide](docs/user-memory.md).
+[avatar and memory guide](docs/user/user-memory.md).
 
 To install plugins for a new chat, select **+ → Plugins** before sending the
 first task. Claude Code and Codex accept `name@marketplace` with a GitHub
@@ -249,7 +249,7 @@ gateway_contracts/                Gateway contract mirrors and control-plane API
 migrations/                       Alembic revisions for the Agent database
 deploy/                           Control-plane, host, sandbox, local, and release recipes
 tests/                            Unit, API, integration, and external verification
-docs/                             Feature guides, runbooks, designs, and acceptance records
+docs/                             Developer guides, user notes, and agent records
 ```
 
 ## Contributing

@@ -5,7 +5,7 @@
 - 状态：§7 的替换与删除已在代码中完成（部署协议升为 `shared-live-exact-sha-v4`）。发布仍需保留 §9 的目标环境 Kata 验收及部署清理证据；本次风险接受不代表已经部署或完成其他验收。
 - 发布前提：本次按尚未正式上线处理。一次性替换旧出口实现，不保留旧模式、兼容分支、灰度开关或新旧网络并行运行方案。
 - 替代：已关闭的 [#328 初版](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/328)，以及 2026-09-22 的多模式设计、实施 prompt 和 P0–P3 路线。旧实验分支不合并；仅按 §10 挑选仍适用的材料。
-- 相关：[AGENTS.md](../../AGENTS.md) §6–§7、[沙盒安全模型](2026-09-01-agent-sandbox-security-model.zh.md)。其中描述旧出口的段落须随实现同步替换；成员隔离、运行时隔离和凭据边界继续成立。
+- 相关：[AGENTS.md](../../../AGENTS.md) §6–§7、[沙盒安全模型](2026-09-01-agent-sandbox-security-model.zh.md)。其中描述旧出口的段落须随实现同步替换；成员隔离、运行时隔离和凭据边界继续成立。
 
 ## 1. 交付目标
 
@@ -118,13 +118,13 @@ DNS 使用指定解析器。runc 的开发测试路径通过 Docker DNS 配置�
 
 | 层面 | 必须处理的内容与当前入口 |
 |---|---|
-| 策略模型 | 删除 `EgressTier`、按阶段选择 tier、域名 allowlist 合并、`custom/full` 开放入口。重写 [共享出口模块](../../apps/backend/cloud_agent_shared/egress.py) 为单一网络所需的固定规则与配置；删除 [host 兼容转导出模块](../../apps/backend/cloud_agent_host/egress.py) 及旧策略适配层 |
+| 策略模型 | 删除 `EgressTier`、按阶段选择 tier、域名 allowlist 合并、`custom/full` 开放入口。重写 [共享出口模块](../../../apps/backend/cloud_agent_shared/egress.py) 为单一网络所需的固定规则与配置；删除 [host 兼容转导出模块](../../apps/backend/cloud_agent_host/egress.py) 及旧策略适配层 |
 | 白名单代理 | 删除 [Squid 配置渲染器](../../apps/backend/cloud_agent_host/egress_proxy.py)、默认域名列表、代理专用预检、代理 URL 配置及平台注入的 HTTP/HTTPS/ALL_PROXY、NO_PROXY 逻辑；不清理与此无关的宿主运维代理设置 |
-| 沙盒生命周期 | 在 [chat_sandbox.py](../../apps/backend/cloud_agent_host/chat_sandbox.py)、[sandbox.py](../../apps/backend/cloud_agent_host/sandbox.py) 及调用方删除网络 phase 参数、旧拓扑兼容采用路径、按 tier 的验证分支、旧网络标签及切换状态；保留组归属、generation、工作区与成员隔离 |
+| 沙盒生命周期 | 在 [chat_sandbox.py](../../../apps/backend/cloud_agent_host/chat_sandbox.py)、[sandbox.py](../../../apps/backend/cloud_agent_host/sandbox.py) 及调用方删除网络 phase 参数、旧拓扑兼容采用路径、按 tier 的验证分支、旧网络标签及切换状态；保留组归属、generation、工作区与成员隔离 |
 | 环境变量 | 删除 `AGENT_EGRESS_SETUP_TIER`、`AGENT_EGRESS_AGENT_TIER`、旧 `AGENT_EGRESS_NETWORK_*`、`AGENT_EGRESS_PROXY_*`、`AGENT_EGRESS_ALLOWLIST`、`AGENT_SANDBOX_ALLOW_OPEN_NETWORK`、旧任意网络选择入口 `AGENT_SANDBOX_NETWORK` 的读取和使用说明；不提供旧变量别名、映射或 fallback |
-| API 与前端 | 删除 `setup_egress_tier`、`agent_egress_tier`、相关 API 计算、前端类型、标签和展示；同步 [OpenAPI](../../gateway_contracts/agent-control-plane.openapi.json) 与 fixture。必要时展示固定网络说明和失败原因，不新增另一种 `network_mode` 字段 |
+| API 与前端 | 删除 `setup_egress_tier`、`agent_egress_tier`、相关 API 计算、前端类型、标签和展示；同步 [OpenAPI](../../../gateway_contracts/agent-control-plane.openapi.json) 与 fixture。必要时展示固定网络说明和失败原因，不新增另一种 `network_mode` 字段 |
 | 部署资源 | 删除 `agent-egress-proxy`、`agent-egress-proxy-config`、Squid [Dockerfile](../../deploy/host/Dockerfile.agent-egress-proxy)、代理卷、代理专用网络与服务依赖；同步 host/local Compose、启动脚本和 `.env.example`，整理中继发现网络 |
-| 构建与发布 | 从 [制品映射](../../deploy/release/artifact_compose.py)、release manifest/schema、`AGENT_EGRESS_IMAGE`、镜像构建矩阵和 smoke/acceptance 中删除 Squid 制品；CI 改为验证新宿主规则与统一拓扑，不保留旧代理构建作为备用 |
+| 构建与发布 | 从 [制品映射](../../../deploy/release/artifact_compose.py)、release manifest/schema、`AGENT_EGRESS_IMAGE`、镜像构建矩阵和 smoke/acceptance 中删除 Squid 制品；CI 改为验证新宿主规则与统一拓扑，不保留旧代理构建作为备用 |
 | 测试 | 删除仅验证旧 tier、代理和网络切换的用例；把隔离、失败关闭和无秘密泄露的断言迁移到新实现，并保留反例验证。不能靠删掉安全断言或改成跳过来获得通过 |
 | 文档 | 同步 AGENTS.md §6–§7、沙盒安全模型、ENVIRONMENT.md、操作手册、部署说明和 Agent 网络说明；旧现行设计应替换或明确标为历史记录，不保留可执行的旧模式操作指南 |
 

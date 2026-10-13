@@ -41,7 +41,7 @@ Repository creation requires the GitHub App's **Repository creation: write**
 permission (or **Administration: Read and write**). Existing task execution and
 repository-access checks still apply; creating a repository does not itself
 grant the agent access. See the
-[GitHub App setup](developer/operations.md) for operator configuration.
+[GitHub App setup](../developer/operations.md) for operator configuration.
 
 ## Grouping and ordering
 
@@ -136,7 +136,7 @@ using the thread/update index, applies the page boundary, then reads the latest
 turn only for the resulting page. Keyset pagination does not make this a
 constant-time query across all owned conversations.
 
-See [`AgentsSidebar.tsx`](../apps/frontend/src/components/features/agents/AgentsSidebar.tsx),
-[`sidebarPreferences.ts`](../apps/frontend/src/components/features/agents/sidebarPreferences.ts),
-[`catalog.py`](../apps/backend/cloud_agent/api/catalog.py) and
-[`conversation_queries.py`](../apps/backend/cloud_agent/storage/repositories/conversation_queries.py).
+See [`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/AgentsSidebar.tsx),
+[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebarPreferences.ts),
+[`catalog.py`](../../apps/backend/cloud_agent/api/catalog.py) and
+[`conversation_queries.py`](../../apps/backend/cloud_agent/storage/repositories/conversation_queries.py).

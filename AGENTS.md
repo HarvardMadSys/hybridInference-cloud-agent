@@ -34,7 +34,7 @@ gateway_contracts/             OpenAPI mirrors of the gateway contracts we consu
 migrations/                    Alembic migrations (agent-owned database only)
 deploy/{control-plane,host,sandbox}/
 tests/{unit,servers,integration,external}/  # plus fixtures/ and support/
-docs/
+docs/{developer,user,agents}/  maintained guides, user notes, agent records
 ```
 
 Not every module is worth a line here; these are the ones a newcomer needs to
@@ -97,6 +97,13 @@ as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
 
 - Branch off `dev` as `<user>/<scope>/<name>`. Pull requests target `dev`.
 - Keep each pull request focused on one feature, fix, or documentation change.
+- Put documentation where [docs/README.md](docs/README.md) expects it.
+  Maintained guides go in `docs/developer/`. New designs and implementation
+  plans go in `docs/agents/specs/`; verification and review records
+  (acceptance runs, reviews of a revision) go in `docs/agents/reviews/`. Name
+  records `YYYY-MM-DD-<topic>.md`. Do not create other top-level folders under
+  `docs/`: tools that default elsewhere, such as the superpowers plugin's
+  `docs/superpowers/`, must write to these folders instead.
 - Never commit secrets. This repository will be made public; treat every commit
   as already public.
 
@@ -153,10 +160,10 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   has its own native session and active CLI process; Fork adds a member to the
   same group and workspace. Native resume stays in that container. There is no
   transcript-replay or platform-checkpoint recovery path. See the implemented
-  [session design](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
+  [session design](docs/agents/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
   The group has **one network**, the same for setup and for the agent, with
   nothing to select
-  ([design](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
+  ([design](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
   Each group gets its own routable bridge, and before anything joins one the
   host installs this deployment's nftables table (`cloud_agent_shared/egress.py`
   renders it, `cloud_agent_host/network_guard.py` installs and verifies it):
@@ -190,7 +197,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   turns, so a short TTL is not a fixed total exposure window. This accepted
   risk replaces the separate internal inference entry as a release prerequisite;
   neither that entry nor a host credential-substitution relay is required.
-  See the [decision and remaining boundaries](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
+  See the [decision and remaining boundaries](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
 - Platform-held long-lived account and service credentials never enter the sandbox. Each
   member receives its own scoped inference and MCP credentials, which a
   sibling member cannot read: members have distinct UIDs, private provider
@@ -216,7 +223,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   Git pushes. Same-owner Fork inherits the binding; no cross-owner sharing is
   introduced. Reserved platform/host variable names and the existing fixed
   network and member credential boundaries still apply. See the
-  [environment design](docs/specs/2026-10-12-repository-environment-design.zh-CN.md).
+  [environment design](docs/agents/specs/2026-10-12-repository-environment-design.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.

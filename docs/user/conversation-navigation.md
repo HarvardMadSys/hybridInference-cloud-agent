@@ -6,7 +6,7 @@ The newest mark takes you to that turn's beginning; **Back to bottom** takes you
 to the end and resumes following new output.
 
 This guide describes the current implementation. For design decisions and sizing
-measurements, see the [turn navigation design](specs/2026-09-11-conversation-turn-navigation-design.zh.md).
+measurements, see the [turn navigation design](../agents/specs/2026-09-11-conversation-turn-navigation-design.zh.md).
 
 ## The rail
 
@@ -184,7 +184,7 @@ positions.
 10. Repeat keyboard navigation in both languages, both themes and reduced motion.
 
 Implementation and tests live in
-[`JobDetail.tsx`](../apps/frontend/src/components/features/agents/JobDetail.tsx),
-[`TurnNavigator.tsx`](../apps/frontend/src/components/features/agents/TurnNavigator.tsx),
-[`conversationTurnNavigation.ts`](../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)
-and [`useConversationScroll.ts`](../apps/frontend/src/components/features/agents/useConversationScroll.ts).
+[`JobDetail.tsx`](../../apps/frontend/src/components/features/agents/JobDetail.tsx),
+[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/TurnNavigator.tsx),
+[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)
+and [`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/useConversationScroll.ts).

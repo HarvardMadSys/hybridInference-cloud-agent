@@ -361,6 +361,7 @@ the build points them at GitHub, and fails for a path or heading that does not
 exist. Run `make docs` after changing any Markdown file; CI's Docs Build job
 runs the same target.
 
-Designs, completed migration checklists, and acceptance records document their
-own baseline. Preserve that history and update current-use guides when the
+Designs, completed migration checklists, and acceptance records under
+[`docs/agents/`](../agents/) document their own baseline. Preserve that history
+and update current-use guides when the
 implementation changes.

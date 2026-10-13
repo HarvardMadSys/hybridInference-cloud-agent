@@ -512,4 +512,4 @@ Postgres 上所有含 `agent_threads` 的库都查过一遍，命中的全部是
 - [D2] [DeepSeek 原生 Goal 工具](https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/goal/tool-goal/src/index.ts)。
 - [D3] [DeepSeek 同会话续跑](https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/goal/goal-round-driver/src/index.ts)、[轮次提示](https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/goal/goal-round-driver/src/prompt.ts)。
 - [D4] [DeepSeek 持久 Goal 与运行授权](https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/goal/goal/README.md)、[续跑限制](https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/goal/goal-round-driver/README.md)。
-- [Cloud Agent 原生会话与共享工作区设计](2026-08-31-native-session-fork-shared-workspace-design.md)、[仓库工作与安全边界](../../AGENTS.md)。
+- [Cloud Agent 原生会话与共享工作区设计](2026-08-31-native-session-fork-shared-workspace-design.md)、[仓库工作与安全边界](../../../AGENTS.md)。

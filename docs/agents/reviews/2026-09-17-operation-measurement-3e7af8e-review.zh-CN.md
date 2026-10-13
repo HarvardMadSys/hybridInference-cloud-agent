@@ -7,7 +7,7 @@
 但不能把上一轮五项问题全部视为闭合。下列问题需与后续 endpoint/exporter/Admin
 一起修复。它们是当前代码的可复现问题；已明确尚未实现的写入入口、后台投递和页面
 不重复作为缺陷列出。总体契约仍见
-[存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。
+[存储/Admin 整合设计](../specs/2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。
 
 ## 1. P2：文件读取的真实阶段耗时丢失
 

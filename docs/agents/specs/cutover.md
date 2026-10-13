@@ -55,7 +55,7 @@ Do not start until every one of these is true.
       `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` (**generated once, kept for good** —
       regenerating it after the migration orphans every credential this runbook
       re-encrypts).
-- [ ] The E11 smoke checklist ([smoke.md](developer/smoke.md)) passes against the new
+- [ ] The E11 smoke checklist ([smoke.md](../../developer/smoke.md)) passes against the new
       stack with a *fresh* connection — i.e. before any migrated row is
       involved.
 - [ ] The gateway's key material is available as a **file** on whatever machine
@@ -297,7 +297,7 @@ that credential. Request-body host names are not identity.
 
 ## 8. Smoke test
 
-Run the E11 checklist ([smoke.md](developer/smoke.md)). At minimum, and in this order —
+Run the E11 checklist ([smoke.md](../../developer/smoke.md)). At minimum, and in this order —
 each step is the precondition for the next:
 
 - [ ] **A migrated connection still works.** Open Integrations as a user whose
