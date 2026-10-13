@@ -570,9 +570,10 @@ def test_a_push_with_no_release_behind_it_runs_everything(history: Path) -> None
     assert _classify_push(history, docs, before=first) == SELECTS_EVERYTHING
 
 
-def test_a_rerun_of_a_released_commit_is_classified_as_its_first_run_was(
+def test_a_rerun_of_a_released_commit_is_not_compared_with_its_own_release(
     history: Path,
 ) -> None:
+    """Otherwise the re-run would find nothing changed and check nothing."""
     released = _commit(history, "README.md")
     _release(history, released)
     backend = _commit(history, "apps/backend/cloud_agent/feature.py")

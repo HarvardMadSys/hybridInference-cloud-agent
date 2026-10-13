@@ -91,8 +91,8 @@ jobs:
               # next push arrives, and a red run publishes nothing. A release
               # exists only for a commit whose own run passed, so everything
               # since the newest one is what this run has to check. Searched
-              # from the parent, so a re-run of a released commit is classified
-              # exactly as its first run was.
+              # from the parent, so re-running a released commit never compares
+              # it with its own release and finds nothing to check.
               if release="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null)"; then
                 echo "classifying every change since the newest release, ${release}"
                 files="$(git diff --name-only "${release}" "${GITHUB_SHA}")"

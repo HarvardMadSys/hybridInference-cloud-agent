@@ -285,7 +285,7 @@ def test_pr_workflow_has_only_read_permissions_and_no_privileged_event_trigger()
 
 
 #: Every workflow this repository runs, publication and synchronisation included.
-WORKFLOWS = sorted(WORKFLOW.parent.glob("*.yml"))
+WORKFLOWS = sorted([*WORKFLOW.parent.glob("*.yml"), *WORKFLOW.parent.glob("*.yaml")])
 _PINNED = re.compile(r"[\w.-]+/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40}")
 _PINNED_LINE = re.compile(r"(?:-\s+)?uses:\s+\S+@[0-9a-f]{40} # v\d+(?:\.\d+)*")
 
