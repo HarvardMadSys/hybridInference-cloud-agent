@@ -817,8 +817,8 @@ async def _replay_settled_terminals(store: _SettledTerminals, *, interval_second
     Every marker is a round trip to the broker of the host that ran its turn,
     and a marker stays set until that broker confirms. A host that stopped
     answering therefore costs each of its markers a full request timeout on
-    every pass, and the attempts the reaper supersedes when a host dies are
-    exactly the ones that leave markers behind. Inside the reaper's pass that
+    every pass, and the turns the reaper ends because their host died are
+    among the ones that leave markers behind. Inside the reaper's pass that
     wait held up lease reaping, goal scheduling, queue settlement and grant
     renewal for the whole pool.
     """
