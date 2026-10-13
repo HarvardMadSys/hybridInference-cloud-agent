@@ -71,7 +71,7 @@ def _literal(name: str) -> tuple[str, ...]:
     raise AssertionError(f"{name} not found in the baseline migration")
 
 
-def _revision_pair(path: Path) -> tuple[str, str | None]:
+def _revision_pair(path: Path) -> tuple[str, tuple[str, ...]]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     values: dict[str, object] = {}
     for node in tree.body:
@@ -80,20 +80,68 @@ def _revision_pair(path: Path) -> tuple[str, str | None]:
             "down_revision",
         ):
             values[node.targets[0].id] = ast.literal_eval(node.value)
-    return str(values["revision"]), values.get("down_revision")  # type: ignore[return-value]
+    parent_value = values.get("down_revision")
+    if parent_value is None:
+        parents: tuple[str, ...] = ()
+    elif isinstance(parent_value, str):
+        parents = (parent_value,)
+    elif isinstance(parent_value, tuple) and all(
+        isinstance(parent, str) for parent in parent_value
+    ):
+        parents = tuple(parent_value)
+    else:
+        raise AssertionError(f"{path} declares an invalid down_revision")
+    return str(values["revision"]), parents
 
 
-def test_the_chain_is_linear_and_rooted_at_the_rewritten_baseline() -> None:
-    """One root, one head, and every revision revises the one before it."""
+def test_the_chain_is_connected_with_one_intentional_merge() -> None:
+    """One root/head remains after merging the committed trajectory branch."""
     pairs = dict(map(_revision_pair, VERSIONS.glob("*.py")))
-    assert "0001_schema_baseline" in pairs and pairs["0001_schema_baseline"] is None
-    roots = [rev for rev, parent in pairs.items() if parent is None]
+    assert "0001_schema_baseline" in pairs and pairs["0001_schema_baseline"] == ()
+    roots = [rev for rev, parents in pairs.items() if not parents]
     assert roots == ["0001_schema_baseline"], roots
-    parents = [parent for parent in pairs.values() if parent is not None]
-    assert len(parents) == len(set(parents)), "a revision is revised twice"
+    parents = [parent for revision_parents in pairs.values() for parent in revision_parents]
     assert all(parent in pairs for parent in parents), "a down_revision names no file"
     heads = [rev for rev in pairs if rev not in parents]
     assert len(heads) == 1, heads
+
+    merges = {revision: parents for revision, parents in pairs.items() if len(parents) > 1}
+    assert merges == {
+        "0057_admin_sandbox_trajectory": (
+            "0046_admin_sandbox_trajectory",
+            "0056_cloudlab_autoscaling",
+        )
+    }
+    children: dict[str, list[str]] = {}
+    for revision, revision_parents in pairs.items():
+        for parent in revision_parents:
+            children.setdefault(parent, []).append(revision)
+    splits = {
+        parent: tuple(sorted(revisions))
+        for parent, revisions in children.items()
+        if len(revisions) > 1
+    }
+    assert splits == {
+        "0045_admin_sandbox_deletion": (
+            "0046_admin_sandbox_trajectory",
+            "0046_job_claim_retry",
+        )
+    }
+
+    # Every revision must be reachable from the sole root. A disconnected
+    # cycle can otherwise have no missing parent and still evade the head check.
+    reachable = {"0001_schema_baseline"}
+    while True:
+        newly_reachable = {
+            revision
+            for revision, revision_parents in pairs.items()
+            if revision_parents and set(revision_parents) <= reachable
+        }
+        updated = reachable | newly_reachable
+        if updated == reachable:
+            break
+        reachable = updated
+    assert reachable == set(pairs), sorted(set(pairs) - reachable)
     assert all(len(rev) <= 32 for rev in pairs)
 
 

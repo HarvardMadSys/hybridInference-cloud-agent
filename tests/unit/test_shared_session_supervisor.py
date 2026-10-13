@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import stat
 import subprocess
+import tarfile
 import threading
 import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,15 +20,18 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import (
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxInspection,
+    ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatFailStopped,
     RetainedChatLost,
     claude_member_config_dir,
 )
-from cloud_agent_host.drivers import InputOutcome
+from cloud_agent_host.drivers import DriverError, InputOutcome
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
@@ -1133,6 +1141,235 @@ def test_status_listing_never_stops_a_managed_running_group():
     assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
 
 
+def test_targeted_listing_refreshes_all_members_without_host_reconciliation(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.terminal_opened("athr_peer")
+    supervisor.terminal_opened("athr_peer")
+    supervisor.operation_opened("athr_source")
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+    inspected: list[str] = []
+
+    def inspect(container_name):
+        inspected.append(container_name)
+        return manager.items[container_name]
+
+    def inventory():
+        raise SandboxError("unrelated sandbox inventory failed")
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+    monkeypatch.setattr(manager, "list", inventory)
+
+    descriptors = supervisor.list_for_thread("athr_peer")
+
+    assert inspected == [_spec().container_name]
+    assert {row.thread_id for row in descriptors} == {"athr_source", "athr_peer"}
+    assert sum(row.terminal_count for row in descriptors) == 2
+    assert sum(row.operation_count for row in descriptors) == 1
+    assert all(row.running is False and row.group_busy for row in descriptors)
+    assert manager.stop_count == 0
+    assert manager.pruned_specs == []
+    with pytest.raises(SandboxError, match="unrelated sandbox inventory failed"):
+        supervisor.list()
+
+
+def test_targeted_listing_unknown_member_does_not_discover_or_inspect_containers(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    monkeypatch.setattr(manager, "list", lambda: pytest.fail("unexpected inventory"))
+    monkeypatch.setattr(manager, "inspect", lambda _name: pytest.fail("unexpected inspection"))
+
+    with pytest.raises(SandboxError, match="no shared sandbox membership"):
+        supervisor.list_for_thread("athr_unknown")
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_targeted_listing_marks_missing_or_replaced_container_lost(missing):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    if missing:
+        manager.items.pop(_spec().container_name)
+    else:
+        manager.items[_spec().container_name] = replace(
+            original,
+            container_id="container-replacement",
+        )
+
+    with pytest.raises(RetainedChatLost, match="missing" if missing else "identity changed"):
+        supervisor.list_for_thread("athr_peer")
+
+    group = supervisor._members["athr_source"]
+    assert group.inspection == original
+    assert group.container_lost is True
+    assert {member.context_status for member in group.members.values()} == {"lost"}
+    assert manager.stop_count == 0
+
+
+def test_targeted_listing_rejects_changed_immutable_labels_without_accepting_inspection():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(
+        original,
+        labels=replace(_spec(), generation=2).docker_labels(),
+        running=False,
+        status=ChatSandboxStatus.STOPPED,
+    )
+
+    with pytest.raises(SandboxError, match="immutable labels changed"):
+        supervisor.list_for_thread("athr_source")
+
+    assert supervisor._members["athr_source"].inspection == original
+    assert manager.stop_count == 0
+
+
+def test_targeted_listing_inspection_does_not_block_another_groups_status(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(
+        other,
+        [replace(_members()[0], thread_id=other.thread_id)],
+    )
+    inspect_entered = threading.Event()
+    allow_inspect = threading.Event()
+    status_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def inspect(container_name):
+        if container_name == _spec().container_name:
+            inspect_entered.set()
+            assert allow_inspect.wait(timeout=2)
+        return manager.items[container_name]
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    def targeted_listing():
+        try:
+            supervisor.list_for_thread("athr_source")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def other_status():
+        try:
+            supervisor.status(other.thread_id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            status_done.set()
+
+    listing_thread = threading.Thread(target=targeted_listing)
+    status_thread = threading.Thread(target=other_status)
+    listing_thread.start()
+    try:
+        assert inspect_entered.wait(timeout=1)
+        status_thread.start()
+        assert status_done.wait(timeout=0.5), "inspection held the supervisor-wide lock"
+    finally:
+        allow_inspect.set()
+        listing_thread.join(timeout=2)
+        if status_thread.ident is not None:
+            status_thread.join(timeout=2)
+
+    assert not listing_thread.is_alive()
+    assert not status_thread.is_alive()
+    assert errors == []
+
+
+def test_targeted_listing_rejects_a_stopped_observation_after_concurrent_start(monkeypatch):
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    original_generation = group.lifecycle_generation
+    inspect_entered = threading.Event()
+    allow_inspect = threading.Event()
+    errors: list[BaseException] = []
+
+    def inspect(container_name):
+        observed = manager.items[container_name]
+        if not inspect_entered.is_set():
+            inspect_entered.set()
+            assert allow_inspect.wait(timeout=2)
+        return observed
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    def targeted_listing():
+        try:
+            supervisor.list_for_thread(spec.thread_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    listing_thread = threading.Thread(target=targeted_listing)
+    listing_thread.start()
+    try:
+        assert inspect_entered.wait(timeout=1)
+        token, opened = supervisor.terminal_opened("athr_peer")
+        assert opened.running is True
+    finally:
+        allow_inspect.set()
+        listing_thread.join(timeout=2)
+
+    assert not listing_thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], SessionLeaseLost)
+    assert group.lifecycle_generation == original_generation
+    assert group.inspection.running is True
+    assert manager.items[spec.container_name].running is True
+    supervisor.terminal_closed("athr_peer", token)
+
+
+@pytest.mark.parametrize(
+    "changed_fence",
+    ["group_index", "member_index", "member", "lifecycle", "spec", "container"],
+)
+def test_targeted_listing_rejects_a_changed_fence_during_inspection(monkeypatch, changed_fence):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    group = supervisor._members["athr_source"]
+    original = group.inspection
+    stale = replace(original, running=False, status=ChatSandboxStatus.STOPPED)
+
+    def inspect(_container_name):
+        with supervisor._lock:
+            if changed_fence == "group_index":
+                supervisor._groups.pop(_spec().sandbox_id)
+            elif changed_fence == "member_index":
+                supervisor._members.pop("athr_source")
+            elif changed_fence == "member":
+                group.members["athr_source"] = replace(group.members["athr_source"])
+            elif changed_fence == "lifecycle":
+                group.lifecycle_generation += 1
+            elif changed_fence == "spec":
+                group.spec = replace(group.spec, generation=2)
+            else:
+                group.inspection = replace(original, container_id="container-successor")
+        return stale
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+
+    with pytest.raises(SessionLeaseLost, match="lifecycle changed during observation"):
+        supervisor.list_for_thread("athr_source")
+
+    assert group.inspection.running is True
+    assert group.container_lost is False
+    assert manager.stop_count == 0
+
+
 def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
@@ -1636,6 +1873,156 @@ def test_private_provider_members_get_deterministic_distinct_homes(
     assert source_home != child_home
 
 
+class _LocalMemberShell:
+    """Run the real member scripts on this host, with /agent-state under a temp root.
+
+    Every path a script touches arrives as an argument, so rebasing the
+    ``/agent-state`` arguments is enough to exercise the actual shell. The
+    member pipe is a real pipe between the two local processes.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.backend = SimpleNamespace(uid=os.getuid(), gid=os.getgid())
+        self.calls: list[tuple[object, ...]] = []
+
+    def local(self, path: str) -> Path:
+        return Path(f"{self.root}{path}")
+
+    def _rebase(self, argv: list[str]) -> list[str]:
+        return [str(self.local(item)) if item.startswith("/agent-state") else item for item in argv]
+
+    def exec_capture(self, _spec, argv, **kwargs):
+        self.calls.append(("exec", kwargs.get("user_uid")))
+        return subprocess.run(self._rebase(argv), capture_output=True, timeout=30, check=False)
+
+    def pipe_member_exec(
+        self, _spec, *, source_argv, source_uid, target_argv, target_uid, user_gid, timeout_s
+    ):
+        self.calls.append(("pipe", source_uid, target_uid))
+        source = subprocess.Popen(
+            self._rebase(source_argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert source.stdout is not None and source.stderr is not None
+        target = subprocess.run(
+            self._rebase(target_argv),
+            stdin=source.stdout,
+            capture_output=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        source.stdout.close()
+        stderr = source.stderr.read()
+        return subprocess.CompletedProcess(source_argv, source.wait(), b"", stderr), target
+
+
+def _private_state_root(tmp_path: Path) -> Path:
+    """Mirror the image: a setgid, group-writable /agent-state."""
+    state = tmp_path / "agent-state"
+    state.mkdir()
+    state.chmod(0o2770)
+    (state / "config.toml").write_text("model = 'bootstrap'\n")
+    (state / "config.toml").chmod(0o664)
+    return state
+
+
+def _assert_private(home: Path) -> None:
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700, oct(home.stat().st_mode)
+    for path in home.rglob("*"):
+        assert path.lstat().st_mode & 0o077 == 0, (path, oct(path.lstat().st_mode))
+
+
+@pytest.mark.parametrize("runtime_id", ["codex", "opencode", "kilo"])
+def test_a_member_provider_home_is_private_to_its_member(tmp_path: Path, runtime_id: str):
+    """A sibling UID shares the group, so group bits would hand it this home."""
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id=runtime_id)
+    home = factory._member_state_dir(launch)
+
+    factory._prepare_member_state(_spec(), launch, home)
+
+    _assert_private(manager.local(home))
+    collection = manager.local(home).parent
+    assert collection.stat().st_mode & 0o070 == 0o070, "every member can add its own home"
+    assert manager.calls == [("exec", MEMBER_UID_BASE + 1)]
+    if runtime_id == "codex":
+        assert (manager.local(home) / "config.toml").read_text() == "model = 'bootstrap'\n"
+
+
+def test_an_older_group_writable_member_home_is_narrowed_on_its_next_start(tmp_path: Path):
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="opencode")
+    home = manager.local(factory._member_state_dir(launch))
+    (home / "opencode/config").mkdir(parents=True)
+    home.chmod(0o2770)
+    (home / ".freeinference-member-state-v1").write_text("")
+
+    factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+
+
+def test_a_planted_member_home_is_refused_not_adopted(tmp_path: Path):
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="codex")
+    home = manager.local(factory._member_state_dir(launch))
+    planted = tmp_path / "sibling-owned"
+    planted.mkdir()
+    planted.chmod(0o777)
+    home.parent.mkdir()
+    home.symlink_to(planted, target_is_directory=True)
+
+    with pytest.raises(DriverError, match="not owned by this member"):
+        factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+
+    assert list(planted.iterdir()) == []
+
+
+@pytest.mark.parametrize("runtime_id", ["codex", "opencode"])
+def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path, runtime_id: str):
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id=runtime_id
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2), runtime_id=runtime_id
+    )
+    source_home = factory._member_state_dir(source_launch)
+    factory._prepare_member_state(_spec(), source_launch, source_home)
+    source = manager.local(source_home)
+    (source / "sessions").mkdir()
+    (source / "sessions/rollout.jsonl").write_text('{"id":"native-source"}\n')
+    (source / ".hidden").write_text("dotfile")
+    (source / "tmp").mkdir(exist_ok=True)
+    (source / "tmp/scratch").write_text("never copied")
+    (source / f"{runtime_id}/state/{runtime_id}/locks").mkdir(parents=True)
+    (source / f"{runtime_id}/state/{runtime_id}/locks/server.lock").write_text("pid")
+    manager.calls.clear()
+
+    factory._clone_private_member_state(_spec(), source_launch, target_launch)
+
+    child = manager.local(factory._member_state_dir(target_launch))
+    _assert_private(child)
+    # The CLI's own files keep its umask; the closed home is what protects them.
+    assert stat.S_IMODE(source.stat().st_mode) == 0o700
+    assert manager.calls == [("pipe", MEMBER_UID_BASE + 0, MEMBER_UID_BASE + 2)]
+    assert (child / "sessions/rollout.jsonl").read_text() == '{"id":"native-source"}\n'
+    assert (child / ".hidden").read_text() == "dotfile"
+    assert list((child / "tmp").iterdir()) == []
+    assert (child / ".freeinference-member-state-v1").exists()
+    locks = child / f"{runtime_id}/state/{runtime_id}/locks"
+    assert locks.exists() is (runtime_id == "codex")
+    assert (source / "tmp/scratch").exists(), "the source home is read, never changed"
+
+
 def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(monkeypatch):
     manager = _Manager()
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
@@ -2019,7 +2406,10 @@ def test_snapshot_start_failure_releases_the_admission_barrier():
 
 
 @pytest.mark.parametrize("reserved_child", [False, True])
-def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reserved_child):
+@pytest.mark.parametrize("with_plugins", [False, True])
+def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(
+    reserved_child, with_plugins
+):
     manager = _Manager()
     factory = _TransportFactory()
     supervisor: SharedChatSessionSupervisor
@@ -2028,6 +2418,7 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
         assert source_transport.native_session_id == "native-source"
         assert operation_id == "fork-one"
         assert source_native_turn_no == 1
+        assert target_launch.plugins == source_transport.launch.plugins
         token, peer = supervisor.operation_opened("athr_peer")
         assert peer.operation_count == 1
         assert supervisor.status("athr_source").operation_count == 1
@@ -2049,7 +2440,12 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
         manifest=_members(),
         expected_container_id="container-shared",
     )
-    source_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    plugins = (
+        ({"plugin": "review@fixture", "marketplace": "owner/marketplace"},) if with_plugins else ()
+    )
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), plugins=plugins
+    )
     supervisor.ensure_resident("athr_source", lease.token, source_launch)
     supervisor.settle(
         "athr_source",
@@ -2079,7 +2475,9 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
         target_thread_id="athr_child",
         target_slot_id=2,
         source_launch=source_launch,
-        target_launch=_launch("athr_child", native_session_id=None, slot=2),
+        target_launch=replace(
+            _launch("athr_child", native_session_id=None, slot=2), plugins=plugins
+        ),
     )
 
     assert result.container_id == "container-shared"
@@ -2087,6 +2485,8 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reser
     assert supervisor.status("athr_child").resident_state == "live"
     assert supervisor.status("athr_source").operation_count == 0
     assert supervisor.status("athr_source").idle_deadline_monotonic is not None
+    assert factory.opened[-1].thread_id == "athr_child"
+    assert factory.opened[-1].plugins == plugins
 
     if reserved_child:
         # A concurrent Files/Git request can still carry the pending database
@@ -3027,6 +3427,116 @@ def test_durable_flush_block_survives_stop_failure_and_replacement_controller() 
     with pytest.raises(SessionBusy, match="native flush failure"):
         replacement.operation_opened(_spec().thread_id)
     replacement_controller.close()
+
+
+def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fence() -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.marker: bytes | None = None
+            self.missing_exports = 0
+            self.marker_writes = 0
+            self.marker_clears = 0
+
+        def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+            return self.items[spec.container_name]
+
+        def read_final_archive_marker(self, spec, *, expected_container_id) -> bytes:
+            return ChatSandboxManager.read_final_archive_marker(
+                self, spec, expected_container_id=expected_container_id
+            )
+
+        def read_stopped_final_archive_marker_optional(
+            self, spec, *, expected_container_id
+        ) -> bytes | None:
+            return ChatSandboxManager.read_stopped_final_archive_marker_optional(
+                self, spec, expected_container_id=expected_container_id
+            )
+
+        def export_archive(self, spec, path, destination, **kwargs) -> int:
+            current = self._require(spec)
+            assert current.container_id == kwargs["expected_container_id"]
+            assert current.running is False
+            assert path == f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+            if self.marker is None:
+                self.missing_exports += 1
+                # The real Docker copy normalizes this exact missing source
+                # into FileNotFoundError before writing any archive bytes.
+                raise FileNotFoundError(path)
+            with tarfile.open(fileobj=destination, mode="w") as archive:
+                entry = tarfile.TarInfo(FINAL_ARCHIVE_MARKER_NAME)
+                entry.uid = entry.gid = 0
+                entry.mode = 0o600
+                entry.size = len(self.marker)
+                archive.addfile(entry, io.BytesIO(self.marker))
+            return destination.tell()
+
+        def write_stopped_final_archive_marker(
+            self, spec, payload, *, expected_container_id
+        ) -> None:
+            self.marker = payload
+            self.marker_writes += 1
+            assert (
+                self.read_final_archive_marker(spec, expected_container_id=expected_container_id)
+                == payload
+            )
+            self.events.append("fence")
+
+        def start(self, spec, **kwargs) -> ChatSandboxInspection:
+            current = super().start(spec, **kwargs)
+            self.events.append("start")
+            return current
+
+        def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
+            current = self._require(spec)
+            assert current.container_id == expected_container_id
+            assert current.running is True
+            self.marker = None
+            self.marker_clears += 1
+            self.events.append("clear")
+
+    manager = MarkerManager()
+    spec = _spec()
+    manager.items[spec.container_name] = replace(
+        manager._inspection(spec, running=False), status=ChatSandboxStatus.CREATED
+    )
+    controller = SandboxArchiveController(manager, namespace="pool-east")
+    controller.start()
+    controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        starting_archive_prepare_hook=controller.prepare_start,
+        started_archive_hook=controller.complete_start,
+    )
+    try:
+        cold = supervisor.acquire(
+            spec,
+            thread_id=spec.thread_id,
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=False,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+        assert cold.token
+        assert cold.context_status == "new"
+        assert manager.events == ["fence", "start", "clear"]
+        supervisor.abandon(spec.thread_id, cold.token, lost=False)
+        warm = supervisor.acquire(
+            spec,
+            thread_id=spec.thread_id,
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=False,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+        assert warm.token != cold.token
+        assert manager.items[spec.container_name].running is True
+        assert manager.marker is None
+        assert manager.missing_exports == manager.marker_writes == manager.marker_clears == 1
+    finally:
+        controller.close()
 
 
 def test_archive_start_fence_runs_only_for_a_stopped_to_running_transition() -> None:
@@ -4079,6 +4589,20 @@ def test_unused_mcp_token_does_not_change_live_process_compatibility():
     assert transport.compatible_with(
         replace(launch, mcp_base_url="http://relay", mcp_credential="fresh-attempt-token")
     )
+
+
+def test_github_token_rotation_or_removal_requires_a_new_resident_process():
+    launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        github_token="first-token",
+        github_repo="owner/repo",
+    )
+    transport = ResidentTransport(launch=launch, session=SimpleNamespace())
+
+    assert transport.compatible_with(replace(launch, credential="renewed-grant"))
+    assert not transport.compatible_with(replace(launch, github_token="renewed-token"))
+    assert not transport.compatible_with(replace(launch, github_token=None))
+    assert not transport.compatible_with(replace(launch, github_repo="owner/other"))
 
 
 def test_missing_launch_locator_restores_the_known_member_instead_of_starting_fresh():

@@ -6,8 +6,9 @@ selected by configuration, so the same runner code serves dogfooding on CI,
 self-hosted machines, and a multi-tenant fleet.
 
 The production topology is runner outside, retained container per chat group
-(``container`` / ``kata``). Only scoped inference/MCP credentials cross into
-the sandbox; control-plane and repository credentials remain outside. The
+(``container`` / ``kata``). Scoped inference/MCP credentials and a short-lived
+repository-scoped GitHub App token cross into the sandbox; control-plane,
+account and service credentials remain outside. The
 ``process`` backend exists only as a deterministic test seam and cannot attest
 or claim a retained job.
 
@@ -28,6 +29,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host.bounded_output import TextTail, protocol_lines, text_chunks
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 from cloud_agent_shared.errors import SandboxError
@@ -207,17 +209,6 @@ class SandboxSpec:
     live_input: bool = False
 
 
-#: The most one read takes from a command's pipe. A caller that bounds output
-#: counts it per read, so this is also how far one read can overshoot a limit.
-PIPE_CHUNK_BYTES = 64 * 1024
-
-
-def read_pipe_chunks(fd: int) -> Iterator[bytes]:
-    """Yield whatever one pipe delivers, a bounded read at a time, until EOF."""
-    while chunk := os.read(fd, PIPE_CHUNK_BYTES):
-        yield chunk
-
-
 class SandboxProcess(ABC):
     """A running agent, exposing a line stream and a kill switch."""
 
@@ -225,16 +216,9 @@ class SandboxProcess(ABC):
     def lines(self) -> Iterator[str]:
         """Yield the agent's stdout, line by line, as it is produced."""
 
-    def byte_chunks(self) -> Iterator[bytes]:
-        """Yield stdout as raw bytes, a bounded read at a time, as it is produced.
-
-        This is for a bounded command's output, not an agent's event stream.
-        A line exists only once its newline arrives, so a stream without one
-        would be buffered whole before a caller could apply any limit, and
-        the bytes need not be UTF-8 at all. Use this or :meth:`lines` on one
-        process, never both.
-        """
-        raise SandboxError("this sandbox process does not expose its output as bytes")
+    def chunks(self) -> Iterator[str]:
+        """Yield bounded stdout chunks; line-only test adapters may reuse lines."""
+        yield from self.lines()
 
     @abstractmethod
     def kill(self) -> None:
@@ -411,7 +395,7 @@ class _PopenProcess(SandboxProcess):
     def __init__(self, process: subprocess.Popen[str], *, container: str | None = None) -> None:
         self._process = process
         self._container = container
-        self._stderr_chunks: list[str] = []
+        self._stderr_tail = TextTail()
         self._stderr_thread: threading.Thread | None = None
         if process.stderr is not None:
             self._stderr_thread = threading.Thread(
@@ -427,11 +411,8 @@ class _PopenProcess(SandboxProcess):
     def _drain_stderr(self) -> None:
         """Read stderr to EOF, keeping a bounded tail."""
         assert self._process.stderr is not None
-        for line in self._process.stderr:
-            self._stderr_chunks.append(line)
-            # Bounded: a runaway agent must not turn its own noise into an
-            # out-of-memory on the runner.
-            del self._stderr_chunks[:-200]
+        for chunk in text_chunks(self._process.stderr):
+            self._stderr_tail.append(chunk)
 
     def write_line(self, text: str) -> None:
         """Write one line to the child's stdin, flushed immediately."""
@@ -454,13 +435,15 @@ class _PopenProcess(SandboxProcess):
 
     def lines(self) -> Iterator[str]:
         """Yield stdout lines from the child process."""
-        assert self._process.stdout is not None
-        yield from self._process.stdout
+        try:
+            yield from protocol_lines(self.chunks())
+        except SandboxError:
+            self.kill()
+            raise
 
-    def byte_chunks(self) -> Iterator[bytes]:
-        """Yield the child's stdout bytes, read straight from the pipe."""
+    def chunks(self) -> Iterator[str]:
         assert self._process.stdout is not None
-        yield from read_pipe_chunks(self._process.stdout.fileno())
+        yield from text_chunks(self._process.stdout)
 
     def kill(self) -> None:
         """Kill the child process."""
@@ -475,7 +458,7 @@ class _PopenProcess(SandboxProcess):
         """Return the child's stderr tail, collected by the drain thread."""
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
-        return "".join(self._stderr_chunks)
+        return self._stderr_tail.text()
 
 
 class ProcessBackend(SandboxBackend):

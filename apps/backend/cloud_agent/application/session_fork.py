@@ -31,7 +31,11 @@ from fastapi import HTTPException
 
 from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
 from cloud_agent.broker_routing import broker_for_job
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_broker_client import (
+    SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
+    SHARED_SESSION_FORK_TIMEOUT_S,
+    WorkspaceBrokerError,
+)
 from cloud_agent.workspace_errors import _workspace_broker_http_error
 
 if TYPE_CHECKING:
@@ -52,11 +56,11 @@ class _ForkMaterializationStorage(Protocol):
     session_fork: SessionForkRepository
 
 
-# The host fork request is bounded to 180s. Keep one short recovery margin so
-# a second API worker cannot take over while the first is still recording its
-# receipt; a crashed worker becomes retryable without waiting for the 15-minute
-# stalled-saga reconciler.
-SESSION_FORK_COORDINATOR_LEASE_S = 210.0
+# Keep a short recovery margin past the host request's deadline so a second API
+# worker cannot take over while the first is recording its receipt. Plugin
+# installation needs a longer request and lease; the stalled-saga reconciler
+# also respects that live lease.
+SESSION_FORK_COORDINATOR_LEASE_S = SHARED_SESSION_FORK_TIMEOUT_S + 30.0
 
 
 async def materialize_session_fork(
@@ -140,6 +144,7 @@ async def materialize_session_fork(
         "runtime_version": operation.get("runtime_version"),
         "model": str(source_job.get("model") or ""),
         "reasoning_effort": source_job.get("reasoning_effort"),
+        "plugins": source_job.get("plugins") or [],
         # Replaced by the broker's host-local, sandbox-reachable relay.
         "gateway_base_url": "",
         # Fork-only does not need a tool credential. A later turn whose
@@ -152,7 +157,11 @@ async def materialize_session_fork(
     claimed = await job_store.session_fork.claim_session_fork_materialization(
         operation_id=operation_id,
         coordinator_token=coordinator_token,
-        lease_seconds=SESSION_FORK_COORDINATOR_LEASE_S,
+        lease_seconds=(
+            SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S + 30.0
+            if source_job.get("plugins")
+            else SESSION_FORK_COORDINATOR_LEASE_S
+        ),
     )
     if not claimed:
         raise HTTPException(

@@ -280,9 +280,21 @@ def _challenge_parameters(header: str) -> list[tuple[str, str]]:
 
 
 def _same_resource(left: str, right: str) -> bool:
-    """Compare two resource identifiers by origin and path, ignoring case."""
+    """Match the resource identity, including Slack's official transport alias."""
     try:
-        return normalize_url(left).url.rstrip("/") == normalize_url(right).url.rstrip("/")
+        resource = normalize_url(left).url.rstrip("/")
+        endpoint = normalize_url(right).url.rstrip("/")
+        if resource == endpoint:
+            return True
+        # Slack's /mcp transport points to root resource metadata whose OAuth
+        # audience is its origin. Keep this alias bounded to that official pair;
+        # a generic origin match could cross tenant/resource boundaries.
+        return (
+            resource == "https://mcp.slack.com"
+            and endpoint == "https://mcp.slack.com/mcp"
+            and not urlsplit(left).fragment
+            and not urlsplit(right).fragment
+        )
     except EndpointRejected:
         return False
 
@@ -335,7 +347,29 @@ def choose_registration(
     is therefore last.
     """
     if preregistered_client_id:
-        method = "client_secret_basic" if preregistered_client_secret else "none"
+        if preregistered_client_secret:
+            method: str | None = next(
+                (
+                    candidate
+                    for candidate in ("client_secret_basic", "client_secret_post")
+                    if candidate in metadata.token_endpoint_auth_methods_supported
+                ),
+                None,
+            )
+            if method is None:
+                raise OAuthError(
+                    "this authorization server does not support client secret authentication "
+                    "with Basic credentials or form parameters for the registered client.",
+                    kind="client_registration_required",
+                )
+        elif metadata.allows_public_clients():
+            method = "none"
+        else:
+            raise OAuthError(
+                "this authorization server requires a client secret. Provide the registered "
+                "client's secret in the connection's auth settings.",
+                kind="client_registration_required",
+            )
         return ClientIdentity(
             client_id=preregistered_client_id,
             registration="preregistered",
@@ -363,9 +397,10 @@ def choose_registration(
             auth_method="none",
             delete_on_disconnect=True,
         )
+    credentials = "client id" if metadata.allows_public_clients() else "client id and secret"
     raise OAuthError(
-        "this server does not support automatic client registration. Provide a client id "
-        "for it in the connection's auth settings.",
+        "this server does not support automatic client registration. Provide a "
+        f"{credentials} for it in the connection's auth settings.",
         kind="client_registration_required",
     )
 
@@ -506,6 +541,11 @@ class OAuthFlow:
         }
         if self.scopes:
             params["scope"] = " ".join(self.scopes)
+        if self.metadata.issuer.rstrip("/") == "https://accounts.google.com":
+            # Google's web OAuth flow requires offline access for a refresh
+            # token. Consent also obtains one when reconnecting a prior grant.
+            params["access_type"] = "offline"
+            params["prompt"] = "consent"
         # RFC 8707: the token is minted for a named resource, which is what
         # stops one server's token being replayed against another's endpoint.
         params["resource"] = self.resource

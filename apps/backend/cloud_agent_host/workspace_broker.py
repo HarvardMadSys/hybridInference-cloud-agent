@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from cloud_agent_host import broker_profiling_policy
+from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
@@ -104,6 +105,7 @@ from cloud_agent_shared.host_settings import (
     resolve,
 )
 from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 
 logger = get_logger(__name__)
@@ -438,9 +440,12 @@ class SharedResidentLaunchConfig(BaseModel):
     gateway_base_url: str = Field("", max_length=2048)
     credential: str | None = Field(None, max_length=16384)
     mcp_server_ids: list[str] = Field(default_factory=list, max_length=64)
+    plugins: list[SandboxPlugin] = Field(default_factory=list, max_length=MAX_SANDBOX_PLUGINS)
     # Replaced, like the gateway's, by this host's own MCP relay address.
     mcp_base_url: str = Field("", max_length=2048)
     mcp_credential: str = Field("", max_length=16384)
+    github_token: str | None = Field(None, max_length=16384, repr=False)
+    github_repo: str = Field("", max_length=512)
     slot_id: int = Field(..., ge=0, le=127)
     residency_generation: int = Field(0, ge=0)
 
@@ -1480,15 +1485,11 @@ def _run_sandbox(
     env: dict[str, str],
     timeout_s: float,
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-) -> tuple[int, bytes, str]:
-    """Run a bounded command and return its status, raw stdout and stderr.
+) -> tuple[int, str, str]:
+    """Run a bounded command and return status, stdout and stderr.
 
-    Stdout is read as bytes, a bounded read at a time, and counted read by
-    read: neither a stream without newlines nor bytes that are not UTF-8 can
-    get past the limit or end the read early, and decoding it is the caller's
-    choice. The deadline covers the command's exit as well as its output, so
-    one that closes stdout and keeps running is stopped like one that never
-    closes it.
+    The deadline covers the command's exit as well as its output, so one that
+    closes stdout and keeps running is stopped like one that never closes it.
     """
     process = backend.spawn(
         SandboxSpec(
@@ -1497,58 +1498,54 @@ def _run_sandbox(
             env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
         )
     )
-    # Output chunks, a read that failed, then the exit status once the
-    # command has been reaped.
-    events: queue.Queue[bytes | Exception | int] = queue.Queue()
+    # Real sandbox adapters read fixed-size chunks; injected line-only adapters
+    # remain supported without turning protocol frames into command records.
+    chunks_source = getattr(process, "chunks", process.lines)
 
-    def pump() -> None:
-        size = 0
-        try:
-            for chunk in process.byte_chunks():
-                events.put(chunk)
-                size += len(chunk)
-                if size > max_output_bytes:
-                    # Stop reading: the command is about to be stopped, and
-                    # what it writes meanwhile must not accumulate here.
-                    break
-        except Exception as exc:
-            # A read that failed is not the end of the output; partial output
-            # must not pass for the whole of it.
-            events.put(exc)
-        events.put(process.wait())
+    def output_then_status() -> Iterator[str | int]:
+        yield from chunks_source()
+        # Queued behind the output, so the deadline also covers a command
+        # that closed its stdout and kept running.
+        yield process.wait()
 
-    threading.Thread(target=pump, daemon=True, name="workspace-command").start()
+    output = OutputPump(output_then_status(), name="workspace-command")
     deadline = time.monotonic() + timeout_s
-    stdout = bytearray()
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _stop_overrun_command(process)
-            raise HTTPException(status_code=408, detail="workspace command timed out")
-        try:
-            event = events.get(timeout=remaining)
-        except queue.Empty:
-            continue
-        if isinstance(event, int):
-            exit_code = event
-            break
-        if isinstance(event, Exception):
-            _stop_overrun_command(process)
-            raise HTTPException(
-                status_code=502, detail="workspace command output could not be read"
-            ) from event
-        stdout += event
-        if len(stdout) > max_output_bytes:
-            _stop_overrun_command(process)
-            raise HTTPException(status_code=413, detail="workspace command output is too large")
-    stderr = process.stderr_text()
-    if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
-        stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
-            "utf-8", errors="replace"
-        )
+    chunks: list[str] = []
+    size = 0
+    exit_code: int | None = None
+    try:
+        while exit_code is None:
+            if time.monotonic() > deadline:
+                output.close(drain=True)
+                _stop_overrun_command(process)
+                process.wait()
+                raise HTTPException(status_code=408, detail="workspace command timed out")
+            try:
+                chunk = output.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if isinstance(chunk, int):
+                exit_code = chunk
+            elif chunk is not None:
+                size += len(chunk.encode("utf-8", errors="replace"))
+                if size > max_output_bytes:
+                    output.close(drain=True)
+                    _stop_overrun_command(process)
+                    process.wait()
+                    raise HTTPException(
+                        status_code=413, detail="workspace command output is too large"
+                    )
+                chunks.append(chunk)
+        stderr = process.stderr_text()
+        if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
+            stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
+                "utf-8", errors="replace"
+            )
+    finally:
+        output.close()
     if isinstance(workdir, Path):
         os.utime(workdir, None)
-    return exit_code, bytes(stdout), stderr
+    return exit_code, "".join(chunks), stderr
 
 
 def _run_terminal(
@@ -1567,7 +1564,7 @@ def _run_terminal(
         'eval "$WORKSPACE_COMMAND"; status=$?; '
         f'printf "\\n__HYI_{marker}_CWD__%s\\n__HYI_{marker}_STATUS__%s\\n" "$PWD" "$status"'
     )
-    process_status, raw_stdout, stderr = _run_sandbox(
+    process_status, stdout, stderr = _run_sandbox(
         backend,
         workdir=workdir,
         script=script,
@@ -1579,9 +1576,6 @@ def _run_terminal(
         ),
         max_output_bytes=max_output_bytes,
     )
-    # Shown to the owner as text: a byte that is not UTF-8 is replaced, and
-    # never costs the rest of the output.
-    stdout = raw_stdout.decode("utf-8", errors="replace")
     cwd_marker = f"\n__HYI_{marker}_CWD__"
     status_marker = f"\n__HYI_{marker}_STATUS__"
     cwd = request.cwd
@@ -1643,33 +1637,25 @@ def _run_git(
         timeout_s=timeout_s,
         max_output_bytes=max_output_bytes,
     )
-    # Split on the ASCII markers before decoding anything: a file's bytes in
-    # the diff need not be UTF-8, and only the patch must keep them exactly.
-    raw_status, separator, remainder = stdout.partition(f"\n{diff_tag}\n".encode())
+    status_text, separator, remainder = stdout.partition(f"\n{diff_tag}\n")
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    raw_patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n".encode())
+    patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n")
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    raw_commits, _, raw_git_status = commits_and_status.rpartition(f"\n{status_tag}".encode())
+    commits_text, _, git_status_text = commits_and_status.rpartition(f"\n{status_tag}")
     try:
-        git_status = int(raw_git_status.strip().splitlines()[0])
+        git_status = int(git_status_text.strip().splitlines()[0])
     except (ValueError, IndexError):
         git_status = process_status
     if git_status != 0:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    try:
-        patch = raw_patch.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        # A patch that will be applied must apply as the bytes it holds; one
-        # shown to the owner can show a replacement character instead.
-        if exact_patch:
-            raise HTTPException(
-                status_code=502, detail="workspace patch is not UTF-8 text"
-            ) from exc
-        patch = raw_patch.decode("utf-8", errors="replace")
-    status_text = raw_status.decode("utf-8", errors="replace")
-    commits_text = raw_commits.decode("utf-8", errors="replace")
+    if exact_patch and "�" in patch:
+        # Command output is decoded with replacement, so a byte that is not
+        # UTF-8 arrives here as U+FFFD: a captured patch holding one would
+        # restore different bytes than the workspace holds. A file that really
+        # contains U+FFFD cannot be told apart from that and is refused too.
+        raise HTTPException(status_code=502, detail="workspace patch is not exact UTF-8 text")
 
     status_lines = [line for line in status_text.splitlines() if line]
     branch = ""
@@ -2098,9 +2084,10 @@ def create_app(
     ) -> dict[str, object]:
         """Apply one complete DB policy and confirm its exact revision.
 
-        This authenticated runner-to-broker channel never transports AWS
-        credentials. The fixed destination and broker workload identity remain
-        the only S3 authority.
+        This authenticated runner-to-broker channel may carry one saved AWS
+        access key. The broker keeps it in memory for S3 and never writes it
+        into a sandbox marker. With no key, the broker's workload identity
+        remains the S3 authority. The destination stays fixed.
         """
         if archive_controller is None:
             raise HTTPException(
@@ -2296,6 +2283,7 @@ def create_app(
             reasoning_effort=body.reasoning_effort,
             gateway_base_url=gateway_base_url,
             credential=body.credential,
+            plugins=tuple(plugin.model_dump(exclude_none=True) for plugin in body.plugins),
             mcp_server_ids=tuple(body.mcp_server_ids),
             # Like the gateway's, the relay is this host's own, so the address
             # a CLI is told is the one the host rules admit for its group. Only
@@ -2306,6 +2294,8 @@ def create_app(
                 else ""
             ),
             mcp_credential=body.mcp_credential,
+            github_token=body.github_token,
+            github_repo=body.github_repo,
             slot_id=body.slot_id,
             residency_generation=body.residency_generation,
         )
@@ -2489,13 +2479,35 @@ def create_app(
                 resources = build_turn_resources(value, tool_windows, thread_id=thread_id)
                 return resources
 
-            try:
+            def observed_events() -> Iterator[Any]:
                 for event in turn.lines():
-                    tool_windows.observe(
-                        event.event_type,
-                        event.payload,
-                        mono=time.monotonic(),
-                    )
+                    # Timestamp at the native read boundary, before queueing:
+                    # backpressure must not move a tool's message window past
+                    # the trusted guest hook marks collected within it.
+                    tool_windows.observe(event.event_type, event.payload, mono=time.monotonic())
+                    yield event
+
+            events = OutputPump(observed_events(), name="shared-turn-events")
+            try:
+                while True:
+                    # Sampling and forwarding must both proceed while the CLI
+                    # is silent. A crash should retain its latest closed
+                    # checkpoint even during one long tool invocation.
+                    checkpoint = take_reported_checkpoint(owner, thread_id)
+                    if checkpoint is not None:
+                        yield (
+                            json.dumps(
+                                {"kind": "resource_checkpoint", "turn_resources": checkpoint},
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                    try:
+                        event = events.get(timeout=0.25)
+                    except queue.Empty:
+                        continue
+                    if event is None:
+                        break
                     yield (
                         json.dumps(
                             {
@@ -2508,22 +2520,6 @@ def create_app(
                         )
                         + "\n"
                     )
-                    # A long turn crosses the checkpoint interval several
-                    # times. The sampler thread produces those checkpoints on
-                    # its own clock; this only forwards one that is waiting,
-                    # which costs a dictionary read per event.
-                    checkpoint = take_reported_checkpoint(owner, thread_id)
-                    if checkpoint is not None:
-                        yield (
-                            json.dumps(
-                                {
-                                    "kind": "resource_checkpoint",
-                                    "turn_resources": checkpoint,
-                                },
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        )
                 result = turn.wait()
                 # The activation boundary is part of success, not cleanup
                 # after success. It reaps escaped background processes and
@@ -2577,6 +2573,7 @@ def create_app(
                     + "\n"
                 )
             finally:
+                events.close()
                 with contextlib.suppress(Exception):
                     if not turn_boundary_closed:
                         owner.abort_turn(thread_id, body.token, turn)
@@ -2956,19 +2953,26 @@ def create_app(
 
     @app.get("/sandboxes")
     async def list_chat_sandboxes(
+        thread_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        """Return Docker-observed state for host-heartbeat reconciliation.
+        """Return Docker-observed state for all groups or one member's group.
 
-        This is a complete observation, not an ownership mutation.  The
+        The full listing is a complete observation, not an ownership mutation. The
         control plane keeps the durable thread/container mapping and accepts
         only exact identity matches; the broker supplies the fact it alone
         can see: whether each retained Docker container is currently running.
         Reconciliation also makes a broker restart self-healing because it
         rebuilds the supervisor's in-memory index from Docker labels first.
+        A member query inspects only its known group without host reconciliation.
         """
         try:
-            shared_descriptors = await endpoint_calls.run(require_shared_supervisor().list)
+            owner = require_shared_supervisor()
+            shared_descriptors = (
+                await endpoint_calls.run(owner.list)
+                if thread_id is None
+                else await endpoint_calls.run(owner.list_for_thread, thread_id)
+            )
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
         rows: list[dict[str, Any]] = []
@@ -3001,9 +3005,10 @@ def create_app(
             ]
             rows.append(origin)
         resource_collector = app.state.sandbox_resource_collector
-        if resource_collector is not None:
+        if resource_collector is not None and thread_id is None:
             # The listing already proved each group's labels and exact ID.
             # Synchronization and cache reads perform no Docker stats I/O.
+            # A partial listing must not evict unrelated collection targets.
             resource_collector.sync_targets(rows)
         for row in rows:
             row["resource_usage"] = (

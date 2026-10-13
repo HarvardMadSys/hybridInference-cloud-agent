@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from cloud_agent.ports.external.compute_provider import (
@@ -70,6 +72,28 @@ def resource(**updates: object) -> dict[str, object]:
         },
         **updates,
     }
+
+
+def openssh_user_key() -> str:
+    return (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+
+
+def _profile_list() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "profiles": [
+                {"name": "one-node", "project": "PortalProfiles"},
+                {"name": "small-lan", "project": "PortalProfiles"},
+                {"name": "cloud-agent-node", "project": "research"},
+            ]
+        },
+    )
 
 
 def provider(handler: object) -> CloudLabProvider:
@@ -261,6 +285,8 @@ async def test_cloudlab_checks_experiment_name_limit_before_posting(name):
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         return httpx.Response(201, json={"id": EXPERIMENT})
 
@@ -285,11 +311,100 @@ async def test_cloudlab_checks_experiment_name_limit_before_posting(name):
         assert json.loads(requests[0].content)["name"] == name
 
 
+def _provision(name: str | None = None) -> dict[str, object]:
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "one-node",
+        "profile_project": "PortalProfiles",
+    }
+    if name is not None:
+        config["name"] = name
+    return config
+
+
+def _routes(responses: dict[tuple[str, str], httpx.Response]):
+    def respond(request):
+        key = (request.method, request.url.path)
+        if key not in responses:
+            raise AssertionError(key)
+        return responses[key]
+
+    return respond
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_missing_profile_is_rejected_before_create():
+    requests = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json={"profiles": []})
+
+    with pytest.raises(ProviderError, match="has no profile one-node") as caught:
+        await provider(respond).acquire(
+            AcquireRequest(mode="provision", config=_provision()), intent()
+        )
+    assert caught.value.code == "request_rejected"
+    assert requests == [("GET", "/v1/profiles/")]
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_completed_server_error_without_an_experiment_is_a_rejection():
+    responses = {
+        ("GET", "/v1/profiles/"): httpx.Response(
+            200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
+        ),
+        ("POST", "/v1/experiments/"): httpx.Response(
+            500, json={"error": "Internal server error", "code": 500}
+        ),
+        ("GET", "/v1/experiments/"): httpx.Response(200, json={"experiments": []}),
+    }
+    with pytest.raises(ProviderError, match="did not create the experiment") as caught:
+        await provider(_routes(responses)).acquire(
+            AcquireRequest(mode="provision", config=_provision("probe-exp")), intent()
+        )
+    assert caught.value.code == "request_rejected"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_server_error_adopts_the_named_experiment_when_it_exists():
+    responses = {
+        ("GET", "/v1/profiles/"): httpx.Response(
+            200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
+        ),
+        ("POST", "/v1/experiments/"): httpx.Response(
+            500, json={"error": "Internal server error", "code": 500}
+        ),
+        ("GET", "/v1/experiments/"): httpx.Response(
+            200,
+            json={
+                "experiments": [
+                    {"id": EXPERIMENT, "name": "probe-exp", "project": "research"},
+                    {
+                        "id": "11111111-1111-1111-1111-111111111111",
+                        "name": "other",
+                        "project": "research",
+                    },
+                ]
+            },
+        ),
+    }
+    receipt = await provider(_routes(responses)).acquire(
+        AcquireRequest(mode="provision", config=_provision("probe-exp")), intent()
+    )
+    assert receipt.outcome == "pending"
+    assert receipt.resource is not None
+    assert receipt.resource.external_id == EXPERIMENT
+
+
 @pytest.mark.asyncio
 async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contract():
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         if request.url.path == "/v1/experiments":
             return httpx.Response(307, headers={"Location": "/v1/experiments/"})
@@ -314,7 +429,56 @@ async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contr
     assert payload["profile_project"] == "PortalProfiles"
     assert payload["bindings"] == {"hardware": "c220g2"}
     assert "credential_ref" not in payload and "ssh_credential_ref" not in payload
+    assert "sshpubkey" not in payload
     assert requests[0].url.path == "/v1/experiments/"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_provision_installs_the_ssh_users_public_key():
+    requests = []
+
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    public_key = openssh_user_key()
+    adapter = provider(respond)
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "one-node",
+        "profile_project": "PortalProfiles",
+        "ssh_username": "researcher",
+        "ssh_credential_ref": "ssh-1",
+        "ssh_known_hosts_ref": "ssh-1:known_hosts",
+        "ssh_public_key": f"  {public_key}   researcher@lab  ",
+    }
+    receipt = await adapter.acquire(AcquireRequest(mode="provision", config=config), intent())
+    payload = json.loads(requests[0].content)
+    assert payload["sshpubkey"] == f"{public_key} researcher@lab"
+    assert receipt.resource.config["ssh_public_key"] == payload["sshpubkey"]
+    assert TOKEN not in requests[0].content.decode()
+
+
+def test_cloudlab_refuses_a_private_key_in_place_of_the_ssh_user_key():
+    private_key = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    )
+    with pytest.raises(ValidationError):
+        provider(lambda request: httpx.Response(201)).validate_config(
+            "provision",
+            {
+                "credential_ref": "account-1",
+                "project": "research",
+                "profile_name": "one-node",
+                "profile_project": "PortalProfiles",
+                "ssh_public_key": private_key.decode(),
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -322,6 +486,8 @@ async def test_create_timeout_recovery_never_reposts_or_adopts_a_name_collision(
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         raise httpx.ReadTimeout("secret " + TOKEN)
 
@@ -641,6 +807,8 @@ async def test_cloudlab_sends_boolean_bindings_in_the_portal_string_form():
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         return httpx.Response(201, json={"id": EXPERIMENT})
 
@@ -714,6 +882,8 @@ async def test_the_registration_token_rides_only_on_the_create_request():
     requests = []
 
     def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
         requests.append(request)
         return httpx.Response(201, json={"id": EXPERIMENT})
 

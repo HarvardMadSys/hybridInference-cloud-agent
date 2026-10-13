@@ -226,15 +226,19 @@ async def test_one_pass_publishes_past_a_failure_and_retries_every_due_import(mo
         await _stop(task)
 
 
-async def test_an_idle_publisher_looks_again_when_a_failed_import_is_due(monkeypatch):
+@pytest.mark.parametrize("retry_kind", ["base_import", "snapshot_publish"])
+async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, retry_kind):
     monkeypatch.setattr(publish_worker, "PUBLISH_IDLE_S", 30.0)
     imported = AsyncMock()
     monkeypatch.setattr(publish_worker, "_retry_due_base_imports", imported)
     monkeypatch.setattr(publish_worker, "_publish_due", AsyncMock())
     due = datetime.now(UTC) + timedelta(seconds=0.1)
-    store = SimpleNamespace(
-        snapshot=SimpleNamespace(next_base_import_retry_due=AsyncMock(return_value=due))
-    )
+    schedules = {
+        "next_base_import_retry_due": AsyncMock(return_value=None),
+        "next_snapshot_publish_retry_due": AsyncMock(return_value=None),
+    }
+    schedules[f"next_{retry_kind}_retry_due"].return_value = due
+    store = SimpleNamespace(snapshot=SimpleNamespace(**schedules))
     task = asyncio.create_task(
         publish_worker.publish_loop(
             store,  # type: ignore[arg-type]

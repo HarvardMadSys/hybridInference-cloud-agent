@@ -17,6 +17,7 @@ import pytest
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
+from cloud_agent.domain.compute import autoscaling_acquire_can_cancel
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
@@ -151,6 +152,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         upsert_node=AsyncMock(return_value=allocation["nodes"][0]),
         checkpoint_operation=AsyncMock(return_value=True),
         finish_operation=AsyncMock(side_effect=save_finish),
+        assert_autoscale_acquire_connections_verified=AsyncMock(),
         record_observation_error=AsyncMock(),
         set_admission_hold=AsyncMock(),
         prepare_bootstrap_binding=AsyncMock(),
@@ -322,6 +324,86 @@ async def test_unknown_acquisition_is_never_blindly_repeated(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rotated_autoscale_connection_blocks_before_provider_acquire(monkeypatch):
+    h = harness(monkeypatch)
+    h.allocation.update(
+        autoscaling_owned=True,
+        nodes=[],
+        hosts=[],
+        scope_complete=False,
+    )
+    h.repository.assert_autoscale_acquire_connections_verified.side_effect = ValueError(
+        "autoscaling_connection_unverified"
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    h.provider.acquire.assert_not_awaited()
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["external_pending"] is False
+    assert autoscaling_acquire_can_cancel(h.operation, h.allocation)
+
+
+@pytest.mark.asyncio
+async def test_registration_refusal_is_checkpointed_as_cancellable_before_provider(monkeypatch):
+    h = registering(monkeypatch)
+    h.allocation.update(
+        autoscaling_owned=True,
+        nodes=[],
+        hosts=[],
+        scope_complete=False,
+    )
+    h.repository.create_node_registration.side_effect = ProviderError(
+        "registration_unavailable", "Registration is unavailable"
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    h.provider.acquire.assert_not_awaited()
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["external_pending"] is False
+    assert autoscaling_acquire_can_cancel(h.operation, h.allocation)
+
+
+@pytest.mark.asyncio
+async def test_retryable_capacity_rejection_remains_cancellable(monkeypatch):
+    h = harness(monkeypatch)
+    h.allocation.update(
+        autoscaling_owned=True,
+        nodes=[],
+        hosts=[],
+        scope_complete=False,
+    )
+    h.provider.acquire.side_effect = ProviderError(
+        "capacity_unavailable",
+        "CloudLab has no matching capacity",
+        retryable=True,
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.operation["result"]["external_pending"] is False
+    assert autoscaling_acquire_can_cancel(h.operation, h.allocation)
+    h.provider.acquire.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_acquisition_finishes_failed_for_profile_recycling(monkeypatch):
+    h = harness(monkeypatch)
+    h.provider.acquire.return_value = ProviderReceipt(
+        outcome="confirmed", resource=REF, observation=observed(state="terminated")
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "failed"
+    assert h.allocation["observed_state"] == "terminated"
+    assert h.repository.finish_operation.await_args.kwargs["state"] == "failed"
+    h.bootstrap.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_known_deployment_timeout_retries_same_resource_and_binding(monkeypatch):
     h = harness(monkeypatch)
     h.bootstrap.deploy.side_effect = [
@@ -422,6 +504,81 @@ async def test_committed_release_queries_before_replaying_same_immutable_resourc
     assert events == [("inspect", REF.external_id), ("release", REF.external_id)]
     assert h.operation["state"] == "succeeded"
     h.repository.begin_retirement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_of_a_server_the_provider_never_created_finishes_locally(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=False)
+    h.allocation.update(
+        external_id=None,
+        nodes=[],
+        hosts=[],
+        scope_complete=False,
+        observed_at=None,
+        observed_state="unknown",
+        desired_state="present",
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert h.operation["step"] == "released"
+    assert h.allocation["observed_state"] == "absent"
+    assert h.allocation["provider_state"] == "not_created"
+    h.provider.release.assert_not_awaited()
+    h.provider.inspect.assert_not_awaited()
+    h.repository.record_inventory.assert_not_awaited()
+    h.repository.commit_release.assert_awaited_once()
+    observation = h.repository.observe_allocation.await_args.kwargs["observation"]
+    assert observation["observed_state"] == "absent"
+    assert observation["scope_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_incomplete_scope_still_blocks_release_of_an_identified_server(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.repository.retirement_impact.return_value = {"blocked_reasons": ["unmanaged_scope"]}
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.operation["step"] == "waiting_for_retention"
+    h.repository.commit_release.assert_not_awaited()
+    h.provider.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_precommit_terminal_retire_skips_impossible_retention_wait(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.provider.inspect.return_value = observed(state="terminated")
+    h.repository.retirement_impact.return_value = {"blocked_reasons": ["retained_groups_present"]}
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert h.operation["step"] == "released"
+    assert h.operation["result"]["external_pending"] is False
+    h.repository.begin_retirement.assert_awaited_once()
+    h.repository.retirement_impact.assert_not_awaited()
+    h.repository.record_inventory.assert_not_awaited()
+    h.repository.commit_release.assert_awaited_once()
+    h.provider.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_settles_retirement_already_observed_terminal(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.allocation.update(desired_state="absent", observed_state="terminated")
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert h.operation["step"] == "released"
+    h.commands._require_managed.assert_not_called()
+    h.repository.begin_retirement.assert_not_awaited()
+    h.repository.commit_release.assert_awaited_once()
+    h.provider.inspect.assert_not_awaited()
+    h.provider.release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -599,7 +756,8 @@ async def test_failed_provisioning_is_released_and_never_deployed(monkeypatch):
     h.provider.release.assert_awaited_once()
     assert h.provider.release.await_args.args[0].external_id == REF.external_id
     assert h.allocation["observed_state"] == "terminated"
-    assert h.operation["state"] == "blocked"
+    assert h.operation["state"] == "failed"
+    assert h.repository.finish_operation.await_args.kwargs["state"] == "failed"
     assert h.operation["result"]["blocked_reasons"][0]["code"] == "resource_failed"
     h.repository.prepare_bootstrap_binding.assert_not_awaited()
     h.bootstrap.deploy.assert_not_awaited()

@@ -8,10 +8,12 @@
 // its own ledger snapshot.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useT } from '@/components/providers';
 import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 
 import {
+  createAgentJob,
   getAgentJobUsage,
   refreshAgentJobUsage,
   type AgentJobApi,
@@ -317,8 +319,11 @@ export function RunDetails({
   onOpenGitDiff: () => void;
 }) {
   const t = useT();
+  const router = useRouter();
   const idPrefix = `run-${jobId}`;
   const { usage, loaded, refreshing, error, refresh } = useJobUsage(jobId);
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
 
   const runEvents = useMemo(
     () => (events as AgentThreadEventApi[]).filter((event) => event.job_id === jobId),
@@ -365,6 +370,37 @@ export function RunDetails({
       : state === 'cancelled'
         ? t('runDetails.stoppedFollowUp')
         : null;
+
+  // "Restart in a new session" re-issues the same task (repo + prompt) as a
+  // fresh job/thread, so it is offered only for a failed run and only when the
+  // turn exposed enough to recreate it. A cancelled run is deliberately not
+  // offered: its follow-up continues from saved intermediate changes instead.
+  const repo = job?.repo ?? turnFallback?.repo;
+  const prompt = (job?.task_prompt ?? turnFallback?.prompt ?? '').trim();
+  const model = job?.model ?? turnFallback?.model;
+  const restartable = state === 'failed' && Boolean(repo && prompt && model) && !restarting;
+
+  async function restartInNewSession() {
+    if (!repo || !prompt || !model) return;
+    setRestarting(true);
+    setRestartError(null);
+    try {
+      const restart = await createAgentJob({
+        repo,
+        task_prompt: prompt,
+        model,
+        ...((job?.reasoning_effort ?? turnFallback?.reasoningEffort)
+          ? { reasoning_effort: job?.reasoning_effort ?? turnFallback?.reasoningEffort }
+          : {}),
+      });
+      router.push(`/${restart.id}`);
+    } catch (cause: unknown) {
+      setRestarting(false);
+      setRestartError(
+        cause instanceof Error ? cause.message : 'Could not restart in a new session',
+      );
+    }
+  }
 
   if (tab === 'usage') {
     if (!loaded) {
@@ -529,6 +565,21 @@ export function RunDetails({
           <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
             {guidance}
           </p>
+        ) : null}
+        {restartable ? (
+          <div className="mt-4">
+            {restartError ? (
+              <p className="text-[11px] text-red-600 dark:text-red-400">{restartError}</p>
+            ) : null}
+            <button
+              type="button"
+              onClick={restartInNewSession}
+              disabled={restarting}
+              className="ui-focus-ring inline-flex min-h-9 items-center rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-700 transition-colors hover:border-red-300 hover:bg-red-50 disabled:opacity-60 dark:border-red-500/30 dark:bg-transparent dark:text-red-300 dark:hover:border-red-500/50 dark:hover:bg-red-500/10"
+            >
+              {restarting ? t('runDetails.restarting') : t('runDetails.restart')}
+            </button>
+          </div>
         ) : null}
       </section>
       <DetailRows>

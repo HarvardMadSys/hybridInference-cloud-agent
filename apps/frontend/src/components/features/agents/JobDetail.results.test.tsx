@@ -11,6 +11,12 @@ import {
 } from '@/lib/api/agents';
 import { toDisplayJob } from './adapt';
 import { JobDetail } from './JobDetail';
+import { buildTrajectorySteps } from './trajectorySteps';
+
+vi.mock('./trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectorySteps')>();
+  return { ...original, buildTrajectorySteps: vi.fn(original.buildTrajectorySteps) };
+});
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -27,6 +33,8 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
     github_install_url: null,
   }),
   getAgentJobGit: vi.fn(),
+  getAgentJob: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
+  getAgentAttemptTelemetry: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
   getAgentJobUsage: vi.fn().mockResolvedValue(null),
   refreshAgentJobUsage: vi.fn().mockResolvedValue(null),
   getAgentThreadStats: vi.fn().mockResolvedValue(null),
@@ -176,6 +184,28 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('recorded results in the conversation', () => {
+  it('defers trajectory work in chat, reuses it while inspecting, and rebuilds after new events', async () => {
+    vi.mocked(buildTrajectorySteps).mockClear();
+    const props = fixture();
+    const { rerender } = render(<JobDetail {...props} />);
+    expect(buildTrajectorySteps).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(buildTrajectorySteps).toHaveBeenCalledTimes(1);
+    fireEvent.change(await screen.findByLabelText('Search steps'), {
+      target: { value: 'current' },
+    });
+    expect(buildTrajectorySteps).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    const events = [...props.events, diffEvent(props.threadJobs[1], patch('src/new.ts', 'new'), 2)];
+    rerender(<JobDetail {...props} events={events} />);
+    expect(buildTrajectorySteps).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(buildTrajectorySteps).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(buildTrajectorySteps).mock.lastCall?.[0]).toBe(events);
+  });
+
   it('moves keyboard focus into the recorded workspace and restores the file opener when closed', async () => {
     render(<JobDetail {...fixture()} />);
     const opener = screen.getByRole('button', {

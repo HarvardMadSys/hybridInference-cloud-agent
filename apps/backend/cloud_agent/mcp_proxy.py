@@ -39,8 +39,12 @@ and needs no state to carry between requests.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
+
+from cloud_agent.mcp.jsonrpc import INVALID_REQUEST, PARSE_ERROR
 
 if TYPE_CHECKING:
     from cloud_agent.mcp.models import McpServer
@@ -53,6 +57,14 @@ METHOD_NOT_FOUND = -32601
 
 TOOLS_LIST = "tools/list"
 TOOLS_CALL = "tools/call"
+
+#: The members of a JSON-RPC message, and the request parameters that name
+#: what a call reaches. A decision reads these by their exact spelling, so a
+#: variant spelling is refused rather than forwarded: an upstream whose decoder
+#: matches member names case-insensitively would read ``Method`` or ``NAME`` as
+#: the member this relay never saw.
+_MESSAGE_MEMBERS = ("jsonrpc", "id", "method", "params", "result", "error")
+_DECIDED_PARAMS = ("name", "uri", "arguments")
 
 # A single SSE frame is buffered to filter it. The cap bounds what a hostile or
 # broken upstream can make the gateway hold for one frame; it is far above any
@@ -90,24 +102,127 @@ def _error(payload: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
+class UnreadableRequest(ValueError):
+    """A relayed body this proxy will not decide, and therefore will not forward."""
+
+    def __init__(self, code: int, message: str) -> None:
+        """Record the JSON-RPC code the refusal is reported under."""
+        super().__init__(message)
+        self.code = code
+
+    def reply(self) -> dict[str, Any]:
+        """Render the refusal as a JSON-RPC error with the null id the spec requires."""
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": self.code, "message": str(self)}}
+
+
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON object, refusing a member name that appears twice."""
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: the member {key!r} repeats")
+        document[key] = value
+    return document
+
+
+def _finite(text: str) -> float:
+    """Read a finite number only when its JSON encoding preserves its decimal value."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: {text} is not a finite number")
+    try:
+        unchanged = Decimal(text) == Decimal(str(value))
+    except InvalidOperation:
+        unchanged = False
+    if not unchanged:
+        raise UnreadableRequest(
+            PARSE_ERROR,
+            "this number cannot be relayed without changing its value; "
+            "send an exactly representable number or a string if the tool accepts one",
+        )
+    return value
+
+
+def _not_json(text: str) -> Any:
+    """Refuse ``NaN`` and ``Infinity``, which Python reads and JSON does not have."""
+    raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: {text} is not a JSON value")
+
+
+def _require_exact_spelling(members: dict[str, Any], names: tuple[str, ...]) -> None:
+    """Refuse a member that differs from a decided name only by case."""
+    canonical = {name.casefold(): name for name in names}
+    for key in members:
+        expected = canonical.get(key.casefold())
+        if expected is not None and key != expected:
+            raise UnreadableRequest(
+                INVALID_REQUEST, f"{key!r} is not a member this relay reads; send {expected!r}"
+            )
+
+
+def parse_request(body: bytes) -> Any:
+    """Read a relayed request exactly as the upstream must, or refuse it.
+
+    The relay decides a call from its parse of the body, so a body it cannot
+    parse is a call it has not decided, and is refused rather than forwarded.
+    Strictness here is about agreement, not pedantry: an upstream decoder that
+    replaces invalid UTF-8 or keeps the last of two repeated members would
+    otherwise run a call other than the one decided. So the body has to be
+    UTF-8, every member name unique within its object, and the members a
+    decision reads spelled exactly. Fractional or exponent numbers must retain
+    their exact decimal value when re-encoded: overflow, underflow and rounding
+    are refused rather than forwarding different arguments or a different id.
+    Ordinary values such as ``0.1`` still travel, because their JSON encoding
+    retains that decimal value despite the float's binary representation.
+    """
+    try:
+        document = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_unique_members,
+            parse_float=_finite,
+            parse_constant=_not_json,
+        )
+    except UnreadableRequest:
+        raise
+    except (ValueError, RecursionError) as exc:
+        # UnicodeDecodeError and JSONDecodeError are both ValueErrors. Nesting
+        # deep enough to exhaust the parser's stack is no more a request than
+        # bytes that are not JSON at all.
+        raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: {exc}") from exc
+    for message in document if isinstance(document, list) else [document]:
+        if not isinstance(message, dict):
+            continue
+        _require_exact_spelling(message, _MESSAGE_MEMBERS)
+        params = message.get("params")
+        if isinstance(params, dict):
+            _require_exact_spelling(params, _DECIDED_PARAMS)
+    return document
+
+
+def canonical_request(document: Any) -> bytes:
+    """Serialize what was decided, which is what is forwarded in place of the body.
+
+    The upstream receives this relay's own encoding of the parsed document, so
+    whatever a different decoder would have made of the original bytes, it
+    reads the request this relay authorized. ASCII escapes keep the output
+    valid for every decoder, including for a lone surrogate the input escaped.
+    """
+    return json.dumps(document, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode()
+
+
 def plan_request(body: bytes, server: McpServer) -> RequestPlan:
     """Decide whether a request may be forwarded.
 
-    Unparseable bodies are forwarded untouched: the upstream server owns the
-    protocol and will answer a malformed request better than a guess here
-    would. Nothing is weakened by that — a body the proxy cannot parse is not a
-    ``tools/call`` it failed to notice, since noticing one is the same parse,
-    and the response filter is independent of this decision.
+    A body that :func:`parse_request` refuses is refused here too. A body the
+    proxy cannot parse is one whose ``tools/call`` it cannot see, and the
+    upstream may well be able to see it: forwarding it would let the call skip
+    the allowlist entirely.
     """
     # No early return for an "unfiltered" server: there is no such server. An
-    # empty reachable set means nothing is callable, and a body that cannot be
-    # parsed is still forwarded untouched -- the response filter is independent
-    # of this decision, so nothing is weakened by letting the upstream answer a
-    # malformed request itself.
+    # empty reachable set means nothing is callable.
     try:
-        document = json.loads(body or b"{}")
-    except (json.JSONDecodeError, ValueError):
-        return RequestPlan()
+        document = parse_request(body)
+    except UnreadableRequest as exc:
+        return RequestPlan(rejection=exc.reply())
 
     batch = document if isinstance(document, list) else [document]
     blocked: list[str] = []
@@ -255,8 +370,11 @@ __all__ = [
     "TOOLS_LIST",
     "RequestPlan",
     "SseFilter",
+    "UnreadableRequest",
+    "canonical_request",
     "filter_json_body",
     "filter_message",
     "filter_sse_frame",
+    "parse_request",
     "plan_request",
 ]

@@ -44,6 +44,7 @@ class ServerQueries:
         caps = entry.provider.capabilities() if entry else None
         reasons: list[dict[str, str]] = []
         actions: list[str] = []
+        autoscaling_owned = bool(row.get("autoscaling_owned"))
         terminal = row.get("observed_state") in {"terminated", "absent"} or bool(
             row.get("release_committed_at")
         )
@@ -51,13 +52,23 @@ class ServerQueries:
             reasons.append(
                 {"code": "provider_unavailable", "message": "Provider is not configured."}
             )
-        if row.get("observation_error"):
+        if row.get("observation_error") and row.get("observed_state") not in {
+            "terminated",
+            "absent",
+        }:
             reasons.append(
                 {"code": "observation_stale", "message": "Resource observation needs refresh."}
             )
         if not terminal and caps:
-            if caps.can_extend:
+            if caps.can_extend and not autoscaling_owned:
                 actions.append("policy")
+            if autoscaling_owned:
+                reasons.append(
+                    {
+                        "code": "autoscaling_managed",
+                        "message": "Renewal policy and node replacement are managed by CloudLab autoscaling.",
+                    }
+                )
             if row.get("management_mode") == "manage" and self.secrets.configured:
                 if row.get("external_id") and caps.can_extend:
                     actions.append("extend")
@@ -91,6 +102,7 @@ class ServerQueries:
             and policy.node_types
             and len(hosts) == 1
             and not moving
+            and not autoscaling_owned
         ):
             actions.append("rotate")
         nodes = [
@@ -147,7 +159,9 @@ class ServerQueries:
             "created_at": row.get("created_at"),
             # A replacement node took this Host over from that allocation.
             "predecessor_id": row.get("predecessor_id"),
-            "rotation": self._rotation_view(row, policy, rotation),
+            "rotation": self._rotation_view(
+                row, policy, rotation, autoscaling_owned=autoscaling_owned
+            ),
             "revision": row["revision"],
             "management_mode": row.get("management_mode", "observe"),
             "desired_state": row.get("desired_state", "present"),
@@ -158,7 +172,11 @@ class ServerQueries:
 
     @staticmethod
     def _rotation_view(
-        row: dict[str, Any], policy: RenewalPolicy, rotation: dict[str, Any] | None
+        row: dict[str, Any],
+        policy: RenewalPolicy,
+        rotation: dict[str, Any] | None,
+        *,
+        autoscaling_owned: bool,
     ) -> dict[str, Any]:
         """When the node is next renewed or replaced, and how the last move went."""
         expires, created = row.get("expires_at"), row.get("created_at")
@@ -169,11 +187,11 @@ class ServerQueries:
         )
         replace_after = (
             created + timedelta(seconds=policy.max_node_age_seconds)
-            if policy.rotation_enabled and isinstance(created, datetime)
+            if policy.rotation_enabled and not autoscaling_owned and isinstance(created, datetime)
             else None
         )
         return {
-            "enabled": policy.rotation_enabled,
+            "enabled": policy.rotation_enabled and not autoscaling_owned,
             "decide_at": decide_at,
             "replace_after": replace_after,
             "last": None

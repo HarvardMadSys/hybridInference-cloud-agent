@@ -19,14 +19,14 @@ import { rememberReturn, requestGitHubAccess } from './githubReturn';
 // undone here for a few seconds, and from Settings after that.
 
 const ROW =
-  'group mt-1.5 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] font-medium text-gray-800 transition-colors hover:bg-gray-200/50 hover:text-gray-900 disabled:cursor-wait disabled:opacity-70 dark:text-gray-200 dark:hover:bg-white/5 dark:hover:text-gray-100';
+  'ui-focus-ring group mt-2 flex min-h-10 w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left text-[13px] font-medium text-foreground transition-colors hover:bg-surface-hover disabled:cursor-wait disabled:opacity-70 [@media(pointer:coarse)]:min-h-11';
 
 function StepIcon({ step }: { step: FirstRunStep['next'] }) {
   if (step === 'task') {
     return (
       <svg
         aria-hidden="true"
-        className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
+        className="h-4 w-4 shrink-0 text-muted"
         fill="none"
         viewBox="0 0 24 24"
         stroke="currentColor"
@@ -43,7 +43,7 @@ function StepIcon({ step }: { step: FirstRunStep['next'] }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
+      className="h-4 w-4 shrink-0 text-muted"
       viewBox="0 0 16 16"
       fill="currentColor"
     >
@@ -90,7 +90,7 @@ function SkippedNote({
         onMouseLeave={() => setPointedAt(false)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
-        className="flex items-center gap-2 rounded-md bg-gray-200/40 px-2 py-1.5 text-[12px] leading-snug text-gray-500 dark:bg-white/5 dark:text-gray-400"
+        className="flex items-center gap-2 rounded-xl bg-surface-hover px-2.5 py-2 text-[12px] leading-snug text-muted"
       >
         <span className="min-w-0 flex-1">{t('gettingStarted.hidden')}</span>
         <button
@@ -98,7 +98,7 @@ function SkippedNote({
           type="button"
           // A press from the keyboard has no click count.
           onClick={(event) => onUndo(event.detail === 0)}
-          className="shrink-0 rounded px-1.5 py-0.5 font-medium text-gray-700 transition-colors hover:bg-gray-200/80 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-200 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          className="ui-focus-ring shrink-0 rounded-lg px-1.5 py-1 font-medium text-foreground transition-colors hover:bg-surface [@media(pointer:coarse)]:min-h-11"
         >
           {t('gettingStarted.undo')}
         </button>
@@ -181,7 +181,7 @@ export function GettingStarted() {
       <span className="min-w-0 flex-1 truncate">{leaving ? t('connect.leaving') : label}</span>
       <svg
         aria-hidden="true"
-        className="h-3.5 w-3.5 shrink-0 text-gray-400 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 dark:text-gray-500"
+        className="h-3.5 w-3.5 shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
         fill="none"
         viewBox="0 0 24 24"
         stroke="currentColor"
@@ -193,9 +193,9 @@ export function GettingStarted() {
   );
 
   return (
-    <section aria-labelledby={headingId} className="shrink-0 px-3 pb-3">
-      <div className="flex items-center justify-between pl-2 pr-0.5 text-[11px] text-gray-400 dark:text-gray-500">
-        <h2 id={headingId} className="font-medium uppercase tracking-[0.08em]">
+    <section aria-labelledby={headingId} className="shrink-0 px-3 pb-4 pt-3">
+      <div className="flex items-center justify-between pl-2 pr-0.5 text-[11px] text-muted">
+        <h2 id={headingId} className="font-medium tracking-[0.04em]">
           {t('gettingStarted.title')}
         </h2>
         <span className="flex items-center gap-1">
@@ -210,7 +210,7 @@ export function GettingStarted() {
               skip();
               setNote({ fromKeyboard: event.detail === 0 });
             }}
-            className="rounded px-1 transition-colors hover:bg-gray-200/60 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:hover:bg-white/10 dark:hover:text-gray-200"
+            className="ui-focus-ring rounded-lg px-1.5 py-1 transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11"
           >
             {t('gettingStarted.skip')}
           </button>
@@ -221,9 +221,7 @@ export function GettingStarted() {
           <span
             key={index}
             className={`h-[3px] flex-1 rounded-full ${
-              index < step.done
-                ? 'bg-crimson/70 dark:bg-crimson-light/70'
-                : 'bg-gray-200 dark:bg-white/10'
+              index < step.done ? 'bg-accent/70' : 'bg-border'
             }`}
           />
         ))}

@@ -180,6 +180,43 @@ class TestHeaders:
         assert headers["mcp-protocol-version"] == "2025-11-25"
         assert headers["mcp-session-id"] == "sess-1"
 
+    async def test_a_stateless_tool_call_sends_annotated_argument_headers(self) -> None:
+        """GitHub's remote server answers 400 when these headers are missing."""
+        seen: list[httpx.Headers] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers)
+            return _reply(request, {"content": [{"type": "text", "text": "ok"}]})
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-mcp-header": "owner"},
+                "repo": {"type": "string", "x-mcp-header": "repo"},
+            },
+        }
+        async with _client(handle) as http:
+            transport = StreamableHttpTransport(
+                _config(protocol_version="2026-07-28"), http, owns_client=False
+            )
+            await transport.request(
+                "tools/call",
+                {"name": "get_file_contents", "arguments": {"owner": "acme", "repo": "demo"}},
+                input_schema=schema,
+            )
+            transport.set_era("handshake")
+            await transport.request(
+                "tools/call",
+                {"name": "get_file_contents", "arguments": {"owner": "acme", "repo": "demo"}},
+                input_schema=schema,
+            )
+        assert seen[0]["mcp-method"] == "tools/call"
+        assert seen[0]["mcp-name"] == "get_file_contents"
+        assert seen[0]["mcp-param-owner"] == "acme"
+        assert seen[0]["mcp-param-repo"] == "demo"
+        assert "mcp-method" not in seen[1]
+        assert "mcp-param-owner" not in seen[1]
+
 
 class TestStatuses:
     """Turning an HTTP answer into an action the owner can take."""

@@ -193,12 +193,25 @@ async def test_a_hard_delete_of_the_job_row_still_cascades(store, pool):
     assert remaining == 0
 
 
-async def test_uploads_no_task_ever_claimed_are_collected(store, pool):
+async def test_uploads_no_task_ever_claimed_are_collected_and_release_quota(
+    store, pool, monkeypatch
+):
+    monkeypatch.setattr(
+        "cloud_agent.storage.repositories.attachments.attachment_max_files", lambda: 1
+    )
     staged = await stage(store)
+    with pytest.raises(AttachmentError, match="at most 1"):
+        await stage(store, path="blocked.txt")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_job_attachments SET created_at = NOW() - INTERVAL '23 hours' "
+            "WHERE id = $1",
+            staged["id"],
+        )
     assert await store.attachments.purge_stale_staged(older_than_hours=24) == 0
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_job_attachments SET created_at = NOW() - INTERVAL '48 hours' "
+            "UPDATE agent_job_attachments SET created_at = NOW() - INTERVAL '25 hours' "
             "WHERE id = $1",
             staged["id"],
         )
@@ -207,6 +220,8 @@ async def test_uploads_no_task_ever_claimed_are_collected(store, pool):
         await store.attachments.select_attachments(user_id="user-1", attachment_ids=[staged["id"]])
         == []
     )
+    replacement = await stage(store, path="replacement.txt")
+    assert replacement["path"] == "replacement.txt"
 
 
 async def claimed_upload(store):

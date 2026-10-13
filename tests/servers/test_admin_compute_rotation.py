@@ -87,6 +87,38 @@ async def test_move_now_refuses_servers_that_cannot_move(compute_api, change, st
 
 
 @pytest.mark.asyncio
+async def test_autoscaling_member_has_no_manual_policy_or_rotation_escape(compute_api):
+    client, repo, _ = compute_api
+    row = await movable(client, repo, autoscaling_owned=True)
+
+    servers = (await client.get("/admin/agent/servers", headers=ADMIN)).json()
+    [view] = [item for item in servers["allocations"] if item["id"] == row["id"]]
+    assert "policy" not in view["allowed_actions"]
+    assert "rotate" not in view["allowed_actions"]
+    assert view["rotation"]["enabled"] is False
+    assert view["rotation"]["replace_after"] is None
+    assert "autoscaling_managed" in {reason["code"] for reason in view["blocked_reasons"]}
+
+    for policy in (RenewalPolicy(), POLICY):
+        refused = await client.patch(
+            f"/admin/agent/compute-allocations/{row['id']}/policy",
+            headers=ADMIN,
+            json={"expected_revision": row["revision"], "policy": policy.model_dump()},
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["detail"]["code"] == "autoscaling_managed"
+
+    refused = await client.post(
+        f"/admin/agent/compute-allocations/{row['id']}/rotate",
+        headers=ADMIN,
+        json={"request_id": "owned-move", "expected_revision": row["revision"]},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "autoscaling_managed"
+    assert not [op for op in repo.operations.values() if op["kind"] == "rotate"]
+
+
+@pytest.mark.asyncio
 async def test_a_second_move_is_refused_while_one_runs(compute_api, monkeypatch):
     client, repo, _ = compute_api
     row = await movable(client, repo)

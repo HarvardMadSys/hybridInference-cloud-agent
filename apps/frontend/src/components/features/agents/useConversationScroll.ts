@@ -196,7 +196,12 @@ export function restoreScrollTop(
     if (row !== undefined) return clampScrollTop(row.top - anchor.offset, maxScroll);
   }
   const turn = turns.find((candidate) => candidate.key === anchor.turnKey);
-  if (turn !== undefined) return turnScrollTop(turn.top, maxScroll);
+  if (turn !== undefined) {
+    // When no row was available, the turn itself was the original anchor.
+    // Preserve its offset instead of treating it as a missing-row fallback.
+    if (anchor.blockKey === undefined) return clampScrollTop(turn.top - anchor.offset, maxScroll);
+    return turnScrollTop(turn.top, maxScroll);
+  }
   const nearest = turns[Math.min(anchor.turnIndex, turns.length - 1)];
   return turnScrollTop(nearest.top, maxScroll);
 }
@@ -661,7 +666,11 @@ export function useConversationScroll({
         lastContentHeightRef.current,
         lastClientHeightRef.current,
       );
-      const wasAtEnd = container.scrollTop >= previousMaxScroll - BOTTOM_EPSILON_PX;
+      // Shrinking content clamps scrollTop before this callback runs (for
+      // example, hiding the back-to-bottom control in the sticky composer).
+      // Reaching that new maximum still means the reader is at the end.
+      const wasAtEnd =
+        container.scrollTop >= Math.min(previousMaxScroll, maxScroll) - BOTTOM_EPSILON_PX;
       // Growth that came from a reflow, or from the composer itself, is not
       // something the reader has not been shown. The composer is a sibling of
       // the rows inside the same scroller, so its height has to be excluded by
@@ -742,7 +751,11 @@ export function useConversationScroll({
         else if (!atEnd && modeRef.current !== 'reading') enterMode('reading');
       }
       if (atEnd) setHasNewContent(false);
-      scheduleSync(false);
+      // Capture the new reading anchor now. ResizeObserver can run before the
+      // next animation frame; restoring the previous frame's anchor would
+      // undo the reader's scroll. Cached geometry avoids remeasuring every row
+      // when the rows have not changed.
+      sync(false);
     };
     const onPointerDown = (event: PointerEvent) => {
       // A press on the scrollbar lands on the container itself; anything else
@@ -771,7 +784,7 @@ export function useConversationScroll({
       container.removeEventListener('pointerdown', onPointerDown);
       container.removeEventListener('keydown', onKeyDown);
     };
-  }, [active, container, enterMode, scheduleSync]);
+  }, [active, container, enterMode, sync]);
 
   // Nothing may outlive the view: a queued frame from a replaced conversation
   // would otherwise move the next one.

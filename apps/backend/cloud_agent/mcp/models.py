@@ -207,8 +207,10 @@ class HeaderAuth:
 
     def render(self, secret: str) -> dict[str, str]:
         """Build the outbound header for ``secret``."""
+        from cloud_agent.mcp.net_policy import credential_headers
+
         value = f"{self.scheme} {secret}".strip() if self.scheme else secret
-        return {self.header_name: value}
+        return credential_headers({self.header_name: value})
 
 
 @dataclass(frozen=True)

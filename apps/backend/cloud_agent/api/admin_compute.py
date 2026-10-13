@@ -34,6 +34,7 @@ from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request model
     ResolveComputeOperation,
     RetireComputeRequest,
     RotateComputeRequest,
+    UpdateCloudLabAutoscaling,
     UpdateComputeConnection,
     UpdateComputePolicy,
 )
@@ -74,6 +75,58 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
     "rotation_switching": (
         409,
         "The old node is stopped or the Host already moved; wait for the move or its rollback.",
+    ),
+    "deployment_profile_reserved": (
+        409,
+        "The deployment profile is reserved for CloudLab autoscaling.",
+    ),
+    "autoscaling_profile_in_use": (
+        409,
+        "A selected deployment profile is already used by a manual resource.",
+    ),
+    "autoscaling_profile_unavailable": (
+        409,
+        "No reserved deployment profile is available for another host.",
+    ),
+    "autoscaling_connection_unverified": (
+        409,
+        "Both autoscaling connections must still be verified.",
+    ),
+    "autoscaling_connection_in_use": (
+        409,
+        "Pause autoscaling and resolve any running acquisition before changing this connection.",
+    ),
+    "autoscaling_placement_pinned": (
+        409,
+        "Set host placement to Automatic before enabling or running autoscaling.",
+    ),
+    "autoscaling_runtime_conflict": (
+        409,
+        "Autoscaling state changed; the controller will retry from a fresh snapshot.",
+    ),
+    "autoscaling_disabled": (409, "CloudLab autoscaling is paused."),
+    "autoscaling_acquire_blocked": (
+        409,
+        "A previous autoscaling acquisition needs administrator attention.",
+    ),
+    "autoscaling_operation_in_flight": (
+        409,
+        "An autoscaling lifecycle operation is already in progress.",
+    ),
+    "autoscaling_at_capacity": (409, "Autoscaling is already at maximum capacity."),
+    "autoscaling_scale_down_disabled": (409, "Automatic scale-down is disabled."),
+    "autoscaling_member_not_found": (404, "The autoscaling member no longer exists."),
+    "autoscaling_member_not_retirable": (
+        409,
+        "The autoscaling member is not in a safe state for retirement.",
+    ),
+    "autoscaling_member_not_idle": (
+        409,
+        "The autoscaling member became busy and cannot be retired.",
+    ),
+    "autoscaling_minimum_capacity": (
+        409,
+        "Retirement would reduce the pool below its configured minimum.",
     ),
 }
 
@@ -230,6 +283,35 @@ async def set_cloudlab_defaults(
     defaults = await commands.set_cloudlab_defaults(payload)
     await _audit(request, actor, "cloudlab_defaults.set")
     return {"defaults": defaults}
+
+
+@router.get("/compute-autoscaling/cloudlab")
+async def cloudlab_autoscaling(
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Read the safe autoscaling policy, controller status and owned members."""
+    return await commands.cloudlab_autoscaling()
+
+
+@router.get("/compute-availability/cloudlab")
+async def cloudlab_preferred_nodes(
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """List fresh, plentiful CloudLab node types from the public inventory."""
+    return await commands.cloudlab_preferred_nodes()
+
+
+@router.put("/compute-autoscaling/cloudlab")
+async def set_cloudlab_autoscaling(
+    request: Request,
+    payload: UpdateCloudLabAutoscaling,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Compare and replace the singleton CloudLab autoscaling policy."""
+    result = await commands.set_cloudlab_autoscaling(payload, actor=actor)
+    await _audit(request, actor, "cloudlab_autoscaling.set")
+    return result
 
 
 @router.get("/compute-connections")

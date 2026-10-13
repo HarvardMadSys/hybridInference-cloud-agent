@@ -454,6 +454,48 @@ describe('PendingMessageQueue', () => {
 });
 
 describe('usePendingMessages', () => {
+  it('retains waiting messages after a failed read and clears the stale notice on retry', async () => {
+    let queue!: ReturnType<typeof usePendingMessages>;
+    render(
+      <Harness
+        onQueue={(value) => {
+          queue = value;
+        }}
+      />,
+    );
+    await screen.findByText('A: add a regression test');
+    vi.mocked(getThreadQueue).mockRejectedValueOnce(new Error('Offline'));
+    await act(async () => queue.refresh());
+    expect(screen.getByText('A: add a regression test')).toBeInTheDocument();
+    expect(
+      screen.getByText('Refresh failed — showing the last successful read.'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(queue.refreshError).toBeNull());
+    expect(
+      screen.queryByText('Refresh failed — showing the last successful read.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not poll a hidden tab and reads immediately when visible again', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    try {
+      const { result } = renderHook(() => usePendingMessages({ threadId: 'athr_1', active: true }));
+      await act(async () => {});
+      const reads = vi.mocked(getThreadQueue).mock.calls.length;
+      visibility.mockReturnValue('hidden');
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads);
+      expect(result.current.messages).toHaveLength(2);
+      visibility.mockReturnValue('visible');
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+    } finally {
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
   it.each([
     [false, IDLE_QUEUE_POLL_MS],
     [true, PUSH_FALLBACK_POLL_MS],

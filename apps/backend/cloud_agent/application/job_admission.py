@@ -47,6 +47,7 @@ from cloud_agent_host.runtimes import (
     runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
+from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:
     from typing import Any
@@ -445,6 +446,18 @@ async def _create_job_as(
     # service door creates jobs through here too: a check only one door runs
     # is precisely the drift this extraction exists to prevent.
     _require_registered_runtime(body.runtime)
+    try:
+        plugins = validate_sandbox_plugins(body.runtime, body.plugins or [])
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_plugin_selection",
+                    "message": str(exc),
+                }
+            },
+        ) from exc
     # Canonical from here on. The grant the gateway mints names canonical
     # ids, so a job that stored the alias would carry a scope matching
     # nothing — created successfully, dead at its first inference call.
@@ -530,6 +543,7 @@ async def _create_job_as(
         reasoning_effort=reasoning_effort,
         base_sha=base_sha,
         setup_script=body.setup_script,
+        plugins=plugins,
         metadata=metadata or None,
         mcp_bindings=mcp_bindings,
         # Named rather than splatted: see the note on the same call in

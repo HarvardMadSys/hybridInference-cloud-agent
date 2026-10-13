@@ -45,12 +45,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Dependencies first, so a source edit does not re-resolve them.
-COPY pyproject.toml README.md LICENSE ./
-COPY apps/backend/cloud_agent/__init__.py apps/backend/cloud_agent/__init__.py
-COPY apps/backend/cloud_agent_host/__init__.py apps/backend/cloud_agent_host/__init__.py
+# Install the same locked production dependencies CI and the runner use.
+# Source edits retain this dependency layer; neither sync may update uv.lock.
 ARG PIP_DEFAULT_TIMEOUT=120
-RUN pip install --no-cache-dir .
+ARG UV_HTTP_TIMEOUT=120
+ARG UV_VERSION=0.9.7
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN uv sync --frozen --no-dev --no-install-project
+ENV PATH="/app/.venv/bin:$PATH"
 
 # All three packages. See the header for why this image needs the host one.
 COPY apps/backend/cloud_agent/ apps/backend/cloud_agent/
@@ -64,7 +67,7 @@ COPY alembic.ini ./
 COPY migrations/ migrations/
 COPY --from=host-release /compute-host-release/ /app/compute-host-release/
 
-RUN pip install --no-cache-dir . \
+RUN uv sync --frozen --no-dev --no-editable \
     && useradd --create-home --uid 10001 cloudagent \
     && chown -R cloudagent:cloudagent /app \
     && install -d -m 0750 -o cloudagent -g cloudagent /var/lib/cloud-agent/pgadmin-bootstrap

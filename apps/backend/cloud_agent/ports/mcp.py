@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 
 class McpConnectionRepository(Protocol):
@@ -39,6 +39,9 @@ class McpConnectionRepository(Protocol):
         account_label: str | None = None,
         request_timeout_s: float | None = None,
         reuse_pending: bool = False,
+        access_token_ciphertext: str | None = None,
+        auth_config_patch: Mapping[str, Any] | None = None,
+        sealed_launch_spec: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Insert a connection and return it, at revision one.
 
@@ -50,6 +53,21 @@ class McpConnectionRepository(Protocol):
         ``reuse_pending`` resumes an identical remote setup without credentials
         instead of inserting another row. Existing credentials, settings, and
         approvals are never changed; authenticated accounts remain independent.
+
+        ``access_token_ciphertext`` and ``sealed_launch_spec`` are written in
+        the same transaction as the insert. A rejected write raises
+        ``McpCredentialWriteRejected`` and leaves no row.
+        """
+        ...
+
+    async def create_mcp_connections(
+        self, *, connections: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Insert every draft, with its credentials, in one transaction.
+
+        One rejected credential write or a later insert failure rolls the whole
+        batch back. Callers encrypt before this call, so a missing key never
+        reaches it.
         """
         ...
 
@@ -294,7 +312,7 @@ class McpConnectionRepository(Protocol):
         connection_id: int,
         config_revision: int,
         authorization_epoch: int,
-        oauth_generation: int,
+        expected_oauth_generation: int,
         code_verifier_ciphertext: str,
         client_id: str,
         client_secret_ciphertext: str | None,
@@ -309,23 +327,30 @@ class McpConnectionRepository(Protocol):
         revocation_endpoint: str | None,
         registration_endpoint: str | None,
         expires_at: Any,
-    ) -> None:
-        """Record one started authorization.
+    ) -> int | None:
+        """Record one started authorization and return its generation.
 
-        Starting a flow also moves the OAuth generation, in the same
-        transaction, so any callback still in flight for an earlier attempt is
-        refused rather than being allowed to win a race against the newer one.
+        The new generation is allocated in the same statement that fences the
+        connection on the config revision, authorization epoch, and OAuth
+        generation the caller read. The flow row stores that returned value.
+        A stale start matches nothing: it does not move the generation and it
+        does not delete a newer pending flow. ``None`` means the fence missed.
         """
         ...
 
-    async def consume_mcp_oauth_flow(self, *, state_hash: str) -> dict[str, Any] | None:
-        """Claim a flow exactly once, returning it, or ``None``.
+    async def consume_mcp_oauth_flow(
+        self, *, state_hash: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """Claim one of ``user_id``'s flows exactly once, returning it, or ``None``.
 
         The ``consumed_at IS NULL`` predicate is inside the ``UPDATE``, so two
         callbacks racing on the same state cannot both proceed: the second
         matches no row. Marking it consumed before the token exchange is
         deliberate -- a callback that fails after this point must be restarted
         by the user, which is preferable to a state value that can be replayed.
+
+        The owner is part of the match: a flow presented by a browser signed in
+        as another account matches nothing and is left for its owner.
         """
         ...
 
@@ -576,18 +601,23 @@ class McpConnectionRepository(Protocol):
         change of target as editing the command. Both revisions move, which
         invalidates every session binding approved against the previous answer,
         and the connector's authorized set is written in the same transaction so
-        the two cannot disagree about what it may serve.
+        the two cannot disagree about what it may serve. Every previous
+        authorization row for the connection is removed in that transaction
+        before the new pair is inserted.
         """
         ...
 
     async def unbind_mcp_connection_connector(
-        self, *, connection_id: int, user_id: str
+        self, *, connection_id: int, user_id: str, connector_id: int
     ) -> dict[str, Any] | None:
-        """Stop routing one connection through its connector.
+        """Stop routing one connection through the connector the caller named.
 
-        The same version movement as binding, for the same reason: a connection
-        that has moved back to "nowhere to run" is not the one a session was
-        approved against.
+        ``connector_id`` is matched in the same statement that clears the
+        route. A request that names connector A must not detach a connection
+        currently bound to B, and only that pair's authorization row is removed.
+        The same version movement as binding applies when the pair matches: a
+        connection that has moved back to "nowhere to run" is not the one a
+        session was approved against.
         """
         ...
 
@@ -600,12 +630,6 @@ class McpConnectionRepository(Protocol):
         connection has its versions moved so the sessions approved against it
         stop working rather than quietly pointing somewhere else.
         """
-        ...
-
-    async def authorize_mcp_connector_connection(
-        self, *, connector_id: int, connection_id: int
-    ) -> None:
-        """Record that a connector is allowed to serve one connection."""
         ...
 
     async def list_mcp_connector_connections(self, *, connector_id: int) -> list[int]:
