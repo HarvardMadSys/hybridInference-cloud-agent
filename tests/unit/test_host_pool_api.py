@@ -151,6 +151,7 @@ class FakeHostPoolStore(AllCapabilities):
         *,
         host: str,
         credential_hash: str,
+        enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
         broker_url: str | None = None,
@@ -633,6 +634,28 @@ async def test_a_replayed_enrollment_token_is_refused(client):
     assert (
         "runner-a" not in second.text or second.json()["detail"]["error"]["type"] == "unauthorized"
     )
+
+
+async def test_removal_between_token_consumption_and_registration_refuses_enrollment(
+    client, monkeypatch
+):
+    async_client, store = client
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
+    )
+    token = issued.json()["enroll_token"]
+    register = AsyncMock(side_effect=ValueError("enrollment_token_removed"))
+    monkeypatch.setattr(store, "register_host", register)
+
+    response = await async_client.post(
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"]["type"] == "unauthorized"
+    assert register.await_args.kwargs["enrollment_token_hash"] == hash_secret(token)
+    assert token not in response.text
+    assert "runner-a" not in store.rows
 
 
 async def test_an_invalid_broker_url_does_not_spend_the_enrollment_token(client):

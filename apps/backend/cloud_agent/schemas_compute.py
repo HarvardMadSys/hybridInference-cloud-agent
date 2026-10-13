@@ -356,6 +356,12 @@ class RetireComputeRequest(ComputeRequest):
     expected_revision: int = Field(ge=0)
 
 
+class RemoveComputeRequest(ComputeRequest):
+    """Remove server inventory against the allocation the admin reviewed."""
+
+    expected_revision: int = Field(ge=0)
+
+
 class ComputeOperationAction(ComputeRequest):
     """An explicit action whose current state is checked under the operation lock."""
 

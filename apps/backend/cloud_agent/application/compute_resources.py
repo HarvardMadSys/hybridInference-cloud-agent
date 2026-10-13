@@ -746,6 +746,12 @@ class ComputeCommands:
         """Read inventory through the independent query surface."""
         return await self.queries.servers()
 
+    async def remove_server(self, allocation_id: str, *, expected_revision: int) -> None:
+        """Remove local server records after the store verifies lifecycle safety."""
+        await self.repository.remove_allocation(
+            allocation_id=allocation_id, expected_revision=expected_revision
+        )
+
     def allocation_view(self, row: dict[str, Any]) -> dict[str, Any]:
         """Use the same public projection for command responses and queries."""
         return self.queries.allocation_view(row)

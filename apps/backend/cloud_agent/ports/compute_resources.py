@@ -126,6 +126,10 @@ class ComputeResourceRepository(Protocol):
         """Read one allocation and its stable node and Host bindings."""
         ...
 
+    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:
+        """Atomically remove safe server inventory and its private bookkeeping."""
+        ...
+
     async def list_allocations(self) -> list[dict[str, Any]]:
         """Read all managed inventory from one local snapshot."""
         ...

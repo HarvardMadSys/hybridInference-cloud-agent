@@ -564,6 +564,220 @@ class PostgresComputeResourceRepository:
         async with self._pool.acquire() as conn:
             return await self._allocation(conn, allocation_id)
 
+    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:
+        """Forget an unused server and its inventory after rechecking dependencies.
+
+        This performs no provider or filesystem action. A releasable resource
+        must already be confirmed absent; an acquisition that never submitted
+        and a disabled attached machine can instead be deregistered locally.
+        User jobs and deleted sandbox audit rows survive the inventory cleanup.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            active = await conn.fetchval(
+                "SELECT active_host FROM agent_runner_policy WHERE id FOR UPDATE"
+            )
+            await lock_compute_entry(conn, exclusive=True)
+            row = await conn.fetchrow(
+                "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
+            )
+            if row is None:
+                raise ValueError("allocation_not_found")
+            if row["revision"] != expected_revision:
+                raise ValueError("revision_conflict")
+            # The dispatcher locks operation rows without taking the topology
+            # fence. Lock them here so a queued acquisition is either removed
+            # before it is claimed, or observed running and refused.
+            related_operations = [
+                _row(operation)
+                for operation in await conn.fetch(
+                    """SELECT o.*,a.desired_state AS allocation_desired_state,
+                              a.observed_state AS allocation_observed_state,
+                              a.release_committed_at AS allocation_release_committed_at
+                       FROM agent_compute_operations o
+                       LEFT JOIN agent_compute_allocations a ON a.id=o.allocation_id
+                       WHERE o.allocation_id=$1 OR o.allocation_id=$2
+                          OR a.predecessor_id=$1 OR o.result->'candidate'->>'id'=$1
+                          OR o.result->'attempts' @> jsonb_build_array(
+                              jsonb_build_object('candidate',$1::text)
+                          ) OR o.parameters->>'source_allocation_id'=$1
+                          OR o.id IN (
+                              SELECT parameters->>'rotation_operation_id'
+                              FROM agent_compute_operations WHERE allocation_id=$1
+                          )
+                       ORDER BY o.id FOR UPDATE OF o""",
+                    allocation_id,
+                    row["predecessor_id"],
+                )
+            ]
+            operations = [
+                operation
+                for operation in related_operations
+                if operation["allocation_id"] == allocation_id
+            ]
+            if any(
+                operation["kind"] == "rotate"
+                and (
+                    operation["state"] not in {"succeeded", "failed", "cancelled"}
+                    or (
+                        operation["state"] == "failed"
+                        and operation["result"].get("candidate")
+                        and operation["allocation_desired_state"] == "present"
+                        and operation["allocation_release_committed_at"] is None
+                        and operation["allocation_observed_state"] not in {"terminated", "absent"}
+                    )
+                )
+                for operation in related_operations
+            ):
+                raise ValueError("rotation_in_progress")
+            if any(
+                operation["allocation_id"] != allocation_id
+                and operation["parameters"].get("source_allocation_id") == allocation_id
+                and operation["kind"] in {"acquire", "discard"}
+                and operation["state"] not in {"succeeded", "failed", "cancelled"}
+                for operation in related_operations
+            ):
+                raise ValueError("rotation_in_progress")
+            # Staging and abandoned-candidate release both need the source's
+            # predecessor link. A successor already serving its Host may keep
+            # running after the old server's historical link is cleared.
+            if await conn.fetchval(
+                """SELECT 1 FROM agent_compute_allocations candidate
+                   WHERE candidate.predecessor_id=$1 AND (
+                       EXISTS (
+                           SELECT 1 FROM agent_compute_operations o
+                           WHERE o.allocation_id=candidate.id
+                             AND o.kind IN ('acquire','discard')
+                             AND o.state NOT IN ('succeeded','failed','cancelled')
+                       ) OR (
+                           candidate.observed_state NOT IN ('terminated','absent')
+                           AND NOT EXISTS (
+                               SELECT 1 FROM agent_runner_hosts h
+                               JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                               WHERE n.allocation_id=candidate.id
+                           )
+                       )
+                   ) LIMIT 1""",
+                allocation_id,
+            ):
+                raise ValueError("rotation_in_progress")
+            if any(
+                operation["state"] in {"running", "unknown"}
+                or operation["result"].get("external_pending")
+                for operation in operations
+            ):
+                raise ValueError("external_operation_unresolved")
+            allocation = await self._allocation(conn, allocation_id)
+            assert allocation is not None
+            hosts = [host["host"] for host in allocation["hosts"]]
+            if active in hosts:
+                raise ValueError("placement_pinned")
+            # Attempt settlement locks its attempt before returning the host's
+            # slot. Keep that order when deleting hosts and nulling audit FKs.
+            attempts = await conn.fetch(
+                "SELECT status FROM agent_attempts WHERE host_id=ANY($1::text[]) "
+                "ORDER BY id FOR UPDATE",
+                hosts,
+            )
+            if any(attempt["status"] == "running" for attempt in attempts):
+                raise ValueError("active_attempts_present")
+            host_rows = await conn.fetch(
+                "SELECT host,status,drain_fence_active FROM agent_runner_hosts "
+                "WHERE host=ANY($1::text[]) ORDER BY host FOR UPDATE",
+                hosts,
+            )
+            if any(host["drain_fence_active"] for host in host_rows):
+                raise ValueError("deployment_drain_active")
+            if await conn.fetchval(
+                "SELECT 1 FROM agent_sandboxes WHERE host=ANY($1::text[]) "
+                "AND deletion_state<>'deleted' LIMIT 1",
+                hosts,
+            ):
+                raise ValueError("retained_groups_present")
+            terminal = (
+                allocation["observed_state"] in {"terminated", "absent"}
+                and allocation["observed_at"] is not None
+            )
+            uncreated = provider_resource_absent(allocation)
+            if (
+                uncreated
+                and not terminal
+                and (
+                    any(
+                        operation["result"].get("resource_ref")
+                        or operation["result"].get("external_id")
+                        or operation["result"].get("resolved_external_id")
+                        or (
+                            operation["kind"] in {"acquire", "add", "import"}
+                            and operation["step"] != "pending"
+                        )
+                        for operation in operations
+                    )
+                    or await conn.fetchval(
+                        "SELECT 1 FROM agent_compute_node_registrations "
+                        "WHERE allocation_id=$1 AND registered_at IS NOT NULL LIMIT 1",
+                        allocation_id,
+                    )
+                )
+            ):
+                raise ValueError("external_operation_unresolved")
+            local_attach = (
+                allocation["mode"] == "attach"
+                and not allocation["release_supported"]
+                and all(host["status"] == "disabled" for host in host_rows)
+            )
+            if not terminal and not uncreated and not local_attach:
+                raise ValueError("resource_release_required")
+            if allocation.get("autoscaling_owned") and not terminal:
+                raise ValueError("autoscaling_member_active")
+            await conn.execute(
+                "DELETE FROM agent_host_enroll_tokens "
+                "WHERE host=ANY($1::text[]) OR consumed_host=ANY($1::text[])",
+                hosts,
+            )
+            await conn.execute("DELETE FROM agent_runner_hosts WHERE host=ANY($1::text[])", hosts)
+            await conn.execute(
+                """DELETE FROM agent_host_admission_holds
+                   WHERE allocation_id=$1 OR (
+                       purpose IN ('bootstrap','retirement','rotation')
+                       AND source_id=ANY($2::text[])
+                   )""",
+                allocation_id,
+                [operation["id"] for operation in operations],
+            )
+            await conn.execute(
+                "DELETE FROM agent_compute_node_registrations WHERE allocation_id=$1", allocation_id
+            )
+            await conn.execute(
+                "DELETE FROM agent_cloudlab_autoscaling_members WHERE allocation_id=$1",
+                allocation_id,
+            )
+            # The reservation belongs to the autoscaling policy's configured
+            # setup. Recycle its slot while retaining a still-configured profile.
+            await conn.execute(
+                """DELETE FROM agent_cloudlab_autoscaling_profile_reservations r
+                   USING agent_cloudlab_autoscaling_policy p
+                   WHERE p.id AND r.allocation_id=$1
+                     AND NOT (r.deployment_profile=ANY(p.deployment_profiles))""",
+                allocation_id,
+            )
+            await conn.execute(
+                "UPDATE agent_cloudlab_autoscaling_profile_reservations "
+                "SET allocation_id=NULL,updated_at=NOW() WHERE allocation_id=$1",
+                allocation_id,
+            )
+            await conn.execute(
+                "UPDATE agent_compute_allocations SET predecessor_id=NULL,updated_at=NOW() "
+                "WHERE predecessor_id=$1",
+                allocation_id,
+            )
+            await conn.execute(
+                "DELETE FROM agent_compute_operations WHERE allocation_id=$1", allocation_id
+            )
+            await conn.execute(
+                "DELETE FROM agent_compute_nodes WHERE allocation_id=$1", allocation_id
+            )
+            await conn.execute("DELETE FROM agent_compute_allocations WHERE id=$1", allocation_id)
+
     async def _allocation(self, conn: Any, allocation_id: str) -> dict[str, Any] | None:
         result = _optional_row(
             await conn.fetchrow(

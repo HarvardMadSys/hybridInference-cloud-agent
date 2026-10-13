@@ -12505,6 +12505,22 @@
         "title": "ReleaseHostDrainFenceRequest",
         "type": "object"
       },
+      "RemoveComputeRequest": {
+        "additionalProperties": false,
+        "description": "Remove server inventory against the allocation the admin reviewed.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "RemoveComputeRequest",
+        "type": "object"
+      },
       "RenewalPolicy": {
         "additionalProperties": false,
         "description": "Independent resource deadlines, expressed in seconds.\n\nWith rotation, ``renew_before_seconds`` is also when a node is replaced:\nan extension is tried first; a refused one, or a node at its maximum age,\nstarts a move of the whole Host to a newly allocated node instead.",
@@ -20714,7 +20730,7 @@
     },
     "/admin/agent/runner-hosts/{host}": {
       "delete": {
-        "description": "Drop a decommissioned host from the list.\n\nHousekeeping only: a runner still polling on that machine re-adds itself\nwithin seconds. The active host cannot be dropped, because doing so would\nsilently unpin new-chat placement, which is the opposite of what removing a\nhost from a list looks like it does. Existing retained owners are not moved\nby forgetting their pool row; their broker routing continues to fail closed\nuntil the same named host is enrolled again. The active-host refusal is\ndecided inside the store's transaction, not by a check here: a check here\nis a read a concurrent switch can outrun.",
+        "description": "Drop a decommissioned host from the list.\n\nHousekeeping only: removal invalidates its credential and enrollment tokens;\nthe machine needs a fresh administrator-issued token to register again.\nThe active host cannot be dropped, because doing so would\nsilently unpin new-chat placement, which is the opposite of what removing a\nhost from a list looks like it does. Existing retained owners are not moved\nby forgetting their pool row; their broker routing continues to fail closed\nuntil the same named host is enrolled again. The active-host refusal is\ndecided inside the store's transaction, not by a check here: a check here\nis a read a concurrent switch can outrun.",
         "operationId": "forget_agent_runner_host_admin_agent_runner_hosts__host__delete",
         "parameters": [
           {
@@ -22769,6 +22785,76 @@
           }
         },
         "summary": "Add Server"
+      }
+    },
+    "/admin/agent/servers/{allocation_id}": {
+      "delete": {
+        "description": "Remove safe local inventory without orphaning provider resources or work.",
+        "operationId": "remove_server_admin_agent_servers__allocation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Remove Server Admin Agent Servers  Allocation Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Server"
       }
     },
     "/admin/agent/settings": {

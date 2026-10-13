@@ -264,6 +264,7 @@ class PostgresHostPoolRepository:
         *,
         host: str,
         credential_hash: str,
+        enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
         broker_url: str | None = None,
@@ -297,6 +298,15 @@ class PostgresHostPoolRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn)
+            if enrollment_token_hash is not None and not await conn.fetchval(
+                "SELECT 1 FROM agent_host_enroll_tokens "
+                "WHERE token_hash=$1 AND host=$2 AND consumed_host=$2 AND consumed_at IS NOT NULL",
+                enrollment_token_hash,
+                host,
+            ):
+                # Removal may have invalidated this token after consumption but
+                # before registration acquired the topology fence.
+                raise ValueError("enrollment_token_removed")
             existing = await conn.fetchrow(
                 "SELECT drain_fence_active FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
@@ -1503,7 +1513,10 @@ class PostgresHostPoolRepository:
             return True
 
     async def forget_runner_host(self, *, host: str) -> str:
-        """Drop a host from the pool. A runner still polling re-adds itself.
+        """Drop a host and its enrollment tokens from the pool.
+
+        The removed credential and old enrollment tokens cannot restore it;
+        registering it again requires a freshly issued admin enrollment token.
 
         Returns ``"deleted"`` or ``"unknown"``; refuses ``"active"``,
         ``"fenced"``,
@@ -1573,6 +1586,10 @@ class PostgresHostPoolRepository:
             deleted = await conn.fetchval(
                 "DELETE FROM agent_runner_hosts WHERE host = $1 RETURNING host", host
             )
+            if deleted is not None:
+                await conn.execute(
+                    "DELETE FROM agent_host_enroll_tokens WHERE host=$1 OR consumed_host=$1", host
+                )
             if deleted is not None and local_cleanup_allocation is not None:
                 # This is inventory deregistration for an attached machine,
                 # never a provider release, shutdown, or filesystem action.

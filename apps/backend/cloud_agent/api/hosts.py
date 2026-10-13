@@ -185,8 +185,9 @@ async def register_host(
     # operator can correct; consuming the token first turns that typo into a
     # second privileged admin operation for no security benefit.
     broker_url = _checked_broker_url(body.broker_url)
+    enrollment_token_hash = hash_secret(body.enroll_token)
     if not await job_store.host_pool.consume_enroll_token(
-        token_hash=hash_secret(body.enroll_token), host=body.name
+        token_hash=enrollment_token_hash, host=body.name
     ):
         # One answer for expired, already-spent, never-issued and issued-for-
         # another-host: they are the same fact from the presenter's side — this
@@ -207,6 +208,7 @@ async def register_host(
         host = await job_store.host_pool.register_host(
             host=body.name,
             credential_hash=hash_secret(credential),
+            enrollment_token_hash=enrollment_token_hash,
             capabilities=body.capabilities,
             slots_total=body.slots_total,
             broker_url=broker_url,
@@ -215,6 +217,16 @@ async def register_host(
         )
     except ValueError as exc:
         error_type = str(exc)
+        if error_type == "enrollment_token_removed":
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "type": "unauthorized",
+                        "message": "This enrollment token is no longer valid. Issue a new one.",
+                    }
+                },
+            ) from exc
         if error_type == "host_drain_fenced":
             raise HTTPException(
                 status_code=409,

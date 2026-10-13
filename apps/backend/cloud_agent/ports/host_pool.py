@@ -91,6 +91,7 @@ class HostPoolRepository(Protocol):
         *,
         host: str,
         credential_hash: str,
+        enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
         broker_url: str | None = None,

@@ -258,6 +258,12 @@ export interface ComputeServerSnapshot {
 
 export const getComputeServers = (signal?: AbortSignal) =>
   get<ComputeServerSnapshot>('/servers', signal);
+export const removeComputeServer = (id: string, expectedRevision: number) =>
+  write<{ removed: true }>(
+    `/servers/${encodeURIComponent(id)}`,
+    { expected_revision: expectedRevision },
+    'DELETE',
+  );
 export const getComputeOperations = (requestId?: string, signal?: AbortSignal) =>
   get<{ operations: ComputeOperation[] }>(
     `/compute-operations${requestId ? `?request_id=${encodeURIComponent(requestId)}` : ''}`,

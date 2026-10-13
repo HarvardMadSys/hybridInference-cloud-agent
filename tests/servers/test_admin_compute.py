@@ -444,6 +444,98 @@ async def test_missing_runtime_is_unavailable_after_authentication(compute_api):
 
 
 @pytest.mark.asyncio
+async def test_remove_is_available_when_provider_is_unconfigured(compute_api):
+    client, _, app = compute_api
+    _, operation = await allocation(client)
+    app.state.compute_commands.registry = ComputeProviderRegistry([])
+    app.state.compute_commands.queries.registry = app.state.compute_commands.registry
+
+    response = await client.get("/admin/agent/servers", headers=ADMIN)
+
+    assert response.status_code == 200, response.text
+    server = next(
+        row for row in response.json()["allocations"] if row["id"] == operation["allocation_id"]
+    )
+    assert server["allowed_actions"] == ["remove"]
+
+
+@pytest.mark.asyncio
+async def test_remove_server_uses_reviewed_revision_and_audits_identifiers_only(
+    compute_api, monkeypatch
+):
+    client, repo, _ = compute_api
+    remove = AsyncMock()
+    monkeypatch.setattr(repo, "remove_allocation", remove, raising=False)
+
+    response = await client.request(
+        "DELETE",
+        "/admin/agent/servers/allocation-a",
+        headers=ADMIN,
+        json={"expected_revision": 4},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"removed": True}
+    assert response.headers["cache-control"] == "no-store"
+    remove.assert_awaited_once_with(allocation_id="allocation-a", expected_revision=4)
+    assert len(repo.audit_rows) == 1
+    assert repo.audit_rows[0]["action"] == "agent.compute.server.remove"
+    assert repo.audit_rows[0]["details"] == {"allocation_id": "allocation-a"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [
+        ("revision_conflict", 409),
+        ("allocation_not_found", 404),
+        ("resource_release_required", 409),
+        ("external_operation_unresolved", 409),
+        ("retained_groups_present", 409),
+        ("placement_pinned", 409),
+        ("deployment_drain_active", 409),
+        ("active_attempts_present", 409),
+    ],
+)
+async def test_remove_server_reports_safe_refusals_without_auditing(
+    compute_api, monkeypatch, code, status
+):
+    client, repo, _ = compute_api
+    remove = AsyncMock(side_effect=ValueError(code))
+    monkeypatch.setattr(repo, "remove_allocation", remove, raising=False)
+
+    response = await client.request(
+        "DELETE",
+        "/admin/agent/servers/allocation-a",
+        headers=ADMIN,
+        json={"expected_revision": 4},
+    )
+
+    assert response.status_code == status, response.text
+    assert response.json()["detail"]["code"] == code
+    assert response.headers["cache-control"] == "no-store"
+    assert repo.audit_rows == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload", [{}, {"expected_revision": -1}, {"expected_revision": 1, "force": True}]
+)
+async def test_remove_server_requires_a_valid_reviewed_revision(compute_api, monkeypatch, payload):
+    client, repo, _ = compute_api
+    remove = AsyncMock()
+    monkeypatch.setattr(repo, "remove_allocation", remove, raising=False)
+
+    response = await client.request(
+        "DELETE", "/admin/agent/servers/allocation-a", headers=ADMIN, json=payload
+    )
+
+    assert response.status_code == 422
+    remove.assert_not_awaited()
+    assert repo.audit_rows == []
+
+
+@pytest.mark.asyncio
 async def test_cloudlab_autoscaling_revision_zero_is_safe_and_defaulted(compute_api):
     client, _, _ = compute_api
 

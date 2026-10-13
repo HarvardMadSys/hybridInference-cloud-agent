@@ -31,6 +31,7 @@ from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request model
     ComputeOperationAction,
     ExtendComputeRequest,
     ImportComputeRequest,
+    RemoveComputeRequest,
     ResolveComputeOperation,
     RetireComputeRequest,
     RotateComputeRequest,
@@ -65,6 +66,21 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
         "The external operation is unresolved; reconcile its result before continuing.",
     ),
     "operation_in_flight": (409, "The operation is running; wait for its result."),
+    "resource_release_required": (
+        409,
+        "Release cloud resources or disable attached hosts before removing this server's records.",
+    ),
+    "placement_pinned": (409, "Choose another default location for new sandboxes first."),
+    "deployment_drain_active": (409, "Finish the server deployment drain before removal."),
+    "retained_groups_present": (
+        409,
+        "Delete the server's retained sandboxes and wait for cleanup before removal.",
+    ),
+    "active_attempts_present": (409, "Wait for the server's active runs to finish before removal."),
+    "autoscaling_member_active": (
+        409,
+        "Release the autoscaling server before removing its records.",
+    ),
     "operation_not_cancellable": (409, "The operation cannot be cancelled in its current state."),
     "operation_not_retryable": (409, "The operation cannot be retried in its current state."),
     "operation_lease_lost": (409, "Another worker owns this operation."),
@@ -381,6 +397,20 @@ async def add_server(
     operation = await commands.add_server(payload, actor=actor)
     await _audit(request, actor, "server.add", operation_id=operation["id"])
     return {"operation": operation}
+
+
+@router.delete("/servers/{allocation_id}")
+async def remove_server(
+    allocation_id: str,
+    request: Request,
+    payload: RemoveComputeRequest,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, bool]:
+    """Remove safe local inventory without orphaning provider resources or work."""
+    await commands.remove_server(allocation_id, expected_revision=payload.expected_revision)
+    await _audit(request, actor, "server.remove", allocation_id=allocation_id)
+    return {"removed": True}
 
 
 @router.post("/server-preflights", status_code=202)

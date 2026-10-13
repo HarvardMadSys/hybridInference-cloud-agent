@@ -490,8 +490,9 @@ async def forget_agent_runner_host(
 ) -> ListAgentRunnerHostsResponse:
     """Drop a decommissioned host from the list.
 
-    Housekeeping only: a runner still polling on that machine re-adds itself
-    within seconds. The active host cannot be dropped, because doing so would
+    Housekeeping only: removal invalidates its credential and enrollment tokens;
+    the machine needs a fresh administrator-issued token to register again.
+    The active host cannot be dropped, because doing so would
     silently unpin new-chat placement, which is the opposite of what removing a
     host from a list looks like it does. Existing retained owners are not moved
     by forgetting their pool row; their broker routing continues to fail closed

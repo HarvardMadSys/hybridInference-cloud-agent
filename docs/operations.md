@@ -1577,6 +1577,29 @@ can carry — the CPU and memory on the same page are. The saved number survives
 heartbeats, restarts and re-enrolment: it is a decision about the named
 machine, and only _Host default_ returns it to the environment.
 
+#### Removing a server
+
+Open a server's details on the admin Servers page and choose **Remove server**
+from its action menu. Confirm permanent removal to delete its allocation, nodes,
+registered hosts, host settings and capacity history, node registration tokens,
+admission holds, and compute activity. Shared connections and deployment profiles
+remain available. User conversations, runs, and deleted-sandbox audit records are
+preserved.
+
+Release cloud resources before removing their records. Attached servers without
+release support can be removed after their hosts are disabled. Remove retained
+sandboxes through the sandbox deletion flow and wait for cleanup to finish; clear
+the default placement pin, running attempts, and deployment drains first. Removal
+checks these dependencies in the same transaction as cleanup and refuses work
+whose provider result is unresolved. An acquisition that never submitted to its
+provider can be removed even when resource observation is unavailable.
+
+The compute API is `DELETE /admin/agent/servers/<allocation_id>` with
+`{"expected_revision": N}`. A revision conflict requires refreshing the server.
+For hosts without an allocation, the action uses the existing guarded
+`DELETE /admin/agent/runner-hosts/<host>` endpoint. Stop an unmanaged host agent
+before removal; inventory cleanup does not shut down its machine or remove files.
+
 #### Sandbox settings
 
 Use the admin settings pages for sandbox and workspace limits. The turn time
