@@ -31,6 +31,12 @@ from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_PENDING,
     LIFECYCLE_STOPPED,
 )
+from cloud_agent.workers.profiling_control import (
+    ACTIVE_INTERVAL_S,
+    ERROR_INTERVAL_S,
+    ProfilingPolicyWorker,
+)
+from cloud_agent_shared import operation_profiling as profiling
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
@@ -538,3 +544,60 @@ async def test_continuous_control_does_not_expire_when_read_days_later(monkeypat
     assert snapshot["run"]["continuous"] is True
     assert snapshot["budget_scope"] == "unlimited"
     assert command.fingerprint() != _start_request(duration_seconds=600).fingerprint()
+
+
+# ── the control plane's sync loop ──────────────────────────────────────
+
+
+class _UnreadableControl(_FakeControl):
+    """The same capability, with a database a test can take away."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unreachable = False
+
+    async def get_control_state(self, *, deployment: str) -> dict[str, Any] | None:
+        """Return the control row, or fail as an unreachable database does."""
+        if self.unreachable:
+            raise ConnectionError("the control database is unreachable")
+        return await super().get_control_state(deployment=deployment)
+
+
+@pytest.fixture
+def _admin_collector(monkeypatch):
+    """This process under Admin control, with nothing published yet."""
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
+    profiling.reset_cache()
+    profiling.reset_policy()
+    yield
+    profiling.reset_cache()
+    profiling.reset_policy()
+
+
+async def test_a_control_plane_that_cannot_read_its_row_stops_selecting(_admin_collector):
+    """A failed read withdraws the run in force; the next good read restores it.
+
+    Regression: the loop published its fail-closed "no run" at revision 0, below
+    the revision it had already applied, and the store refused it as a
+    rollback. The log said collection was paused while a continuous run -- which
+    has no deadline -- went on selecting every file and terminal request.
+    """
+    fake = _UnreadableControl()
+    service = _service(fake)
+    started = await service.start(_start_request(duration_seconds=None), now=NOW)
+    worker = ProfilingPolicyWorker(service=service)
+
+    assert await worker._refresh_once() == ACTIVE_INTERVAL_S
+    live = profiling.active_run()
+    assert live is not None and live.run_id == started.run_id
+
+    fake.unreachable = True
+    assert await worker._refresh_once() == ERROR_INTERVAL_S
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="files.open", host="gpu-1") is None
+    assert profiling.control_state().config_version == started.revision
+
+    fake.unreachable = False
+    assert await worker._refresh_once() == ACTIVE_INTERVAL_S
+    restored = profiling.active_run()
+    assert restored is not None and restored.run_id == started.run_id

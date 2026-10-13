@@ -65,6 +65,20 @@ class _BrokenProvider:
         raise RuntimeError("control source is unreachable")
 
 
+class _FlakyProvider(_FakeProvider):
+    """A control source that answers until a test breaks it."""
+
+    def __init__(self, state: profiling.ControlState | None = None) -> None:
+        super().__init__(state)
+        self.broken = False
+
+    def snapshot(self) -> profiling.ControlState:
+        """Answer, or fail once the test has broken this source."""
+        if self.broken:
+            raise RuntimeError("control source is unreachable")
+        return super().snapshot()
+
+
 @pytest.fixture(autouse=True)
 def _clean_profiling_state(monkeypatch):
     """Every test starts from a process that never read a control source."""
@@ -370,6 +384,42 @@ def test_a_control_source_that_fails_collects_nothing(monkeypatch, caplog):
     assert profiling.active_run() is None
     assert profiling.start_operation(operation="terminal.open", host="host-a") is None
     assert "control source is unavailable" in caplog.text
+
+
+def test_a_source_that_fails_after_answering_withdraws_its_run(monkeypatch):
+    """A failure after a real answer stops selection, without lowering the floor.
+
+    Regression: the failure was published as a fresh ``ControlState()`` at
+    version 0, which the store refused as older than the version already
+    applied -- so the last run stayed in force, and a continuous one has no
+    deadline that would ever end it.
+    """
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
+    profiling.reset_cache()
+    run = _run(run_id=RUN_A, continuous=True)
+    provider = _FlakyProvider(_state(run=run, revision=5))
+    profiling.install_policy_provider(provider)
+    assert profiling.active_run() is run
+
+    provider.broken = True
+    profiling.refresh_policy()
+
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is None
+    control = profiling.control_state()
+    assert control.config_version == 5
+    assert control.mode == profiling.MODE_ADMIN
+    assert control.stop_reason == profiling.STOP_REASON_UNAVAILABLE
+
+    # Still the anti-rollback floor: an older answer cannot bring the run back.
+    profiling.policy_store().publish(_state(run=run, revision=4), run=run)
+    assert profiling.active_run() is None
+
+    # The source answering again restores what it says, at the same version.
+    provider.broken = False
+    profiling.refresh_policy()
+    assert profiling.active_run() is run
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
 
 
 def test_the_store_refuses_a_run_that_does_not_describe_its_policy():

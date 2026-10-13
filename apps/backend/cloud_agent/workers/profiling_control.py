@@ -110,10 +110,10 @@ class ProfilingPolicyWorker:
                 self._interval = interval
                 await self._wait(interval)
         except asyncio.CancelledError:
-            # Publishing is what stops this process collecting, so a cancelled
-            # loop leaves the last snapshot in place. The lease on it is what
-            # ends collection: no refresh, no new authorization, and the
-            # existing one expires in AUTHORIZATION_TTL_S.
+            # Cancelled at shutdown. Nothing is published on the way out, so
+            # the last snapshot stays in place for the little time this process
+            # has left: there is no lease to lapse, a timed run still ends at
+            # its own deadline, and in-flight work finishes as it would anyway.
             logger.info(
                 "operation profiling control loop stopped",
                 extra={"event": "agent_profiling_control_stopped"},
@@ -133,16 +133,19 @@ class ProfilingPolicyWorker:
             raise
         except Exception:
             # A control plane that cannot read the control row must not keep
-            # collecting on the strength of its last answer. Publishing "no
-            # run" is the fail-closed direction: the business path is untouched,
-            # and the experiment's own deadline bounds anything already
-            # selected.
+            # collecting on the strength of its last answer -- a continuous run
+            # has no deadline to end it. Withdrawing the run is the fail-closed
+            # direction: the business path is untouched, work already selected
+            # finishes under its own manifest, and the next read that succeeds
+            # restores whatever the row then says. It is withdrawn at the
+            # applied revision, because the store refuses anything older as a
+            # rollback and would silently keep the run in force.
             logger.warning(
                 "operation profiling control read failed; pausing collection",
                 exc_info=True,
                 extra={"event": "agent_profiling_control_read_failed"},
             )
-            self._publish(None)
+            policy_store().suspend()
             return ERROR_INTERVAL_S
         # Only a run that is actually in force becomes policy. A stopped
         # experiment is reported in the snapshot's ``last_stopped_run`` so the
@@ -161,8 +164,8 @@ class ProfilingPolicyWorker:
         # experiment in force is the state in which a Stop has to land soon.
         return ACTIVE_INTERVAL_S if published.run is not None else IDLE_INTERVAL_S
 
-    def _publish(self, run: Mapping[str, Any] | None, *, revision: int = 0) -> Any:
-        """Publish one configuration, or the fail-closed "nothing"."""
+    def _publish(self, run: Mapping[str, Any] | None, *, revision: int) -> Any:
+        """Publish the configuration the control row states at ``revision``."""
         if run is None:
             return policy_store().publish(
                 ControlState(mode=MODE_ADMIN, config_version=revision, run=None)
