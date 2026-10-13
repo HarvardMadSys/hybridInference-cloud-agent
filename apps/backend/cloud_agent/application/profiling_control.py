@@ -376,6 +376,33 @@ class ProfilingControlService:
 
     # -- reads -------------------------------------------------------------
 
+    async def policy_snapshot(self, *, now: datetime) -> dict[str, Any]:
+        """Return what a producer acts on: the revision and the run in force.
+
+        The host policy route and every control-plane sync loop read this every
+        few seconds while a run is in force, so it reads the control row and the
+        run it names and nothing else. In particular it does not count the run's
+        stored samples -- a scan over every row the run ever stored, which grows
+        without bound for a continuous run, on the path that also carries a
+        Stop -- and it does not look up the last stopped experiment. Both are
+        for the Admin card, :meth:`control_snapshot`.
+        """
+        control, run = await self._current()
+        return {
+            "deployment": self._deployment,
+            "revision": int(control["revision"]) if control is not None else 0,
+            "run": _run_payload(run, now=now),
+            "run_active": run is not None,
+        }
+
+    async def _current(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Read the control row, and the run it names when it names one."""
+        control = await self._control.get_control_state(deployment=self._deployment)
+        run: dict[str, Any] | None = None
+        if control is not None and control.get("current_run_id"):
+            run = await self._control.get_run(run_id=str(control["current_run_id"]))
+        return control, run
+
     async def control_snapshot(self, *, now: datetime) -> dict[str, Any]:
         """Return everything the control card needs in one answer.
 
@@ -388,16 +415,18 @@ class ProfilingControlService:
         stored so far. It deliberately says nothing about which processes have
         applied it -- sync lags by design, and the page states the lag instead
         of pretending to have measured it.
+
+        This is the Admin read. Producers poll :meth:`policy_snapshot` instead,
+        which leaves out the sample count and the last stopped experiment.
         """
-        control = await self._control.get_control_state(deployment=self._deployment)
+        control, run = await self._current()
         revision = int(control["revision"]) if control is not None else 0
-        run: dict[str, Any] | None = None
         stopped_run: dict[str, Any] | None = None
         stored = 0
         if control is not None and control.get("current_run_id"):
-            run_id = str(control["current_run_id"])
-            run = await self._control.get_run(run_id=run_id)
-            stored = await self._control.count_stored_measurements(run_id=run_id)
+            stored = await self._control.count_stored_measurements(
+                run_id=str(control["current_run_id"])
+            )
         elif control is not None:
             # Nothing is configured right now. If something was stopped, the
             # page can still name it: "off" and "you stopped it four seconds

@@ -65,6 +65,9 @@ class _FakeControl:
         self.runs: dict[str, dict[str, Any]] = {}
         self.commands: dict[tuple[str, str], dict[str, Any]] = {}
         self.stored = 0
+        #: How often the stored samples were counted, which only the Admin
+        #: card may pay for.
+        self.counted = 0
 
     async def get_control_state(self, *, deployment: str) -> dict[str, Any] | None:
         """Return the control row, if this deployment has one."""
@@ -208,6 +211,7 @@ class _FakeControl:
 
     async def count_stored_measurements(self, *, run_id: str) -> int:
         """Return how many samples this experiment stored."""
+        self.counted += 1
         return self.stored
 
     async def mark_run_lifecycle(self, **kwargs: Any) -> None:
@@ -660,6 +664,28 @@ def test_a_host_is_told_the_configuration_in_force() -> None:
     # lease is issued: the experiment's own deadline is the bound.
     assert "lease" not in policy
     assert "applied" not in answer.text
+
+
+def test_a_host_poll_never_counts_the_runs_samples() -> None:
+    """Every runner polls every five seconds while a run is in force.
+
+    Regression: the route answered from the Admin card's snapshot, which counts
+    every measurement the run has stored -- a scan that grows for as long as a
+    continuous run is on, run once per host per poll, on a path with a
+    two-second budget that is also how a Stop reaches the host.
+    """
+    storage = _FakeStorage()
+    service = ProfilingControlService(
+        control=storage.profiling_control, deployment="test", host_pool=storage.host_pool
+    )
+    started = _run_sync(service.start, service, now=datetime.now(UTC))
+
+    with TestClient(_host_app(storage, None)) as client:
+        for _ in range(3):
+            answer = client.post("/v1/agent/hosts/profiling-policy", json={"host": HOST})
+            assert answer.status_code == 200, answer.text
+            assert answer.json()["run"]["run_id"] == started.run_id
+    assert storage.profiling_control.counted == 0
 
 
 def test_the_configuration_exchange_records_nothing_about_the_host() -> None:

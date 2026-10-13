@@ -128,7 +128,7 @@ class ProfilingPolicyWorker:
             # published below should describe the state after that rather than
             # before it.
             await self._service.sweep(now=now)
-            snapshot = await self._service.control_snapshot(now=now)
+            snapshot = await self._service.policy_snapshot(now=now)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -148,9 +148,9 @@ class ProfilingPolicyWorker:
             policy_store().suspend()
             return ERROR_INTERVAL_S
         # Only a run that is actually in force becomes policy. A stopped
-        # experiment is reported in the snapshot's ``last_stopped_run`` so the
-        # page can name it; publishing it here would keep every producer
-        # collecting for the experiment an administrator just ended.
+        # experiment is named only on the Admin card, as ``last_stopped_run``;
+        # publishing it here would keep every producer collecting for the
+        # experiment an administrator just ended.
         run = snapshot.get("run") if snapshot.get("run_active") else None
         published = self._publish(run, revision=int(snapshot.get("revision") or 0))
         if published is None:
