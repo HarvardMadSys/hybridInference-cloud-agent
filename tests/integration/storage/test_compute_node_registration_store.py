@@ -13,6 +13,7 @@ from tests.integration.storage.test_host_pool_store import (
 )
 
 from cloud_agent.host_pool import hash_secret
+from cloud_agent.ports.external.compute_provider import SshConnection
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -176,3 +177,20 @@ async def test_a_pinned_host_key_survives_later_provider_observations(store):
     )
     stored = (await repo.get_allocation(allocation_id))["nodes"][0]["connection"]
     assert stored == {**connection, "host_key": KEY_A[0]}
+
+
+async def test_a_pinned_host_key_survives_an_observation_serialized_with_its_empty_fields(store):
+    """The reconciler saves the adapter's whole connection model, unset fields as null."""
+    allocation_id, node, _ = await resource(store, provision=True)
+    repo = store.compute_resources
+    observed = SshConnection(
+        address="node.example.org", username="agent", credential_ref="ssh-1"
+    ).model_dump(mode="json")
+    assert observed["host_key"] is None
+    identity = {k: node[k] for k in ("provider_node_id", "instance_identity", "name")}
+    await repo.upsert_node(allocation_id=allocation_id, node={**identity, "connection": observed})
+    op = await operation(repo, allocation_id, kind="acquire")
+    await repo.record_host_key(node_id=node["id"], host_key=KEY_A[0], **fence(op))
+    await repo.upsert_node(allocation_id=allocation_id, node={**identity, "connection": observed})
+    stored = (await repo.get_allocation(allocation_id))["nodes"][0]["connection"]
+    assert stored == {**observed, "host_key": KEY_A[0]}

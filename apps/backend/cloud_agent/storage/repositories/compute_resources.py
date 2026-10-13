@@ -1629,9 +1629,10 @@ class PostgresComputeResourceRepository:
             ON CONFLICT (allocation_id,provider_node_id) DO UPDATE
             SET name=EXCLUDED.name,updated_at=NOW(),
                 -- A registered host key belongs to this exact instance and
-                -- provider observations never carry it: keep it.
-                connection=CASE WHEN agent_compute_nodes.connection ? 'host_key'
-                    AND NOT EXCLUDED.connection ? 'host_key'
+                -- provider observations never carry it, at most a null
+                -- placeholder from the serialized connection: keep it.
+                connection=CASE WHEN agent_compute_nodes.connection->>'host_key' IS NOT NULL
+                    AND EXCLUDED.connection->>'host_key' IS NULL
                     THEN EXCLUDED.connection
                         || jsonb_build_object('host_key', agent_compute_nodes.connection->'host_key')
                     ELSE EXCLUDED.connection END
