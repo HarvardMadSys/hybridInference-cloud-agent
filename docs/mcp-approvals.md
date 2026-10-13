@@ -33,6 +33,25 @@ Keep the conversation open until the panel confirms that the capability can run
 without asking, or save its permission explicitly in Tools afterward. The
 one-time approval remains recorded even if the deferred rule is lost.
 
+## Waiting and expiry
+
+A call requiring confirmation waits for an owner decision for up to ten
+minutes. Claude Code's per-server HTTP request timeout and remote idle timeout
+are explicitly set to the same 26-minute window as its overall tool timeout.
+Raising only the overall timer leaves separate network timers able to abandon
+the request while Approvals still shows it as pending.
+Clients accepting SSE receive an immediate response and periodic keepalive
+comments during the wait, followed by the original call's single JSON-RPC result
+or error. Disconnecting cancels the wait and expires its held approval; no
+background dispatcher keeps running on behalf of an abandoned request.
+
+An approval expiry means the request was not dispatched to the upstream server.
+Review the permission or approve the next request before retrying. Repeated
+unapproved retries do not diagnose an unavailable GitHub server. A changed
+session authorization also stops the held call before dispatch. Errors after
+dispatch can have an unknown outcome; check the external state before retrying
+a write such as creating a pull request.
+
 ## API pagination
 
 `GET /v1/agent/mcp/invocations?pending_only=true` reads the authenticated owner's

@@ -288,3 +288,38 @@ def test_oversized_structured_result_does_not_bypass_the_content_limit():
     built = host.McpHost(limits=host.HostLimits(max_content_bytes=16))
     with pytest.raises(host.HostError):
         built.render_result({"structuredContent": {"text": "文" * 16}})
+
+
+@pytest.mark.parametrize("value", [[{"name": "dev"}], [], "文", 0, False, None])
+def test_non_object_structured_results_reach_legacy_clients_without_data_loss(value):
+    result = host.McpHost().render_result({"structuredContent": value}).as_dict()
+    assert result["structuredContent"] == {"result": value}
+    assert json.loads(result["content"][0]["text"]) == {"result": value}
+    assert result["isError"] is False
+
+
+def test_structured_only_object_is_also_readable_as_text():
+    value = {"number": 594, "state": "open"}
+    result = host.McpHost().render_result({"structuredContent": value}).as_dict()
+    assert result["structuredContent"] == value
+    assert json.loads(result["content"][0]["text"]) == value
+
+
+def test_list_results_preserve_existing_text_and_error_status():
+    block = {"type": "text", "text": '[{"name":"dev"}]'}
+    result = (
+        host.McpHost()
+        .render_result(
+            {"content": [block], "structuredContent": [{"name": "dev"}], "isError": True}
+        )
+        .as_dict()
+    )
+    assert result["content"] == [block]
+    assert result["structuredContent"] == {"result": [{"name": "dev"}]}
+    assert result["isError"] is True
+
+
+def test_compatibility_wrapper_counts_toward_the_content_limit():
+    built = host.McpHost(limits=host.HostLimits(max_content_bytes=16))
+    with pytest.raises(host.HostError, match="structured content larger"):
+        built.render_result({"structuredContent": ["abcdef"]})

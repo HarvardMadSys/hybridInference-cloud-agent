@@ -145,7 +145,7 @@ class ToolResult:
     """
 
     content: tuple[ContentBlock, ...] = ()
-    structured: Any = None
+    structured: dict[str, Any] | None = None
     is_error: bool = False
     unsupported: tuple[str, ...] = ()
 
@@ -843,9 +843,23 @@ class McpHost:
                     unsupported.append(str(item.get("type") or "unknown"))
                 continue
             blocks.append(block)
-        structured = result.get("structuredContent")
-        if structured is not None and self._oversized(json.dumps(structured, ensure_ascii=False)):
-            raise HostError("the server returned structured content larger than the platform limit")
+        structured = None
+        if "structuredContent" in result:
+            value = result["structuredContent"]
+            # The 2026 revision permits any JSON value, but native clients
+            # speaking the 2025 revisions require an object. Keep the value
+            # intact inside an object instead of forwarding a list/scalar that
+            # causes those clients to reject the entire successful tool call.
+            structured = dict(value) if isinstance(value, Mapping) else {"result": value}
+            serialized = json.dumps(structured, ensure_ascii=False)
+            if self._oversized(serialized):
+                raise HostError(
+                    "the server returned structured content larger than the platform limit"
+                )
+            # Some CLIs only render content. A structured-only response must
+            # still carry the data into the model's context, including []/0/false.
+            if not blocks:
+                blocks.append(ContentBlock(type="text", text=serialized))
         return ToolResult(
             content=tuple(blocks),
             structured=structured,
