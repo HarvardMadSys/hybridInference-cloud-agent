@@ -54,6 +54,13 @@ Event = Literal[
 #: How long an owner is given to answer, when nothing tighter applies.
 DEFAULT_DECISION_WINDOW = timedelta(minutes=10)
 
+#: The largest stored argument body a held call may carry, in encoded bytes.
+#: A held call keeps its arguments, encrypted, in a table every tenant shares
+#: until its owner decides, so that the owner can see what they are approving.
+#: A body past this is not something a person reviews, and it is refused
+#: rather than stored.
+MAX_HELD_ARGUMENTS_BYTES = 256 * 1024
+
 #: Transition table. A pair absent from it is refused rather than ignored,
 #: because silently accepting "deny after completion" would rewrite history.
 _TRANSITIONS: dict[tuple[InvocationStatus, Event], InvocationStatus] = {
@@ -225,6 +232,7 @@ def recovery_note(invocation: Invocation) -> str:
 
 __all__ = [
     "DEFAULT_DECISION_WINDOW",
+    "MAX_HELD_ARGUMENTS_BYTES",
     "RECOVERY_GUIDANCE",
     "TERMINAL_STATUSES",
     "Deadline",

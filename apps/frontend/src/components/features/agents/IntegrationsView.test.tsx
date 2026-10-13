@@ -1,17 +1,52 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LocaleProvider } from '@/components/providers/LocaleProvider';
+import {
+  clearUserMemory,
+  getUserMemory,
+  updateUserMemory,
+  type UserMemoryView,
+} from '@/lib/api/userMemory';
+import { getMemoryProjects } from '@/lib/api/projectMemory';
+import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
+
+vi.mock('@/components/providers/AuthProvider', () => ({
+  useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
+}));
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 
 vi.mock('@/lib/api/agents', () => ({
+  getAgentConfig: vi.fn(),
   getAgentIntegrations: vi.fn(),
   disconnectAgentIntegration: vi.fn(),
   disconnectGitHubAccount: vi.fn(),
+}));
+
+vi.mock('@/lib/api/userMemory', () => ({
+  getUserMemory: vi.fn(),
+  updateUserMemory: vi.fn(),
+  clearUserMemory: vi.fn(),
+  editUserMemoryEntry: vi.fn(),
+  deleteUserMemoryEntry: vi.fn(),
+  saveUserMemories: vi.fn(),
+  consolidateUserMemory: vi.fn(),
+}));
+
+vi.mock('@/lib/api/projectMemory', () => ({
+  getMemoryProjects: vi.fn(),
+  getProjectMemory: vi.fn(),
+  updateProjectMemory: vi.fn(),
+  clearProjectMemory: vi.fn(),
+  editProjectMemoryEntry: vi.fn(),
+  deleteProjectMemoryEntry: vi.fn(),
+  saveProjectMemories: vi.fn(),
+  consolidateProjectMemory: vi.fn(),
 }));
 
 // The MCP section loads its own connections; mocked empty so this file stays
@@ -26,6 +61,7 @@ vi.mock('@/lib/api/mcp', () => ({
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
+  getAgentConfig,
   getAgentIntegrations,
 } from '@/lib/api/agents';
 import { listMcpConnections } from '@/lib/api/mcp';
@@ -33,6 +69,46 @@ import { listMcpConnections } from '@/lib/api/mcp';
 const mockedGetIntegrations = getAgentIntegrations as unknown as ReturnType<typeof vi.fn>;
 const mockedDisconnect = disconnectAgentIntegration as unknown as ReturnType<typeof vi.fn>;
 const mockedListMcpConnections = listMcpConnections as unknown as ReturnType<typeof vi.fn>;
+
+const emptyMemory: UserMemoryView = {
+  enabled: true,
+  revision: 1,
+  updated_at: null,
+  avatar: { data_url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', style: 'illustrated' },
+  portrait: {
+    summary: '',
+    projects: [],
+    focus_areas: [],
+    preferred_runtime: null,
+    preferred_model: null,
+  },
+  memories: [],
+  suggestions: [],
+};
+
+const memory: UserMemoryView = {
+  ...emptyMemory,
+  portrait: { ...emptyMemory.portrait, summary: 'Working on developer tools.' },
+  memories: [
+    {
+      id: 'preference-1',
+      kind: 'preference',
+      content: 'Use small pull requests.',
+      source_job_id: 'job_memory_source',
+      source_repo: 'alice/toolbox',
+      user_edited: false,
+      created_at: null,
+    },
+  ],
+  suggestions: [
+    {
+      id: 'suggestion-1',
+      title: 'Include a validation command',
+      reason: 'Recent tasks often require test fixes.',
+      action: 'Add the expected test command to future requests.',
+    },
+  ],
+};
 
 const integrations: AgentIntegrationsApi = {
   providers: [
@@ -78,8 +154,21 @@ function unloadedGithub(
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  document.documentElement.lang = 'en';
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    models: ['model-a', 'model-b'],
+    repos: [],
+    runtimes: ['codex'],
+    github_connected: true,
+    github_install_url: null,
+  });
   vi.mocked(listSkills).mockResolvedValue([]);
   mockedListMcpConnections.mockResolvedValue({ connections: [], templates: [] });
+  vi.mocked(getUserMemory).mockResolvedValue(memory);
+  vi.mocked(getMemoryProjects).mockResolvedValue([]);
+  vi.mocked(updateUserMemory).mockResolvedValue({ ...memory, enabled: false });
+  vi.mocked(clearUserMemory).mockResolvedValue({ ...emptyMemory, enabled: false });
 });
 
 afterEach(() => {
@@ -93,7 +182,7 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView connectedProvider="github" />);
 
-    expect(screen.getByRole('heading', { level: 1, name: 'Integrations' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Setting' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
     expect(
@@ -108,6 +197,67 @@ describe('IntegrationsView', () => {
     expect(screen.getAllByText('Coming soon')).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Add server' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Agent questions' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Turn completions' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'User memory' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'User memory' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Project memory' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
+  });
+
+  it('keeps source-linked memory, suggestions, and privacy controls on the Setting page without an avatar', async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+
+    const section = screen.getByRole('region', { name: 'User memory' });
+    await within(section).findByRole('switch');
+    expect(within(section).getByRole('combobox', { name: 'Consolidation model' })).toHaveValue(
+      'model-a',
+    );
+    expect(within(section).getByRole('button', { name: 'Consolidate' })).toBeEnabled();
+    expect(within(section).queryByRole('img')).not.toBeInTheDocument();
+    expect(within(section).getByText(memory.portrait.summary)).toBeInTheDocument();
+    expect(within(section).getByRole('link', { name: 'View source task' })).toHaveAttribute(
+      'href',
+      '/job_memory_source',
+    );
+    expect(within(section).getByText(memory.suggestions[0].action)).toBeInTheDocument();
+    const toggle = within(section).getByRole('switch', { name: 'Automatically build memory' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(updateUserMemory).toHaveBeenCalledWith(false, expect.any(AbortSignal));
+    expect(within(section).getByText(memory.memories[0].content)).toBeInTheDocument();
+
+    fireEvent.click(within(section).getByRole('button', { name: 'Clear memory' }));
+    expect(clearUserMemory).not.toHaveBeenCalled();
+    fireEvent.click(within(section).getByRole('button', { name: 'Confirm clear memory' }));
+    await within(section).findByText('No saved memory yet.');
+    expect(clearUserMemory).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(within(section).queryByText(memory.portrait.summary)).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].title)).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('translates the Setting page and its memory card into Chinese', async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    render(
+      <LocaleProvider>
+        <IntegrationsView />
+      </LocaleProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { level: 1, name: '设置' })).toBeInTheDocument();
+    const section = screen.getByRole('region', { name: '用户记忆' });
+    await within(section).findByRole('switch', { name: '自动建立记忆' });
+    expect(within(section).queryByRole('img')).not.toBeInTheDocument();
+    expect(within(section).getByRole('switch', { name: '自动建立记忆' })).toBeChecked();
+    expect(screen.getByRole('region', { name: '项目记忆' })).toBeInTheDocument();
+    expect(screen.getByText('管理你的连接、技能、记忆和通知。')).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

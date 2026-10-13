@@ -14,10 +14,27 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
+    from uuid import UUID
 
 
 class HostPoolRepository(Protocol):
     """Port: the runner-host pool and its enrollment."""
+
+    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:
+        """Observe new-group demand and capacity without claiming work.
+
+        The queue count deliberately excludes jobs whose thread already owns
+        a retained sandbox: another machine cannot serve those turns. Free
+        slots include only fresh, enrolled hosts that may create a new group
+        under the same durable compute fences as the claim path. Unmatched
+        demand is the exact capability/profile matching against those slots;
+        once an owned fresh template exists, work that no such template can
+        run is omitted from scale-up pressure. No job identifiers or job
+        requirements leave this projection. The result also carries raw host
+        telemetry for conservative per-host slot sizing; callers must not
+        treat a stale sample as evidence for an increase.
+        """
+        ...
 
     async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
         """Observe configured queue stalls without claiming or changing jobs.
@@ -199,10 +216,10 @@ class HostPoolRepository(Protocol):
         """
         ...
 
-    async def set_host_status(self, *, host: str, status: str) -> str:
+    async def set_host_status(self, *, host: str, status: str, force: bool = False) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.
 
-        Returns ``"ok"``, ``"unknown"`` or ``"invalid"``. The table is consulted
+        Returns ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"fenced"``. The table is consulted
         inside the transaction that writes, on a locked row: checking it in the
         caller means an admin draining a host and the reaper marking it offline
         can both read ``online`` and both write, and the loser's decision is the
@@ -210,11 +227,39 @@ class HostPoolRepository(Protocol):
         """
         ...
 
+    async def acquire_host_drain_fence(
+        self,
+        *,
+        host: str,
+        expected_fence_token: UUID | None,
+        expected_fence_epoch: UUID | None,
+        fence_token: UUID,
+    ) -> tuple[str, str | None, UUID | None]:
+        """CAS an expected deployment-drain owner and epoch to ``fence_token``.
+
+        Exact requested-token retries are resolved before the expected owner
+        and epoch are compared. The row lock covers observation and mutation.
+        ``status_before`` is returned only for ``"ok"``; other outcomes
+        are ``"unknown"``, ``"invalid"``, ``"manual"``, ``"stale"``
+        and ``"released"``. The epoch is absent only for an unknown host.
+        """
+        ...
+
+    async def release_host_drain_fence(
+        self, *, host: str, fence_token: UUID
+    ) -> tuple[str, UUID | None]:
+        """Put the exact active drain owner online, retaining its receipt.
+
+        Returns the outcome and current post-update epoch. Outcomes are
+        ``"ok"``, ``"unknown"``, ``"invalid"`` or ``"stale"``.
+        """
+        ...
+
     async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
         """Ask a host to run ``slots`` turns at once, or with ``None`` its default.
 
-        Returns ``"ok"`` or ``"unknown"``. Nothing here starts or stops
-        anything: the host reads the value off its next heartbeat answer,
+        Returns ``"ok"``, ``"unknown"`` or ``"autoscaling_managed"``. Nothing
+        here starts or stops anything: the host reads the value off its next heartbeat answer,
         serves it as its limit, and reports it back as ``slots_total``. The
         claim honours the lower of the two from the next poll on, so a number
         the host has not confirmed admits nothing extra and a lowered one takes
@@ -433,6 +478,7 @@ class HostPoolRepository(Protocol):
         """Drop a host from the pool. A runner still polling re-adds itself.
 
         Returns ``"deleted"`` or ``"unknown"``; refuses ``"active"``,
+        ``"fenced"``,
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
         A disabled attached machine without external release capability may

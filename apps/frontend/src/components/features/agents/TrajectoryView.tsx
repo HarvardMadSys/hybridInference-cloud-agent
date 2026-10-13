@@ -25,10 +25,11 @@ import {
   type PointerEvent,
 } from 'react';
 
-import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
+import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { filterSteps, type TrajectoryStep } from './trajectorySteps';
 import { preview, toSessionLog, type TrajectoryLane } from './trajectory';
 import { formatDuration } from './TurnFooter';
+import { TrajectoryTimeBreakdown } from './TrajectoryTimeBreakdown';
 import {
   deriveTimeline,
   focusKeys,
@@ -58,6 +59,7 @@ const LANES: { key: TrajectoryLane; label: string; tone: string }[] = [
   { key: 'tools', label: 'Tools', tone: 'bg-amber-400' },
   { key: 'other', label: 'Other', tone: 'bg-gray-300 dark:bg-gray-600' },
 ];
+const EMPTY_TIMING_JOBS: AgentJobApi[] = [];
 
 const ACTOR_TONE: Record<TrajectoryStep['actor'], string> = {
   user: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400',
@@ -668,6 +670,7 @@ export function TrajectoryView({
   onSelectStep,
   onOpenRun,
   focusJobId,
+  jobs = EMPTY_TIMING_JOBS,
 }: {
   events: (AgentJobEventApi | AgentThreadEventApi)[];
   steps: TrajectoryStep[];
@@ -678,6 +681,7 @@ export function TrajectoryView({
   onOpenRun: (jobId: string, turnNo: number) => void;
   /** A turn opened from Chat: bring its header into view without selecting it. */
   focusJobId?: string | null;
+  jobs?: AgentJobApi[];
 }) {
   const [mode, setMode] = useState<TimelineMode>('steps');
   const [range, setRange] = useState<DomainRange | null>(null);
@@ -806,6 +810,7 @@ export function TrajectoryView({
               onSelect={onSelectStep}
             />
           </div>
+          <TrajectoryTimeBreakdown jobs={jobs} />
         </div>
 
         <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">

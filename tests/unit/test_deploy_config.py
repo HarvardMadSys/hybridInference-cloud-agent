@@ -9,6 +9,9 @@ runner container crash-loops in production.
 
 from __future__ import annotations
 
+import base64
+import ipaddress
+import json
 import os
 import re
 import shutil
@@ -23,6 +26,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
+from cloud_agent.attachments.models import (
+    MAX_ATTACHMENT_FILE_BYTES,
+    MAX_ATTACHMENT_PATH_LENGTH,
+    MAX_CONTENT_TYPE_LENGTH,
+)
+from cloud_agent.providers.compute.setup_tunnels import _REMOTE_SCRIPT
 from cloud_agent_host.runner import build_parser
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +44,8 @@ _LOCAL_EDGE_DOCKERFILE = REPO_ROOT / "deploy/local/Dockerfile.edge"
 _LOCAL_NGINX = REPO_ROOT / "deploy/local/nginx.conf"
 _DOCKERFILE = Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
 _CODEX_REQUIREMENTS = Path(__file__).resolve().parents[2] / "deploy/sandbox/codex-requirements.toml"
+#: The hand-provisioning reference for the far machines' sshd tunnel policy.
+_SSHD_REFERENCE = REPO_ROOT / "deploy/host/sshd-tunnels.conf.example"
 
 
 @pytest.fixture(scope="module")
@@ -449,6 +460,76 @@ def test_the_standalone_edge_is_probed_before_a_deploy_succeeds():
     assert 'wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"' in edge_checks
 
 
+@pytest.mark.parametrize(
+    "file,prefix,upstream",
+    [
+        ("deploy/control-plane/edge.nginx.conf", "/api", "http://cloud_agent_api"),
+        ("deploy/local/nginx.conf", "/api", "http://cloud_agent_api"),
+        (
+            "deploy/reverse-proxy/agents-under-gateway.conf",
+            "/agents/api",
+            "http://127.0.0.1:8000",
+        ),
+    ],
+)
+def test_edge_allows_the_largest_supported_attachment_json(file, prefix, upstream):
+    """A valid base64 upload must fit the proxy limit and retain its API path."""
+    config = (REPO_ROOT / file).read_text()
+    route = f"{prefix}/v1/agent/uploads"
+    match = re.search(r"location " + re.escape(route) + r"\s*\{([^}]+)\}", config)
+    assert match is not None, "uploads need a distinct bounded proxy body limit"
+    block = match.group(1)
+    limit = re.search(r"client_max_body_size\s+(\d+)([km]?)\s*;", block)
+    assert limit is not None
+    maximum = int(limit.group(1)) * {"": 1, "k": 1024, "m": 1024 * 1024}[limit.group(2)]
+    body = json.dumps(
+        {
+            # Control characters/non-ASCII metadata can consume six JSON bytes
+            # per character; include that envelope rather than just base64.
+            "path": "\u0100" * MAX_ATTACHMENT_PATH_LENGTH,
+            "content_base64": base64.b64encode(bytes(MAX_ATTACHMENT_FILE_BYTES)).decode(),
+            "content_type": "\u0100" * MAX_CONTENT_TYPE_LENGTH,
+        }
+    ).encode()
+    assert len(body) <= maximum <= 8 * 1024 * 1024
+    assert f"proxy_pass {upstream}/v1/agent/uploads;" in block
+    assert config.count("client_max_body_size") == 1, "other routes retain the default"
+
+
+@pytest.mark.parametrize(
+    "file",
+    ["deploy/control-plane/edge.nginx.conf", "deploy/reverse-proxy/agents-under-gateway.conf"],
+)
+def test_shipped_proxies_overwrite_the_forwarded_address(file):
+    """The audit trail must not record an address the caller wrote.
+
+    With ``AGENT_TRUST_PROXY_HEADERS`` on, ``get_client_ip`` takes the first
+    ``X-Forwarded-For`` entry. ``$proxy_add_x_forwarded_for`` appends to the
+    header the caller sent, so that first entry would be the caller's choice.
+    Each shipped proxy replaces it with the one peer address nginx knows.
+    """
+    config = (REPO_ROOT / file).read_text()
+    live = [line.split("#", 1)[0] for line in config.splitlines()]
+    assert not any("$proxy_add_x_forwarded_for" in line for line in live)
+    forwarded = [
+        line.strip() for line in live if re.search(r"proxy_set_header\s+X-Forwarded-For", line)
+    ]
+    assert forwarded, f"{file} forwards no client address at all"
+    assert set(forwarded) == {"proxy_set_header X-Forwarded-For $remote_addr;"}, forwarded
+
+
+def test_control_and_runner_install_locked_production_dependencies():
+    """Both images consume uv.lock without an unlocked pip project install."""
+    for file in ("deploy/control-plane/Dockerfile", "deploy/host/Dockerfile.agent-runner"):
+        recipe = (REPO_ROOT / file).read_text()
+        assert "uv.lock" in recipe
+        assert "uv sync --frozen --no-dev --no-install-project" in recipe
+        assert '"uv==${UV_VERSION}"' in recipe
+        assert "pip install --no-cache-dir ." not in recipe
+    control = (REPO_ROOT / "deploy/control-plane/Dockerfile").read_text()
+    assert "uv sync --frozen --no-dev --no-editable" in control
+
+
 def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():
     """Compose must distinguish unset from explicitly empty for root hosting."""
     text = _CONTROL_PLANE_COMPOSE.read_text()
@@ -667,6 +748,7 @@ def test_the_tunnel_key_is_allowed_the_one_thing_it_exists_to_do(compose: dict):
     candidates = [
         REPO_ROOT / "deploy/host/sandbox_host.sh",
         REPO_ROOT / "docs/operations.md",
+        _SSHD_REFERENCE,
     ]
     checked = 0
     for path in (candidate for candidate in candidates if candidate.exists()):
@@ -680,6 +762,169 @@ def test_the_tunnel_key_is_allowed_the_one_thing_it_exists_to_do(compose: dict):
                 "`port-forwarding`; ssh will refuse the forward this key exists for"
             )
     assert checked, "no authorized_keys example was found to check"
+
+
+#: Where a documented authorized_keys line for a tunnel key can appear.
+_KEY_LINE_DOCS = (
+    REPO_ROOT / "deploy/host/sandbox_host.sh",
+    REPO_ROOT / "docs/operations.md",
+    _SSHD_REFERENCE,
+)
+_KEY_OPTIONS = re.compile(r'command=""(?:,[a-z-]+(?:="[^"]*")?)*')
+
+
+def _key_lines(path: Path) -> list[dict[str, str]]:
+    """The options of every authorized_keys line documented in ``path``."""
+    found = []
+    for match in _KEY_OPTIONS.finditer(path.read_text()):
+        options = {}
+        for option in match.group(0).split(","):
+            name, _, value = option.partition("=")
+            options[name] = value.strip('"')
+        found.append(options)
+    return found
+
+
+def _tunnel_remote_port(compose: dict, service: str) -> int:
+    """The far-side port a tunnel forwards to when nothing overrides it."""
+    return int(_expand(compose["services"][service]["environment"]["TUNNEL_REMOTE_PORT"]))
+
+
+def _sshd_match_blocks(text: str) -> dict[str, dict[str, str]]:
+    """Each ``Match User`` block's settings, keyed by account, as sshd -T names them."""
+    blocks: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        keyword, _, value = line.partition(" ")
+        if keyword.lower() == "match":
+            criterion, _, account = value.strip().partition(" ")
+            current = blocks.setdefault(account, {}) if criterion.lower() == "user" else None
+            continue
+        assert current is not None, f"{line!r} is outside any Match User block"
+        current[keyword.lower()] = value.strip()
+    return blocks
+
+
+def test_only_the_control_tunnel_key_may_listen_and_only_where_it_must(compose: dict):
+    """`port-forwarding` re-enables `-R` too; `permitopen` limits only `-L`.
+
+    So a documented key line without `permitlisten` lets its key open
+    listeners on the far machine. The control-plane key needs exactly one, for
+    the broker's way back, and must name it; the two relay keys need none and
+    are refused remote forwarding by their accounts' Match blocks instead
+    (`permitlisten="none"` is not something OpenSSH accepts on a key line).
+    """
+    control = _tunnel_remote_port(compose, "control-plane-tunnel")
+    relays = {
+        _tunnel_remote_port(compose, "gateway-tunnel"),
+        _tunnel_remote_port(compose, "mcp-tunnel"),
+    }
+    documented_controls = set()
+    for path in _KEY_LINE_DOCS:
+        rel = path.relative_to(REPO_ROOT)
+        for options in _key_lines(path):
+            port = int(options["permitopen"].rsplit(":", 1)[1])
+            if port in relays:
+                assert "permitlisten" not in options, (
+                    f"{rel} documents a relay key with a reverse listener: {options}"
+                )
+                continue
+            assert port == control, f"{rel} documents a key for no tunnel: {options}"
+            documented_controls.add(path)
+            assert "permitlisten" in options, (
+                f"{rel} documents the control-plane key without `permitlisten`; "
+                "it could then open a listener on any port of the control-plane machine"
+            )
+            host, _, listen_port = options["permitlisten"].rpartition(":")
+            address = ipaddress.ip_address(host)
+            assert address.is_private and not address.is_loopback, (
+                f"{rel}: the reverse listener must be the Docker bridge gateway, not {host}"
+            )
+            assert listen_port.isdigit(), f"{rel}: permitlisten needs one exact port"
+    assert documented_controls == set(_KEY_LINE_DOCS), (
+        "the control-plane key line is no longer documented in "
+        f"{sorted(str(p.relative_to(REPO_ROOT)) for p in set(_KEY_LINE_DOCS) - documented_controls)}"
+    )
+
+
+def test_the_reference_sshd_policy_is_what_automatic_setup_writes(compose: dict):
+    """A hand-provisioned tunnel account gets exactly the generated policy.
+
+    Automatic setup writes one ``Match User`` block per tunnel account and
+    reads it back. The reference an operator copies instead must not drift
+    from it: relay accounts forward locally only and listen nowhere, and the
+    control account's single listener is the one its key line also names.
+    """
+    namespace: dict = {"__name__": "reference_sshd_policy"}
+    exec(compile(_REMOTE_SCRIPT, "setup_tunnels", "exec"), namespace)
+    blocks = _sshd_match_blocks(_SSHD_REFERENCE.read_text())
+
+    relay_ports, reverse = set(), {}
+    for account, settings in blocks.items():
+        port = int(settings["permitopen"].rsplit(":", 1)[1])
+        listen = settings.get("permitlisten")
+        expected, _ = namespace["desired_policy"](
+            account, port, None if listen == "none" else listen
+        )
+        assert settings == expected, (
+            f"{_SSHD_REFERENCE.name}: {account} differs from the generated policy"
+        )
+        if listen == "none":
+            assert settings["allowtcpforwarding"] == "local"
+            relay_ports.add(port)
+        else:
+            reverse[port] = listen
+
+    assert relay_ports == {
+        _tunnel_remote_port(compose, "gateway-tunnel"),
+        _tunnel_remote_port(compose, "mcp-tunnel"),
+    }, "each relay account needs its own block refusing remote forwards"
+    control = _tunnel_remote_port(compose, "control-plane-tunnel")
+    assert list(reverse) == [control], "exactly one account, the control one, may listen"
+    key_listens = {
+        options["permitlisten"]
+        for options in _key_lines(_SSHD_REFERENCE)
+        if "permitlisten" in options
+    }
+    assert key_listens == {reverse[control]}, (
+        "the control key line and its account must name the same single listener"
+    )
+    assert "deploy/host/sshd-tunnels.conf.example" in (REPO_ROOT / "docs/operations.md").read_text()
+
+
+def test_no_shipped_doc_or_config_offers_gateway_ports_yes():
+    """`GatewayPorts yes` moves every remote forward to the wildcard address.
+
+    sshd overrides the requested bind and still reports success, so
+    `ExitOnForwardFailure` never fires and each host's broker is published on
+    every interface of the control-plane machine behind one shared token.
+    The broker route needs `clientspecified`, held to one address and port by
+    the account's PermitListen and the key's permitlisten.
+    """
+    offered = re.compile(r"GatewayPorts[\s=`'\"]+yes\b", re.IGNORECASE)
+    sources = [
+        *sorted((REPO_ROOT / "docs").rglob("*.md")),
+        *sorted(REPO_ROOT.glob("*.md")),
+        *sorted(p for p in (REPO_ROOT / "deploy").rglob("*") if p.is_file()),
+    ]
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}:{number}"
+        for path in sources
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
+        )
+        if offered.search(line)
+    ]
+    assert not offenders, f"`GatewayPorts yes` is offered at {offenders}"
+
+    operations = (REPO_ROOT / "docs/operations.md").read_text()
+    assert "`GatewayPorts clientspecified`" in operations
+    assert "GatewayPorts clientspecified" in _SSHD_REFERENCE.read_text()
+    # The bind address alone does not keep the LAN out (weak host model).
+    assert re.search(r"iptables -I INPUT -p tcp --dport \d+ ! -i br-\S+ -j DROP", operations)
 
 
 def test_a_failed_tunnel_probe_is_not_reported_as_a_successful_start() -> None:

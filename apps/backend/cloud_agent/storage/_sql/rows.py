@@ -102,6 +102,7 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "metadata": load_json(row["metadata"]),
         "skills": load_json(row.get("skills")),
         "attachments": load_json(row.get("attachments")),
+        "plugins": load_json(row.get("plugins")) or [],
         "fork_source_job_id": row["fork_source_job_id"],
         # This turn's immutable goal snapshot: the objective it was created for,
         # what kind of round it was, and how its final message read. Distinct

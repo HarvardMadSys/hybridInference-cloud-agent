@@ -15,6 +15,8 @@ import { useState } from 'react';
 
 import type { AgentRunnerHost, HostSettingDefinition, HostSettingValues } from '@/lib/api/admin';
 
+import { SettingsSection } from '../SettingsSection';
+
 import {
   amountIn,
   factNote,
@@ -43,6 +45,59 @@ const UNIT_CLASS =
   'ui-input min-h-11 w-20 shrink-0 px-2 disabled:cursor-not-allowed disabled:opacity-50';
 const BUTTON_CLASS = 'ui-button ui-button-primary min-h-11 min-w-16';
 const CLEAR_CLASS = 'ui-button ui-button-ghost min-h-11 text-xs';
+
+interface SettingGroup {
+  title: string;
+  definitions: HostSettingDefinition[];
+}
+
+/** Keep the same organization for defaults and individual server overrides. */
+function organizeSettings(definitions: HostSettingDefinition[]) {
+  const resources: SettingGroup = { title: 'Container resources', definitions: [] };
+  const sessions: SettingGroup = { title: 'Session limits', definitions: [] };
+  const other: SettingGroup = { title: 'Other settings', definitions: [] };
+  const terminals: SettingGroup = { title: 'Terminal limits', definitions: [] };
+  const workspace: SettingGroup = { title: 'Workspace limits', definitions: [] };
+  const storage: SettingGroup = { title: 'Storage admission', definitions: [] };
+
+  for (const definition of definitions) {
+    const key = definition.key;
+    if (['sandbox_cpu_millicores', 'sandbox_memory_mib', 'sandbox_disk_mib'].includes(key)) {
+      resources.definitions.push(definition);
+    } else if (
+      [
+        'agent_timeout_s',
+        'source_import_max_mib',
+        'chat_idle_timeout_s',
+        'shared_resident_capacity',
+      ].includes(key)
+    ) {
+      sessions.definitions.push(definition);
+    } else if (key.startsWith('terminal_')) {
+      terminals.definitions.push(definition);
+    } else if (key.startsWith('workspace_')) {
+      workspace.definitions.push(definition);
+    } else if (key === 'storage_min_available_mib') {
+      storage.definitions.push(definition);
+    } else {
+      // New definitions stay visible until their group has been decided.
+      other.definitions.push(definition);
+    }
+  }
+
+  return [
+    {
+      title: 'Important' as const,
+      description: 'Container resources and limits for running sessions.',
+      groups: [resources, sessions, other].filter((group) => group.definitions.length > 0),
+    },
+    {
+      title: 'Advanced' as const,
+      description: 'Terminal, workspace and storage admission limits.',
+      groups: [terminals, workspace, storage].filter((group) => group.definitions.length > 0),
+    },
+  ].filter((section) => section.groups.length > 0);
+}
 
 /**
  * One value's amount, unit, Save and clear.
@@ -202,46 +257,59 @@ export function GlobalSettingsCard({
       <p className="mt-2 text-sm leading-6 text-muted">
         Defaults for every server. Individual servers can override these values.
       </p>
-      <div className="mt-4">
-        {definitions.map((definition, index) => {
-          const saved = values[definition.key] ?? null;
-          return (
-            <div
-              key={definition.key}
-              className={`grid gap-4 py-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start xl:gap-8 ${
-                index > 0 ? 'border-t border-border' : ''
-              }`}
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground">
-                  {definition.label}
-                  {saved !== null && (
-                    <span className="ml-2 inline-flex rounded-md bg-surface-muted px-2 py-0.5 text-xs font-normal tabular-nums text-muted">
-                      {formatSettingValue(definition, saved)}
-                    </span>
-                  )}
-                </p>
-                <p className="mt-1.5 text-sm leading-6 text-muted">{definition.description}</p>
-                <p className="mt-2 text-xs leading-5 text-muted">
-                  {rolloutText(definition, values, hosts, nameOf)}
-                </p>
-              </div>
-              <div className="min-w-0">
-                <SettingForm
-                  key={`${definition.key}:${saved ?? 'unset'}`}
-                  definition={definition}
-                  saved={saved}
-                  placeholder={definition.default}
-                  label={`${definition.label} for all servers`}
-                  clearLabel="Use deployment default"
-                  busy={busy}
-                  onChange={onChange}
-                />
-              </div>
+      {organizeSettings(definitions).map((section) => (
+        <SettingsSection
+          key={section.title}
+          title={section.title}
+          description={section.description}
+        >
+          {section.groups.map((group) => (
+            <div key={group.title} className="mt-5 first:mt-0">
+              <h4 className="text-sm font-semibold text-foreground">{group.title}</h4>
+              {group.definitions.map((definition, index) => {
+                const saved = values[definition.key] ?? null;
+                return (
+                  <div
+                    key={definition.key}
+                    className={`grid gap-4 py-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start xl:gap-8 ${
+                      index > 0 ? 'border-t border-border' : ''
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-foreground">
+                        {definition.label}
+                        {saved !== null && (
+                          <span className="ml-2 inline-flex rounded-md bg-surface-muted px-2 py-0.5 text-xs font-normal tabular-nums text-muted">
+                            {formatSettingValue(definition, saved)}
+                          </span>
+                        )}
+                      </p>
+                      <p className="mt-1.5 text-sm leading-6 text-muted">
+                        {definition.description}
+                      </p>
+                      <p className="mt-2 text-xs leading-5 text-muted">
+                        {rolloutText(definition, values, hosts, nameOf)}
+                      </p>
+                    </div>
+                    <div className="min-w-0">
+                      <SettingForm
+                        key={`${definition.key}:${saved ?? 'unset'}`}
+                        definition={definition}
+                        saved={saved}
+                        placeholder={definition.default}
+                        label={`${definition.label} for all servers`}
+                        clearLabel="Use deployment default"
+                        busy={busy}
+                        onChange={onChange}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </SettingsSection>
+      ))}
     </div>
   );
 }
@@ -282,69 +350,92 @@ export function ServerSettingsPanel({
           Redeploy it to manage them here.
         </p>
       )}
-      <div
-        className="ui-focus-ring mt-4 overflow-x-auto rounded-xl border border-border"
-        tabIndex={0}
-        role="region"
-        aria-label={`Sandbox settings table for ${name}`}
-      >
-        <table className="w-full min-w-[36rem] text-left text-sm">
-          <thead className="border-b border-border bg-surface-muted text-xs text-muted">
-            <tr>
-              <th scope="col" className="px-4 py-3 font-medium">
-                Setting
-              </th>
-              <th scope="col" className="px-4 py-3 font-medium">
-                In use
-              </th>
-              <th scope="col" className="px-4 py-3 text-right font-medium">
-                This server only
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {definitions.map((definition) => {
-              const fact = settingFact(definition, globalValues, host);
-              const override = host.settings_desired?.[definition.key] ?? null;
-              return (
-                <tr key={definition.key}>
-                  <th scope="row" className="px-4 py-4 align-top font-medium text-foreground">
-                    {definition.label}
-                  </th>
-                  <td className="px-4 py-4 align-top">
-                    <span className="block whitespace-nowrap tabular-nums text-foreground">
-                      {fact.inUse === null ? '—' : formatSettingValue(definition, fact.inUse)}
-                    </span>
-                    {/* A runner that cannot apply settings says so once, above
-                      the table, rather than on every row. */}
-                    {supported && (
-                      <span
-                        className={`mt-1 block text-xs leading-5 ${
-                          fact.state === 'applied' ? 'text-muted' : 'text-status-warning'
-                        }`}
-                      >
-                        {factNote(fact)}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-4 align-top">
-                    <SettingForm
-                      key={`${definition.key}:${override ?? 'unset'}`}
-                      definition={definition}
-                      saved={override}
-                      placeholder={fact.admin ?? definition.default}
-                      label={`${definition.label} for ${name}`}
-                      clearLabel="Use default"
-                      busy={busy}
-                      disabled={!supported}
-                      onChange={onChange}
-                    />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="mt-4 min-w-0" role="region" aria-label={`Sandbox settings table for ${name}`}>
+        {organizeSettings(definitions).map((section) => (
+          <SettingsSection
+            key={section.title}
+            title={section.title}
+            description={section.description}
+          >
+            {section.groups.map((group) => (
+              <div key={group.title} className="mt-5 first:mt-0">
+                <h4 className="text-sm font-semibold text-foreground">{group.title}</h4>
+                <div
+                  className="ui-focus-ring mt-3 overflow-x-auto rounded-xl border border-border"
+                  tabIndex={0}
+                  role="region"
+                  aria-label={`${group.title} table for ${name}`}
+                >
+                  <table className="w-full min-w-[36rem] text-left text-sm">
+                    <caption className="sr-only">
+                      {group.title} for {name}
+                    </caption>
+                    <thead className="border-b border-border bg-surface-muted text-xs text-muted">
+                      <tr>
+                        <th scope="col" className="px-4 py-3 font-medium">
+                          Setting
+                        </th>
+                        <th scope="col" className="px-4 py-3 font-medium">
+                          In use
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-right font-medium">
+                          This server only
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {group.definitions.map((definition) => {
+                        const fact = settingFact(definition, globalValues, host);
+                        const override = host.settings_desired?.[definition.key] ?? null;
+                        return (
+                          <tr key={definition.key}>
+                            <th
+                              scope="row"
+                              className="px-4 py-4 align-top font-medium text-foreground"
+                            >
+                              {definition.label}
+                            </th>
+                            <td className="px-4 py-4 align-top">
+                              <span className="block whitespace-nowrap tabular-nums text-foreground">
+                                {fact.inUse === null
+                                  ? '—'
+                                  : formatSettingValue(definition, fact.inUse)}
+                              </span>
+                              {/* A runner that cannot apply settings says so once, above
+                                  the tables, rather than on every row. */}
+                              {supported && (
+                                <span
+                                  className={`mt-1 block text-xs leading-5 ${
+                                    fact.state === 'applied' ? 'text-muted' : 'text-status-warning'
+                                  }`}
+                                >
+                                  {factNote(fact)}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-4 align-top">
+                              <SettingForm
+                                key={`${definition.key}:${override ?? 'unset'}`}
+                                definition={definition}
+                                saved={override}
+                                placeholder={fact.admin ?? definition.default}
+                                label={`${definition.label} for ${name}`}
+                                clearLabel="Use default"
+                                busy={busy}
+                                disabled={!supported}
+                                onChange={onChange}
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </SettingsSection>
+        ))}
       </div>
     </section>
   );

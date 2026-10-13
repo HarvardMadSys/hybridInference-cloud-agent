@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
+from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
 from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
@@ -36,9 +37,9 @@ from cloud_agent.schemas import (
     HostHeartbeatResponse,
     HostRegisterRequest,
     HostRegisterResponse,
+    HostSandboxArchiveSettings,
     ResidencyBeat,
     RetainedSandboxStop,
-    SandboxArchiveSettingsResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
@@ -67,7 +68,8 @@ class _HostsStorage(Protocol):
     sandbox: SandboxRepository
 
 
-router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
+# Host traffic arrives through the tunnel, past the edge's body limits.
+router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"], route_class=HostBodyLimitRoute)
 
 
 def _require_store(store: _HostsStorage | None) -> _HostsStorage:
@@ -212,7 +214,22 @@ async def register_host(
             labels=dict(body.labels),
         )
     except ValueError as exc:
-        if str(exc) != "resource_retiring":
+        error_type = str(exc)
+        if error_type == "host_drain_fenced":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "host_drain_fenced",
+                        "message": (
+                            "This host is held by an automated deployment drain. "
+                            "The enrollment token was consumed; release the drain "
+                            "and issue a new token before retrying."
+                        ),
+                    }
+                },
+            ) from exc
+        if error_type != "resource_retiring":
             raise
         raise HTTPException(
             status_code=409,
@@ -279,9 +296,10 @@ async def heartbeat_host(
         ),
     )
     if updated is None:
-        # The row vanished between authentication and the write — a forget
-        # landing mid-request. Refusing is right: this credential now names
-        # nothing.
+        # The row vanished, or its credential changed, between authentication
+        # and the write — a forget, a removal or a re-enrollment landing
+        # mid-request. Refusing is right: this credential now names nothing,
+        # and the residencies below must not be extended on its word.
         raise _unauthorized("This host credential is no longer valid.")
     # Residency beats ride the host heartbeat (design §7): one wire message
     # says "I am here" and "these sandboxes are still mine", generation-scoped
@@ -399,7 +417,7 @@ async def heartbeat_host(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
         ),
-        sandbox_archive_settings=SandboxArchiveSettingsResponse.model_validate(
+        sandbox_archive_settings=HostSandboxArchiveSettings.model_validate(
             await job_store.host_pool.sandbox_archive_settings()
         ),
         residencies_lost=lost,

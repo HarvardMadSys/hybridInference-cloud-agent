@@ -36,6 +36,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
+from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.hosts import authenticate_host
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.profiling_control_config import profiling_control_deployment
@@ -50,7 +51,9 @@ logger = get_logger(__name__)
 IDLE_SYNC_SECONDS = 30.0
 ACTIVE_SYNC_SECONDS = 5.0
 
-router = APIRouter(prefix="/v1/agent/hosts", tags=["host-profiling"])
+router = APIRouter(
+    prefix="/v1/agent/hosts", tags=["host-profiling"], route_class=HostBodyLimitRoute
+)
 
 
 @router.post("/profiling-policy")

@@ -40,6 +40,7 @@ from tests.support.storage import AllCapabilities, EmptyAttachments
 from cloud_agent.api import routes as agent_jobs_router, worker as agent_worker
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
+    get_gateway_client,
     get_grant_client,
     get_storage,
 )
@@ -59,6 +60,8 @@ class _ClaimStore(EmptyAttachments, AllCapabilities):
         self.queued = queued
         self.fence_still_current = fence_still_current
         self.released: list[tuple[str, int]] = []
+        self.retry_delays: list[float] = []
+        self.failed: list[str] = []
         # Named apart from the capability: `store.linked` is now the grant
         # repository the route reaches for, not this fake's record of what it
         # linked.
@@ -101,9 +104,22 @@ class _ClaimStore(EmptyAttachments, AllCapabilities):
         return []
 
     async def release_claim(
-        self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int | None = None,
+        retry_after_seconds: float = 0,
     ) -> bool:
         self.released.append((job_id, attempt_id))
+        self.retry_delays.append(retry_after_seconds)
+        return True
+
+    async def transition(self, *, job_id: str, to_state: str, **kwargs: Any) -> bool:
+        if not self.fence_still_current:
+            return False
+        assert to_state == "failed"
+        self.failed.append(job_id)
         return True
 
     async def record_attempt_grant(
@@ -158,12 +174,42 @@ class _Grants:
         return True
 
 
-def _app(store: _ClaimStore, grants: _Grants) -> FastAPI:
+class _Gateway:
+    """The Gateway's Agent access decision, as the claim re-reads it.
+
+    Allowed unless told otherwise. ``decision`` replaces the answer; ``error``
+    makes the lookup itself fail, which is how both a withdrawn account
+    (``subject_unavailable``) and an unreachable Gateway arrive.
+    """
+
+    def __init__(
+        self,
+        *,
+        decision: dict[str, Any] | None = None,
+        error: GatewayError | None = None,
+    ) -> None:
+        self.decision = decision
+        self.error = error
+        self.asked: list[str] = []
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        self.asked.append(user_id)
+        if self.error is not None:
+            raise self.error
+        if self.decision is not None:
+            return {"user_id": user_id, **self.decision}
+        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+
+
+def _app(store: _ClaimStore, grants: _Grants, gateway: _Gateway | None = None) -> FastAPI:
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_grant_client] = lambda: grants
+    # Every claim asks the Gateway again whether the owner may use Agent.
+    resolved_gateway = gateway if gateway is not None else _Gateway()
+    app.dependency_overrides[get_gateway_client] = lambda: resolved_gateway
     app.dependency_overrides[agent_worker.verify_claiming_host] = lambda: {
         "host": "runner-test",
         "credential_hash": "test-credential-hash",
@@ -183,8 +229,8 @@ def _env(monkeypatch):
 async def claim():
     """Return a helper that drives one claim against a fresh app."""
 
-    async def _drive(store: _ClaimStore, grants: _Grants):
-        transport = ASGITransport(app=_app(store, grants))
+    async def _drive(store: _ClaimStore, grants: _Grants, gateway: _Gateway | None = None):
+        transport = ASGITransport(app=_app(store, grants, gateway))
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             return await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
 
@@ -198,10 +244,28 @@ async def test_the_sandbox_credential_is_the_gateways_grant(claim):
 
     assert response.status_code == 200
     assert response.json()["sandbox_token"] == "agr.header.signature"
+    assert response.json()["plugins"] == []
     # And the runner's own token is still this service's own, unchanged.
     from cloud_agent.tokens import SCOPE_FULL, parse_worker_token
 
     assert parse_worker_token(response.json()["worker_token"])["scope"] == SCOPE_FULL
+
+
+async def test_claim_delivers_the_threads_plugins(claim, monkeypatch):
+    store, grants = _ClaimStore(), _Grants()
+    plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]
+    original = store.claim_job
+
+    async def claim_with_plugins(**kwargs):
+        job = await original(**kwargs)
+        assert job is not None
+        return {**job, "plugins": plugins}
+
+    monkeypatch.setattr(store, "claim_job", claim_with_plugins)
+    response = await claim(store, grants)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["plugins"] == plugins
 
 
 async def test_the_grant_is_scoped_to_the_job(claim):
@@ -246,6 +310,7 @@ async def test_a_refused_grant_returns_the_job_to_the_queue(claim):
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["type"] == "credential_unavailable"
     assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.retry_delays == [30]
     assert store.linked == {}
 
 
@@ -311,12 +376,13 @@ async def test_a_grant_that_omits_the_job_model_is_refused(claim):
 
     response = await claim(store, grants)
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.json()["detail"]["error"]["type"] == "model_not_granted"
     # Withdrawn, not left live: nothing will ever renew a grant whose claim
     # failed, but its TTL would otherwise keep it usable for minutes.
     assert grants.revoked == ["agr_7"]
-    assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.released == []
+    assert store.failed == [_JOB]
 
 
 async def test_a_grant_with_no_scope_at_all_is_refused(claim):
@@ -330,9 +396,146 @@ async def test_a_grant_with_no_scope_at_all_is_refused(claim):
 
     response = await claim(store, grants)
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.json()["detail"]["error"]["type"] == "model_not_granted"
     assert grants.revoked == ["agr_7"]
+    assert store.failed == [_JOB]
+
+
+async def test_an_unreadable_grant_scope_retries_without_ending_the_job(claim):
+    class UnreadableGrants(_Grants):
+        async def mint(self, **kwargs: Any) -> dict[str, Any]:
+            grant = await super().mint(**kwargs)
+            grant.pop("allowed_models")
+            return grant
+
+    store, grants = _ClaimStore(), UnreadableGrants()
+    response = await claim(store, grants)
+    assert response.status_code == 503
+    assert grants.revoked == ["agr_7"]
+    assert store.failed == []
+    assert store.retry_delays == [30]
+
+
+async def test_a_definitively_unavailable_subject_ends_the_job(claim):
+    class UnavailableSubjectGrants(_Grants):
+        async def mint(self, **kwargs: Any) -> dict[str, Any]:
+            raise GatewayError(
+                "subject unavailable", status_code=403, error_type="subject_unavailable"
+            )
+
+    store = _ClaimStore()
+    response = await claim(store, UnavailableSubjectGrants())
+    assert response.status_code == 403
+    assert store.failed == [_JOB]
+    assert store.released == []
+
+
+async def test_an_unavailable_repository_lookup_delays_the_claim(claim, monkeypatch):
+    from cloud_agent.entitlement import RepoAccessUnavailable
+
+    async def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RepoAccessUnavailable("GitHub is temporarily unavailable")
+
+    monkeypatch.setattr(agent_worker, "require_entitled_repo", unavailable)
+    store = _ClaimStore()
+    response = await claim(store, _Grants())
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "source_control_unavailable"
+    assert store.failed == []
+    assert store.retry_delays == [30]
+
+
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        _Gateway(decision={"allowed": False, "permissions": []}),
+        _Gateway(
+            error=GatewayError(
+                "gateway answered 403", status_code=403, error_type="subject_unavailable"
+            )
+        ),
+    ],
+    ids=["denied", "subject_unavailable"],
+)
+async def test_an_owner_whose_agent_access_was_withdrawn_is_not_run(claim, gateway):
+    """Queued work does not outlive its owner's access.
+
+    A goal's round or a waiting message is written with no request to admit
+    it, and any job can wait in the queue past a withdrawal. The grant mint
+    alone would not notice — the Gateway refuses it only for an unknown or
+    inactive account — so the claim asks, and a "no" ends the job with the
+    reason rather than handing it back to be refused again at every claim.
+    """
+    store, grants = _ClaimStore(), _Grants()
+
+    response = await claim(store, grants, gateway)
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"]["type"] == "agent_access_denied"
+    assert gateway.asked == ["user-owner"]
+    assert grants.calls == []
+    assert store.failed == [_JOB]
+    assert store.released == []
+
+
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        _Gateway(error=GatewayError("gateway unreachable")),
+        _Gateway(error=GatewayError("gateway answered 503", status_code=503)),
+        _Gateway(decision={"allowed": True, "permissions": []}),
+    ],
+    ids=["unreachable", "unavailable", "malformed"],
+)
+async def test_an_unconfirmed_agent_access_hands_the_job_back(claim, gateway):
+    """No answer is not permission, and not a verdict on the owner either."""
+    store, grants = _ClaimStore(), _Grants()
+
+    response = await claim(store, grants, gateway)
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "agent_access_unavailable"
+    assert grants.calls == []
+    assert store.failed == []
+    assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.retry_delays == [30]
+
+
+@pytest.mark.parametrize("refusal", ["not_allowed", "unavailable"])
+async def test_a_repository_refusal_is_decided_before_any_grant_is_minted(
+    claim, monkeypatch, refusal
+):
+    """A job that cannot run asks the gateway for nothing.
+
+    The entitlement re-check used to follow the mint, so each claim of a job
+    whose owner could no longer reach its repository cost the gateway a grant
+    and, a reaper pass later, a revocation — for a turn that was never going to
+    start. Ended or delayed, the job is decided with no credential in play.
+    """
+    from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed
+
+    async def refused(*args: Any, **kwargs: Any) -> None:
+        if refusal == "not_allowed":
+            raise RepoNotAllowed("owner/name is no longer reachable by its owner")
+        raise RepoAccessUnavailable("GitHub is temporarily unavailable")
+
+    monkeypatch.setattr(agent_worker, "require_entitled_repo", refused)
+    store, grants = _ClaimStore(), _Grants()
+
+    response = await claim(store, grants)
+
+    assert response.status_code == (403 if refusal == "not_allowed" else 503)
+    assert grants.calls == []
+    assert grants.revoked == []
+    assert store.linked == {}
+    if refusal == "not_allowed":
+        assert response.json()["detail"]["error"]["type"] == "repo_not_allowed"
+        assert store.failed == [_JOB]
+        assert store.released == []
+    else:
+        assert store.failed == []
+        assert store.retry_delays == [30]
 
 
 @pytest.mark.parametrize("pending", [True, False])
@@ -363,6 +566,7 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
         store=store,
         app_credentials=None,
         grants=grants,
+        gateway=_Gateway(),
     )
     assert response.job_id == _JOB
     generate.assert_not_awaited()

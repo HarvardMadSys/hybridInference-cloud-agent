@@ -1,6 +1,8 @@
 'use client';
 
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useModalDialog } from '@/components/ui/useModalDialog';
+
+import { useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
 export const SKILL_FIELD =
@@ -70,6 +72,7 @@ export function SkillDialog({
   // Defaulted rather than required: the library screens pass their own English
   // copy today, and a missing label would be worse than an untranslated one.
   dismissLabel = 'Dismiss skill dialog',
+  lang = 'en',
 }: {
   title: string;
   description?: string;
@@ -78,51 +81,15 @@ export function SkillDialog({
   children: ReactNode;
   footer?: ReactNode;
   dismissLabel?: string;
+  lang?: string;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const overflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    (
-      panel.current?.querySelector<HTMLElement>('input, textarea') ??
-      panel.current?.querySelector<HTMLElement>('button')
-    )?.focus();
-    return () => {
-      document.body.style.overflow = overflow;
-      if (previous?.isConnected) previous.focus();
-    };
-  }, []);
+  useModalDialog(panel, { busy, onClose, initialFocus: 'input, textarea' });
 
   if (typeof document === 'undefined') return null;
   return createPortal(
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          event.stopPropagation();
-          if (!busy) onClose();
-        }
-        if (event.key === 'Tab') {
-          const controls = Array.from(
-            panel.current?.querySelectorAll<HTMLElement>(
-              'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href]',
-            ) ?? [],
-          ).filter((element) => !element.closest('[hidden]'));
-          const first = controls[0];
-          const last = controls[controls.length - 1];
-          if (first && last && event.shiftKey && document.activeElement === first) {
-            event.preventDefault();
-            last.focus();
-          } else if (first && last && !event.shiftKey && document.activeElement === last) {
-            event.preventDefault();
-            first.focus();
-          }
-        }
-      }}
-    >
+    <div lang={lang} className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <button
         type="button"
         tabIndex={-1}
@@ -134,6 +101,7 @@ export function SkillDialog({
       <div
         ref={panel}
         role="dialog"
+        lang={lang}
         aria-modal="true"
         aria-labelledby={id}
         className="relative flex max-h-full w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-card dark:border-white/10 dark:bg-gray-900"
@@ -155,6 +123,7 @@ export function SkillDialog({
             disabled={busy}
             onClick={onClose}
             aria-label="Close skill dialog"
+            lang="en"
             className="shrink-0 rounded-md px-2 py-1 text-sm text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-white/5"
           >
             Close

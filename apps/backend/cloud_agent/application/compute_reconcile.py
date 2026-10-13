@@ -18,7 +18,7 @@ from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
-from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.domain.compute import ComputeRefusal, provider_resource_absent
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.external.compute_provider import (
@@ -254,12 +254,22 @@ class ComputeReconciler:
                     "The acquisition outcome is unknown. Identify the existing resource before continuing.",
                 )
             else:
+                terminal_acquire = operation["kind"] == "acquire" and (
+                    code == "resource_terminated"
+                    or (
+                        code == "resource_failed"
+                        and operation.get("step") == "failed_resource_released"
+                    )
+                )
                 await self._finish(
                     operation,
-                    "waiting" if retryable else "blocked",
+                    "failed" if terminal_acquire else "waiting" if retryable else "blocked",
                     operation["step"],
                     str(exc),
-                    result={"blocked_reasons": [{"code": code, "message": str(exc)}]},
+                    result={
+                        **({"external_pending": False} if terminal_acquire else {}),
+                        "blocked_reasons": [{"code": code, "message": str(exc)}],
+                    },
                     retry=30 if retryable else None,
                 )
             logger.warning(
@@ -280,18 +290,31 @@ class ComputeReconciler:
                     scope="all_claims",
                     **self._fence(operation),
                 )
+            pre_submit = code in {
+                "autoscaling_connection_unverified",
+                "registration_unavailable",
+            }
             await self._finish(
                 operation,
                 "blocked",
                 operation["step"],
-                "Resource state changed; inspect the operation before retrying.",
+                (
+                    "Autoscaling prerequisites changed before provider submission."
+                    if pre_submit
+                    else "Resource state changed; inspect the operation before retrying."
+                ),
                 result={
+                    **({"external_pending": False} if pre_submit else {}),
                     "blocked_reasons": [
                         {
-                            "code": "resource_state_conflict",
-                            "message": "Resource identity or state no longer matches this operation.",
+                            "code": code if pre_submit else "resource_state_conflict",
+                            "message": (
+                                "Revalidate autoscaling connections and retry."
+                                if code == "autoscaling_connection_unverified"
+                                else "Resource identity or state no longer matches this operation."
+                            ),
                         }
-                    ]
+                    ],
                 },
             )
 
@@ -645,11 +668,22 @@ class ComputeReconciler:
         self, operation: dict[str, Any], allocation: dict[str, Any]
     ) -> ProviderReceipt:
         provider = self.commands.registry.get(allocation["provider_id"]).provider
-        request = self._request(allocation)
-        if self._registers_host_keys(allocation):
-            request = request.model_copy(
-                update={"registration": await self._open_registration(operation, allocation)}
+        try:
+            request = self._request(allocation)
+            if self._registers_host_keys(allocation):
+                request = request.model_copy(
+                    update={"registration": await self._open_registration(operation, allocation)}
+                )
+            await self.repository.assert_autoscale_acquire_connections_verified(
+                allocation_id=allocation["id"], **self._fence(operation)
             )
+        except (ProviderError, ComputeSecretError, ValueError) as exc:
+            if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+                raise
+            # Nothing has reached the provider yet, so every failure here is
+            # a definite refusal and can safely release an autoscaling slot.
+            await self._checkpoint(operation, "pending", {"external_pending": False})
+            raise
         try:
             return await provider.acquire(request, self._intent(operation, allocation))
         except (ProviderError, ComputeSecretError) as exc:
@@ -793,8 +827,29 @@ class ComputeReconciler:
                 retry=30,
             )
 
+    async def _settle_terminal_retirement(
+        self, operation: dict[str, Any], allocation: dict[str, Any]
+    ) -> None:
+        """Commit local fencing after the provider is already terminal."""
+        await self.repository.commit_release(
+            allocation_id=allocation["id"], **self._fence(operation)
+        )
+        await self._finish(
+            operation,
+            "succeeded",
+            "released",
+            "Provider confirmed that the resource is terminated.",
+            result={"external_pending": False, "blocked_reasons": []},
+        )
+
     async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
         if not allocation.get("release_committed_at"):
+            if allocation.get("desired_state") == "absent" and allocation.get("observed_state") in {
+                "terminated",
+                "absent",
+            }:
+                await self._settle_terminal_retirement(operation, allocation)
+                return
             self.commands._require_managed(allocation, "release")
             await self.repository.begin_retirement(
                 allocation_id=allocation["id"], **self._fence(operation)
@@ -802,7 +857,10 @@ class ComputeReconciler:
             allocation = await self._allocation(allocation["id"])
             await self._checkpoint(operation, "checking_retention", {"external_pending": False})
             if allocation.get("external_id"):
-                await self._inspect(operation, allocation)
+                observation = await self._inspect(operation, allocation)
+                if observation.state == "terminated":
+                    await self._settle_terminal_retirement(operation, allocation)
+                    return
                 allocation = await self._allocation(allocation["id"])
             impact = await self.repository.retirement_impact(allocation["id"])
             meaningful = [
@@ -820,7 +878,10 @@ class ComputeReconciler:
                     retry=30,
                 )
                 return
-            await self._verify_empty_inventory(operation, allocation)
+            # An empty node list cannot pass the inventory scan: that scan
+            # refuses to call zero nodes "empty". There is no machine to scan.
+            if not provider_resource_absent(allocation):
+                await self._verify_empty_inventory(operation, allocation)
             committed = await self.repository.commit_release(
                 allocation_id=allocation["id"], **self._fence(operation)
             )
@@ -839,6 +900,9 @@ class ComputeReconciler:
                 )
                 return
             allocation = await self._allocation(allocation["id"])
+        if provider_resource_absent(allocation):
+            await self._release_absent_provider_resource(operation, allocation)
+            return
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation = await self._inspect(operation, allocation)
         if observation.state == "terminated":
@@ -897,6 +961,33 @@ class ComputeReconciler:
                 result={"external_pending": True},
                 retry=30,
             )
+
+    async def _release_absent_provider_resource(
+        self, operation: dict[str, Any], allocation: dict[str, Any]
+    ) -> None:
+        """Finish retirement when the provider never created a resource.
+
+        Inspect and delete both require an experiment id. A missing profile, or
+        a create cancelled before submission, leaves none. Recording absence
+        locally is the whole release.
+        """
+        await self.repository.observe_allocation(
+            allocation_id=allocation["id"],
+            observation={
+                "observed_state": "absent",
+                "provider_state": "not_created",
+                "scope_complete": True,
+                "expiration_known": False,
+            },
+            **self._fence(operation),
+        )
+        await self._finish(
+            operation,
+            "succeeded",
+            "released",
+            "No provider resource exists for this server, so it was released locally.",
+            result={"external_pending": False, "blocked_reasons": []},
+        )
 
     async def _verify_empty_inventory(
         self, operation: dict[str, Any], allocation: dict[str, Any]

@@ -16,10 +16,17 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from cloud_agent.application.cloudlab_inventory import (
+    CloudLabInventoryUnavailable,
+    CloudLabNodeInventory,
+)
 from cloud_agent.application.server_queries import ServerQueries
 from cloud_agent.compute_config import current_observation_seconds
 from cloud_agent.domain.compute import (
     ComputeRefusal,
+    autoscaling_acquire_can_cancel,
+    autoscaling_operation_is_terminal,
+    autoscaling_retirement_needs_settlement,
     fingerprint,
     normalize_host_keys,
     public_connection,
@@ -27,7 +34,7 @@ from cloud_agent.domain.compute import (
 )
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import CloudLabDefaults, RenewalPolicy
+from cloud_agent.schemas_compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_setup import AutomaticComputeSetup
@@ -44,6 +51,7 @@ if TYPE_CHECKING:
         ImportComputeRequest,
         RetireComputeRequest,
         RotateComputeRequest,
+        UpdateCloudLabAutoscaling,
         UpdateComputeConnection,
         UpdateComputePolicy,
     )
@@ -60,12 +68,14 @@ class ComputeCommands:
         secrets: ComputeSecretStore,
         configuration: ComputeConfiguration,
         automatic_setup: AutomaticComputeSetup | None = None,
+        cloudlab_inventory: CloudLabNodeInventory | None = None,
     ) -> None:
         self.repository = repository
         self.registry = registry
         self.secrets = secrets
         self.configuration = configuration
         self.automatic_setup = automatic_setup
+        self.cloudlab_inventory = cloudlab_inventory
         self.queries = ServerQueries(
             repository,
             registry,
@@ -245,6 +255,137 @@ class ComputeCommands:
         return await self.repository.set_provider_defaults(
             "cloudlab", defaults.model_dump(mode="json")
         )
+
+    @staticmethod
+    def _cloudlab_autoscaling_view(snapshot: dict[str, Any]) -> dict[str, Any]:
+        raw_policy = dict(snapshot["policy"])
+        revision = int(raw_policy.pop("revision", 0))
+        fields = CloudLabAutoscalingPolicy.model_fields
+        policy = CloudLabAutoscalingPolicy.model_validate(
+            {key: value for key, value in raw_policy.items() if key in fields}
+        ).model_dump(mode="json")
+        policy["revision"] = revision
+        return {**snapshot, "policy": policy}
+
+    async def cloudlab_autoscaling(self) -> dict[str, Any]:
+        """Return the safe singleton policy and its durable controller status."""
+        return self._cloudlab_autoscaling_view(await self.repository.get_cloudlab_autoscaling())
+
+    async def cloudlab_preferred_nodes(self) -> dict[str, Any]:
+        """Return fresh public availability for the conservative node shortlist."""
+        if self.cloudlab_inventory is None:
+            raise ComputeRefusal(
+                "cloudlab_availability_unavailable",
+                "CloudLab node availability is temporarily unavailable.",
+                status=503,
+            )
+        try:
+            return await self.cloudlab_inventory.preferred_nodes()
+        except CloudLabInventoryUnavailable:
+            raise ComputeRefusal(
+                "cloudlab_availability_unavailable",
+                "CloudLab node availability is temporarily unavailable.",
+                status=503,
+            ) from None
+
+    async def set_cloudlab_autoscaling(
+        self, request: UpdateCloudLabAutoscaling, *, actor: str
+    ) -> dict[str, Any]:
+        """Validate CloudLab authority, immutable routes and automatic placement."""
+        policy = request.policy
+        requested_policy = policy.model_dump(mode="json")
+        current_policy = self._cloudlab_autoscaling_view(
+            await self.repository.get_cloudlab_autoscaling()
+        )["policy"]
+        pause_existing = bool(
+            current_policy.get("enabled")
+            and not policy.enabled
+            and all(
+                current_policy.get(key) == value
+                for key, value in requested_policy.items()
+                if key != "enabled"
+            )
+        )
+        configured = bool(
+            policy.connection_id
+            or policy.ssh_connection_id
+            or policy.configuration
+            or policy.deployment_profiles
+            or policy.max_hosts
+        )
+        canonical_configuration = dict(policy.configuration)
+        if configured and not pause_existing:
+            if policy.connection_id is None or policy.ssh_connection_id is None:
+                raise ComputeRefusal(
+                    "autoscaling_connections_required",
+                    "Select verified CloudLab and SSH connections.",
+                    status=422,
+                )
+            cloudlab = await self._connection(policy.connection_id, "cloudlab")
+            ssh = await self._connection(policy.ssh_connection_id, "existing_ssh")
+            if cloudlab.get("status") != "verified" or ssh.get("status") != "verified":
+                raise ComputeRefusal(
+                    "autoscaling_connection_unverified",
+                    "Validate both connections before saving autoscaling.",
+                )
+            entry, validated = await self._configuration(
+                "cloudlab",
+                "provision",
+                policy.connection_id,
+                policy.ssh_connection_id,
+                policy.configuration,
+                deploy=True,
+            )
+            if validated.get("host_key_source") != "registration":
+                raise ComputeRefusal(
+                    "autoscaling_registration_required",
+                    "Autoscaled CloudLab nodes must register and pin their host keys.",
+                    status=422,
+                )
+            if "name" in policy.configuration or "external_id" in policy.configuration:
+                raise ComputeRefusal(
+                    "invalid_configuration",
+                    "Autoscaling generates a unique experiment identity for every node.",
+                    status=422,
+                )
+            allowed = {field["key"] for field in entry.fields}
+            canonical_configuration = {
+                key: value for key, value in validated.items() if key in allowed
+            }
+        profiles = {} if pause_existing else await self.deployment_profiles()
+        missing = (
+            []
+            if pause_existing
+            else [
+                profile_id
+                for profile_id in policy.deployment_profiles
+                if profile_id not in profiles
+            ]
+        )
+        if missing:
+            raise ComputeRefusal(
+                "autoscaling_profile_unavailable",
+                "Every autoscaling deployment profile must be configured and ready.",
+                status=422,
+            )
+        normalized = policy.model_copy(
+            update={"configuration": canonical_configuration}
+        ).model_dump(mode="json")
+        snapshots = (
+            {}
+            if pause_existing
+            else {
+                profile_id: profiles[profile_id].model_dump(mode="json")
+                for profile_id in policy.deployment_profiles
+            }
+        )
+        saved = await self.repository.update_cloudlab_autoscaling(
+            expected_revision=request.expected_revision,
+            policy=normalized,
+            profile_snapshots=snapshots,
+            requested_by=actor,
+        )
+        return self._cloudlab_autoscaling_view(saved)
 
     async def connections(self) -> dict[str, Any]:
         """List metadata with a second whitelist above the storage boundary."""
@@ -450,6 +591,7 @@ class ComputeCommands:
     ) -> dict[str, Any]:
         """Save policy independently from the result of a future renewal."""
         row = await self._allocation(allocation_id)
+        self._require_manual_policy_control(row)
         entry = self.registry.get(row["provider_id"])
         mode = request.management_mode or row["management_mode"]
         if request.management_mode == "manage" and not row.get("scope_complete"):
@@ -504,6 +646,8 @@ class ComputeCommands:
         self, allocation_id: str, request: RotateComputeRequest, *, actor: str
     ) -> dict[str, Any]:
         """Queue a move of the server's Host to a replacement node now."""
+        row = await self._allocation(allocation_id)
+        self._require_manual_policy_control(row)
         parameters = {
             "allocation_id": allocation_id,
             **request.model_dump(mode="json"),
@@ -512,7 +656,6 @@ class ComputeCommands:
         existing = await self._existing(request.request_id, "rotate", parameters)
         if existing is not None:
             return existing
-        row = await self._allocation(allocation_id)
         self._require_managed(row, "release")
         self._require_movable(row, self.registry.get(row["provider_id"]))
         if len(row.get("hosts") or []) != 1 or len(row.get("nodes") or []) != 1:
@@ -653,6 +796,24 @@ class ComputeCommands:
             and not row.get("result", {}).get("resource_ref")
         ):
             result["allowed_actions"].append("resolve")
+        if autoscaling_operation_is_terminal(row, allocation):
+            result["allowed_actions"] = [
+                action for action in result["allowed_actions"] if action not in {"retry", "cancel"}
+            ]
+        elif autoscaling_retirement_needs_settlement(row, allocation):
+            result["allowed_actions"] = [
+                action for action in result["allowed_actions"] if action != "cancel"
+            ]
+        if autoscaling_acquire_can_cancel(row, allocation):
+            result["allowed_actions"].append("cancel")
+        if (
+            allocation
+            and allocation.get("release_committed_at")
+            and row["kind"] not in {"retire", "inspect", "discard"}
+        ):
+            # The dispatcher will not claim ordinary mutations after release.
+            # Do not advertise an action that can only leave the operation queued.
+            result["allowed_actions"] = []
         return result
 
     async def resolve_operation(self, operation_id: str, external_id: str) -> dict[str, Any]:
@@ -670,6 +831,10 @@ class ComputeCommands:
                 "This operation already identified its resource; retry observation.",
             )
         allocation = await self._allocation(operation["allocation_id"])
+        if allocation.get("release_committed_at"):
+            raise ComputeRefusal(
+                "resolution_not_allowed", "This allocation has already been released."
+            )
         entry = self.registry.get(allocation["provider_id"])
         config = entry.provider.validate_config(
             "attach", {**allocation["configuration"], "external_id": external_id}
@@ -731,9 +896,16 @@ class ComputeCommands:
     async def _deployment_profile(self, requested: str | None) -> DeploymentProfile:
         """Choose configured setup capacity without sharing a live broker endpoint."""
         profiles = await self.deployment_profiles()
+        reserved_reader = getattr(self.repository, "list_reserved_deployment_profiles", None)
+        reserved = set(await reserved_reader()) if reserved_reader is not None else set()
         if requested is not None:
             profile = profiles.get(requested)
             if profile is not None:
+                if requested in reserved:
+                    raise ComputeRefusal(
+                        "deployment_profile_reserved",
+                        "The requested server setup is reserved for CloudLab autoscaling.",
+                    )
                 return profile
             raise ComputeRefusal(
                 "profile_unavailable", "The requested server setup is not configured.", status=422
@@ -751,7 +923,7 @@ class ComputeCommands:
             if row.get("observed_state") not in {"terminated", "absent"}
         }
         for profile in profiles.values():
-            if profile.id not in occupied:
+            if profile.id not in occupied and profile.id not in reserved:
                 # The repository rechecks occupancy under its allocation lock.
                 # Concurrent requests may safely refuse rather than share a route.
                 return profile
@@ -818,4 +990,13 @@ class ComputeCommands:
             raise ComputeRefusal(
                 "inventory_unavailable",
                 "Attach a deployment profile and configured SSH connection before releasing this resource.",
+            )
+
+    @staticmethod
+    def _require_manual_policy_control(row: dict[str, Any]) -> None:
+        """Keep per-node renewal and replacement inside the owning pool policy."""
+        if row.get("autoscaling_owned"):
+            raise ComputeRefusal(
+                "autoscaling_managed",
+                "This server's renewal policy and node replacement are managed by CloudLab autoscaling.",
             )

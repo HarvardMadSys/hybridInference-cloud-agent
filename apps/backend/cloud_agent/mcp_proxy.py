@@ -34,23 +34,17 @@ a reply on the long-lived ``GET`` stream rather than on the ``POST`` that asked
 for it, and an id table built from one request cannot recognize a catalogue
 arriving on the other. Matching ``result.tools`` catches it wherever it lands,
 and needs no state to carry between requests.
-
-**What is forwarded is what was read.** The upstream does not parse a body the
-way this module does: a server that decodes invalid UTF-8 with replacement
-characters, keeps the first of two duplicate keys, or matches field names
-without regard to case reads a different message out of the same bytes. So a
-request is read once, strictly, and the upstream is sent this module's own
-encoding of that reading (:func:`canonical_request`) rather than the sandbox's
-bytes. A body that cannot be read exactly one way is refused, never passed on.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.mcp.jsonrpc import PARSE_ERROR
+from cloud_agent.mcp.jsonrpc import INVALID_REQUEST, PARSE_ERROR
 
 if TYPE_CHECKING:
     from cloud_agent.mcp.models import McpServer
@@ -64,6 +58,22 @@ METHOD_NOT_FOUND = -32601
 TOOLS_LIST = "tools/list"
 TOOLS_CALL = "tools/call"
 
+#: The members of a JSON-RPC message, and the request parameters that name
+#: what a call reaches. A decision reads these by their exact spelling, so a
+#: variant spelling is refused rather than forwarded: an upstream whose decoder
+#: matches member names case-insensitively would read ``Method`` or ``NAME`` as
+#: the member this relay never saw.
+_MESSAGE_MEMBERS = ("jsonrpc", "id", "method", "params", "result", "error")
+_DECIDED_PARAMS = ("name", "uri", "arguments")
+
+#: The dotted capital and dotless small I. A per-character case-insensitive
+#: match (Java's ``equalsIgnoreCase``, for one) folds both onto ASCII ``i``, and
+#: :meth:`str.casefold` folds neither, so ``uri`` or ``id`` spelled with one
+#: would otherwise pass here as a member no decision reads.
+_EXTRA_FOLDS = str.maketrans(
+    {"\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}": "i", "\N{LATIN SMALL LETTER DOTLESS I}": "i"}
+)
+
 # A single SSE frame is buffered to filter it. The cap bounds what a hostile or
 # broken upstream can make the gateway hold for one frame; it is far above any
 # real tool catalogue.
@@ -74,25 +84,6 @@ MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_BUFFERED_RESPONSE_BYTES = MAX_FRAME_BYTES
 
 _FRAME_SEPARATOR = b"\n\n"
-
-#: The fields an authorization decision reads, on a message and on its params.
-#: A case variant of one (``METHOD``, ``Name``, ``params`` spelled with a long
-#: s) is invisible to the decision here and is the field itself to a server
-#: that folds case.
-_MESSAGE_FIELDS = frozenset({"jsonrpc", "id", "method", "params"})
-_PARAMS_FIELDS = frozenset({"name", "arguments", "uri"})
-
-#: The dotted capital and dotless small I: a per-character case-insensitive
-#: match (Java's ``equalsIgnoreCase``, for one) folds both onto ASCII ``i`` and
-#: :meth:`str.casefold` folds neither, so ``uri`` spelled with one would
-#: otherwise pass here as an unrelated key.
-_EXTRA_FOLDS = str.maketrans(
-    {"\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}": "i", "\N{LATIN SMALL LETTER DOTLESS I}": "i"}
-)
-
-
-class MalformedRequest(ValueError):
-    """A relayed body that cannot be read as exactly one JSON-RPC message."""
 
 
 @dataclass(frozen=True)
@@ -119,84 +110,127 @@ def _error(payload: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
-def _refuse_constant(name: str) -> Any:
-    """Refuse ``NaN`` and the infinities, which are not JSON."""
-    raise MalformedRequest(f"{name} is not a JSON value")
+class UnreadableRequest(ValueError):
+    """A relayed body this proxy will not decide, and therefore will not forward."""
+
+    def __init__(self, code: int, message: str) -> None:
+        """Record the JSON-RPC code the refusal is reported under."""
+        super().__init__(message)
+        self.code = code
+
+    def reply(self) -> dict[str, Any]:
+        """Render the refusal as a JSON-RPC error with the null id the spec requires."""
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": self.code, "message": str(self)}}
 
 
-def _refuse_case_variants(mapping: dict[str, Any], names: frozenset[str], where: str) -> None:
-    """Refuse a key that only folds to one of ``names``."""
-    for key in mapping:
-        folded = key.translate(_EXTRA_FOLDS).casefold()
-        if key not in names and folded in names:
-            raise MalformedRequest(f"{where} field {key!r} is not {folded!r}")
-
-
-def parse_request(body: bytes) -> Any:
-    """Read a relayed body as exactly one JSON-RPC message or batch, or refuse it.
-
-    Strict UTF-8, strict JSON, and no case variants of the fields a decision
-    reads. Each of those is a way for the upstream to see a different message
-    than the one authorized here; duplicate keys are not refused, because
-    :func:`canonical_request` forwards only the value this read kept.
-    """
-    try:
-        document = json.loads(body.decode("utf-8"), parse_constant=_refuse_constant)
-    except MalformedRequest:
-        raise
-    except (ValueError, RecursionError) as exc:
-        # Invalid UTF-8 included: ``UnicodeDecodeError`` is a ``ValueError``.
-        raise MalformedRequest(str(exc)) from exc
-    for message in document if isinstance(document, list) else [document]:
-        if not isinstance(message, dict):
-            continue
-        _refuse_case_variants(message, _MESSAGE_FIELDS, "message")
-        params = message.get("params")
-        if isinstance(params, dict):
-            _refuse_case_variants(params, _PARAMS_FIELDS, "params")
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON object, refusing a member name that appears twice."""
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: the member {key!r} repeats")
+        document[key] = value
     return document
 
 
-def canonical_request(body: bytes) -> bytes:
-    """Re-encode a relayed body as the message :func:`parse_request` read from it.
-
-    This, not the sandbox's bytes, is what is authorized and forwarded. ASCII
-    only, so no charset the sandbox names can make it decode differently.
-    """
-    document = parse_request(body)
+def _finite(text: str) -> float:
+    """Read a finite number only when its JSON encoding preserves its decimal value."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: {text} is not a finite number")
     try:
-        return json.dumps(document, ensure_ascii=True, allow_nan=False).encode()
-    except ValueError as exc:
-        # A number too large for a float, read as an infinity.
-        raise MalformedRequest(str(exc)) from exc
+        unchanged = Decimal(text) == Decimal(str(value))
+    except InvalidOperation:
+        unchanged = False
+    if not unchanged:
+        raise UnreadableRequest(
+            PARSE_ERROR,
+            "this number cannot be relayed without changing its value; "
+            "send an exactly representable number or a string if the tool accepts one",
+        )
+    return value
 
 
-def parse_error(exc: MalformedRequest) -> dict[str, Any]:
-    """Build the JSON-RPC reply for a body that was refused unread."""
-    return {
-        "jsonrpc": "2.0",
-        "id": None,
-        "error": {
-            "code": PARSE_ERROR,
-            "message": f"The request is not a JSON-RPC message this relay can read: {exc}",
-        },
-    }
+def _not_json(text: str) -> Any:
+    """Refuse ``NaN`` and ``Infinity``, which Python reads and JSON does not have."""
+    raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: {text} is not a JSON value")
+
+
+def _require_exact_spelling(members: dict[str, Any], names: tuple[str, ...]) -> None:
+    """Refuse a member that differs from a decided name only by case."""
+    canonical = {name.casefold(): name for name in names}
+    for key in members:
+        expected = canonical.get(key.translate(_EXTRA_FOLDS).casefold())
+        if expected is not None and key != expected:
+            raise UnreadableRequest(
+                INVALID_REQUEST, f"{key!r} is not a member this relay reads; send {expected!r}"
+            )
+
+
+def parse_request(body: bytes) -> Any:
+    """Read a relayed request exactly as the upstream must, or refuse it.
+
+    The relay decides a call from its parse of the body, so a body it cannot
+    parse is a call it has not decided, and is refused rather than forwarded.
+    Strictness here is about agreement, not pedantry: an upstream decoder that
+    replaces invalid UTF-8 or keeps the last of two repeated members would
+    otherwise run a call other than the one decided. So the body has to be
+    UTF-8, every member name unique within its object, and the members a
+    decision reads spelled exactly. Fractional or exponent numbers must retain
+    their exact decimal value when re-encoded: overflow, underflow and rounding
+    are refused rather than forwarding different arguments or a different id.
+    Ordinary values such as ``0.1`` still travel, because their JSON encoding
+    retains that decimal value despite the float's binary representation.
+    """
+    try:
+        document = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_unique_members,
+            parse_float=_finite,
+            parse_constant=_not_json,
+        )
+    except UnreadableRequest:
+        raise
+    except (ValueError, RecursionError) as exc:
+        # UnicodeDecodeError and JSONDecodeError are both ValueErrors. Nesting
+        # deep enough to exhaust the parser's stack is no more a request than
+        # bytes that are not JSON at all.
+        raise UnreadableRequest(PARSE_ERROR, f"invalid JSON: {exc}") from exc
+    for message in document if isinstance(document, list) else [document]:
+        if not isinstance(message, dict):
+            continue
+        _require_exact_spelling(message, _MESSAGE_MEMBERS)
+        params = message.get("params")
+        if isinstance(params, dict):
+            _require_exact_spelling(params, _DECIDED_PARAMS)
+    return document
+
+
+def canonical_request(document: Any) -> bytes:
+    """Serialize what was decided, which is what is forwarded in place of the body.
+
+    The upstream receives this relay's own encoding of the parsed document, so
+    whatever a different decoder would have made of the original bytes, it
+    reads the request this relay authorized. ASCII escapes keep the output
+    valid for every decoder, including for a lone surrogate the input escaped.
+    """
+    return json.dumps(document, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode()
 
 
 def plan_request(body: bytes, server: McpServer) -> RequestPlan:
     """Decide whether a request may be forwarded.
 
-    A body that cannot be read is refused, not forwarded for the upstream to
-    answer. The upstream is not the same parser: a server that reads a
-    ``tools/call`` out of bytes this module could not read would run a tool
-    nothing here ever checked, with the owner's credential.
+    A body that :func:`parse_request` refuses is refused here too. A body the
+    proxy cannot parse is one whose ``tools/call`` it cannot see, and the
+    upstream may well be able to see it: forwarding it would let the call skip
+    the allowlist entirely.
     """
     # No early return for an "unfiltered" server: there is no such server. An
     # empty reachable set means nothing is callable.
     try:
         document = parse_request(body)
-    except MalformedRequest as exc:
-        return RequestPlan(rejection=parse_error(exc))
+    except UnreadableRequest as exc:
+        return RequestPlan(rejection=exc.reply())
 
     batch = document if isinstance(document, list) else [document]
     blocked: list[str] = []
@@ -308,10 +342,10 @@ class SseFilter:
     ``GET`` stream, and on a ``tools/call`` that reports progress before it
     answers: neither can be held until it completes, because neither does.
 
-    Line endings are the one thing rewritten: SSE ends a line with LF, CRLF or
-    a bare CR, servers send all three (``sse-starlette``, under the MCP Python
-    SDK, sends CRLF), and every one leaves here as LF, which a client reads the
-    same. Framing on LF alone would never see a CRLF frame end: a short stream
+    Line endings are the one part of the framing rewritten: SSE ends a line with
+    LF, CRLF or a bare CR, servers send all three (``sse-starlette``, under the
+    MCP Python SDK, sends CRLF), and every one leaves here as LF, which a client
+    reads the same. Framing on LF alone would never see a CRLF frame end: a short stream
     would reach the client as one unparseable, unfiltered frame, and a long one
     would be held until the size cap released it unfiltered.
     """
@@ -364,14 +398,13 @@ __all__ = [
     "METHOD_NOT_FOUND",
     "TOOLS_CALL",
     "TOOLS_LIST",
-    "MalformedRequest",
     "RequestPlan",
     "SseFilter",
+    "UnreadableRequest",
     "canonical_request",
     "filter_json_body",
     "filter_message",
     "filter_sse_frame",
-    "parse_error",
     "parse_request",
     "plan_request",
 ]

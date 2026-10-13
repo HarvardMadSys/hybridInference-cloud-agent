@@ -14,6 +14,8 @@
 
 const RETURN_KEY = 'agents.github.return';
 const DRAFT_KEY = 'agents.composer.draft';
+const draftKey = (userId?: string) =>
+  userId ? `${DRAFT_KEY}:${encodeURIComponent(userId)}` : DRAFT_KEY;
 const MAX_AGE_MS = 30 * 60 * 1000;
 
 /** What the composer had when the owner left it. */
@@ -62,11 +64,11 @@ function isAppPath(path: unknown): path is string {
 }
 
 /** Note where to come back to, and the composer's draft if there is one. */
-export function rememberReturn(path: string, draft?: ComposerDraft): void {
+export function rememberReturn(path: string, draft?: ComposerDraft, userId?: string): void {
   if (!isAppPath(path)) return;
   write(RETURN_KEY, path);
-  if (draft && (draft.task.trim() || draft.repo)) write(DRAFT_KEY, draft);
-  else remove(DRAFT_KEY);
+  if (draft && (draft.task.trim() || draft.repo)) write(draftKey(userId), draft);
+  else remove(draftKey(userId));
 }
 
 /** Where the callback should go, once. `null` sends it to its usual place. */
@@ -80,8 +82,8 @@ export function takeReturnPath(): string | null {
  * The draft to restore, without consuming it: a component may be rendered
  * twice before it commits, and only the one that applies it should clear it.
  */
-export function peekComposerDraft(): ComposerDraft | null {
-  const draft = read<ComposerDraft>(DRAFT_KEY);
+export function peekComposerDraft(userId?: string): ComposerDraft | null {
+  const draft = read<ComposerDraft>(draftKey(userId));
   if (!draft || typeof draft.task !== 'string') return null;
   return {
     task: draft.task,
@@ -110,8 +112,8 @@ export function markCallbackUsed(state: string): void {
 }
 
 /** The draft has been put back, or the owner came back some other way. */
-export function forgetComposerDraft(): void {
-  remove(DRAFT_KEY);
+export function forgetComposerDraft(userId?: string): void {
+  remove(draftKey(userId));
   remove(RETURN_KEY);
 }
 

@@ -255,6 +255,41 @@ def test_archive_settings_refuse_unsafe_or_unusable_values(key, value):
         settings.encode_changes({key: value})
 
 
+def test_bucket_uri_error_explains_separate_settings_without_echoing_the_input():
+    uri = "s3://archive-bucket/private-prefix?credential=sensitive-value"
+    with pytest.raises(ValueError, match="Use a bucket name") as error:
+        settings.encode_changes({"sandbox_archive.bucket": uri})
+    assert "Sandbox archive S3 prefix" in str(error.value)
+    assert uri not in str(error.value)
+    assert "sensitive-value" not in str(error.value)
+
+
+async def test_canonical_destination_patch_preserves_bucket_and_prefix_through_verification():
+    destination = {
+        "sandbox_archive.bucket": "freeinference",
+        "sandbox_archive.prefix": "cloud-agent/sandbox",
+    }
+    encoded = settings.encode_changes(destination)
+    settings.apply_settings(1, encoded)
+    assert all(
+        settings.settings_response(1, encoded)["values"][key] == value
+        for key, value in destination.items()
+    )
+    client = MagicMock()
+    client.generate_presigned_url.return_value = "https://s3.example/scoped-upload"
+    client.head_object.return_value = {"ContentLength": SIZE, "ChecksumSHA256": CHECKSUM}
+    archives = S3SandboxArchiveStore(SandboxArchiveConfiguration.from_settings(), client=client)
+    key = "cloud-agent/sandbox/sandbox-one/request-one/archive.tar"
+    upload = await archives.prepare_upload("sandbox-one", "request-one", DIGEST, SIZE)
+    assert upload.key == key
+    assert client.generate_presigned_url.call_args.kwargs["Params"]["Bucket"] == "freeinference"
+    receipt = await archives.verify_archive(upload.key, DIGEST, SIZE)
+    client.head_object.assert_called_once_with(
+        Bucket="freeinference", Key=key, ChecksumMode="ENABLED"
+    )
+    assert receipt.archive_uri == f"s3://freeinference/{key}"
+
+
 def test_saved_configuration_wins_over_later_environment_changes(monkeypatch):
     monkeypatch.setenv("AGENT_SANDBOX_ARCHIVE_S3_BUCKET", "initial-bucket")
     settings.apply_settings(1, settings.initial_settings())

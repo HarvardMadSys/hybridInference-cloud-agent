@@ -31,6 +31,7 @@ from cloud_agent_host.runtimes import (
     runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
+from cloud_agent_shared.plugins import supported_plugin_runtimes
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -115,6 +116,7 @@ async def get_agent_config(
     return AgentConfigResponse(
         repos=repos,
         runtimes=registered_runtimes(),
+        plugin_runtimes=supported_plugin_runtimes(),
         # Same predicate the create endpoint enforces and the sandbox's calls
         # will hit — not /v1/models, which answers for the *browsing* user and
         # offered models whose first agent call then 404ed.
