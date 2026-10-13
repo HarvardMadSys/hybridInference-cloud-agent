@@ -966,6 +966,62 @@ describe('useAgentJob with the owner change stream', () => {
       expect(streamAgentJob).toHaveBeenCalledTimes(3);
     });
 
+    it('reads the conversation again once it reconnects, clearing a read that failed meanwhile', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      let stream!: Parameters<typeof streamAgentJob>[1];
+      vi.mocked(streamAgentJob)
+        .mockResolvedValueOnce(undefined)
+        .mockImplementation((_id, options) => {
+          stream = options;
+          return new Promise(() => undefined);
+        });
+      // The read that the failed connection prompts fails as well.
+      vi.mocked(listAllAgentThreadEvents)
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(new Error('Failed to fetch'))
+        .mockResolvedValue([]);
+      const { result } = renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+      expect(result.current.error).toBe('Failed to fetch');
+
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MIN_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(2);
+      // Connected, though the turn has said nothing new yet.
+      await act(async () => {
+        stream.onOpen?.();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(3);
+      expect(result.current.error).toBeNull();
+      expect(result.current.job?.state).toBe('running');
+
+      // Later connections of the same stream are its ordinary resumes.
+      await act(async () => {
+        stream.onOpen?.();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(3);
+      expect(streamAgentJob).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not read the conversation again when its stream opens first time', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      let stream!: Parameters<typeof streamAgentJob>[1];
+      vi.mocked(streamAgentJob).mockImplementation((_id, options) => {
+        stream = options;
+        return new Promise(() => undefined);
+      });
+      renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+      await act(async () => {
+        stream.onOpen?.();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(1);
+    });
+
     it('reads the conversation whole when a pushed end arrives before it is open again', async () => {
       vi.useFakeTimers();
       serve(running);

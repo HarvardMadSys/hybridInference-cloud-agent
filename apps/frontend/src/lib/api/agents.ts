@@ -1870,6 +1870,8 @@ export interface StreamAgentJobOptions {
   onEvent: (event: AgentJobEventApi) => void;
   onFinished?: (info: { state: string; published_pr_url: string | null }) => void;
   onError?: (error: unknown) => void;
+  /** Each connection the server accepts, before any of its frames. */
+  onOpen?: () => void;
   /** Resume point; frames with an id at or below this are not re-sent. */
   lastEventId?: number;
   signal?: AbortSignal;
@@ -1951,6 +1953,7 @@ export async function streamAgentJob(jobId: string, opts: StreamAgentJobOptions)
       await jsonOrThrow(resp).catch((err) => opts.onError?.(err));
       return;
     }
+    opts.onOpen?.();
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();

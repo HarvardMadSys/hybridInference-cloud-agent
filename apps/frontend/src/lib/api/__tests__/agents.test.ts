@@ -873,6 +873,25 @@ describe('agents api', () => {
     expect(secondUrl).toContain('after=2');
   });
 
+  it('reports each connection the server accepts before its frames, and no refused one', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(sseResponse([frame(1, 'message', {})]))
+      .mockResolvedValueOnce(sseResponse([frame(2, 'message', {}), FINISHED]))
+      .mockResolvedValueOnce(jsonResponse({ detail: 'unavailable' }, 503));
+    const seen: string[] = [];
+    const record = {
+      onOpen: () => seen.push('open'),
+      onEvent: (e: { id: number }) => seen.push(`${e.id}`),
+    };
+
+    await streamAgentJob('ajob_1', record);
+    expect(seen).toEqual(['open', '1', 'open', '2']);
+
+    seen.length = 0;
+    await streamAgentJob('ajob_1', { ...record, onError: () => seen.push('error') });
+    expect(seen).toEqual(['error']);
+  });
+
   it.each(['EOF', 'read error'])(
     'backs off repeatedly short job streams ending in %s',
     async (end) => {
