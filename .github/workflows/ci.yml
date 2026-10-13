@@ -67,15 +67,14 @@ jobs:
       - name: Classify changed paths
         id: classify
         env:
-          BEFORE: ${{ github.event.before }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
-          # Fails open: anything this cannot resolve — a dispatch, a first push
-          # to a new branch, a base commit the runner does not have — runs
-          # everything. A misclassification that skips is a job that silently
-          # did not check; one that over-runs costs a minute.
+          # Fails open: anything this cannot resolve — a dispatch, a push with
+          # no release in its history, a base commit the runner does not have —
+          # runs everything. A misclassification that skips is a job that
+          # silently did not check; one that over-runs costs a minute.
           files=""
           resolved=false
           case "${GITHUB_EVENT_NAME}" in
@@ -86,10 +85,17 @@ jobs:
               fi
               ;;
             push)
-              if [ -n "${BEFORE:-}" ] \
-                 && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
-                 && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-                files="$(git diff --name-only "${BEFORE}" "${GITHUB_SHA}")"
+              # From the newest release, not from the previous push. This run
+              # is what lets publish.yml release this commit, and the previous
+              # push may never have passed one: CI cancels a dev run when the
+              # next push arrives, and a red run publishes nothing. A release
+              # exists only for a commit whose own run passed, so everything
+              # since the newest one is what this run has to check. Searched
+              # from the parent, so a re-run of a released commit is classified
+              # exactly as its first run was.
+              if release="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null)"; then
+                echo "classifying every change since the newest release, ${release}"
+                files="$(git diff --name-only "${release}" "${GITHUB_SHA}")"
                 resolved=true
               fi
               ;;

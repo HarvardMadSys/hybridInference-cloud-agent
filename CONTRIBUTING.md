@@ -72,9 +72,11 @@ when commands or behavior change.
 ## Continuous integration
 
 [CI](.github/workflows/ci.yml) classifies the changed paths and chooses the
-backend, frontend, and image jobs to run. It uses Python 3.12 and Node.js 22.
-The `CI Gate` requires the classifier to succeed. Every other job must either
-succeed or be deliberately skipped.
+backend, frontend, and image jobs to run. A pull request is compared with its
+base, and a push with the newest `agent-*` release, so a released commit has had
+every change since the previous release checked. It uses Python 3.12 and
+Node.js 22. The `CI Gate` requires the classifier to succeed. Every other job
+must either succeed or be deliberately skipped.
 
 Depending on the paths changed, jobs cover backend formatting, lint, mypy, the
 default and PostgreSQL test tiers, frontend checks, secret scanning, Compose

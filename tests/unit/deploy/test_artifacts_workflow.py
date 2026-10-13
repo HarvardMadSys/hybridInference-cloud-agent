@@ -356,6 +356,7 @@ def _runs_the_image_jobs(path: str) -> bool:
             "#!/bin/sh\n"
             'case "$1" in\n'
             "cat-file) exit 0 ;;\n"
+            "describe) echo agent-release ;;\n"
             'diff) printf "%s\\n" "$CHANGED_PATH" ;;\n'
             "*) exit 1 ;;\n"
             "esac\n"
@@ -440,6 +441,111 @@ def test_non_image_inputs_do_not_select_image_checks(path: str) -> None:
 def test_new_external_tests_select_image_checks() -> None:
     """New integration files need the image jobs without classifier edits."""
     assert _runs_the_image_jobs("tests/external/test_new_container_integration.py")
+
+
+def _git(repository: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _commit(repository: Path, path: str) -> str:
+    target = repository / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{path}\n")
+    _git(repository, "add", path)
+    _git(repository, "commit", "--quiet", "-m", f"change {path}")
+    return _git(repository, "rev-parse", "HEAD")
+
+
+def _release(repository: Path, sha: str) -> None:
+    """What publication leaves behind: a lightweight `agent-<sha>` tag."""
+    _git(repository, "tag", f"agent-{sha}", sha)
+
+
+def _classify_push(repository: Path, sha: str, *, before: str) -> dict[str, str]:
+    """Run the real classifier for a push, against real history and tags."""
+    script = str(step("Classify changed paths", job="changes")["run"])
+    output = repository.parent / f"outputs-{sha}"
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        cwd=repository,
+        env={
+            **os.environ,
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": sha,
+            "BEFORE": before,
+            "GITHUB_OUTPUT": str(output),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+
+@pytest.fixture
+def history(tmp_path: Path) -> Path:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "--quiet", "--initial-branch=dev")
+    for key, value in (
+        ("user.name", "CI fixture"),
+        ("user.email", "ci@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("core.hooksPath", str(tmp_path / "no-hooks")),
+    ):
+        _git(repository, "config", key, value)
+    return repository
+
+
+SELECTS_NOTHING = {"backend": "false", "web": "false", "docker": "false"}
+SELECTS_EVERYTHING = {"backend": "true", "web": "true", "docker": "true"}
+
+
+def test_a_push_is_checked_against_the_newest_release_not_the_previous_push(
+    history: Path,
+) -> None:
+    """A docs-only push after an unreleased backend change still checks the backend.
+
+    The backend commit's own run failed, or was cancelled by the push after it,
+    so it was never released. Diffing from the previous push left its change
+    out: every job skipped, the gate passed, and publication released a commit
+    whose backend no run had checked.
+    """
+    released = _commit(history, "README.md")
+    _release(history, released)
+    unreleased = _commit(history, "apps/backend/cloud_agent/feature.py")
+    docs = _commit(history, "docs/feature.md")
+    selected = _classify_push(history, docs, before=unreleased)
+    assert selected["backend"] == "true"
+    assert selected["docker"] == "true"
+
+
+def test_a_push_right_after_a_release_keeps_the_path_filter(history: Path) -> None:
+    released = _commit(history, "apps/backend/cloud_agent/feature.py")
+    _release(history, released)
+    docs = _commit(history, "docs/feature.md")
+    assert _classify_push(history, docs, before=released) == SELECTS_NOTHING
+
+
+def test_a_push_with_no_release_behind_it_runs_everything(history: Path) -> None:
+    first = _commit(history, "README.md")
+    docs = _commit(history, "docs/feature.md")
+    assert _classify_push(history, docs, before=first) == SELECTS_EVERYTHING
+
+
+def test_a_rerun_of_a_released_commit_is_classified_as_its_first_run_was(
+    history: Path,
+) -> None:
+    released = _commit(history, "README.md")
+    _release(history, released)
+    backend = _commit(history, "apps/backend/cloud_agent/feature.py")
+    first_run = _classify_push(history, backend, before=released)
+    _release(history, backend)
+    assert _classify_push(history, backend, before=released) == first_run
+    assert first_run["backend"] == "true"
 
 
 def test_real_upload_limits_are_checked_by_compose_ci() -> None:
