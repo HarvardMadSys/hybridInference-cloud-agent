@@ -345,9 +345,9 @@ class SseFilter:
     Line endings are the one part of the framing rewritten: SSE ends a line with
     LF, CRLF or a bare CR, servers send all three (``sse-starlette``, under the
     MCP Python SDK, sends CRLF), and every one leaves here as LF, which a client
-    reads the same. Framing on LF alone would never see a CRLF frame end: a short stream
-    would reach the client as one unparseable, unfiltered frame, and a long one
-    would be held until the size cap released it unfiltered.
+    reads the same. Framing on LF alone would never see a CRLF frame end: a
+    short stream would reach the client as one unparseable, unfiltered frame,
+    and a long one would be held until the size cap released it unfiltered.
     """
 
     def __init__(self, server: McpServer) -> None:
