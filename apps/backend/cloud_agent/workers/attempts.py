@@ -649,6 +649,12 @@ async def _run_attempt_reaper(
                     "agent_attempts_reaped",
                     extra={"event": "agent_attempts_reaped", "count": len(actions)},
                 )
+        except Exception:
+            logger.warning("Agent attempt reaper pass failed", exc_info=True)
+        # Stalled captures, publishes and Forks each in a try of their own: they
+        # recover different workspaces, so one that fails on every pass must
+        # not stop the others -- or the attempt pass above -- from running.
+        try:
             stalled_captures = await store.snapshot.reap_stalled_sandbox_snapshot_captures()
             if stalled_captures:
                 logger.warning(
@@ -658,6 +664,9 @@ async def _run_attempt_reaper(
                         "snapshot_ids": stalled_captures,
                     },
                 )
+        except Exception:
+            logger.warning("Stalled snapshot capture reaper pass failed", exc_info=True)
+        try:
             stalled_snapshot_publishes = await store.snapshot.reap_stalled_snapshot_publishes()
             if stalled_snapshot_publishes:
                 logger.warning(
@@ -667,6 +676,9 @@ async def _run_attempt_reaper(
                         "snapshot_ids": stalled_snapshot_publishes,
                     },
                 )
+        except Exception:
+            logger.warning("Stalled snapshot publish reaper pass failed", exc_info=True)
+        try:
             stalled_session_forks = await store.session_fork.reap_stalled_session_forks()
             if stalled_session_forks:
                 from cloud_agent.broker_routing import broker_for_job
@@ -703,7 +715,7 @@ async def _run_attempt_reaper(
                     },
                 )
         except Exception:
-            logger.warning("Agent attempt reaper pass failed", exc_info=True)
+            logger.warning("Stalled Fork reaper pass failed", exc_info=True)
         # Abandoned staged uploads count against staging quota until collected.
         # Pending-message and job-claimed rows are kept by the repository
         # predicate. Own try: a failure here must not skip later reaping.

@@ -241,10 +241,10 @@ class PostgresPendingMessageRepository:
                 if thread["archived_at"] is not None:
                     return {"error": "session_archived"}
                 if require_idle:
-                    # The thread lock freezes the newest turn. Do not lock its
-                    # job before the group: snapshot publication locks group
-                    # then included jobs, and must be able to finish while this
-                    # guarded action waits at its admission boundary.
+                    # The thread lock freezes the newest turn. Its job is not
+                    # locked until the group shows nothing in flight: snapshot
+                    # publication reaches that job without the thread lock, and
+                    # it locks the group only after its included jobs.
                     latest_job_id = await conn.fetchval(
                         "SELECT id FROM agent_jobs WHERE thread_id = $1 "
                         "ORDER BY turn_no DESC LIMIT 1",
@@ -303,9 +303,10 @@ class PostgresPendingMessageRepository:
                         or current["workspace_publication_state"] != "published"
                     ):
                         return {"error": "conversation_changed"}
-                    # Every group member is idle and this thread is fenced, so
-                    # the helper can now lock its terminal parent under the
-                    # group, matching publication's group -> included job order.
+                    # Every group member is idle, this thread is fenced and the
+                    # newest snapshot is published, so no publication of this
+                    # group holds the parent: the helper can lock it under the
+                    # group without a publication waiting on the group in turn.
                     job = await insert_follow_up(
                         conn,
                         parent_job_id=expected_latest_job_id,
