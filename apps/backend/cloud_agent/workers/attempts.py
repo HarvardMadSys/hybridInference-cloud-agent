@@ -537,6 +537,44 @@ async def _cleanup_reaped_shared_residencies(
                 await grants.revoke(grant_id)
 
 
+async def _cleanup_failed_session_fork(
+    store: HostPoolRepository, operation: dict[str, Any], grants: Any | None
+) -> None:
+    """Fence the member processes and grants one failed Fork left behind.
+
+    The store failed the operation and closed these residencies in its own
+    commit, and it never returns that operation again, so this is the only
+    cleanup it gets. A broker that cannot be resolved or reached still leaves
+    the revocations to run: a later host heartbeat is told the residency was
+    lost and stops its process, but nothing else would end its grant early.
+    """
+    from cloud_agent.broker_routing import broker_for_job
+
+    broker = None
+    try:
+        broker = await broker_for_job(store, operation["source_job_id"])
+    except Exception:
+        logger.warning(
+            "agent_session_fork_cleanup_broker_unavailable",
+            extra={
+                "event": "agent_session_fork_cleanup_broker_unavailable",
+                "operation_id": operation.get("id"),
+            },
+            exc_info=True,
+        )
+    for residency in operation.get("cleanup_residencies") or []:
+        if broker is not None:
+            with contextlib.suppress(Exception):
+                await broker.shared_residency_lost(
+                    str(residency["thread_id"]),
+                    generation=int(residency["generation"]),
+                )
+        grant_id = residency.get("grant_id")
+        if grant_id and grants is not None:
+            with contextlib.suppress(Exception):
+                await grants.revoke(grant_id)
+
+
 async def _run_attempt_reaper(
     store: _Reaping,
     *,
@@ -669,30 +707,31 @@ async def _run_attempt_reaper(
                 )
             stalled_session_forks = await store.session_fork.reap_stalled_session_forks()
             if stalled_session_forks:
-                from cloud_agent.broker_routing import broker_for_job
-
                 recovered: list[str] = []
                 cleaned: list[str] = []
                 for operation in stalled_session_forks:
                     operation_id = str(operation["id"])
-                    if operation.get("recovery_action") == "finalize":
-                        if await store.session_fork.finalize_session_fork(
-                            operation_id=operation_id
-                        ):
-                            recovered.append(operation_id)
+                    # Each operation in a try of its own. The failed ones are
+                    # never returned again, so an error on one must not leave
+                    # the processes and grants of the ones after it running.
+                    try:
+                        if operation.get("recovery_action") == "finalize":
+                            if await store.session_fork.finalize_session_fork(
+                                operation_id=operation_id
+                            ):
+                                recovered.append(operation_id)
+                            continue
+                        await _cleanup_failed_session_fork(store.host_pool, operation, grants)
+                    except Exception:
+                        logger.warning(
+                            "agent_session_fork_reconcile_failed",
+                            extra={
+                                "event": "agent_session_fork_reconcile_failed",
+                                "operation_id": operation_id,
+                            },
+                            exc_info=True,
+                        )
                         continue
-                    broker = await broker_for_job(store.host_pool, operation["source_job_id"])
-                    for residency in operation.get("cleanup_residencies") or []:
-                        if broker is not None:
-                            with contextlib.suppress(Exception):
-                                await broker.shared_residency_lost(
-                                    str(residency["thread_id"]),
-                                    generation=int(residency["generation"]),
-                                )
-                        grant_id = residency.get("grant_id")
-                        if grant_id and grants is not None:
-                            with contextlib.suppress(Exception):
-                                await grants.revoke(grant_id)
                     cleaned.append(operation_id)
                 logger.warning(
                     "agent_session_forks_reconciled",
