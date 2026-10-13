@@ -810,6 +810,27 @@ describe('capacity columns', () => {
     expect(await within(row).findByRole('alert')).toHaveTextContent('image is broken');
   });
 
+  it('warns about a server running untrusted sandboxes without a disk quota', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({ host: 'unbounded', untrusted_without_disk_quota: true }),
+        host({ host: 'bounded', untrusted_without_disk_quota: false }),
+        // A control plane older than the warning sends no field at all.
+        host({ host: 'older' }),
+      ]),
+    );
+    renderPage();
+
+    const unbounded = (await screen.findByRole('rowheader', { name: 'unbounded' })).closest('tr')!;
+    const warning = within(unbounded).getByText('No container disk quota');
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(warning.getAttribute('title')).toContain('Set Container disk above 0');
+    for (const name of ['bounded', 'older']) {
+      const row = screen.getByRole('rowheader', { name }).closest('tr')!;
+      expect(within(row).queryByText('No container disk quota')).not.toBeInTheDocument();
+    }
+  });
+
   it('names the reason a value is missing instead of printing zero', async () => {
     mocked.list.mockResolvedValue(
       pool([

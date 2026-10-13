@@ -33,11 +33,12 @@ import fcntl
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -173,18 +174,31 @@ def store_credential(credential: str) -> None:
     Mode 0600 before anything is written, not after: a credential that exists
     world-readable for even an instant on a machine running untrusted code has
     been readable.
+
+    The temporary file is a new one with a name nobody could predict, created
+    exclusively and without following a link (``mkstemp``), so nothing left
+    at a fixed name, whether a stale file keeping a wider mode or a symlink
+    elsewhere, can receive the credential. It is replaced into place whole,
+    so a concurrent reader never sees half of it. A directory this creates is
+    0700; an existing one is the operator's and is left as it is.
     """
     path = credential_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Exclusive create then replace, so a concurrent reader never sees a
-    # half-written file and no umask can widen the mode.
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        os.write(fd, credential.encode())
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        try:
+            os.fchmod(fd, 0o600)
+            data = credential.encode()
+            while data:
+                data = data[os.write(fd, data) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
 
 
 def _post(url: str, body: dict[str, Any], *, bearer: str = "") -> dict[str, Any]:

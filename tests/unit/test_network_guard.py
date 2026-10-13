@@ -507,3 +507,88 @@ def test_missing_or_malformed_batch_results_are_refused(output) -> None:
     guard._run = run
     with pytest.raises(NetworkGuardError, match="nft returned"):
         guard.relay_endpoints(guard.network.bridge_name("freeinference-chat-net-x"))
+
+
+def test_the_sweep_sees_a_flushed_ruleset_on_its_next_pass_and_reinstalls_it() -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    installs = len(nft.transactions())
+    nft.tables.clear()  # `flush ruleset`, from a firewall reload
+    guard.ensure()
+    assert len(nft.transactions()) == installs, "an activation still trusts the last minute"
+
+    guard.recheck()
+
+    assert {("inet", guard.network.table), ("bridge", guard.network.table)} <= set(nft.tables)
+    assert len(nft.transactions()) == installs + 1
+
+
+def test_an_intact_ruleset_costs_the_sweep_one_read_and_no_install() -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    calls = len(nft.calls)
+
+    guard.recheck()
+
+    assert [argv[argv.index("--entrypoint") + 1] for argv, _ in nft.calls[calls:]] == ["python3"]
+    assert json.loads(nft.calls[-1][1] or "[]") == [
+        ["list", "table", "inet", guard.network.table],
+        ["list", "table", "bridge", guard.network.table],
+        ["list", "set", "inet", guard.network.table, "protected4"],
+        ["list", "set", "inet", guard.network.table, "pool4"],
+    ]
+
+
+def test_a_sweep_that_cannot_reinstall_the_rules_raises_and_trusts_nothing() -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    nft.table("inet", guard.network.table)["rules"]["from_group"] = 0
+
+    def run(argv, stdin):
+        if argv[argv.index("--entrypoint") + 1] == "nft":
+            return subprocess.CompletedProcess(argv, 1, "", "Error: Could not process rule")
+        return nft(argv, stdin)
+
+    guard._run = run
+    with pytest.raises(NetworkGuardError, match="Could not process rule"):
+        guard.recheck()
+    # The activation path no longer trusts the earlier success either.
+    with pytest.raises(NetworkGuardError, match="Could not process rule"):
+        guard.ensure()
+
+
+def test_a_verification_past_its_minute_takes_the_full_check(monkeypatch) -> None:
+    from cloud_agent_host import network_guard
+
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    installs = len(nft.transactions())
+    now = network_guard.time.monotonic()
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: now + network_guard.GUARD_RECHECK_S
+    )
+
+    guard.recheck()
+
+    assert len(nft.transactions()) == installs + 1
+    assert nft.calls[-1][0][nft.calls[-1][0].index("--entrypoint") + 1] == "ip"
+
+
+def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
+    from types import SimpleNamespace
+
+    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+
+    nft = FakeNft()
+    guard = _guard(nft)
+    manager = ChatSandboxManager(SimpleNamespace(network_guard=lambda: guard))  # type: ignore[arg-type]
+    manager.verify_host_rules()
+    nft.tables.clear()
+
+    manager.verify_host_rules()
+
+    assert ("inet", guard.network.table) in nft.tables

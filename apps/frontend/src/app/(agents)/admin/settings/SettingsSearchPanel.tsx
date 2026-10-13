@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 
-import { searchSettingsItems, type SettingsSearchItem } from './settingsSearch';
+import { searchSettingsItems, type SettingsSearchItem } from './settingsSearchIndex';
 
 export function SettingsSearch({
   items,

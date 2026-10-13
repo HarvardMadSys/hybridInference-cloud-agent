@@ -1335,6 +1335,7 @@ def _guest_check(monkeypatch, *, route: str = "0100F00A", **changes: Any) -> lis
         ("agent-mcp", 8000, "tcp"): "ok",
         ("10.240.0.1", 9, "udp"): errno.EHOSTUNREACH,
         ("169.254.169.254", 80, "tcp"): errno.EHOSTUNREACH,
+        ("168.63.129.16", 80, "tcp"): errno.EHOSTUNREACH,
     }
     for key, value in changes.items():
         outcomes[
@@ -1342,6 +1343,7 @@ def _guest_check(monkeypatch, *, route: str = "0100F00A", **changes: Any) -> lis
                 "resolver": ("127.0.0.11", 53, "udp"),
                 "host": ("10.240.0.1", 9, "udp"),
                 "metadata": ("169.254.169.254", 80, "tcp"),
+                "wireserver": ("168.63.129.16", 80, "tcp"),
                 "relay": ("agent-mcp", 8000, "tcp"),
             }[key]
         ] = value
@@ -1383,6 +1385,8 @@ def test_a_guest_behind_its_rules_passes(monkeypatch):
         ("host", "timeout", "was not refused within 2s"),
         ("metadata", "ok", "answered; the network rules are not in this guest's path"),
         ("metadata", "timeout", "was not refused within 2s"),
+        ("wireserver", "ok", "168.63.129.16:80 answered; the network rules are not in"),
+        ("wireserver", errno.ECONNREFUSED, "168.63.129.16:80 was refused by ECONNREFUSED"),
     ],
 )
 def test_the_guest_check_names_what_it_found(monkeypatch, change, value, problem):

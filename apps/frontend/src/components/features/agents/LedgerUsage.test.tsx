@@ -296,11 +296,13 @@ describe('LedgerUsage', () => {
   it('requests fresh source usage throughout active runs, including after five minutes', async () => {
     const view = await mount({ ...job, state: 'running' });
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Counting usage…')).toBeVisible();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
     await advance(360_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(25);
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(25);
-    expect(screen.getByText('Counting usage…')).toBeVisible();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
     expect(refreshAgentJobUsage).toHaveBeenLastCalledWith('ajob_1', expect.any(AbortSignal));
     view.unmount();
     await advance(60_000);
@@ -533,12 +535,178 @@ describe('LedgerUsage with the owner change stream', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['pending', 'refreshing'])(
+    'reads a finished turn again after fifteen seconds while its usage is %s',
+    async (state) => {
+      act(() => setAgentPushLive(true));
+      const unsettled = usage();
+      if (state === 'pending') unsettled.ledger.status = 'pending';
+      else unsettled.ledger.refreshing = true;
+      const updated = usage();
+      updated.ledger.totals!.calls = 4;
+      vi.mocked(getAgentJobUsage)
+        .mockResolvedValueOnce(usage())
+        .mockResolvedValueOnce(unsettled)
+        .mockResolvedValue(updated);
+      const view = await mount({ ...job, state: 'running' });
+      await act(async () => view.rerender(<LedgerUsage job={job} />));
+      expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+      expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+
+      await advance(14_999);
+      expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+      await advance(1);
+      expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+      expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
+      expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+      await advance(60_000);
+      expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+      expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('hides pending usage without totals until the next read provides them', async () => {
+    act(() => setAgentPushLive(true));
+    const pending = usage();
+    pending.ledger.status = 'pending';
+    pending.ledger.totals = null;
+    pending.runtime = {
+      source: 'runtime',
+      input_tokens: null,
+      normalized_input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+    };
+    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(pending).mockResolvedValue(usage());
+    await mount();
+    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    await advance(14_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
+  it('keeps reading pending usage pushed for a finished turn until it becomes available', async () => {
+    act(() => setAgentPushLive(true));
+    const updated = usage();
+    updated.ledger.totals!.calls = 5;
+    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(usage()).mockResolvedValue(updated);
+    await mount();
+    const pending = usage();
+    pending.ledger.status = 'pending';
+    pending.ledger.totals!.calls = 4;
+    act(() => receiveHint('usage', job.id, pending));
+    await advance(PUSH_BATCH_MS);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+    await advance(15_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('5 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
+  it("reads at a finished turn's scheduled refresh instead of waiting a minute", async () => {
+    act(() => setAgentPushLive(true));
+    const scheduled = usage();
+    scheduled.ledger.next_refresh_at = new Date(Date.now() + 5_000).toISOString();
+    const updated = usage();
+    updated.ledger.totals!.calls = 4;
+    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(scheduled).mockResolvedValue(updated);
+    await mount();
+    await advance(4_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    await advance(60_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the normal backstop while a terminal refresh stays overdue', async () => {
+    act(() => setAgentPushLive(true));
+    const overdue = usage();
+    overdue.ledger.next_refresh_at = new Date(Date.now() - 5_000).toISOString();
+    vi.mocked(getAgentJobUsage).mockResolvedValue(overdue);
+    await mount();
+    await advance(14_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    await advance(15_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the minute backstop for an active turn while pushes flow', async () => {
+    act(() => setAgentPushLive(true));
+    await mount({ ...job, state: 'running' });
+    await advance(59_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
   function versioned(version: string, calls: number): AgentJobUsageApi {
     const data = usage();
     data.version = version;
     data.ledger.totals = { ...data.ledger.totals!, calls };
     return data;
   }
+
+  it("keeps a newer terminal pending snapshot's timer after an older settled push", async () => {
+    act(() => setAgentPushLive(true));
+    vi.mocked(getAgentJobUsage)
+      .mockResolvedValueOnce(versioned('0001', 3))
+      .mockResolvedValue(versioned('0003', 4));
+    await mount();
+    const pending = versioned('0002', 3);
+    pending.ledger.status = 'pending';
+    act(() => receiveHint('usage', job.id, pending));
+    await advance(PUSH_BATCH_MS);
+    act(() => receiveHint('usage', job.id, versioned('0001', 3)));
+    await advance(PUSH_BATCH_MS);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+
+    await advance(15_000 - PUSH_BATCH_MS);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
+  });
+
+  it.each(['pending', 'scheduled'])(
+    'keeps terminal polling stopped when an older %s read follows a settled push',
+    async (state) => {
+      act(() => setAgentPushLive(true));
+      let finishOlder!: (value: AgentJobUsageApi) => void;
+      vi.mocked(getAgentJobUsage)
+        .mockResolvedValueOnce(versioned('0001', 3))
+        .mockImplementationOnce(() => new Promise((resolve) => (finishOlder = resolve)));
+      await mount();
+      act(() => receiveHint('usage', job.id));
+      await advance(PUSH_BATCH_MS);
+      act(() => receiveHint('usage', job.id, versioned('0003', 4)));
+      await advance(PUSH_BATCH_MS);
+      const older = versioned('0002', 3);
+      if (state === 'pending') older.ledger.status = 'pending';
+      else older.ledger.next_refresh_at = new Date(Date.now() + 5_000).toISOString();
+      await act(async () => finishOlder(older));
+
+      await advance(60_000);
+      expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+      expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
+      expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    },
+  );
 
   it('shows usage the stream sent without reading it, over a read that left before it', async () => {
     act(() => setAgentPushLive(true));

@@ -33,7 +33,7 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
         {
             "gateway_issuer": "https://identity.example",
             "session_signing_secret": "test-session-key-longer-than-thirty-two-bytes",
-            "control_signing_secret": "test-control-signing-key",
+            "control_signing_secret": "test-control-signing-key-longer-than-32-bytes",
         }
     )
     settings.apply_settings(1, encoded)
@@ -47,7 +47,9 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
         2,
         {
             **encoded,
-            **settings.encode_changes({"control_signing_secret": "new-control-signing-key"}),
+            **settings.encode_changes(
+                {"control_signing_secret": "new-control-signing-key-longer-than-32-bytes"}
+            ),
         },
     )
     assert tokens._signing_key() != old_key

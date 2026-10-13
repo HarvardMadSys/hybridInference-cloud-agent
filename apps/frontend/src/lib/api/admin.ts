@@ -256,6 +256,13 @@ export interface AgentRunnerHost {
   settings_local?: HostSettingValues | null;
   /** Archive-policy revision this host's broker confirmed applying. */
   sandbox_archive_settings_applied_revision?: number | null;
+  /**
+   * True when this host can be given untrusted (Kata) work and reports no
+   * container disk quota, so a new untrusted sandbox's writable layer is
+   * unbounded. A recommendation only; nothing is refused. Absent from a
+   * control plane older than the warning; the page reads it as false.
+   */
+  untrusted_without_disk_quota?: boolean;
 }
 
 /** Which unit a runtime setting's whole number counts. */

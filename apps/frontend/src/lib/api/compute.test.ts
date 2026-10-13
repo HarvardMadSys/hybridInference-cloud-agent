@@ -9,6 +9,7 @@ import {
   getCloudLabPreferredNodes,
   getComputeOperations,
   importComputeResource,
+  removeComputeServer,
   rotateComputeAllocation,
   saveComputeConnection,
   setComputePolicy,
@@ -137,6 +138,16 @@ describe('CloudLab auto-scaling API', () => {
 });
 
 describe('compute API contracts', () => {
+  it('permanently removes the encoded server at the reviewed revision', async () => {
+    const fetch = stub(200, { removed: true });
+
+    await expect(removeComputeServer('resource/one', 4)).resolves.toEqual({ removed: true });
+
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/servers/resource%2Fone');
+    expect(fetch.mock.calls[0][2]?.method).toBe('DELETE');
+    expect(JSON.parse(String(fetch.mock.calls[0][2]?.body))).toEqual({ expected_revision: 4 });
+  });
+
   it('checks automatic setup availability without caching deployment readiness', async () => {
     const readiness = { available: true, deployment_sha: 'c'.repeat(40), blocked_reasons: [] };
     const fetch = stub(200, readiness);

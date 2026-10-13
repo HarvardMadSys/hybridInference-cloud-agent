@@ -26,7 +26,11 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService, SandboxInitialArchiveMarker
+from cloud_agent_host.sandbox_archives import (
+    SandboxArchiveService,
+    SandboxInitialArchiveMarker,
+    safe_archive_error_type,
+)
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_BUCKET,
@@ -1009,10 +1013,13 @@ class SandboxArchiveController:
         for service in services:
             try:
                 service.close()
-            except Exception:
-                logger.exception(
+            except Exception as exc:
+                logger.error(
                     "retired sandbox archive service cleanup failed",
-                    extra={"event": "sandbox_archive_service_close_failed"},
+                    extra={
+                        "event": "sandbox_archive_service_close_failed",
+                        "error_type": safe_archive_error_type(exc),
+                    },
                 )
 
     def _all_slots_locked(self) -> list[_ServiceSlot]:

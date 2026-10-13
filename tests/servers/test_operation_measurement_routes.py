@@ -25,6 +25,7 @@ import asyncio
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -896,17 +897,11 @@ async def test_the_broker_client_sends_the_selection_and_preserves_the_answer(mo
     _enable(monkeypatch)
     seen: list[dict[str, Any]] = []
 
-    class _Response:
-        status_code = 200
-        is_error = False
-
-        def json(self) -> dict[str, Any]:
-            return {"path": "", "kind": "directory", "entries": []}
-
     class _Http:
-        async def request(self, method, url, *, headers, params, json, timeout):
+        @asynccontextmanager
+        async def stream(self, method, url, *, headers, params, json, timeout):
             seen.append({"method": method, "url": url, "headers": headers, "params": params})
-            return _Response()
+            yield httpx.Response(200, json={"path": "", "kind": "directory", "entries": []})
 
     client = WorkspaceBrokerClient(BROKER_URL, "token")
     monkeypatch.setattr(client, "_http", _http_for(_Http()))

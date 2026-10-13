@@ -360,12 +360,16 @@ class SandboxArchiveService:
                 "aborted": True,
             }
 
-    def discard(self, identity: ArchiveIdentity) -> dict[str, Any]:
+    def discard(
+        self, identity: ArchiveIdentity, *, sandbox_id: str | None = None
+    ) -> dict[str, Any]:
         """Remove the exact stopped container without exporting or uploading it.
 
         The authorization record is fsynced before Docker removal, so a lost
         response retries the same request. A request that already prepared an
-        archive cannot be discarded.
+        archive cannot be discarded. A caller that supplies the durable
+        sandbox id may also complete an already-absent target, but only after
+        the supervisor proves both its exact id and stable name are absent.
         """
         if identity.archive_key:
             raise ValueError("sandbox discard does not upload an archive")
@@ -374,6 +378,13 @@ class SandboxArchiveService:
             finished = self._read(directory / "discarded.json")
             if finished is not None:
                 if finished.get("identity") != self._identity_dict(identity):
+                    raise SessionLeaseLost("sandbox discard request identity changed")
+                recorded_sandbox_id = finished.get("sandbox_id")
+                if (
+                    recorded_sandbox_id is not None
+                    and sandbox_id is not None
+                    and recorded_sandbox_id != sandbox_id
+                ):
                     raise SessionLeaseLost("sandbox discard request identity changed")
                 return self._discard_receipt(identity)
             if any(
@@ -391,22 +402,56 @@ class SandboxArchiveService:
             if record is None:
                 self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
                 directory.mkdir(mode=0o700, exist_ok=True)
-                spec, _manifest = self._supervisor.begin_archive(
-                    identity.thread_id,
-                    request_id=identity.request_id,
-                    generation=identity.generation,
-                    container_id=identity.expected_container_id,
-                )
-                record = {"identity": self._identity_dict(identity), "spec": asdict(spec)}
+                try:
+                    spec, _manifest = self._supervisor.begin_archive(
+                        identity.thread_id,
+                        request_id=identity.request_id,
+                        generation=identity.generation,
+                        container_id=identity.expected_container_id,
+                    )
+                except SandboxError:
+                    if sandbox_id is None or not self._supervisor.admin_deletion_target_absent(
+                        identity.thread_id,
+                        sandbox_id=sandbox_id,
+                        container_id=identity.expected_container_id,
+                    ):
+                        raise
+                    record = {
+                        "identity": self._identity_dict(identity),
+                        "sandbox_id": sandbox_id,
+                        "target_absent": True,
+                    }
+                else:
+                    record = {"identity": self._identity_dict(identity), "spec": asdict(spec)}
                 self._append(directory / "discard.json", record)
             elif record.get("identity") != self._identity_dict(identity):
                 raise SessionLeaseLost("sandbox discard request identity changed")
-            self._supervisor.commit_archive(
-                ChatSandboxSpec(**record["spec"]),
-                request_id=identity.request_id,
-                container_id=identity.expected_container_id,
-            )
-            self._append(directory / "discarded.json", {"identity": self._identity_dict(identity)})
+            absent_sandbox_id: str | None = None
+            if record.get("target_absent") is True:
+                recorded_sandbox_id = record.get("sandbox_id")
+                if (
+                    not isinstance(recorded_sandbox_id, str)
+                    or not recorded_sandbox_id
+                    or (sandbox_id is not None and recorded_sandbox_id != sandbox_id)
+                ):
+                    raise SessionLeaseLost("sandbox discard request identity changed")
+                if not self._supervisor.admin_deletion_target_absent(
+                    identity.thread_id,
+                    sandbox_id=recorded_sandbox_id,
+                    container_id=identity.expected_container_id,
+                ):
+                    raise SessionLeaseLost("sandbox discard target is no longer absent")
+                absent_sandbox_id = recorded_sandbox_id
+            else:
+                self._supervisor.commit_archive(
+                    ChatSandboxSpec(**record["spec"]),
+                    request_id=identity.request_id,
+                    container_id=identity.expected_container_id,
+                )
+            discarded: dict[str, Any] = {"identity": self._identity_dict(identity)}
+            if absent_sandbox_id is not None:
+                discarded["sandbox_id"] = absent_sandbox_id
+            self._append(directory / "discarded.json", discarded)
             return self._discard_receipt(identity)
 
     @staticmethod

@@ -960,6 +960,39 @@ async def test_credential_never_appears_in_the_pr_body(monkeypatch):
     assert "super-secret-token" not in captured["title"]
 
 
+async def test_a_changed_file_name_cannot_break_out_of_its_code_span(monkeypatch):
+    """The agent names the files; the App posts the body under its own name.
+
+    Each name stays one code span whose fence no backtick run inside it can
+    close, so a crafted name cannot write live mentions, closing keywords or
+    links into the body. A control character, which would end the list item
+    with the span still open, is shown as an escape rather than written.
+    """
+    names = [
+        "src/plain.py",
+        "a` @octocat Fixes #1 [x](https://example.test) `b",
+        "c ``` d",
+        "`leading",
+        "e\n\n@octocat Closes #2",
+    ]
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=names)
+    )
+    captured = _patch_pr(monkeypatch)
+
+    await publish_one(store, credential=GitHubCredential("t"))
+
+    files = captured["body"].split("**Changed files (5)**\n\n", 1)[1].split("\n\n", 1)[0]
+    assert files.splitlines() == [
+        "- `src/plain.py`",
+        "- ``a` @octocat Fixes #1 [x](https://example.test) `b``",
+        "- ````c ``` d````",
+        "- `` `leading ``",
+        "- `e\\n\\n@octocat Closes #2`",
+    ]
+
+
 async def test_app_only_deployment_actually_publishes(monkeypatch):
     """An App-configured deployment with no static token must still publish.
 

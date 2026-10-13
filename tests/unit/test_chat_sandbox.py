@@ -1343,9 +1343,14 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
     assert script.count("-path /agent-state/codex-members") == 2
     assert script.count("-path /agent-state/opencode-members") == 2
     assert script.count("-path /agent-state/kilo-members") == 2
+    # The trusted collections hold other members' 0700 homes; a traversal
+    # into them would fail on the first one it cannot open.
+    for runtime_id in ("codex", "opencode", "kilo"):
+        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == 2
     # A member's provider home is never widened, not even by its owner: the
     # pass no longer enters the collections at all.
     assert "-members/" not in script
+    assert "-homes/" not in script
     assert '"$member"' not in script
     assert calls[0][1]["user_uid"] == MEMBER_UID_BASE
 
@@ -1465,6 +1470,32 @@ def test_unsettled_reset_has_each_member_clear_its_private_homes_first(monkeypat
     assert [kwargs.get("user_uid") for _argv, kwargs in calls] == [None, 11001, 11003, None]
     assert calls[0][0] == calls[3][0], "the roots are cleared only once no member home is left"
     assert "-members" in calls[1][0][2] and '-uid "$uid"' in calls[1][0][2]
+    assert "/agent-state/codex-homes" in calls[0][0][2] and "-homes" in calls[1][0][2]
+
+
+def test_private_member_collections_are_secured_as_the_sandbox_user(monkeypatch):
+    spec = replace(_spec(), shared_live=True, resident_slot_capacity=4)
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    manager.ensure_private_member_collections(spec)
+
+    ((argv, kwargs),) = calls
+    # No user override: the sandbox user owns /agent-state and is no member.
+    assert kwargs.get("user_uid") is None and kwargs.get("user_gid") is None
+    assert argv[4:] == [
+        CHAT_STATE_DIR,
+        "/agent-state/codex-homes",
+        "/agent-state/opencode-homes",
+        "/agent-state/kilo-homes",
+    ]
+    assert 'chmod +t -- "$root"' in argv[2] and "mkdir -m 3770" in argv[2]
 
 
 @pytest.mark.parametrize("owners", [b"0\n", b"10001\n", b"11005\n", b"not-a-uid\n"])

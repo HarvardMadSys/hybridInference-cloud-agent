@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0061_environments"
-down_revision = "0060_admin_sandbox_discard"
+revision = "0064_environments"
+down_revision = "0063_user_profiles"
 branch_labels = None
 depends_on = None
 

@@ -1483,6 +1483,11 @@ class PostgresSandboxRepository:
         base_sha: str | None = None,
     ) -> dict[str, Any] | None:
         """Close one turn boundary and arm deactivation without deleting state."""
+        # The runner canonicalizes observed locators the same way. Repeat it at
+        # the repository boundary for non-HTTP callers and rolling clients.
+        native_session_id = (
+            native_session_id.strip() if native_session_id is not None else None
+        ) or None
         async with self._pool.acquire() as conn, conn.transaction():
             # Attempt first, then thread -> job -> membership. Terminal
             # transition and the reaper use the same outer order; taking the
@@ -1531,7 +1536,10 @@ class PostgresSandboxRepository:
                   AND m.active_attempt_id IS NULL
                   AND m.admitted_job_id = $7 AND m.last_settled_job_id = $7
                   AND m.native_state = 'ready' AND m.context_status = $8
-                  AND ($9::text IS NULL OR m.native_session_id = $9)
+                  AND (
+                        $9::text IS NULL
+                        OR BTRIM(m.native_session_id) = $9
+                  )
                   AND a.lease_generation = $3 AND a.job_id = $7
                   AND j.thread_id = m.thread_id AND j.current_attempt_id = a.id
                   AND j.state = 'running'
@@ -1829,7 +1837,13 @@ class PostgresSandboxRepository:
                 SET active_attempt_id = NULL,
                     context_status = CASE WHEN $6 THEN 'lost' ELSE m.context_status END,
                     native_state = CASE WHEN $6 THEN 'lost' ELSE m.native_state END,
-                    resident_state = CASE WHEN $6 THEN 'lost' ELSE 'restarting' END,
+                    resident_state = CASE
+                        WHEN $6 THEN 'lost'
+                        WHEN m.native_session_id IS NULL
+                             OR m.native_session_id !~ '[^[:space:]]'
+                            THEN 'stopped'
+                        ELSE 'restarting'
+                    END,
                     last_error = $7, updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
@@ -2327,6 +2341,20 @@ class PostgresSandboxRepository:
                     sandbox_id,
                     running,
                 )
+                if recovered == "stopped":
+                    await conn.execute(
+                        """
+                        UPDATE agent_thread_sandbox_memberships
+                        SET resident_state = CASE
+                                WHEN native_state = 'lost' OR context_status = 'lost'
+                                    THEN 'lost'
+                                ELSE 'stopped'
+                            END,
+                            updated_at = NOW()
+                        WHERE sandbox_id = $1
+                        """,
+                        sandbox_id,
+                    )
                 return None if recovered is None else str(recovered)
             if running:
                 if group["stop_requested_at"] is not None:
@@ -2373,7 +2401,7 @@ class PostgresSandboxRepository:
                 SET state = 'stopped', idle_deadline = NULL,
                     stop_requested_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND (
-                    state IN ('stopping', 'stopped_dirty', 'lost')
+                    state IN ('stopped', 'stopping', 'stopped_dirty', 'lost')
                     OR (state = 'running' AND idle_deadline IS NOT NULL
                         AND idle_deadline <= clock_timestamp())
                 )
@@ -2387,13 +2415,18 @@ class PostgresSandboxRepository:
                 """
                 UPDATE agent_thread_sandbox_memberships
                 SET resident_state = CASE
-                        WHEN native_state = 'lost' THEN 'lost' ELSE 'stopped' END,
+                        WHEN native_state = 'lost' OR context_status = 'lost'
+                            THEN 'lost'
+                        ELSE 'stopped'
+                    END,
                     updated_at = NOW()
                 WHERE sandbox_id = $1
                 """,
                 sandbox_id,
             )
-            return None if row is None else str(row["state"])
+            # A repeated stopped observation may still repair stale member
+            # state, but it does not ask the host to perform another stop.
+            return None if group["state"] == "stopped" else str(row["state"])
 
     @staticmethod
     async def _record_terminal_observation(

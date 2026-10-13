@@ -4,10 +4,15 @@ import { createContext, Fragment, useContext, useMemo, type ReactNode } from 're
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { useT } from '@/components/providers/LocaleProvider';
 import { highlightFence, TOKEN_CLASS } from '@/lib/codeHighlight';
 import { workspaceLinkPath } from '@/lib/workspaceLink';
 
 const WorkspaceLinkContext = createContext<((path: string) => void) | null>(null);
+
+// Set inside a rendered link, so an image there does not become a second,
+// nested one: `[![build](badge.svg)](https://ci)` is a single link.
+const InsideLinkContext = createContext(false);
 
 export function WorkspaceLinkProvider({
   onOpenFile,
@@ -32,7 +37,7 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
         className="ui-focus-ring rounded-sm text-accent underline underline-offset-2 hover:opacity-80"
         title={path}
       >
-        {children}
+        <InsideLinkContext.Provider value={true}>{children}</InsideLinkContext.Provider>
       </button>
     );
   }
@@ -43,9 +48,32 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
       rel="noopener noreferrer"
       className="text-crimson dark:text-crimson-light underline underline-offset-2 hover:opacity-80"
     >
-      {children}
+      <InsideLinkContext.Provider value={true}>{children}</InsideLinkContext.Provider>
     </a>
   );
+}
+
+/**
+ * An image, shown as a link to itself rather than fetched.
+ *
+ * Everything this renders is agent output or repository content, so an image
+ * URL is someone else's choice. An `<img>` would request it the moment the
+ * conversation opens — a beacon that tells whoever chose it when, from where
+ * and in what browser the message was read — and a relative one would be a
+ * request to this origin carrying the session cookie. So the image is named by
+ * its alt text and opening it is the reader's decision: a new tab without a
+ * referrer, or the workspace pane for a file reference, exactly like a link.
+ * Inside a link it is only its label, and the link around it stays the action.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const t = useT();
+  const insideLink = useContext(InsideLinkContext);
+  const name = alt?.trim();
+  const label = name
+    ? t('conversation.markdownImage', { alt: name })
+    : t('conversation.markdownImageUntitled');
+  if (insideLink || !src) return <span>{label}</span>;
+  return <MarkdownLink href={src}>{label}</MarkdownLink>;
 }
 
 // react-markdown gives `code` no way to tell a fenced block from inline code
@@ -97,6 +125,9 @@ function Code({ className, children }: { className?: string; children?: ReactNod
 const components: Components = {
   p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
   a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
+  img: ({ src, alt }) => (
+    <MarkdownImage src={typeof src === 'string' ? src : undefined} alt={alt} />
+  ),
   ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>,
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,
@@ -144,8 +175,10 @@ export function Markdown({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={components}
+        // An image's source is only ever a link target (see MarkdownImage),
+        // so it may name a workspace file exactly as a link may.
         urlTransform={(url, key) =>
-          key === 'href' && workspaceLinks && workspaceLinkPath(url)
+          (key === 'href' || key === 'src') && workspaceLinks && workspaceLinkPath(url)
             ? url
             : defaultUrlTransform(url)
         }

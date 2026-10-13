@@ -1,14 +1,14 @@
 # 可复用云端环境配置验收记录
 
-日期：2026-10-13。对应[设计](2026-10-12-repository-environment-design.zh-CN.md)；实现以 `dev` 的 `542249c6` 为基线，同一个功能 PR 提交全部配置、执行、UI、安全和测试改动。
+日期：2026-10-13。对应[设计](2026-10-12-repository-environment-design.zh-CN.md)；本轮实现及验证以 `dev` 的 `a4f4afc4` 为基线，同一个功能 PR 提交全部配置、执行、UI、安全和测试改动。
 
 ## 已运行的质量门禁
 
 | 检查 | 环境及结果 |
 | --- | --- |
-| `make check` | Linux、Python 3.12、Git/C 编译器/zstd；格式、lint、pydocstyle、mypy 通过，8,934 个测试通过、9 个跳过 |
-| `make ci-frontend` | Node.js 22；eslint、prettier、TypeScript、Vitest、server-only 和 runtime-config 全部通过，3,516 个测试通过 |
-| `make ci-database` | 每次新建 PostgreSQL 15，1,312 个测试通过、0 个跳过 |
+| `make check` | Linux、Python 3.12、Git/C 编译器/zstd；格式、lint、pydocstyle、mypy 通过，9,325 个测试通过、9 个跳过 |
+| `make ci-frontend` | Node.js 22；eslint、prettier、TypeScript、Vitest、server-only 和 runtime-config 全部通过，3,653 个测试通过 |
+| `make ci-database` | 每次新建 PostgreSQL 15，1,371 个测试通过、0 个跳过 |
 | Docker 实际生命周期验收 | 6 个测试通过，无推理请求、无外部网络请求；见下文 |
 | 仓库检查 | `git diff --check`、提交内容的凭据扫描通过 |
 
@@ -20,7 +20,7 @@
 - 在真实 Git 仓库执行生产扫描脚本，覆盖未跟踪、已暂存、已跟踪、二进制、符号链接、忽略文件与删除旧值；保持用户 index 字节不变。
 - 空绑定固定旧任务选择但不要求环境协议；终端带有效配置时只有能力检查和终端创建两个 broker 请求，旧 broker 收不到值。
 - 后台测试执行可取消、单次占一个槽位、不会同步阻塞调用线程，孤儿查询节流且不执行全局写库维护。
-- 快捷操作保留 host 私有执行记录，回收和重启后的重试不重跑；缺失结果明确标为 unknown，迟到状态不能覆盖数据库终态。
+- 快捷操作保留 host 私有执行记录，回收和重启后的重试不重跑；缺失结果明确标为 unknown，迟到状态不能覆盖数据库终态；重复请求和结果写盘失败不会遗留工作区活动令牌。
 - 普通标题字段仍返回原字段校验错误；未知 ValueError 不作为 422 回显；SourceControlError 不误报环境加密故障。
 - 环境请求失败退出忙碌状态，编辑/仓库选择可用；恢复后不漏掉默认环境。
 

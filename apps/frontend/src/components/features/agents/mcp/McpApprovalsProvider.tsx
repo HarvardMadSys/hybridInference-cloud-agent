@@ -64,16 +64,18 @@ function OwnerApprovals({ children }: { children: React.ReactNode }) {
   const [lastDecision, setLastDecision] = useState<McpInvocationApi | null>(null);
   const mounted = useRef(true);
   const reading = useRef(false);
-  const again = useRef(false);
+  const again = useRef<boolean | null>(null);
   const pageCount = useRef(1);
   const decisions = useRef(new Set<number>());
   // A read begun before a local decision must not restore its old approval button.
   const decided = useRef(new Set<number>());
   const pushLive = useAgentPushLive();
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (background = false) => {
+    if (background && document.visibilityState === 'hidden') return;
     if (reading.current) {
-      again.current = true;
+      // A queued user action takes priority over a background refresh.
+      again.current = again.current === false ? false : background;
       return;
     }
     reading.current = true;
@@ -85,6 +87,7 @@ function OwnerApprovals({ children }: { children: React.ReactNode }) {
       // Refresh every loaded page. Otherwise expired calls from older pages
       // would stay visible after the head of the queue was read again.
       for (let page = 0; page < pageCount.current; page += 1) {
+        if (background && document.visibilityState === 'hidden') return;
         const response = await listMcpInvocations({
           pendingOnly: true,
           limit: 50,
@@ -118,9 +121,10 @@ function OwnerApprovals({ children }: { children: React.ReactNode }) {
       reading.current = false;
       if (mounted.current) {
         setLoading(false);
-        if (again.current) {
-          again.current = false;
-          void refresh();
+        if (again.current !== null) {
+          const background = again.current;
+          again.current = null;
+          void refresh(background);
         }
       }
     }
@@ -134,16 +138,19 @@ function OwnerApprovals({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(refresh, pushLive ? PUSH_FALLBACK_POLL_MS : 3000);
+    const refreshInBackground = () => void refresh(true);
+    refreshInBackground();
+    const timer = setInterval(refreshInBackground, pushLive ? PUSH_FALLBACK_POLL_MS : 3000);
     const unsubscribe = onAgentRecordsChanged((change) => {
       if (change.resync || change.mcp.length || change.jobs.some((job) => job.deleted)) {
-        void refresh();
+        refreshInBackground();
       }
     });
+    document.addEventListener('visibilitychange', refreshInBackground);
     return () => {
       clearInterval(timer);
       unsubscribe();
+      document.removeEventListener('visibilitychange', refreshInBackground);
     };
   }, [refresh, pushLive]);
 
@@ -155,7 +162,10 @@ function OwnerApprovals({ children }: { children: React.ReactNode }) {
     if (!deadlines.length) return;
     // Expiry does not depend on receiving another server event. Only future
     // deadlines schedule a read, so clock skew cannot create a refresh loop.
-    const timer = setTimeout(refresh, Math.min(Math.min(...deadlines) - now + 5, 2_147_483_647));
+    const timer = setTimeout(
+      () => void refresh(true),
+      Math.min(Math.min(...deadlines) - now + 5, 2_147_483_647),
+    );
     return () => clearTimeout(timer);
   }, [invocations, refresh]);
 

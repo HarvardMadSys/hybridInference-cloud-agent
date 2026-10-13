@@ -123,9 +123,22 @@ export function initialFields(fields: ComputeField[]): Record<string, string> {
         ? ''
         : field.type === 'json'
           ? JSON.stringify(field.default, null, 2)
-          : String(field.default),
+          : field.type === 'string_list' && Array.isArray(field.default)
+            ? field.default.join('\n')
+            : String(field.default),
     ]),
   );
+}
+
+export function parseStringList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[,\r\n]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 export class ProviderFieldError extends Error {
@@ -143,7 +156,9 @@ export function parseFields(
 ): Record<string, unknown> {
   return Object.fromEntries(
     fields
-      .filter((field) => values[field.key]?.trim())
+      .filter((field) =>
+        field.type === 'string_list' ? values[field.key] !== undefined : values[field.key]?.trim(),
+      )
       .map((field) => {
         const raw = values[field.key];
         if (field.max_length !== undefined && raw.length > field.max_length) {
@@ -159,6 +174,7 @@ export function parseFields(
             throw new ProviderFieldError(field.key, `${field.label} must contain valid JSON.`);
           }
         }
+        if (field.type === 'string_list') return [field.key, parseStringList(raw)];
         return [field.key, field.type === 'number' ? Number(raw) : raw];
       }),
   );
@@ -179,6 +195,7 @@ export function ProviderFields({
   return (
     <>
       {fields.map((field) => {
+        const isTextArea = ['json', 'textarea', 'string_list'].includes(field.type);
         const common = {
           className: inputClass,
           'aria-invalid': Boolean(errors[field.key]) || undefined,
@@ -207,7 +224,7 @@ export function ProviderFields({
                     </option>
                   ))}
                 </select>
-              ) : field.type === 'json' || field.type === 'textarea' ? (
+              ) : isTextArea ? (
                 <textarea {...common} rows={4} spellCheck={false} />
               ) : (
                 <input

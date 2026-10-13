@@ -10,6 +10,7 @@ import {
 } from '@/components/features/agents/githubReturn';
 import { connectGitHub, connectGitLab } from '@/lib/api/agents';
 import type { AgentIntegrationProvider } from '@/lib/api/agents';
+import { describeProviderAuthorizationFailure } from '@/lib/authorizationOutcome';
 
 function ConnectedInner() {
   const router = useRouter();
@@ -22,7 +23,13 @@ function ConnectedInner() {
   const providerName = provider === 'gitlab' ? 'GitLab' : 'GitHub';
   const code = params?.get('code');
   const state = params?.get('state');
-  const oauthError = params?.get('error_description') ?? params?.get('error');
+  // Read as an outcome, never displayed as sent: anyone can write this link.
+  const oauthError = params?.get('error');
+  const oauthErrorDescription = params?.get('error_description');
+  const oauthErrorMessage =
+    oauthError || oauthErrorDescription
+      ? describeProviderAuthorizationFailure(providerName, oauthError, oauthErrorDescription)
+      : null;
 
   useEffect(() => {
     // React intentionally replays effects in development Strict Mode. OAuth
@@ -31,8 +38,8 @@ function ConnectedInner() {
     if (connectStarted.current) return;
     connectStarted.current = true;
 
-    if (oauthError) {
-      setError(oauthError);
+    if (oauthErrorMessage) {
+      setError(oauthErrorMessage);
       return;
     }
     if (!code) {
@@ -82,7 +89,7 @@ function ConnectedInner() {
     void completeConnection(code, state).catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : 'could not complete the connection'),
     );
-  }, [code, oauthError, provider, providerName, router, state]);
+  }, [code, oauthErrorMessage, provider, providerName, router, state]);
 
   if (error) {
     return (

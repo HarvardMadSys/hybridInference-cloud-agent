@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -17,7 +18,8 @@ import pytest
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
-from cloud_agent.domain.compute import autoscaling_acquire_can_cancel
+from cloud_agent.application.compute_setup import HostRelease
+from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
@@ -36,6 +38,7 @@ from cloud_agent.ports.external.host_bootstrap import (
 )
 from cloud_agent.schemas_compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
+from cloud_agent_shared.shared_protocol import shared_deployment_capability
 
 NOW = datetime.now(UTC)
 TARGET = NOW + timedelta(hours=8)
@@ -886,3 +889,306 @@ async def test_without_a_public_address_no_registering_node_is_created(monkeypat
     h.provider.acquire.assert_not_awaited()
     assert h.operation["state"] == "blocked"
     assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_unavailable"
+
+
+RELEASE = HostRelease(
+    sha="c" * 40,
+    digest="d" * 64,
+    bundle=b"host-bundle",
+    path=Path("/app/compute-host-release/source.tar.gz"),
+)
+
+
+def _host_view(*, capabilities: list[str], **overrides: object) -> dict:
+    view = {
+        "host": "compute-nodeid",
+        "status": "online",
+        "enrolled": True,
+        "last_heartbeat_at": NOW,
+        "capabilities": capabilities,
+    }
+    view.update(overrides)
+    return view
+
+
+def _arm_upgrade(monkeypatch, h, release: HostRelease = RELEASE) -> HostRelease:
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: release)
+    h.operation.update(
+        kind="upgrade",
+        parameters={"allocation_id": h.allocation["id"], "deployment_sha": release.sha},
+        result={},
+    )
+    h.repository.advance_host_release = AsyncMock()
+    return release
+
+
+@pytest.mark.asyncio
+async def test_a_managed_host_off_the_control_plane_commit_is_queued(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.repository.create_operation = AsyncMock()
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: RELEASE)
+    await h.reconciler.schedule()
+    queued = h.repository.create_operation.await_args.kwargs
+    parameters = {"allocation_id": h.allocation["id"], "deployment_sha": RELEASE.sha}
+    assert queued == {
+        "request_id": f"host-release:{h.allocation['id']}:{RELEASE.sha}",
+        "fingerprint": fingerprint("upgrade", parameters),
+        "kind": "upgrade",
+        "allocation_id": h.allocation["id"],
+        "parameters": parameters,
+        "requested_by": "compute-host-release",
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_host_release_is_queued_without_a_control_plane_bundle(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.repository.create_operation = AsyncMock()
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: None)
+    await h.reconciler.schedule()
+    h.repository.create_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_host_already_on_the_release_is_not_queued_again(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.allocation["deployment_profile"].update(
+        deployment_sha=RELEASE.sha, source_sha256=RELEASE.digest
+    )
+    h.allocation["hosts"][0]["capabilities"] = [shared_deployment_capability(RELEASE.sha)]
+    h.repository.create_operation = AsyncMock()
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: RELEASE)
+    await h.reconciler.schedule()
+    h.repository.create_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocker", ["drain", "acquire", "duplicate"])
+async def test_host_release_waits_for_an_exclusive_machine(monkeypatch, blocker):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.repository.create_operation = AsyncMock()
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: RELEASE)
+    if blocker == "drain":
+        h.allocation["hosts"][0]["drain_fence_active"] = True
+    elif blocker == "acquire":
+        h.repository.list_operations.return_value = [
+            {"kind": "acquire", "state": "running", "request_id": "busy"}
+        ]
+    else:
+        h.repository.list_operations.return_value = [
+            {
+                "kind": "upgrade",
+                "state": "succeeded",
+                "request_id": f"host-release:{h.allocation['id']}:{RELEASE.sha}",
+            }
+        ]
+    await h.reconciler.schedule()
+    h.repository.create_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_deploys_the_release_then_records_it(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    release = _arm_upgrade(monkeypatch, h)
+    old = shared_deployment_capability(PROFILE.deployment_sha)
+    new = shared_deployment_capability(release.sha)
+    h.host_pool.get_host = AsyncMock(
+        side_effect=[_host_view(capabilities=[old]), _host_view(capabilities=[new])]
+    )
+    await h.reconciler.execute(h.operation)
+    deployed = h.bootstrap.deploy.await_args
+    assert deployed.args[1].deployment_sha == release.sha
+    assert deployed.args[1].source_sha256 == release.digest
+    assert deployed.args[1].source_bundle == str(release.path)
+    assert deployed.args[3] is None
+    assert deployed.kwargs == {"prerequisites": False, "reenroll": False}
+    h.repository.advance_host_release.assert_awaited_once_with(
+        allocation_id=h.allocation["id"],
+        previous_sha=PROFILE.deployment_sha,
+        previous_digest=PROFILE.source_sha256,
+        deployment_sha=release.sha,
+        source_sha256=release.digest,
+        source_bundle=release.bundle,
+        release_bundle_path=str(release.path),
+        operation_id=h.operation["id"],
+        generation=1,
+        worker_id="worker-a",
+    )
+    assert h.operation["state"] == "succeeded"
+    assert h.operation["result"]["deployment_sha"] == release.sha
+    h.repository.record_observation_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_records_a_host_that_already_advertises_the_release(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    release = _arm_upgrade(monkeypatch, h)
+    h.host_pool.get_host = AsyncMock(
+        return_value=_host_view(capabilities=[shared_deployment_capability(release.sha)])
+    )
+    await h.reconciler.execute(h.operation)
+    h.bootstrap.deploy.assert_not_awaited()
+    h.repository.advance_host_release.assert_awaited_once()
+    assert h.operation["state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_a_dark_host_is_restored_to_the_previous_bundle(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    release = _arm_upgrade(monkeypatch, h)
+    failed = BootstrapResult(
+        ready=False,
+        host="compute-nodeid",
+        deployment_sha=release.sha,
+        blocked_reasons=("host_deployment_failed",),
+        advertising=False,
+    )
+    restored = BootstrapResult(
+        ready=True, host="compute-nodeid", deployment_sha=PROFILE.deployment_sha
+    )
+    h.bootstrap.deploy = AsyncMock(side_effect=[failed, restored])
+    h.host_pool.get_host = AsyncMock(
+        return_value=_host_view(capabilities=[shared_deployment_capability(PROFILE.deployment_sha)])
+    )
+    await h.reconciler.execute(h.operation)
+    assert h.bootstrap.deploy.await_count == 2
+    rollback = h.bootstrap.deploy.await_args_list[1]
+    assert rollback.args[1].deployment_sha == PROFILE.deployment_sha
+    assert rollback.args[1].source_sha256 == PROFILE.source_sha256
+    assert rollback.args[3] is None
+    assert rollback.kwargs == {"prerequisites": False, "reenroll": False}
+    h.repository.advance_host_release.assert_not_awaited()
+    assert h.operation["state"] == "blocked"
+    assert h.operation["step"] == "restored"
+    assert h.operation["result"]["restored"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advertising", [True, None])
+async def test_a_rollout_that_may_still_be_serving_is_not_restored(monkeypatch, advertising):
+    h = harness(monkeypatch, identified=True)
+    release = _arm_upgrade(monkeypatch, h)
+    h.operation["result"] = {"release_attempts": 2} if advertising is True else {}
+    h.bootstrap.deploy = AsyncMock(
+        return_value=BootstrapResult(
+            ready=False,
+            host="compute-nodeid",
+            deployment_sha=release.sha,
+            blocked_reasons=("host_deployment_failed",),
+            advertising=advertising,
+        )
+    )
+    h.host_pool.get_host = AsyncMock(
+        return_value=_host_view(capabilities=[shared_deployment_capability(PROFILE.deployment_sha)])
+    )
+    await h.reconciler.execute(h.operation)
+    h.bootstrap.deploy.assert_awaited_once()
+    h.repository.advance_host_release.assert_not_awaited()
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "host_deployment_failed"
+    assert "restored" not in h.operation["result"]
+
+
+@pytest.mark.asyncio
+async def test_a_still_advertising_rollout_retries_before_it_blocks(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    release = _arm_upgrade(monkeypatch, h)
+    h.bootstrap.deploy = AsyncMock(
+        return_value=BootstrapResult(
+            ready=False,
+            host="compute-nodeid",
+            deployment_sha=release.sha,
+            blocked_reasons=("host_deployment_failed",),
+            advertising=True,
+        )
+    )
+    h.host_pool.get_host = AsyncMock(
+        return_value=_host_view(capabilities=[shared_deployment_capability(PROFILE.deployment_sha)])
+    )
+    await h.reconciler.execute(h.operation)
+    finished = h.repository.finish_operation.await_args.kwargs
+    assert finished["state"] == "waiting"
+    assert finished["result"] == {"release_attempts": 1}
+    assert finished["retry_after_seconds"] == 300
+    h.bootstrap.deploy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_failure_does_not_mark_the_allocation_unhealthy(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    _arm_upgrade(monkeypatch, h)
+    h.bootstrap.deploy = AsyncMock(
+        side_effect=ProviderError("result_unknown", "The connection dropped", retryable=True)
+    )
+    h.host_pool.get_host = AsyncMock(
+        return_value=_host_view(capabilities=[shared_deployment_capability(PROFILE.deployment_sha)])
+    )
+    await h.reconciler.execute(h.operation)
+    h.repository.record_observation_error.assert_not_awaited()
+    assert h.operation["state"] == "waiting"
+    assert h.operation["step"] == "deploying"
+
+
+@pytest.mark.asyncio
+async def test_an_active_upgrade_renews_the_lease_and_does_not_rotate(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation.update(
+        observed_state="ready",
+        created_at=NOW - timedelta(days=8),
+        expires_at=NOW + timedelta(minutes=30),
+        policy=RenewalPolicy(
+            enabled=True,
+            reason="Keep the evaluation sandboxes",
+            renew_before_seconds=3600,
+            extend_to_horizon_seconds=8 * 3600,
+            rotation_enabled=True,
+            node_types=["r6615"],
+        ).model_dump(),
+    )
+    upgrade = {
+        "kind": "upgrade",
+        "state": "running",
+        "request_id": f"host-release:{h.allocation['id']}:{RELEASE.sha}",
+        "parameters": {"allocation_id": h.allocation["id"], "deployment_sha": RELEASE.sha},
+    }
+    h.repository.list_operations.return_value = [upgrade]
+    h.repository.create_operation = AsyncMock()
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: RELEASE)
+    await h.reconciler.schedule()
+    h.repository.create_operation.assert_not_awaited()
+    h.commands.extend.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_finished_upgrade_lets_an_old_node_rotate(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation.update(
+        observed_state="ready",
+        created_at=NOW - timedelta(days=8),
+        expires_at=NOW + timedelta(minutes=30),
+        policy=RenewalPolicy(
+            enabled=True,
+            reason="Keep the evaluation sandboxes",
+            renew_before_seconds=3600,
+            extend_to_horizon_seconds=8 * 3600,
+            rotation_enabled=True,
+            node_types=["r6615"],
+        ).model_dump(),
+    )
+    h.repository.list_operations.return_value = [
+        {
+            "kind": "upgrade",
+            "state": "succeeded",
+            "request_id": f"host-release:{h.allocation['id']}:{RELEASE.sha}",
+            "parameters": {"deployment_sha": RELEASE.sha},
+        }
+    ]
+    h.repository.create_operation = AsyncMock()
+    monkeypatch.setattr(compute_reconcile, "load_control_plane_host_release", lambda: RELEASE)
+    await h.reconciler.schedule()
+    h.commands.extend.assert_not_awaited()
+    assert h.repository.create_operation.await_args.kwargs["kind"] == "rotate"

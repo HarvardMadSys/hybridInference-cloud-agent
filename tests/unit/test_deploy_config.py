@@ -69,6 +69,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     dotenv.write_text(
         "AGENT_SESSION_SECRET=keep-this-secret\n"
         "AGENT_WORKSPACE_BROKER_TOKEN=keep-this-broker-token\n"
+        "AGENT_DEPLOYMENT_SHA=local-freeinference-local\n"
         "LOCAL_EDGE_PORT=23002\n"
     )
     fake_bin = tmp_path / "bin"
@@ -85,7 +86,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     fake_compose.write_text(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$GATEWAY_AUTHORIZE_URL" "$AGENT_SESSION_REDIRECT_URI" '
-        '"$AGENT_WEB_BASE_URL" >"$COMPOSE_ENV_LOG"\n'
+        '"$AGENT_WEB_BASE_URL" "$AGENT_DEPLOYMENT_SHA" >"$COMPOSE_ENV_LOG"\n'
     )
     fake_compose.chmod(0o755)
 
@@ -127,6 +128,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
         "http://127.0.0.1:24002/authorize",
         "http://127.0.0.1:24002/api/v1/session/callback",
         "http://127.0.0.1:24002",
+        "unknown",
     ]
 
 

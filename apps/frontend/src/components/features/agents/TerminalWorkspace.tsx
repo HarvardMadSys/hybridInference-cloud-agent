@@ -1,5 +1,7 @@
 'use client';
 
+import '@/styles/terminal.css';
+
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import {

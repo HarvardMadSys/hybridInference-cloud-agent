@@ -15,6 +15,7 @@ honest about *this* surface while saying nothing about the gate.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -26,11 +27,13 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities
 
+from cloud_agent import broker_routing
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
 from cloud_agent.application import residency
 from cloud_agent.broker_routing import (
     ENV_BROKER_HOSTS,
+    PROBE_FAILED_FOR_HOST,
     BrokerUrlRefused,
     validate_broker_url,
 )
@@ -151,6 +154,7 @@ class FakeHostPoolStore(AllCapabilities):
         *,
         host: str,
         credential_hash: str,
+        enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
         broker_url: str | None = None,
@@ -587,6 +591,51 @@ async def _enroll(client, store, name="runner-a", **body) -> str:
 # ── Enrollment ─────────────────────────────────────────────────────────
 
 
+async def test_a_failed_broker_probe_tells_the_host_only_that_it_failed(
+    client, monkeypatch, caplog
+):
+    """The host chose the address; what answered there stays in the server log."""
+    async_client, _store = client
+    broker_routing._PROBE_CACHE.clear()
+
+    async def health(self, *, timeout: float = 3) -> None:
+        raise broker_routing.WorkspaceBrokerError(403, "internal-admin-console says hello")
+
+    monkeypatch.setattr(broker_routing.WorkspaceBrokerClient, "health", health)
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
+    )
+    with caplog.at_level("WARNING"):
+        response = await async_client.post(
+            "/v1/agent/host/register",
+            json=_registration_body(
+                issued.json()["enroll_token"], "runner-a", broker_url="http://10.0.0.5:8080"
+            ),
+        )
+    try:
+        assert response.status_code == 200, response.text
+        assert response.json()["broker_error"] == PROBE_FAILED_FOR_HOST
+        assert "hello" not in response.text and "10.0.0.5" not in response.text
+        [record] = [r for r in caplog.records if r.getMessage() == "agent_host_broker_unreachable"]
+        assert "hello" in record.broker_error and "10.0.0.5" in record.broker_error
+    finally:
+        broker_routing._PROBE_CACHE.clear()
+        await broker_routing.close_broker_clients()
+
+
+async def test_a_configuration_probe_answer_still_reaches_the_host(client, monkeypatch):
+    async_client, _store = client
+    monkeypatch.delenv("AGENT_WORKSPACE_BROKER_TOKEN")
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
+    )
+    response = await async_client.post(
+        "/v1/agent/host/register",
+        json=_registration_body(issued.json()["enroll_token"], "runner-a"),
+    )
+    assert response.json()["broker_error"] == broker_routing.PROBE_NO_CREDENTIAL
+
+
 async def test_enrollment_returns_a_credential_and_starts_the_host_enrolling(client):
     async_client, store = client
 
@@ -633,6 +682,28 @@ async def test_a_replayed_enrollment_token_is_refused(client):
     assert (
         "runner-a" not in second.text or second.json()["detail"]["error"]["type"] == "unauthorized"
     )
+
+
+async def test_removal_between_token_consumption_and_registration_refuses_enrollment(
+    client, monkeypatch
+):
+    async_client, store = client
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
+    )
+    token = issued.json()["enroll_token"]
+    register = AsyncMock(side_effect=ValueError("enrollment_token_removed"))
+    monkeypatch.setattr(store, "register_host", register)
+
+    response = await async_client.post(
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"]["type"] == "unauthorized"
+    assert register.await_args.kwargs["enrollment_token_hash"] == hash_secret(token)
+    assert token not in response.text
+    assert "runner-a" not in store.rows
 
 
 async def test_an_invalid_broker_url_does_not_spend_the_enrollment_token(client):
@@ -1093,6 +1164,31 @@ async def test_a_heartbeat_stores_the_settings_report_reduced_to_known_numbers(c
     assert row["settings_local"] == {"agent_timeout_s": 3600, "chat_idle_timeout_s": 15.5}
 
 
+@pytest.mark.parametrize(
+    ("sandbox_runtime", "applied", "warned"),
+    [
+        ("io.containerd.kata.v2", {"sandbox_disk_mib": 0}, True),
+        ("io.containerd.kata.v2", {"sandbox_disk_mib": 20480}, False),
+        # Not reported: a runner that predates the setting is not guessed about.
+        ("io.containerd.kata.v2", {"agent_timeout_s": 900}, False),
+        ("io.containerd.kata.v2", None, False),
+        # Only a Kata host is handed untrusted work.
+        ("", {"sandbox_disk_mib": 0}, False),
+    ],
+)
+async def test_a_host_serving_untrusted_work_without_a_disk_quota_is_flagged(
+    client, sandbox_runtime, applied, warned
+):
+    async_client, store = client
+    await _enroll(async_client, store)
+    store.rows["runner-a"]["sandbox_runtime"] = sandbox_runtime
+    store.rows["runner-a"]["settings_applied"] = applied
+
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+
+    assert listed["hosts"][0]["untrusted_without_disk_quota"] is warned
+
+
 async def test_a_heartbeat_delivers_archive_policy_and_tracks_exact_broker_revision(client):
     async_client, store = client
     credential = await _enroll(async_client, store)
@@ -1322,9 +1418,47 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
                 "sandbox_archive_settings_applied_revision": None,
                 "host_kernel": "host",
                 "guest_kernel": "guest",
+                # Absent from the request: a runner from before the report.
+                "sandbox_disk_limit_mib": None,
             },
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("disk_limit_mib", "profile", "thread_sandbox", "warned"),
+    [
+        (0, "untrusted-kata-v1", None, True),
+        (20480, "untrusted-kata-v1", None, False),
+        # A runner from before the report attests nothing.
+        (None, "untrusted-kata-v1", None, False),
+        (0, "trusted-v1", None, False),
+        # An existing group keeps the quota it was created with.
+        (0, "untrusted-kata-v1", {"sandbox_id": "asbx_existing"}, False),
+    ],
+)
+def test_a_claim_warns_about_a_new_untrusted_group_without_a_disk_quota(
+    caplog, disk_limit_mib, profile, thread_sandbox, warned
+):
+    """A warning only: the claim itself is never changed by the quota."""
+    from cloud_agent.api.worker import _warn_on_unbounded_untrusted_group
+    from cloud_agent.schemas import WorkerClaimAttestation
+
+    claim = {"id": "ajob_1", "execution_profile": profile, "thread_sandbox": thread_sandbox}
+    attestation = WorkerClaimAttestation(sandbox_disk_limit_mib=disk_limit_mib)
+
+    with caplog.at_level(logging.WARNING):
+        _warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
+
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_untrusted_sandbox_without_disk_quota"
+    ]
+    assert len(events) == (1 if warned else 0)
+    if warned:
+        assert events[0].host == "runner-a"  # type: ignore[attr-defined]
+        assert events[0].job_id == "ajob_1"  # type: ignore[attr-defined]
 
 
 async def test_request_body_host_identity_is_rejected(claim_client):
@@ -2081,6 +2215,53 @@ def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
 
     monkeypatch.delenv(ENV_BROKER_HOSTS)
     assert validate_broker_url("http://anything:8081") == "http://anything:8081"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://broker:8092/admin",
+        "http://broker:8092?next=",
+        "http://broker:8092/?",
+        "http://broker:8092#/workspaces",
+        "http://user:secret@broker:8092",
+        "http://other@broker:8092",
+        "http://broker:99999",
+        "http://broker:8092\\@elsewhere",
+        "http://bro ker:8092",
+    ],
+)
+def test_a_broker_url_must_be_a_bare_origin(monkeypatch, url: str) -> None:
+    """Requests append ``/workspaces/...`` to the address; nothing may redirect that."""
+    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
+    with pytest.raises(BrokerUrlRefused):
+        validate_broker_url(url)
+
+
+def test_a_broker_origin_keeps_its_trailing_slash_and_default_port(monkeypatch) -> None:
+    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
+    assert validate_broker_url("http://broker:8092/") == "http://broker:8092/"
+    assert validate_broker_url("https://[2001:db8::1]") == "https://[2001:db8::1]"
+
+
+def test_an_origin_allowlist_entry_pins_the_scheme_and_port(monkeypatch) -> None:
+    """Brokers behind one tunnel address differ only by port."""
+    monkeypatch.setenv(ENV_BROKER_HOSTS, "http://172.30.0.1:19092,https://broker.example")
+    assert validate_broker_url("http://172.30.0.1:19092") == "http://172.30.0.1:19092"
+    assert validate_broker_url("https://broker.example:443/") == "https://broker.example:443/"
+    for refused in (
+        "http://172.30.0.1:19093",
+        "https://172.30.0.1:19092",
+        "http://broker.example",
+        "https://broker.example:8443",
+    ):
+        with pytest.raises(BrokerUrlRefused):
+            validate_broker_url(refused)
+
+    # A bare name still admits that host on any port, as it always did.
+    monkeypatch.setenv(ENV_BROKER_HOSTS, "workspace-broker, http://172.30.0.1:19092")
+    assert validate_broker_url("http://workspace-broker:8092") == "http://workspace-broker:8092"
+    assert validate_broker_url("https://Workspace-Broker:1") == "https://Workspace-Broker:1"
 
 
 # ── removed host-level residency control plane ─────────────────────────

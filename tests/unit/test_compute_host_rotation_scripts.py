@@ -13,6 +13,7 @@ import os
 import pathlib
 import shlex
 import subprocess
+import sys
 import tarfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,8 +30,10 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _AUTHORIZE_TRANSFER,
     _DEPLOY,
     _PUSH,
+    _REVOKE_TRANSFER_TARGET,
     _STOP,
     _TRANSFER_KEY,
+    _TRANSFER_RECEIVE,
     _WIPE,
     SshHostBootstrap,
 )
@@ -715,6 +718,7 @@ def test_target_accepts_the_transfer_key_once_and_empties_only_on_the_first_copy
     monkeypatch.setenv("HOME", str(tmp_path))
     params = {
         "key": "ssh-ed25519 KEY ca-transfer",
+        "source": "192.0.2.10",
         "first": True,
         "root": "/opt/agent",
         "identity": IDENTITY,
@@ -729,7 +733,12 @@ def test_target_accepts_the_transfer_key_once_and_empties_only_on_the_first_copy
     run_remote(_AUTHORIZE_TRANSFER, {**params, "first": False}, monkeypatch, capsys)
     assert not [call for call in calls if "-delete" in call]
     keys = (tmp_path / ".ssh/authorized_keys").read_text().splitlines()
-    assert keys == ["restrict ssh-ed25519 KEY ca-transfer"]
+    receive = tmp_path / ".ssh/ca-transfer-receive"
+    assert keys == [
+        f'restrict,from="192.0.2.10",command="{sys.executable} -I {receive}" '
+        "ssh-ed25519 KEY ca-transfer"
+    ]
+    assert receive.read_text() == _TRANSFER_RECEIVE and receive.stat().st_mode & 0o777 == 0o700
     marker = json.dumps({**IDENTITY, "host": "other"})
     refused = run_remote(_AUTHORIZE_TRANSFER, params, monkeypatch, capsys)
     assert refused == {"authorized": False, "reason": "deployment_identity_conflict"}
@@ -774,6 +783,7 @@ async def test_transfer_pushes_from_the_source_and_pins_the_target_key():
     assert authorize.args[0] == TARGET.connection
     sent = json.loads(shlex.split(authorize.args[1])[-1])
     assert sent["first"] is False and sent["identity"]["namespace"] == "ca-nodea"
+    assert sent["source"] == "source.example.org"
     assert push.args[0] == SOURCE.connection
     assert (
         push.kwargs["stdin"]
@@ -841,3 +851,208 @@ async def test_reenrollment_requires_a_token():
     bootstrap = SshHostBootstrap(transport=AsyncMock(), resolver=AsyncMock())
     with pytest.raises(ProviderError, match="fresh token"):
         await bootstrap.deploy(SOURCE, PROFILE, INTENT, None, reenroll=True)
+
+
+HOSTILE_REASON = "<!channel> rotate now: <https://evil.example|runbook>\nreason=ok"
+
+
+async def test_hostile_remote_reasons_never_become_failure_codes():
+    """A node prints what it likes; only our vocabulary reaches records and alerts."""
+    transport = AsyncMock()
+    bootstrap = SshHostBootstrap(transport=transport, resolver=AsyncMock())
+    transport.run.return_value = json.dumps({"stopped": False, "reason": HOSTILE_REASON})
+    with pytest.raises(ProviderError) as stopped:
+        await bootstrap.stop(SOURCE, PROFILE, INTENT)
+    assert stopped.value.code == "host_stop_failed" and not stopped.value.retryable
+
+    transport.run.return_value = json.dumps({"wiped": False, "reason": HOSTILE_REASON})
+    with pytest.raises(ProviderError) as wiped:
+        await bootstrap.wipe(SOURCE, PROFILE, INTENT)
+    assert wiped.value.code == "wipe_failed"
+
+    transport.run.return_value = None
+    transport.run.side_effect = [
+        "ssh-ed25519 AAAA ca-transfer",
+        json.dumps({"authorized": False, "reason": HOSTILE_REASON}),
+    ]
+    with pytest.raises(ProviderError) as refused:
+        await bootstrap.transfer(SOURCE, TARGET, PROFILE, INTENT, final=False)
+    assert refused.value.code == "transfer_failed"
+
+
+async def test_remote_blocked_reasons_keep_only_our_vocabulary():
+    """The takeover rolls back with the first blocked reason as its alert code."""
+    transport = AsyncMock()
+    bootstrap = SshHostBootstrap(transport=transport, resolver=AsyncMock())
+    transport.run.return_value = json.dumps(
+        {"ready": False, "blocked_reasons": [HOSTILE_REASON, "host_readiness_failed", 7]}
+    )
+    checked = await bootstrap.readiness(SOURCE, PROFILE, INTENT)
+    assert checked.blocked_reasons == ("host_readiness_failed",)
+
+    transport.run.return_value = json.dumps({"ready": False, "blocked_reasons": HOSTILE_REASON})
+    assert (await bootstrap.readiness(SOURCE, PROFILE, INTENT)).blocked_reasons == ()
+
+
+def test_every_reason_the_remote_scripts_print_is_in_the_vocabulary():
+    """A code added to a script but not to the vocabulary would silently vanish."""
+    import re
+
+    from cloud_agent.providers.compute import host_bootstrap
+
+    scripts = "\n".join(
+        value
+        for name, value in vars(host_bootstrap).items()
+        if name.startswith("_") and name.isupper() and isinstance(value, str)
+    )
+    printed = set(
+        re.findall(r"(?:refuse|blocked|run)\('([a-z_]+)'", scripts)
+        + re.findall(r"'reason': (?:None if ok else )?'([a-z_]+)'", scripts)
+        + re.findall(r"'blocked_reasons': (?:\[\] if ready else )?\['([a-z_]+)'\]", scripts)
+    )
+    assert {"deployment_identity_conflict", "host_stop_failed", "transfer_failed"} <= printed
+    assert printed <= host_bootstrap._REMOTE_REASONS
+
+
+# What rsync 3.2.7's client asks ssh to run on the target for each _PUSH copy:
+# the pre-copy cleanup level, the main stream and a --files-from chunk, then
+# the same three for a final copy. Captured from the real client.
+RSYNC_SERVER_COMMANDS = [
+    "sudo -n rsync --server -ldHogDtpAXxSe.LsfxCIvu --stats --numeric-ids . "
+    "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/",
+    "sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu --stats --numeric-ids . /var/lib/",
+    "sudo -n rsync --server -lHogDtpAXrRxSe.iLsfxCIvu --stats --numeric-ids . "
+    "/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/",
+    "sudo -n rsync --server -ldHogDtpAXxSe.LsfxCIvu --no-r --delete --stats --numeric-ids . "
+    "/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/",
+    "sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu --delete --stats --numeric-ids . /var/lib/",
+    "sudo -n rsync --server -lHogDtpAXrRxSe.iLsfxCIvu --delete --stats --numeric-ids . "
+    "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/",
+]
+
+
+def _receive(monkeypatch, original_command: str | None) -> list[str] | None:
+    """Run the forced command as sshd would; return what it executed, if anything."""
+    executed: list[list[str]] = []
+
+    def execvp(program, argv):
+        executed.append([program, *argv])
+        raise SystemExit(0)
+
+    monkeypatch.setattr("os.execvp", execvp)
+    if original_command is None:
+        monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
+    else:
+        monkeypatch.setenv("SSH_ORIGINAL_COMMAND", original_command)
+    try:
+        exec(_TRANSFER_RECEIVE, {})
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            assert not executed
+            return None
+    return executed[0][1:] if executed else None
+
+
+@pytest.mark.parametrize("command", RSYNC_SERVER_COMMANDS)
+def test_the_transfer_key_runs_the_rsync_receiver_the_copy_sends(monkeypatch, command):
+    assert _receive(monkeypatch, command) == shlex.split(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        None,
+        "",
+        "sh",
+        "sudo -n cat /opt/agent/.compute-secrets/control.key",
+        "sudo -n rsync --server --sender -logDtpre.iLsfxCIvu . /opt/agent/.env",
+        "sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu --stats --numeric-ids . /etc/",
+        "sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu --log-file=/etc/cron.d/x . /var/lib/",
+        "sudo -n rsync --server -lHogDtpAXrxSKe.iLsfxCIvu --stats . /var/lib/",
+        "sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu . /var/lib/; sh",
+        "sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu . '/var/lib/",
+        "rsync --server -lHogDtpAXrxSe.iLsfxCIvu . /var/lib/",
+    ],
+)
+def test_the_transfer_key_refuses_everything_else(monkeypatch, command):
+    """Not a shell, not a read of the target, not another destination."""
+    assert _receive(monkeypatch, command) is None
+
+
+def test_every_destination_the_copy_writes_is_one_the_key_accepts(machine, monkeypatch, capsys):
+    """Drift between _PUSH and the forced command would break the next move."""
+    destinations = set()
+    for final in (False, True):
+        _, rsyncs = _push(machine, monkeypatch, capsys, final=final, codes=[])
+        destinations |= {call[-1].split(":", 1)[1] for call in rsyncs}
+    monkeypatch.undo()
+    for destination in destinations:
+        command = f"sudo -n rsync --server -lHogDtpAXrxSe.iLsfxCIvu --stats . {destination}"
+        assert _receive(monkeypatch, command) is not None, destination
+
+
+def test_the_transfer_key_is_refused_when_its_source_cannot_be_named(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(list(args))
+        if args[:3] == ["sudo", "-n", "cat"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps(IDENTITY), "")
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    params = {
+        "key": "ssh-ed25519 KEY ca-transfer",
+        "source": "unresolvable.invalid",
+        "first": True,
+        "root": "/opt/agent",
+        "identity": IDENTITY,
+    }
+    assert run_remote(_AUTHORIZE_TRANSFER, params, monkeypatch, capsys) == {
+        "authorized": False,
+        "reason": "transfer_failed",
+    }
+    assert not (tmp_path / ".ssh/authorized_keys").exists()
+    # Refused before the target's daemons are stopped or emptied.
+    assert [call[:3] for call in calls] == [["sudo", "-n", "cat"]]
+
+
+def test_reauthorizing_replaces_an_unrestricted_entry_and_revoking_removes_both(
+    tmp_path, monkeypatch, capsys
+):
+    """A move begun under an older control plane left a bare ``restrict`` line."""
+
+    def run(args, **kwargs):
+        if args[:3] == ["sudo", "-n", "cat"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps(IDENTITY), "")
+        return subprocess.CompletedProcess(args, 0)
+
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "authorized_keys").write_text(
+        "ssh-ed25519 OPERATOR admin@example\nrestrict ssh-ed25519 OLD ca-transfer\n"
+    )
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    params = {
+        "key": "ssh-ed25519 NEW ca-transfer",
+        "source": "2001:db8::7",
+        "first": False,
+        "root": "/opt/agent",
+        "identity": IDENTITY,
+    }
+    assert run_remote(_AUTHORIZE_TRANSFER, params, monkeypatch, capsys) == {"authorized": True}
+    keys = (ssh / "authorized_keys").read_text().splitlines()
+    assert keys[0] == "ssh-ed25519 OPERATOR admin@example"
+    assert len(keys) == 2 and keys[1].startswith('restrict,from="2001:db8::7",command="')
+    assert keys[1].endswith(" ssh-ed25519 NEW ca-transfer")
+
+    monkeypatch.undo()
+    subprocess.run(
+        ["sh", "-c", _REVOKE_TRANSFER_TARGET],
+        env={**os.environ, "HOME": str(tmp_path)},
+        check=True,
+    )
+    assert (ssh / "authorized_keys").read_text() == "ssh-ed25519 OPERATOR admin@example\n"
+    assert not (ssh / "ca-transfer-receive").exists()

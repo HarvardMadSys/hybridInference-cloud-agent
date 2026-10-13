@@ -907,6 +907,7 @@ export async function listAgentConversations(
     cursor?: string;
     limit?: number;
   } = {},
+  signal?: AbortSignal,
 ): Promise<{ conversations: AgentConversationApi[]; next_cursor: string | null }> {
   const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
   if (options.q) query.set('q', options.q);
@@ -914,7 +915,7 @@ export async function listAgentConversations(
   if (options.includeArchived) query.set('include_archived', 'true');
   if (options.pinned !== undefined) query.set('pinned', String(options.pinned));
   if (options.cursor) query.set('cursor', options.cursor);
-  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/conversations?${query}`));
+  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/conversations?${query}`, { signal }));
 }
 
 export interface AgentProjectApi {
@@ -1490,21 +1491,35 @@ export async function listAgentThreadEvents(
   jobId: string,
   after = 0,
   limit = 1000,
+  signal?: AbortSignal,
 ): Promise<{ events: AgentThreadEventApi[]; next_cursor: number }> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/events?after=${after}&limit=${limit}`,
-  );
+  const path = `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/events?after=${after}&limit=${limit}`;
+  const resp = await (signal
+    ? fetchWithAuth(API_BASE, path, { signal })
+    : fetchWithAuth(API_BASE, path));
   return jsonOrThrow(resp);
 }
 
 /** Read a complete thread without imposing the server's page size on Chat. */
-export async function listAllAgentThreadEvents(jobId: string): Promise<AgentThreadEventApi[]> {
+export async function listAllAgentThreadEvents(
+  jobId: string,
+  {
+    signal,
+    onPage,
+  }: {
+    signal?: AbortSignal;
+    /** An immutable snapshot of every page read so far. */
+    onPage?: (events: AgentThreadEventApi[]) => void;
+  } = {},
+): Promise<AgentThreadEventApi[]> {
   const events: AgentThreadEventApi[] = [];
   let cursor = 0;
   for (;;) {
-    const page = await listAgentThreadEvents(jobId, cursor, 1000);
+    signal?.throwIfAborted();
+    const page = await listAgentThreadEvents(jobId, cursor, 1000, signal);
+    signal?.throwIfAborted();
     events.push(...page.events);
+    if (page.events.length) onPage?.([...events]);
     if (page.events.length < 1000 || page.next_cursor <= cursor) return events;
     cursor = page.next_cursor;
   }

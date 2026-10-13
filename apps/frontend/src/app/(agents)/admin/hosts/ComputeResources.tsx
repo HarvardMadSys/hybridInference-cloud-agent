@@ -20,6 +20,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import AddComputeServer from './AddComputeServer';
 import CloudLabAutoscaling from './CloudLabAutoscaling';
 import ComputeSetup from './ComputeSetup';
+import RemoveComputeServer from './RemoveComputeServer';
 import ServerAccess from './ServerAccess';
 import ServerActions from './ServerActions';
 import ComputeResourcePanel from './ComputeResourcePanel';
@@ -90,10 +91,11 @@ export default function ComputeResources({
   const [panel, setPanel] = useState<OpenPanel>(null);
   const [addSetupOpen, setAddSetupOpen] = useState(false);
   const [serverTab, setServerTab] = useState<
-    'overview' | 'lease' | 'activity' | 'access' | 'retire'
+    'overview' | 'lease' | 'activity' | 'access' | 'retire' | 'remove'
   >('overview');
   const [operationOrigin, setOperationOrigin] = useState<OpenPanel>({ kind: 'operations' });
   const [error, setError] = useState<string | null>(null);
+  const [removalNotice, setRemovalNotice] = useState<string | null>(null);
   const [readAt, setReadAt] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -217,6 +219,16 @@ export default function ComputeResources({
     setPanel(null);
     onHostControlsClosed?.();
   }
+  function removedServer(name: string) {
+    closeServer();
+    setRemovalNotice(`${name} was removed from the server inventory.`);
+    hostsChanged.current();
+    void refresh();
+  }
+  function partialRemoval() {
+    hostsChanged.current();
+    void refresh();
+  }
   function returnFromAddSetup() {
     addReturnFocus.current = 'configure';
     setAddSetupOpen(false);
@@ -279,6 +291,9 @@ export default function ComputeResources({
         currentAllocation.provider_id === 'existing_ssh' ? 'Disconnect server' : 'Release server',
       onSelect: () => setServerTab('retire'),
     });
+  }
+  if (currentAllocation) {
+    resourceActions.push({ label: 'Remove server', onSelect: () => setServerTab('remove') });
   }
 
   if (denied)
@@ -343,6 +358,11 @@ export default function ComputeResources({
         </div>
       </div>
       {placementControl}
+      {removalNotice && (
+        <p role="status" className="mb-4 rounded-lg bg-surface-muted px-3 py-2 text-sm">
+          {removalNotice}
+        </p>
+      )}
       {catalog && !catalog.secret_store_configured && (
         <p className="mb-3 text-sm text-amber-800 dark:text-amber-300">
           Configure the control plane secret store to add servers.
@@ -368,6 +388,7 @@ export default function ComputeResources({
         onManage={openResource}
         onManageHosts={(hosts, name) => {
           onHostControlsClosed?.();
+          setServerTab('overview');
           setPanel({ kind: 'host', hosts, name });
         }}
       />
@@ -468,10 +489,31 @@ export default function ComputeResources({
         </Panel>
       )}
       {panel?.kind === 'host' && (
-        <Panel title={panel.name} onClose={closeServer}>
-          {hostFeedback}
-          {placementControls(panel.hosts)}
-          {renderHostControls?.(panel.hosts)}
+        <Panel
+          title={panel.name}
+          onClose={closeServer}
+          actions={
+            <ServerActions
+              items={[{ label: 'Remove server', onSelect: () => setServerTab('remove') }]}
+            />
+          }
+        >
+          {serverTab === 'remove' ? (
+            <RemoveComputeServer
+              key={panel.hosts.join(',')}
+              name={panel.name}
+              hosts={panel.hosts}
+              onRemoved={() => removedServer(panel.name)}
+              onPartialRemoval={partialRemoval}
+              onCancel={() => setServerTab('overview')}
+            />
+          ) : (
+            <>
+              {hostFeedback}
+              {placementControls(panel.hosts)}
+              {renderHostControls?.(panel.hosts)}
+            </>
+          )}
         </Panel>
       )}
       {currentAllocation && (
@@ -521,7 +563,7 @@ export default function ComputeResources({
               </button>
             )}
           </div>
-          {(serverTab === 'access' || serverTab === 'retire') && (
+          {(serverTab === 'access' || serverTab === 'retire' || serverTab === 'remove') && (
             <button
               type="button"
               className="mb-4 text-sm text-gray-500 hover:underline dark:text-gray-400"
@@ -550,6 +592,16 @@ export default function ComputeResources({
               onOperation={receiveOperation}
             />
           </div>
+          {serverTab === 'remove' && (
+            <RemoveComputeServer
+              key={currentAllocation.id}
+              name={currentAllocation.name}
+              allocation={currentAllocation}
+              onRemoved={() => removedServer(currentAllocation.name)}
+              onPartialRemoval={partialRemoval}
+              onCancel={() => setServerTab('overview')}
+            />
+          )}
           <div hidden={serverTab !== 'lease'}>
             <ComputeResourcePanel
               key={currentAllocation.id}

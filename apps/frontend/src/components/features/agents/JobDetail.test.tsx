@@ -2368,9 +2368,10 @@ describe('JobDetail', () => {
     const showCall = within(turn).getByRole('button', { name: 'Show tool call' });
     expect(showCall).toHaveAttribute('aria-expanded', 'false');
     expect(within(turn).getByText('Read: src/router.py')).toBeVisible();
-    expect(within(turn).getByText('src/router.py', { selector: 'pre' })).not.toBeVisible();
-    expect(within(turn).getByText('router source')).not.toBeVisible();
+    expect(within(turn).queryByText('src/router.py', { selector: 'pre' })).not.toBeInTheDocument();
+    expect(within(turn).queryByText('router source')).not.toBeInTheDocument();
     fireEvent.click(showCall);
+    expect(within(turn).getByText('src/router.py', { selector: 'pre' })).toBeVisible();
     expect(within(turn).getByText('router source')).toBeVisible();
     expect(within(turn).getByText('Earlier answer')).toBeInTheDocument();
     expect(screen.getAllByText('Earlier answer')).toHaveLength(1);
@@ -2496,15 +2497,16 @@ describe('JobDetail', () => {
     expect(screen.getByText('Bash: pytest -q')).toBeVisible();
     expect(screen.getByTitle('Bash: pytest -q · Result received')).toBeVisible();
     const call = document.getElementById(showCall.getAttribute('aria-controls')!);
-    expect(call).toHaveTextContent('"cwd": "/workspace"');
-    expect(call).toHaveTextContent('"timeout": 0');
+    expect(call).toBeEmptyDOMElement();
     expect(call).not.toBeVisible();
-    expect(screen.getByText('2 passed')).not.toBeVisible();
+    expect(screen.queryByText('2 passed')).not.toBeInTheDocument();
 
     fireEvent.click(showCall);
     const hideCall = screen.getByRole('button', { name: 'Hide tool call' });
     expect(hideCall).toHaveAttribute('aria-expanded', 'true');
     expect(call).toBeVisible();
+    expect(call).toHaveTextContent('"cwd": "/workspace"');
+    expect(call).toHaveTextContent('"timeout": 0');
     expect(screen.getByText('2 passed')).toBeVisible();
 
     fireEvent.click(hideCall);
@@ -2512,7 +2514,8 @@ describe('JobDetail', () => {
       'aria-expanded',
       'false',
     );
-    expect(screen.getByText('2 passed')).not.toBeVisible();
+    expect(screen.queryByText('2 passed')).not.toBeInTheDocument();
+    expect(call).toBeEmptyDOMElement();
   });
 
   it('uses the real cancel endpoint and refreshes the job', async () => {
@@ -4899,7 +4902,10 @@ describe('JobDetail', () => {
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
   });
 
-  it('skips a failed turn and rewinds its prompt from the nearest successful boundary', async () => {
+  it.each([
+    ['failed', 'Turn 2', 'Retry this failed prompt'],
+    ['current', 'Turn 3', 'Current task\nwith all of its detail.'],
+  ])('rewinds the %s turn from the nearest successful boundary', async (_turn, label, prompt) => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind_failed' } as never);
     vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     render(
@@ -4947,12 +4953,12 @@ describe('JobDetail', () => {
 
     const failedTurn = within(screen.getByLabelText('Turn 2'));
     expect(failedTurn.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
-    fireEvent.click(failedTurn.getByRole('button', { name: 'Edit & rewind' }));
+    fireEvent.click(
+      within(screen.getByLabelText(label)).getByRole('button', { name: 'Edit & rewind' }),
+    );
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_success'));
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(
-      'Retry this failed prompt',
-    );
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(prompt);
   });
 
   it('forks before a user prompt and carries it to the child as a one-shot edit draft', async () => {
@@ -5840,9 +5846,15 @@ describe('conversation turn navigation', () => {
     const { rerender } = render(
       <JobDetail job={multiTurnJob({ historyTurns: [withoutOutput] })} />,
     );
+    const turn = within(screen.getByLabelText('Turn 1'));
+    fireEvent.click(turn.getByRole('button', { name: 'Show tool call' }));
     expect(screen.getByText('Waiting for the tool result…')).toBeInTheDocument();
 
     rerender(<JobDetail job={multiTurnJob({ historyTurns: [withOutput] })} />);
+    expect(turn.getByRole('button', { name: 'Hide tool call' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
     expect(screen.getByText('711 tests passed in the stored turn')).toBeInTheDocument();
     expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
   });

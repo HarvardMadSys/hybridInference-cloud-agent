@@ -80,6 +80,8 @@ const cloudLabDefaults = {
   profile_name: 'kata-node',
   ssh_username: 'researcher',
   ssh_public_key: '',
+  node_types: ['r6615', 'c6620', 'r650', 'r6525', 'c6525-100g', 'c6525-25g'],
+  node_type_binding: 'phystype',
 };
 
 const getArchiveSettings = vi.mocked(getSandboxArchiveSettings);

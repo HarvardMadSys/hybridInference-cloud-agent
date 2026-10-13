@@ -151,8 +151,15 @@ CHAT_STATE_DIR = "/agent-state"
 CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
 #: Where Codex, OpenCode and Kilo keep one mode-0700 provider home per member
 #: (``resident_transport.PRIVATE_MEMBER_STATE_ROOTS``). Only a home's own
-#: member UID can open it.
+#: member UID can open it, and no member can rename or replace one: each
+#: collection is owned by the sandbox user and sticky, inside a sticky
+#: /agent-state (see :meth:`ChatSandboxManager.ensure_private_member_collections`).
 PRIVATE_MEMBER_HOME_COLLECTIONS = tuple(
+    f"{CHAT_STATE_DIR}/{runtime}-homes" for runtime in ("codex", "opencode", "kilo")
+)
+#: The member-created, group-writable collections earlier releases used. A
+#: member moves its own home out of one once; nothing is ever started from it.
+LEGACY_MEMBER_HOME_COLLECTIONS = tuple(
     f"{CHAT_STATE_DIR}/{runtime}-members" for runtime in ("codex", "opencode", "kilo")
 )
 ACTIVATION_TMPFS = "/run/agent-activation"
@@ -387,10 +394,11 @@ def _exec_env_by_name(key: str) -> bool:
 # resolver the guest should use and $2 the relays as JSON. Prints the problems
 # it found as a JSON list; an empty list is a pass. Every probe has a short
 # bound and nothing here leaves the host: the resolver answers one query for the
-# root's name servers, and the two boundary probes aim at the host itself and at
-# the metadata address, which the host rules must refuse at once with their own
-# ICMP "administratively prohibited". A host without the rules would answer
-# "port unreachable" for itself instead, and route the other onwards.
+# root's name servers, and the boundary probes aim at the host itself and at the
+# two platform addresses (cloud metadata, and Azure's WireServer on a public
+# address), which the host rules must refuse at once with their own ICMP
+# "administratively prohibited". A host without the rules would answer "port
+# unreachable" for itself instead, and route the others onwards.
 _GUEST_NETWORK_CHECK = """
 import errno, json, socket, struct, sys
 resolver, relays = sys.argv[1], json.loads(sys.argv[2])
@@ -441,10 +449,13 @@ def host_udp():
     probe.recv(1)
 if gateway is not None:
     refused_by_rules('the host at %s:9/udp' % gateway, host_udp)
-refused_by_rules(
-    'the metadata address 169.254.169.254:80',
-    lambda: socket.create_connection(('169.254.169.254', 80), timeout=2).close(),
-)
+for label, address in (
+    ('the metadata address 169.254.169.254:80', '169.254.169.254'),
+    ('the platform address 168.63.129.16:80', '168.63.129.16'),
+):
+    refused_by_rules(
+        label, lambda address=address: socket.create_connection((address, 80), timeout=2).close()
+    )
 print(json.dumps(problems))
 """
 
@@ -552,7 +563,12 @@ class ChatSandboxSpec:
     @property
     def container_name(self) -> str:
         """A stable Docker-safe name without exposing a user-controlled id."""
-        digest = hashlib.sha256(f"{self.thread_id}\0{self.sandbox_id}".encode()).hexdigest()[:32]
+        return self.container_name_for(self.thread_id, self.sandbox_id)
+
+    @staticmethod
+    def container_name_for(thread_id: str, sandbox_id: str) -> str:
+        """Derive the stable container name from its two durable identities."""
+        digest = hashlib.sha256(f"{thread_id}\0{sandbox_id}".encode()).hexdigest()[:32]
         return f"{CHAT_CONTAINER_PREFIX}-{digest}"
 
     def docker_labels(self) -> dict[str, str]:
@@ -1856,11 +1872,13 @@ class ChatSandboxManager:
     def verify_host_rules(self) -> None:
         """Prove the host still enforces this deployment's rules, repairing them if not.
 
-        Cheap while the guard's last verification is fresh; otherwise it
-        reinstalls and reads the tables back. A raise means the host cannot
-        show the boundary every running group was started behind.
+        Reads the tables from the kernel on every call, so the sweep that
+        calls this sees a flushed ruleset on its next pass rather than when
+        the guard's last verification ages out; a difference reinstalls and
+        reads back. A raise means the host cannot show the boundary every
+        running group was started behind.
         """
-        self.backend.network_guard().ensure()
+        self.backend.network_guard().recheck()
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -2916,6 +2934,48 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
+    def ensure_private_member_collections(self, spec: ChatSandboxSpec) -> None:
+        """Make every provider-home collection one no member can rename or swap.
+
+        A member's home is mode 0700, but that alone does not stop a sibling
+        from renaming it out of a group-writable directory and putting its own
+        tree at the known path before the member's CLI starts. Run as the
+        sandbox user, which owns /agent-state and is no member's UID, this sets
+        the sticky bit on /agent-state and creates each collection owned by the
+        sandbox user with mode 3770 (setgid, sticky). A member can then add its
+        own home but cannot rename or remove another's, nor the collection, and
+        no member UID can undo either bit. An entry at a collection's name that
+        the sandbox user does not own -- a sibling's squat, or a symlink -- is
+        moved aside, which the owner of a sticky directory may always do.
+        """
+        script = (
+            'set -eu; me=$(id -u); group=$(id -g); root="$1"; shift; '
+            'test -n "$(find "$root" -maxdepth 0 -type d -uid "$me")" '
+            '|| { echo "shared state root is not owned by the sandbox user" >&2; exit 1; }; '
+            'chmod +t -- "$root"; '
+            'for collection in "$@"; do '
+            "attempt=0; "
+            'until mkdir -m 3770 -- "$collection" 2>/dev/null '
+            '|| test -n "$(find "$collection" -maxdepth 0 -type d -uid "$me" -gid "$group")"; '
+            "do "
+            'attempt=$((attempt + 1)); test "$attempt" -le 3; '
+            'mv -T -- "$collection" "$collection.refused-$$-$attempt"; '
+            "done; "
+            'chmod 3770 -- "$collection"; '
+            "done"
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", CHAT_STATE_DIR, *PRIVATE_MEMBER_HOME_COLLECTIONS],
+            workdir="/",
+            timeout_s=60,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "private member home collections could not be secured: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
     def normalize_member_files(
         self,
         spec: ChatSandboxSpec,
@@ -2940,6 +3000,7 @@ class ChatSandboxManager:
         # /home/agent-member-N/.claude-members, outside this traversal. Only projects/
         # remains shared; never widen other legacy shared Claude files.
         # Normalize shared roots while pruning every private-home collection.
+        trusted_prunes = "".join(f"-o -path {path} " for path in PRIVATE_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; uid=$1; "
             'normalize_dirs() { find "$@" -xdev -uid "$uid" -type d '
@@ -2952,14 +3013,16 @@ class ChatSandboxManager:
             f"-o -path {CHAT_STATE_DIR}/claude "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
-            f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
+            f"-o -path {CHAT_STATE_DIR}/kilo-members "
+            f"{trusted_prunes}\\) -prune -o "
             '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
             f"-o -path {CHAT_STATE_DIR}/claude "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
-            f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
+            f"-o -path {CHAT_STATE_DIR}/kilo-members "
+            f"{trusted_prunes}\\) -prune -o "
             '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
             f"if test -d {CLAUDE_SHARED_PROJECTS_DIR}; then "
             f"normalize_dirs {CLAUDE_SHARED_PROJECTS_DIR}; "
@@ -4883,7 +4946,7 @@ finally:
         those owners before it deletes anything, has each member remove its
         own homes, and only then clears both roots.
         """
-        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS)
+        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS + LEGACY_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; "
             f"owners=$(for collection in {collections}; do "
@@ -4921,7 +4984,7 @@ finally:
             if not MEMBER_UID_BASE <= uid < MEMBER_UID_BASE + spec.resident_slot_capacity:
                 raise SandboxError(f"private member home is owned by unexpected uid {uid}")
             uids.add(uid)
-        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS)
+        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS + LEGACY_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; uid=$(id -u); "
             f"for collection in {collections}; do "
@@ -4973,10 +5036,15 @@ finally:
             'git bundle unbundle "$bundle" >/dev/null; '
             'git cat-file -e "$object"'
         )
+        # A partial clone fetches a missing prerequisite on demand, through a
+        # transport the workspace's own config names (``remote.*.uploadpack``,
+        # ``core.sshCommand``). These objects come only from the bundle, so an
+        # empty ``GIT_ALLOW_PROTOCOL`` allows no transport, whatever
+        # ``protocol.*.allow`` says.
         result = self.exec_capture(
             spec,
             ["/bin/sh", "-c", script, "sh", commit, f"{commit}^{{commit}}"],
-            env=env,
+            env={**(env or {}), "GIT_ALLOW_PROTOCOL": ""},
             workdir=CHAT_WORKDIR,
             timeout_s=300,
             input_bytes=bundle,

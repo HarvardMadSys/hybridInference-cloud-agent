@@ -253,8 +253,15 @@ export function useAgentJob(
   useEffect(() => {
     if (!active || !jobId) return undefined;
     let cancelled = false;
+    const controller = new AbortController();
     const requestGeneration = generation.current;
     if (seenScope.current.jobId !== jobId || seenScope.current.reads !== reads) {
+      if (seenScope.current.reads !== reads) {
+        setApi(null);
+        setEvents([]);
+        setThreadEvents([]);
+        setThread(null);
+      }
       seen.current = new Map();
       seenScope.current = { jobId, reads };
     }
@@ -266,6 +273,20 @@ export function useAgentJob(
     historyRead.current = read;
     setPatch(null);
     setLoading(true);
+    const progressive =
+      loadedStreamCursor.current?.jobId !== jobId || loadedStreamCursor.current.reads !== reads;
+    const publishEvents = (foundEvents: AgentThreadEventApi[]) => {
+      // A refresh already has a complete transcript. Keep it and its live
+      // appends visible until the replacement snapshot is complete as well.
+      if (!progressive || cancelled || requestGeneration !== generation.current) return;
+      const merged = new Map(foundEvents.map((event) => [event.id, event]));
+      for (const [id, event] of read.events) merged.set(id, event);
+      const rows = [...merged.values()].sort((left, right) => left.id - right.id);
+      const own = rows.filter((event) => event.job_id === jobId);
+      setEvents(own);
+      setThreadEvents(rows);
+      own.forEach((event) => seen.current.set(event.id, event));
+    };
 
     // The turn's row is read before its events. A turn stores every event
     // before it ends, so events read after a row that says it ended are all
@@ -274,7 +295,25 @@ export function useAgentJob(
     Promise.all([reads.getAgentJob(jobId), reads.getAgentJobThread(jobId)])
       .then(async ([job, foundThread]) => {
         if (cancelled || requestGeneration !== generation.current) return null;
-        return [job, foundThread, await listAllAgentThreadEvents(jobId)] as const;
+        // Durable messages and the prompt do not depend on downloading the
+        // activity ledger. Keep a live same-turn row authoritative until the
+        // complete snapshot below can end it with all of its final events.
+        setApi((current) =>
+          current?.id === jobId ? current : preserveResolvedTaskTitle(current, overlayPushed(job)),
+        );
+        if (progressive && seen.current.size === 0) {
+          setEvents([]);
+          setThreadEvents([]);
+        }
+        setThread(foundThread);
+        return [
+          job,
+          foundThread,
+          await listAllAgentThreadEvents(jobId, {
+            signal: controller.signal,
+            onPage: publishEvents,
+          }),
+        ] as const;
       })
       .then((snapshot) => {
         if (!snapshot || cancelled || requestGeneration !== generation.current) return;
@@ -331,6 +370,7 @@ export function useAgentJob(
 
     return () => {
       cancelled = true;
+      controller.abort();
       if (historyRead.current === read) historyRead.current = null;
     };
   }, [active, jobId, reads, tick]);
@@ -616,11 +656,17 @@ export function useAgentJob(
     () => ({ jobId, reads, project: createDisplayJobAdapter() }),
     [jobId, reads],
   );
-  const job = useMemo(
-    () =>
-      api ? adapter.project(api, { events, patch, thread: visibleThread, threadEvents }) : null,
-    [adapter, api, events, patch, visibleThread, threadEvents],
-  );
+  const historyLoading = !(loadedCursor?.jobId === api?.id && loadedCursor?.reads === reads);
+  const job = useMemo(() => {
+    if (!api) return null;
+    return adapter.project(api, {
+      events,
+      patch,
+      thread: visibleThread,
+      threadEvents,
+      historyLoading,
+    });
+  }, [adapter, api, events, patch, visibleThread, threadEvents, historyLoading]);
   // The turn rows come from the thread read, which is a snapshot: a live
   // attempt replacement updates `api` and would otherwise leave the inspector
   // reading the attempt that is already gone. The current turn is therefore

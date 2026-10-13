@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic import SecretStr
 
 from cloud_agent.application.compute_rotation import ComputeRotation
+from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
-from cloud_agent.domain.compute import ComputeRefusal, provider_resource_absent
+from cloud_agent.domain.compute import ComputeRefusal, fingerprint, provider_resource_absent
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.external.compute_provider import (
@@ -32,9 +33,14 @@ from cloud_agent.ports.external.compute_provider import (
     ResourceObservation,
     ResourceRef,
 )
-from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
+from cloud_agent.ports.external.host_bootstrap import (
+    BootstrapIntent,
+    BootstrapResult,
+    DeploymentProfile,
+)
 from cloud_agent.schemas_compute import ExtendComputeRequest, RenewalPolicy
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent_shared.shared_protocol import shared_deployment_capability
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_resources import ComputeCommands
@@ -71,6 +77,12 @@ _PREFLIGHT_CHECKS = {
     "data_mount_available",
     "data_mount_conflict_free",
 }
+# A host release must not run beside another deployment of the same machine.
+_RELEASE_MUTATIONS = {"acquire", "import", "upgrade", "retire", "rotate", "discard"}
+_RELEASE_ACTIVE = {"pending", "running", "waiting", "unknown"}
+# Prepare can fail without draining. Stop retrying a release that keeps failing
+# that way; an administrator retry clears the counter and tries again.
+_RELEASE_ATTEMPTS = 3
 
 
 # How long past its recorded deadline a missing resource is taken as ended.
@@ -127,6 +139,7 @@ class ComputeReconciler:
         """Observe leases and submit renewals even while retirement is blocked."""
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
+        release = load_control_plane_host_release()
         for row in await self.repository.list_allocations():
             if row.get("release_committed_at") or row.get("observed_state") in {
                 "terminated",
@@ -147,6 +160,8 @@ class ComputeReconciler:
                     await self.commands.queue_inspection(
                         row, request_key=f"inspect:{row['id']}:{slot}"
                     )
+            if release is not None and row.get("desired_state") == "present":
+                await self._queue_host_release(row, operations, release)
             policy = RenewalPolicy.model_validate(row.get("policy") or {})
             expires = _moment(row.get("expires_at"))
             if not policy.enabled or expires is None or not row.get("expiration_known"):
@@ -159,13 +174,20 @@ class ComputeReconciler:
                 allocation_id=row["id"], kinds=["extend", "rotate"]
             )
             trigger = self.rotation.due(row, policy, lifecycle, now, expires)
-            if trigger is not None:
+            # A rollout already occupies this machine. Keep renewing the lease
+            # it is still serving; do not start a node replacement beside it.
+            release_moving = self._host_release_blocks_rotation(operations, release)
+            if trigger is not None and not release_moving:
                 await self.rotation.start(row, trigger, expires)
             await self.rotation.remind(row, lifecycle, now, expires)
             stalled = any(
                 op["kind"] == "rotate" and op["state"] in {"blocked", "failed"} for op in lifecycle
             )
-            if self.rotation.replaces_renewal(row, policy, now) and not stalled:
+            if (
+                self.rotation.replaces_renewal(row, policy, now)
+                and not stalled
+                and not release_moving
+            ):
                 # A node at its maximum age is replaced rather than extended,
                 # unless its replacement is stuck: then time still helps.
                 continue
@@ -206,12 +228,14 @@ class ComputeReconciler:
                 await self.rotation.rotate(operation, allocation)
             elif kind == "discard":
                 await self.rotation.discard(operation, allocation)
+            elif kind == "upgrade":
+                await self._upgrade(operation, allocation)
             else:
                 raise ProviderError("unsupported_operation", "Unknown compute operation")
         except (ProviderError, ComputeRefusal, ComputeSecretError) as exc:
             code = getattr(exc, "code", "credential_unavailable")
             retryable = bool(getattr(exc, "retryable", False))
-            if operation.get("allocation_id") and operation["kind"] != "rotate":
+            if operation.get("allocation_id") and operation["kind"] not in {"rotate", "upgrade"}:
                 # A failed move says nothing about the old node's lease; recording
                 # it would stop new chats there until the next observation.
                 await self.repository.record_observation_error(
@@ -525,6 +549,270 @@ class ComputeReconciler:
             "Host deployment needs attention.",
             result={"blocked_reasons": blocked},
         )
+
+    async def _queue_host_release(
+        self, row: dict[str, Any], operations: list[dict[str, Any]], release: HostRelease
+    ) -> None:
+        """Queue one rollout when a managed host is not on this control-plane commit."""
+        if row.get("management_mode") != "manage" or not row.get("external_id"):
+            return
+        if row.get("observed_state") != "ready":
+            return
+        profile = row.get("deployment_profile") or {}
+        if not profile.get("deployment_sha") or not profile.get("source_sha256"):
+            return
+        hosts = row.get("hosts") or []
+        if len(hosts) != 1 or any(host.get("drain_fence_active") for host in hosts):
+            return
+        if any(
+            op.get("kind") in _RELEASE_MUTATIONS and op.get("state") in _RELEASE_ACTIVE
+            for op in operations
+        ):
+            return
+        request_id = f"host-release:{row['id']}:{release.sha}"
+        if any(op.get("request_id") == request_id for op in operations):
+            return
+        host = await self.host_pool.get_host(host=hosts[0]["host"])
+        if host is None or host.get("status") != "online" or not host.get("enrolled"):
+            return
+        on_release = shared_deployment_capability(release.sha) in (host.get("capabilities") or [])
+        profile_current = (
+            profile.get("deployment_sha") == release.sha
+            and profile.get("source_sha256") == release.digest
+        )
+        if on_release and profile_current:
+            return
+        parameters = {"allocation_id": row["id"], "deployment_sha": release.sha}
+        await self.repository.create_operation(
+            request_id=request_id,
+            fingerprint=fingerprint("upgrade", parameters),
+            kind="upgrade",
+            allocation_id=row["id"],
+            parameters=parameters,
+            requested_by="compute-host-release",
+        )
+        logger.info(
+            "compute_host_release_queued",
+            extra={"allocation_id": row["id"], "deployment_sha": release.sha},
+        )
+
+    @staticmethod
+    def _host_release_blocks_rotation(
+        operations: list[dict[str, Any]], release: HostRelease | None
+    ) -> bool:
+        """Keep a node where it is while its release is moving or needs attention."""
+        if release is None:
+            return False
+        return any(
+            op.get("kind") == "upgrade"
+            and (op.get("parameters") or {}).get("deployment_sha") == release.sha
+            and op.get("state") not in {"succeeded", "cancelled"}
+            for op in operations
+        )
+
+    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+        """Deploy this control plane's host bundle and record that release.
+
+        The host recipe builds the replacement before it drains runners, and it
+        lets in-flight turns finish. Enrollment and package installation stay
+        as they are. A rollout that stops advertising a generation is put back
+        on the stored bundle before this operation gives up.
+        """
+        release = load_control_plane_host_release()
+        target = (operation.get("parameters") or {}).get("deployment_sha")
+        if release is None or release.sha != target:
+            raise ProviderError(
+                "automatic_release_mismatch",
+                "The Host bundle does not match the running control-plane release.",
+            )
+        if allocation.get("desired_state") != "present" or allocation.get("release_committed_at"):
+            await self._finish(
+                operation, "succeeded", "skipped", "This server is no longer managed."
+            )
+            return
+        if len(allocation.get("nodes") or []) != 1 or not allocation.get("deployment_profile"):
+            raise ProviderError(
+                "unsupported_node_count",
+                "This deployment profile supports one node.",
+            )
+        profile = DeploymentProfile.model_validate(allocation["deployment_profile"])
+        observation = await self._inspect(operation, allocation)
+        if observation.state != "ready" or len(observation.nodes) != 1:
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for the server to be ready before updating its host.",
+                retry=30,
+            )
+            return
+        allocation = await self._allocation(allocation["id"])
+        node = allocation["nodes"][0]
+        registered = await self._registered_node(operation, allocation, node, observation.nodes[0])
+        if registered is None:
+            return
+        intent = self._bootstrap_intent(operation, allocation, node)
+        host = await self.host_pool.get_host(host=intent.host)
+        if host is None or not host.get("enrolled"):
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_heartbeat",
+                "Waiting for the Host to register before updating it.",
+                retry=30,
+            )
+            return
+        if host.get("drain_fence_active"):
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_drain",
+                "Waiting for the current deployment drain to finish.",
+                retry=60,
+            )
+            return
+        release_profile = profile.model_copy(
+            update={
+                "source_bundle": str(release.path),
+                "source_sha256": release.digest,
+                "deployment_sha": release.sha,
+            }
+        )
+        advertises = shared_deployment_capability(release.sha) in (host.get("capabilities") or [])
+        if not advertises:
+            if host.get("status") != "online":
+                await self._finish(
+                    operation,
+                    "waiting",
+                    "waiting_for_heartbeat",
+                    "Waiting for the Host to be online before updating it.",
+                    retry=30,
+                )
+                return
+            if not operation.get("result", {}).get("deployed"):
+                await self._checkpoint(operation, "deploying")
+                deployed = await self.bootstrap.deploy(
+                    registered,
+                    release_profile,
+                    intent,
+                    None,
+                    prerequisites=False,
+                    reenroll=False,
+                )
+                if not deployed.ready:
+                    await self._recover_failed_release(
+                        operation, registered, profile, intent, deployed
+                    )
+                    return
+                await self._checkpoint(operation, "verifying_host", {"deployed": True})
+            readiness = await self.bootstrap.readiness(registered, release_profile, intent)
+            if not readiness.ready:
+                await self._recover_failed_release(
+                    operation, registered, profile, intent, readiness
+                )
+                return
+            host = await self.host_pool.get_host(host=intent.host)
+            if (
+                host is None
+                or host.get("status") != "online"
+                or not host.get("enrolled")
+                or shared_deployment_capability(release.sha) not in (host.get("capabilities") or [])
+            ):
+                await self._finish(
+                    operation,
+                    "waiting",
+                    "waiting_for_heartbeat",
+                    "Waiting for the Host to advertise the control-plane release.",
+                    retry=15,
+                )
+                return
+        await self._require_fresh_host(host)
+        await self.repository.advance_host_release(
+            allocation_id=allocation["id"],
+            previous_sha=profile.deployment_sha,
+            previous_digest=profile.source_sha256,
+            deployment_sha=release.sha,
+            source_sha256=release.digest,
+            source_bundle=release.bundle,
+            release_bundle_path=str(release.path),
+            **self._fence(operation),
+        )
+        await self._finish(
+            operation,
+            "succeeded",
+            "ready",
+            "Host is running the control-plane release.",
+            result={"deployment_sha": release.sha, "blocked_reasons": []},
+        )
+
+    async def _recover_failed_release(
+        self,
+        operation: dict[str, Any],
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        deployed: BootstrapResult,
+    ) -> None:
+        """Retry a rollout that left the previous generation up; otherwise restore it."""
+        reasons = deployed.blocked_reasons
+        # Only an explicit dark host is restored. A missing flag is not evidence
+        # that the previous generation was taken down, and restoring would drain it.
+        replaced = deployed.advertising is False
+        if not replaced:
+            if deployed.advertising is True:
+                attempts = int(operation.get("result", {}).get("release_attempts") or 0) + 1
+                if attempts < _RELEASE_ATTEMPTS:
+                    await self._finish(
+                        operation,
+                        "waiting",
+                        "deploying",
+                        "The rollout stopped before replacing the running generation.",
+                        result={"release_attempts": attempts},
+                        retry=300,
+                    )
+                    return
+            await self._bootstrap_blocked(operation, reasons)
+            return
+        if operation.get("result", {}).get("restore_attempted"):
+            await self._bootstrap_blocked(operation, reasons)
+            return
+        await self._checkpoint(
+            operation, "restoring", {"restore_attempted": True, "deployed": False}
+        )
+        restored = await self.bootstrap.deploy(
+            node, profile, intent, None, prerequisites=False, reenroll=False
+        )
+        if not restored.ready:
+            await self._bootstrap_blocked(operation, restored.blocked_reasons or reasons)
+            return
+        await self._finish(
+            operation,
+            "blocked",
+            "restored",
+            "The new release failed and the host is serving its previous release again.",
+            result={"restored": True},
+        )
+
+    async def _require_fresh_host(self, host: dict[str, Any] | None) -> None:
+        """Refuse to record a release the control plane cannot currently reach."""
+        last = None if host is None else _moment(host.get("last_heartbeat_at"))
+        if host is None or last is None or _now() - last > timedelta(seconds=90):
+            raise ProviderError("host_stale", "The Host heartbeat is stale", retryable=True)
+        broker = broker_for_host(host)
+        if broker is None:
+            raise ProviderError(
+                "broker_unreachable",
+                "The control plane cannot reach the Host broker",
+                retryable=True,
+            )
+        try:
+            await broker.health()
+        except WorkspaceBrokerError:
+            raise ProviderError(
+                "broker_unreachable",
+                "The control plane cannot reach the Host broker",
+                retryable=True,
+            ) from None
 
     async def _inspect(
         self, operation: dict[str, Any], allocation: dict[str, Any]

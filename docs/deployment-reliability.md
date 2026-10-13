@@ -184,9 +184,10 @@ minutes old:
 
 Follow-ups waiting behind an earlier turn are excluded. Occupied slots with
 running work are normal backpressure. The monitor reports state; it never claims
-jobs, restarts hosts, changes scheduling or relaxes isolation. External
-process/HTTP monitoring remains necessary because a dead API cannot monitor
-itself.
+jobs, restarts hosts, changes scheduling or relaxes isolation. Compute-managed
+hosts follow a new control-plane commit through the compute worker's upgrade
+operation, which uses the host recipe's drain. External process/HTTP monitoring
+remains necessary because a dead API cannot monitor itself.
 
 Events are logged even without external delivery. To enable notifications, set
 `AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` to an operator-owned
