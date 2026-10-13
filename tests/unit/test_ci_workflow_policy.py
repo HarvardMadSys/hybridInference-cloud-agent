@@ -309,9 +309,7 @@ def test_every_action_is_pinned_to_a_commit(workflow: Path) -> None:
     for reference in remote:
         assert _PINNED.fullmatch(reference), f"{workflow.name}: {reference} is not a commit"
     lines = [
-        line.strip()
-        for line in text.splitlines()
-        if re.match(r"\s*(?:-\s+)?uses:\s+(?!\./)", line)
+        line.strip() for line in text.splitlines() if re.match(r"\s*(?:-\s+)?uses:\s+(?!\./)", line)
     ]
     assert len(lines) == len(remote)
     for line in lines:
