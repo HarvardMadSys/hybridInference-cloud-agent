@@ -115,3 +115,34 @@ async def test_a_turn_that_ends_first_stops_the_wait(monkeypatch, state):
     signal.notified(JOB)
     await asyncio.wait_for(task, 0.5)
     handed.assert_not_awaited()
+
+
+async def test_a_turn_that_gets_no_host_in_time_puts_the_message_back_in_line(monkeypatch):
+    """The wait is bounded, and it does not end silently.
+
+    Left ``sending``, the message could be neither edited nor withdrawn until
+    the turn in front of it had run and ended. It goes back in line instead,
+    saying why it was not delivered.
+    """
+    monkeypatch.setattr(send_now_delivery, "HAND_OVER_WAIT_S", 0.1)
+    monkeypatch.setattr(send_now_delivery, "HAND_OVER_POLL_S", 0.01)
+    handed = AsyncMock()
+    monkeypatch.setattr(send_now_delivery, "deliver_handoff", handed)
+    store = Store()
+
+    outcome = await asyncio.wait_for(
+        send_now_delivery.wait_for_handoff(
+            store,  # type: ignore[arg-type]
+            job_id=JOB,
+            message=MESSAGE,
+        ),
+        2,
+    )
+
+    handed.assert_not_awaited()
+    store.pending_messages.return_to_queue.assert_awaited_once_with(
+        message_id=MESSAGE["id"],
+        revision=MESSAGE["revision"],
+        last_error=send_now_delivery.failure_status(send_now_delivery.CLAIM_TIMEOUT),
+    )
+    assert outcome.reason == send_now_delivery.CLAIM_TIMEOUT
