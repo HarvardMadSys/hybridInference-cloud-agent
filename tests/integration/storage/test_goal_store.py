@@ -832,6 +832,56 @@ async def test_the_backoff_and_the_attempt_cap_are_bounded():
     assert is_exhausted(MAX_WAKEUP_ATTEMPTS) is True
 
 
+async def test_waiting_behind_turns_leaves_the_retry_budget_for_a_real_failure(store, pool):
+    """A wakeup that parked behind its owner's turns still gets its retries.
+
+    Every claim spends an attempt, and a parked wakeup is the same row each
+    time a finish releases it. Parking, and handing the lease back because
+    the turn had already ended, are the ordinary answers rather than
+    failures, so they give the attempt back: after more of them than a real
+    failure is allowed, one transient error still backs off instead of
+    pausing the goal as ``scheduling_failed``.
+    """
+    from cloud_agent.goals.controller import _retry_or_pause
+    from cloud_agent.storage._sql.goals import arm_finish_wakeup
+
+    job, _ = await _goal_job(store)
+    thread_id = str(job["thread_id"])
+    persons_turn = {"thread_id": thread_id, "turn_source": "human", "goal_id": None}
+    for _ in range(MAX_WAKEUP_ATTEMPTS + 1):
+        parked = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+        await store.goal_wakeups.release_wakeup(
+            wakeup_id=parked["id"],
+            lease_owner=parked["lease_owner"],
+            waiting_job_id=job["id"],
+            detail="waiting for the turn already in this conversation",
+        )
+        # The person's turn ends, and its finish releases what waited on it.
+        async with pool.acquire() as conn:
+            await arm_finish_wakeup(conn, persons_turn, job_id=job["id"])
+        handed_back = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+        await store.goal_wakeups.release_wakeup(
+            wakeup_id=handed_back["id"],
+            lease_owner=handed_back["lease_owner"],
+            detail="the turn it was waiting for had already ended",
+        )
+
+    failing = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    assert failing["attempts"] == 1
+    await _retry_or_pause(store, failing)
+
+    goal = await store.goals.get_goal(thread_id=thread_id)
+    assert goal["state"] == "active"
+    retried = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert (retried["id"], retried["attempts"], retried["detail"]) == (
+        failing["id"],
+        1,
+        "scheduling failed; retrying",
+    )
+    # The failure itself is still counted, and its backoff is real.
+    assert await store.goal_wakeups.claim_wakeups(limit=1) == []
+
+
 async def test_a_finished_round_commits_its_report_and_its_wakeup(store, pool):
     """The crash boundary: the report, the outcome and the obligation are one commit."""
     job, first, goal = await _live_goal_job(store)
@@ -1490,6 +1540,112 @@ async def test_a_goal_at_its_own_bound_pauses_instead_of_queueing(store, pool, m
     assert (after["state"], after["pause_reason"]) == ("paused", "round_limit")
     turns = await _thread_turns(store, pool, thread_id)
     assert len([row for row in turns if row["turn_source"] == "goal"]) == 1
+
+
+@pytest.mark.parametrize("message_turn_ended", [False, True], ids=["turn-waiting", "turn-ended"])
+async def test_a_message_that_overtakes_a_completion_keeps_the_goal_scheduled(
+    store, pool, monkeypatch, message_turn_ended: bool
+):
+    """A message accepted while a completion is decided is still followed by the goal.
+
+    The round's finish wakeup is pending while the decision runs, so the
+    message arms no wakeup of its own, and the completion it overtakes is
+    refused as stale. That wakeup is the goal's only obligation: processing it
+    left an active goal nothing would look at again until the stall sweep
+    paused it as ``scheduling_failed``. It waits behind the message's turn
+    instead — or is due at once if that turn already ended — and the goal
+    continues after it.
+    """
+    from cloud_agent.goals import controller
+    from cloud_agent.goals.controller import consume_wakeup, run_goal_wakeups
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    job, first, goal = await _live_goal_job(store)
+    thread_id = str(job["thread_id"])
+    await _finish(pool, first)
+    async with pool.acquire() as conn:
+        # The owner wakeup setting the goal armed is settled: this case is
+        # about the one obligation the round's finish leaves.
+        await conn.execute(
+            "UPDATE agent_goal_wakeups SET state = 'processed' WHERE thread_id = $1", thread_id
+        )
+    round_job = await _round(store, job=job, goal=goal)
+    claimed = await _claim_round(store)
+    assert claimed["id"] == round_job["id"]
+    await _finish(pool, claimed)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET goal_report_parse = 'valid', goal_report_outcome = 'complete', "
+            "goal_report_reason = 'pytest: 42 passed' WHERE id = $1",
+            round_job["id"],
+        )
+    finish_id = await store.goal_wakeups.arm_wakeup(
+        thread_id=thread_id,
+        goal_id=str(goal["goal_id"]),
+        revision=goal["revision"],
+        trigger="finish",
+        trigger_ref=f"job:{round_job['id']}",
+    )
+    wakeup = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    assert wakeup["id"] == finish_id
+
+    messages: list[dict[str, Any]] = []
+    entitled = controller.require_entitled_repo
+
+    async def owner_writes_during_the_access_check(*args: Any, **kwargs: Any) -> None:
+        # The repository check runs after the decision read the round and
+        # before its transaction opens: the window a person's send lands in.
+        if not messages:
+            message = await store.conversation_commands.create_follow_up(
+                parent_job_id=round_job["id"],
+                user_id=job["user_id"],
+                prompt="wait, also update the changelog",
+            )
+            messages.append(message)
+            # The finish wakeup under decision is still pending, so the
+            # message armed no obligation of its own.
+            pending = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+            assert pending is not None and pending["id"] == finish_id
+            if message_turn_ended:
+                await _end_persons_turn(store, pool, message)
+        return await entitled(*args, **kwargs)
+
+    monkeypatch.setattr(controller, "require_entitled_repo", owner_writes_during_the_access_check)
+
+    assert await consume_wakeup(store=store, gateway=_GATEWAY, wakeup=wakeup) == "wait"
+
+    (message,) = messages
+    after = await store.goals.get_goal(thread_id=thread_id)
+    assert (after["state"], after["completed_by_job_id"]) == ("active", None)
+    waiting = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert waiting is not None and waiting["id"] == finish_id
+    assert waiting["waiting_job_id"] == (None if message_turn_ended else message["id"])
+    if not message_turn_ended:
+        await _end_persons_turn(store, pool, message)
+
+    assert await run_goal_wakeups(store=store, gateway=_GATEWAY) == 1
+
+    rounds = [
+        row for row in await _thread_turns(store, pool, thread_id) if row["turn_source"] == "goal"
+    ]
+    assert [row["state"] for row in rounds] == ["succeeded", "queued"]
+    assert (await store.goals.get_goal(thread_id=thread_id))["state"] == "active"
+    assert await store.goal_wakeups.pending_wakeup(thread_id=thread_id) is None
+
+
+async def _end_persons_turn(store, pool, message: dict[str, Any]) -> None:
+    """Run a person's queued turn to success, and settle its finish obligation."""
+    from cloud_agent.storage._sql.goals import arm_finish_wakeup
+
+    claim = await _claim_round(store)
+    assert claim["id"] == message["id"]
+    await _finish(pool, claim)
+    async with pool.acquire() as conn:
+        await arm_finish_wakeup(
+            conn,
+            {"thread_id": message["thread_id"], "turn_source": "human", "goal_id": None},
+            job_id=str(message["id"]),
+        )
 
 
 async def test_stale_exhausted_wakeup_cannot_pause_a_successfully_recovered_goal(

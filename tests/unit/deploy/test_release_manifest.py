@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -341,6 +342,26 @@ def test_the_database_revision_is_alembics_head() -> None:
     head = rm.database_revision()
     assert head in revisions
     assert head not in parents
+
+
+@pytest.mark.parametrize(
+    ("document", "sentence"),
+    [
+        ("ENVIRONMENT.md", r"Run `alembic upgrade head` \(through `([^`]+)`\)"),
+        ("docs/operations.md", r"run `alembic upgrade head` through\s+`([^`]+)`"),
+    ],
+)
+def test_the_upgrade_instructions_name_the_revision_this_release_migrates_to(
+    document: str, sentence: str
+) -> None:
+    """An operator comparing ``alembic current`` with the docs sees the real head.
+
+    Both documents name the revision ``alembic upgrade head`` ends at, and
+    both kept naming an older one while later revisions were added, so a
+    database missing those revisions read as current.
+    """
+    named = re.findall(sentence, (REPO_ROOT / document).read_text())
+    assert named == [rm.database_revision()]
 
 
 # ------------------------------------------------- the schema refuses tampering

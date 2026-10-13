@@ -117,6 +117,44 @@ def upgrade() -> None:
         WHERE goal_state = 'paused' AND goal_pause_reason IS NULL
         """
     )
+    # ``0019`` spelled three of its reasons differently, and the reason
+    # constraint below knows only this vocabulary.
+    op.execute(
+        """
+        UPDATE agent_threads
+        SET goal_pause_reason = CASE goal_pause_reason
+                WHEN 'turn-failed' THEN 'execution_failed'
+                WHEN 'context-lost' THEN 'context_lost'
+                WHEN 'stalled' THEN 'scheduling_failed'
+            END
+        WHERE goal_pause_reason IN ('turn-failed', 'context-lost', 'stalled')
+        """
+    )
+    # ``0019`` kept no detail beside a reason, so a goal it paused *with* one —
+    # including a goal paused here and rolled back, since this ``downgrade``
+    # drops the column — and a block that kept no message would reach the
+    # paused-shape constraint below unable to say why. Each gets the sentence
+    # the platform shows for its reason.
+    op.execute(
+        """
+        UPDATE agent_threads
+        SET goal_pause_detail = CASE goal_pause_reason
+                WHEN 'user' THEN 'paused by the user'
+                WHEN 'fork' THEN 'copied from another conversation; resume it to start working'
+                WHEN 'needs_input' THEN 'the agent stopped and asked for input'
+                WHEN 'round_limit' THEN 'the goal reached the round limit its owner set'
+                WHEN 'execution_failed'
+                    THEN 'the automatic round that was running did not finish'
+                WHEN 'cancelled' THEN 'the automatic round was cancelled'
+                WHEN 'context_lost' THEN 'the conversation''s session is gone'
+                WHEN 'scheduling_failed' THEN 'the platform could not schedule the next round'
+                WHEN 'archived' THEN 'the conversation was archived'
+                ELSE 'this goal was paused under an earlier version of the feature; '
+                     'resume it to continue working toward the objective'
+            END
+        WHERE goal_state = 'paused' AND goal_pause_detail IS NULL
+        """
+    )
     # A completed first-version goal was completed because the model said so.
     # Recording that is not a claim of independent verification; the column's
     # name says which basis it is. The turn that earned it is the last
@@ -266,17 +304,16 @@ def upgrade() -> None:
         WHERE goal_report IS NOT NULL OR goal_round_kind IS NOT NULL
         """
     )
+    # ``0017`` named the old round-kind constraint inline too. ``IF EXISTS``
+    # because this revision's own ``downgrade`` does not put it back, and an
+    # upgrade that insisted on it could never be applied again after a rollback.
     op.execute(
         """
-        ALTER TABLE agent_jobs DROP CONSTRAINT agent_jobs_goal_round_kind_check,
+        ALTER TABLE agent_jobs DROP CONSTRAINT IF EXISTS agent_jobs_goal_round_kind_check,
             DROP COLUMN goal_round_kind,
             DROP COLUMN goal_report,
             DROP COLUMN goal_reason
         """
-    )
-    # ``0017`` named the old round-kind constraint inline too.
-    op.execute(
-        "ALTER TABLE agent_jobs DROP CONSTRAINT IF EXISTS agent_jobs_goal_round_kind_check"
     )
     op.execute("ALTER TABLE agent_jobs RENAME COLUMN goal_round_kind_new TO goal_round_kind")
     op.execute(
