@@ -315,9 +315,10 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked
 
-      # -n 4 --dist loadfile, not a serial run: parallel workers isolate each
-      # test file into its own process, which is what surfaces environment
-      # leakage between files. A serial run silently passes on that class of bug.
+      # -n 4 --dist loadfile, not a serial run: the four workers split the test
+      # files between separate processes, so a file that only passes because
+      # another file ran first in the same process fails here. A serial run
+      # silently passes on that class of bug.
       - name: Pytest
         run: |
           set -euo pipefail
@@ -392,12 +393,11 @@ jobs:
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/claude-driver-context.xml"
 
   # The other half of that command. `test` above deselects `dbtest`, and until
-  # this job existed nothing selected it — 158 tests that are written, green,
-  # and were never once executed by CI. The cost of that is on the record: the
-  # xfail in tests/integration/servers/test_agent_jobs_lifecycle.py documents a
-  # router/test mismatch that survived a whole migration, and says why in its
-  # own reason string — "It was never caught because the dbtest tier does not
-  # run in CI."
+  # this job existed nothing selected it — 158 tests that were written, green,
+  # and never once executed by CI. The cost of that is on the record: a
+  # router/test mismatch survived a whole migration, and the xfail that marked
+  # it until it was fixed said why — "It was never caught because the dbtest
+  # tier does not run in CI."
   #
   # These tests need a real Postgres because what they pin lives in SQL, not in
   # Python: `FOR UPDATE SKIP LOCKED` is the entire guarantee that two workers
@@ -596,9 +596,9 @@ jobs:
           ran = int(suite.get("tests", 0))
 
           # Per-testcase, not the suite's `skipped` attribute: junit counts an
-          # xfail as a skip, and this tier has a standing one. Only
-          # type="pytest.skip" is a test that declined to run, which is what a
-          # database-less run produces.
+          # xfail as a skip, although an xfail ran. Only type="pytest.skip" is a
+          # test that declined to run, which is what a database-less run
+          # produces.
           skipped = [
               tc.get("name")
               for tc in suite.iter("testcase")
