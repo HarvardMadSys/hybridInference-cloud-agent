@@ -1,7 +1,7 @@
 """No tracked file may carry a real credential.
 
 CI runs gitleaks over the tree and the full history. Its config allowlists only
-one exact fake fixture line — never a path — so history remains covered. This
+exact fake fixture lines — never a path — so history remains covered. This
 test adds the repository's own language: it scans every tracked file for the
 credential formats this project and its gateway actually issue, which the
 scanner's default rules do not all know, and it exempts fixtures by literal

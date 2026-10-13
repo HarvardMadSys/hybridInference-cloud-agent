@@ -33,6 +33,13 @@ regexes = [
 ]
 
 [[allowlists]]
+description = "Known fake source-control encryption key in the end-to-end chain test."
+regexTarget = "line"
+regexes = [
+  '''_ENCRYPTION_KEY = "e2e-encryption-key-at-least-32-bytes"''',
+]
+
+[[allowlists]]
 description = "Fixed conversation row identifier in sidebar status tests."
 regexTarget = "line"
 regexes = [
