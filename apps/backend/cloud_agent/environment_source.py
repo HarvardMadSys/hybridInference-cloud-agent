@@ -27,6 +27,15 @@ async def read_repository_token(repo: str, credentials: Any) -> str | None:
 
 
 async def _get(repo: str, suffix: str, credentials: Any) -> dict[str, Any]:
+    from cloud_agent.github_app import GITHUB_API
+    from cloud_agent.settings import setting_env
+
+    api_base = (
+        getattr(getattr(credentials, "config", None), "api_base", None)
+        or setting_env("AGENT_GITHUB_API", GITHUB_API)
+        or GITHUB_API
+    )
+    api_base = api_base.rstrip("/")
     headers = {"Accept": "application/vnd.github+json"}
     token = await read_repository_token(repo, credentials)
     if token:
@@ -34,9 +43,7 @@ async def _get(repo: str, suffix: str, credentials: Any) -> dict[str, Any]:
     try:
         async with (
             httpx.AsyncClient(timeout=15) as client,
-            client.stream(
-                "GET", f"https://api.github.com/repos/{repo}{suffix}", headers=headers
-            ) as response,
+            client.stream("GET", f"{api_base}/repos/{repo}{suffix}", headers=headers) as response,
         ):
             response.raise_for_status()
             content = bytearray()

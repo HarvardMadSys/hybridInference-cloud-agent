@@ -20,7 +20,7 @@ ACTION_UIDS = tuple(range(31000, 31064))
 # owns its pipe. A completion receipt lets the caller hand off without waiting
 # for service EOF. No output or variable values are written into the workspace.
 _HELPER = r"""
-import os, subprocess, threading
+import os, subprocess, threading, sys
 path=os.environ.pop("AGENT_SCRIPT_STATUS")
 script=os.environ.pop("AGENT_ENVIRONMENT_SCRIPT")
 os.umask(0o002)
@@ -37,6 +37,7 @@ code=p.wait()
 with open(path+".tmp","w") as f: f.write(str(code))
 os.replace(path+".tmp",path)
 reader.join()
+sys.exit(code)
 """
 
 
@@ -111,6 +112,51 @@ for name in ('status','status.tmp'):
     return f"/run/agent-environments/{uid}"
 
 
+TOOLS_ROOT = "/workspace/.cloud-agent-tools"
+
+
+def tool_environment() -> dict[str, str]:
+    """Share persistent package data without sharing member credential homes."""
+    return {
+        "UV_PYTHON_INSTALL_DIR": TOOLS_ROOT + "/uv/python",
+        "UV_CACHE_DIR": TOOLS_ROOT + "/uv/cache",
+        "UV_TOOL_DIR": TOOLS_ROOT + "/uv/tools",
+        "UV_TOOL_BIN_DIR": TOOLS_ROOT + "/bin",
+        "CARGO_HOME": TOOLS_ROOT + "/cargo",
+        "GOPATH": TOOLS_ROOT + "/go",
+        "POETRY_VIRTUALENVS_IN_PROJECT": "true",
+        "POETRY_CACHE_DIR": TOOLS_ROOT + "/poetry",
+        "PYTHONUSERBASE": TOOLS_ROOT + "/python-user",
+        "PIP_CACHE_DIR": TOOLS_ROOT + "/pip",
+        "NPM_CONFIG_CACHE": TOOLS_ROOT + "/npm",
+    }
+
+
+def prepare_tool_home(manager: Any, spec: Any, uid: int) -> str:
+    """Create an executable shared home only with the operation's own identity."""
+    result = manager.exec_capture(
+        spec,
+        [
+            "/bin/sh",
+            "-c",
+            "set -eu; umask 002; mkdir -p .cloud-agent-tools/home; "
+            "for directory in .cloud-agent-tools .cloud-agent-tools/home; do "
+            'if [ "$(stat -c %u -- "$directory")" = "$(id -u)" ]; then '
+            'chmod g+rwx,g+s "$directory"; fi; done; '
+            "if [ -d .git ]; then mkdir -p .git/info; touch .git/info/exclude; "
+            "grep -qxF '/.cloud-agent-tools/' .git/info/exclude || "
+            "printf '\\n/.cloud-agent-tools/\\n' >> .git/info/exclude; fi",
+        ],
+        user_uid=uid,
+        user_gid=manager.backend.gid,
+        workdir="/workspace",
+        timeout_s=10,
+    )
+    if result.returncode:
+        raise SandboxError("Environment tool directories could not be prepared")
+    return TOOLS_ROOT + "/home"
+
+
 class EnvironmentProcess(SandboxProcess):
     """An exec with a foreground result and a separately owned service stream."""
 
@@ -124,8 +170,9 @@ class EnvironmentProcess(SandboxProcess):
         self.status_path = directory + "/status"
         values = {
             **backend.base_env(),
+            **tool_environment(),
             **env,
-            "HOME": directory + "/home",
+            "HOME": prepare_tool_home(backend.manager, backend.spec, self.uid),
             "AGENT_ENVIRONMENT_SCRIPT": script,
             "AGENT_SCRIPT_STATUS": self.status_path,
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -152,10 +199,13 @@ class EnvironmentProcess(SandboxProcess):
 
     def poll(self) -> int | None:
         """Read the foreground completion receipt without waiting for service EOF."""
+        return self._poll(force=False)
+
+    def _poll(self, *, force: bool) -> int | None:
         with self._lock:
             if self._code is not None:
                 return self._code
-            if time.monotonic() < self._next_poll:
+            if not force and time.monotonic() < self._next_poll:
                 return None
             self._next_poll = time.monotonic() + 1
             result = self.backend.manager.exec_capture(
@@ -172,13 +222,22 @@ class EnvironmentProcess(SandboxProcess):
                 except ValueError:
                     raise SandboxError("Invalid environment completion receipt") from None
             else:
-                self._code = self.process.poll()
+                helper_code = self.process.poll()
+                if helper_code == 0:
+                    raise SandboxError("Environment completion receipt is missing")
+                self._code = helper_code
             return self._code
 
     def wait(self) -> int:
         """Return the foreground result independently of background services."""
-        code = self.poll()
-        return self.process.wait() if code is None else code
+        code = self._poll(force=True)
+        if code is not None:
+            return code
+        self.process.wait()
+        code = self._poll(force=True)
+        if code is None:
+            raise SandboxError("Environment completion receipt is missing")
+        return code
 
     def kill(self) -> None:
         """Reap only this phase identity, including detached children."""

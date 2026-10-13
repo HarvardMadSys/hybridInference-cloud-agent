@@ -15,6 +15,11 @@ from cloud_agent_shared.environment import EnvironmentScripts
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
+@pytest.fixture(autouse=True)
+def enable_environments(monkeypatch):
+    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
+
+
 async def _save(
     store,
     *,
@@ -427,3 +432,376 @@ async def test_short_secret_is_rejected_before_any_configuration_is_written(stor
     assert await store.environments.list_environments("alice", "org/repo") == []
     env = await _save(store, variables=[{"name": "DEBUG", "value": "1", "secret": False}])
     assert env["variables"][0]["value"] == "1"
+
+
+async def test_runtime_rotation_keeps_setup_owner_cas_and_old_secret_scan(store, pool, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store, variables=[{"name": "TOKEN", "value": "original-secret"}])
+    job = await _job(store, env)
+    binding = job["environment_binding_id"]
+    await _save(
+        store,
+        environment_id=env["id"],
+        revision=1,
+        script="new-install",
+        variables=[{"name": "TOKEN", "value": "rotated-secret"}],
+    )
+    assert await store.environments.refresh_runtime_environment("alice", binding, 0) == {
+        "runtime_revision": 1
+    }
+    bound = await store.environments.get_environment_binding("alice", binding)
+    assert bound.setup_script == "install"
+    assert bound.values("setup") == {"TOKEN": "original-secret"}
+    assert bound.values("runtime") == {"TOKEN": "rotated-secret"}
+    with pytest.raises(EnvironmentConflict):
+        await store.environments.refresh_runtime_environment("alice", binding, 0)
+    with pytest.raises(EnvironmentNotFound):
+        await store.environments.refresh_runtime_environment("bob", binding, 1)
+    # Cache the new secret before another rotation: the runtime version must invalidate it.
+    steps = [{"output": "rotated-secret"}]
+    assert "rotated-secret" not in str(
+        await store.environments.redact_environment_steps("alice", binding, steps)
+    )
+    await _save(
+        store,
+        environment_id=env["id"],
+        revision=2,
+        variables=[{"name": "TOKEN", "value": "newest-secret"}],
+    )
+    await store.environments.refresh_runtime_environment("alice", binding, 1)
+    output = await store.environments.redact_environment_steps(
+        "alice", binding, [{"output": "original-secret rotated-secret newest-secret"}]
+    )
+    assert all(
+        secret not in str(output)
+        for secret in ("original-secret", "rotated-secret", "newest-secret")
+    )
+    view = await store.environments.workspace_environment_view("alice", job["thread_id"])
+    assert all(
+        secret not in json.dumps(view)
+        for secret in ("original-secret", "rotated-secret", "newest-secret")
+    )
+    assert view["runtime_revision"] == 2
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "wrong-key")
+    from cloud_agent.environments import EnvironmentEncryptionError
+
+    with pytest.raises(EnvironmentEncryptionError):
+        await store.environments.redact_environment_steps("alice", binding, steps)
+
+
+async def test_test_idempotency_keeps_original_sha_after_branch_moves(store, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store)
+    selection = {"environment_id": env["id"], "environment_id_provided": True}
+    first = await store.environments.create_environment_run(
+        "alice", repo="org/repo", base_sha="a" * 40, selection=selection, key="request", ref="dev"
+    )
+    replay = await store.environments.create_environment_run(
+        "alice", repo="org/repo", base_sha="b" * 40, selection=selection, key="request", ref="dev"
+    )
+    assert replay["id"] == first["id"] and replay["base_sha"] == "a" * 40
+    assert (await store.environments.find_environment_run("alice", "request", selection, "dev"))[
+        "id"
+    ] == first["id"]
+    with pytest.raises(EnvironmentConflict):
+        await store.environments.find_environment_run("alice", "request", selection, "other")
+    assert await store.environments.find_environment_run("bob", "request", selection, "dev") is None
+
+
+async def test_expired_reservation_releases_capacity_but_fences_returning_host(
+    store, pool, monkeypatch
+):
+    from tests.integration.storage.test_agent_job_store import (
+        _SHARED_HOST_CAPABILITIES,
+        _shared_claim_attestation,
+    )
+
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store, variables=[{"name": "TOKEN", "value": "private-example"}])
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": env["id"], "environment_id_provided": True},
+        key="first",
+    )
+    await store.host_pool.register_host(
+        host="environment-host",
+        credential_hash="credential",
+        capabilities=[*_SHARED_HOST_CAPABILITIES, "environment-v1"],
+        slots_total=1,
+    )
+    await store.host_pool.record_host_heartbeat(
+        host="environment-host",
+        capabilities=[*_SHARED_HOST_CAPABILITIES, "environment-v1"],
+        sandbox_image_digest="sha256:shared-image",
+    )
+    claimed = await store.environments.claim_environment_run(
+        "environment-host", "credential", _shared_claim_attestation()
+    )
+    assert claimed["id"] == run["id"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_runs SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            run["id"],
+        )
+    await store.environments.maintain_environments()
+    expired = await store.environments.get_environment_run("alice", run["id"])
+    assert expired["state"] == "failed" and not expired["cleanup_complete"]
+    host = next(
+        h for h in await store.host_pool.list_runner_hosts() if h["host"] == "environment-host"
+    )
+    assert host["slots_used"] == 0
+    next_run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": env["id"], "environment_id_provided": True},
+        key="second",
+    )
+    assert (
+        await store.environments.claim_environment_run(
+            "environment-host", "credential", _shared_claim_attestation()
+        )
+        is None
+    )
+    assert any(
+        r["id"] == run["id"]
+        for r in await store.environments.list_environment_orphans("environment-host")
+    )
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "wrong-key")
+    assert await store.environments.update_environment_run(
+        run["id"],
+        "environment-host",
+        claimed["lease_generation"],
+        {"cleanup_complete": True, "state": "failed"},
+    )
+    assert (await store.environments.get_environment_run("alice", run["id"]))["cleanup_complete"]
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    assert (
+        await store.environments.claim_environment_run(
+            "environment-host", "credential", _shared_claim_attestation()
+        )
+    )["id"] == next_run["id"]
+
+
+async def test_preflight_failure_releases_claim_without_decrypting_again(store, pool, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store, variables=[{"name": "TOKEN", "value": "private-example"}])
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": env["id"], "environment_id_provided": True},
+        key=None,
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_runs SET state='running',host='runner',lease_generation=1,started_at=NOW(),lease_expires_at=NOW()+INTERVAL '2 minutes' WHERE id=$1",
+            run["id"],
+        )
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "wrong-key")
+    assert await store.environments.fail_environment_preflight(run["id"], "runner", 1)
+    result = await store.environments.get_environment_run("alice", run["id"])
+    assert result["state"] == "failed" and result["cleanup_complete"]
+    assert not await store.environments.fail_environment_preflight(run["id"], "runner", 2)
+
+
+async def test_disabled_switch_blocks_new_bindings_but_preserves_existing(store, pool, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store)
+    job = await _job(store, env)
+    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false")
+    with pytest.raises(ValueError, match="disabled"):
+        await _job(store, env)
+    assert (await store.environments.get_job_environment(job["id"])).setup_script == "install"
+    empty = await store.conversation_commands.create_job(
+        user_id="bob",
+        repo="org/repo",
+        task_prompt="work",
+        runtime="codex",
+        model="test",
+        environment_selection={},
+    )
+    async with pool.acquire() as conn:
+        assert not await conn.fetchval(
+            "SELECT required FROM agent_environment_bindings WHERE id=$1",
+            empty["environment_binding_id"],
+        )
+        assert await conn.fetchval(
+            "SELECT required FROM agent_environment_bindings WHERE id=$1",
+            job["environment_binding_id"],
+        )
+    await _save(
+        store,
+        owner="bob",
+        repo=None,
+        name="Global",
+        variables=[{"name": "TOKEN", "value": "private-example"}],
+    )
+    with pytest.raises(ValueError, match="disabled"):
+        await store.environments.refresh_runtime_environment(
+            "bob", empty["environment_binding_id"], 0
+        )
+    assert (
+        await store.environments.refresh_runtime_environment(
+            "alice", job["environment_binding_id"], 0
+        )
+    )["runtime_revision"] == 1
+
+
+async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store)
+    first = await _job(store, env)
+    binding = first["environment_binding_id"]
+    with pytest.raises(EnvironmentConflict):
+        await store.environments.request_skip_environment_start("alice", binding, first["id"])
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state='failed' WHERE id=$1", first["id"])
+    await store.environments.request_skip_environment_start("alice", binding, first["id"])
+    assert not (
+        await store.environments.environment_for_claim("alice", binding, first["id"])
+    ).skip_start
+    second = await store.conversation_commands.create_follow_up(
+        parent_job_id=first["id"], user_id="alice", prompt="continue"
+    )
+    assert (
+        await store.environments.environment_for_claim("alice", binding, second["id"])
+    ).skip_start
+    assert (
+        await store.environments.environment_for_claim("alice", binding, second["id"])
+    ).skip_start
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state='failed' WHERE id=$1", second["id"])
+    third = await store.conversation_commands.create_follow_up(
+        parent_job_id=second["id"], user_id="alice", prompt="again"
+    )
+    assert not (
+        await store.environments.environment_for_claim("alice", binding, third["id"])
+    ).skip_start
+
+
+async def test_worker_preparation_summary_rejects_expired_or_replaced_attempt(
+    store, pool, monkeypatch
+):
+    from tests.integration.storage.test_agent_job_store import _reserve_shared_chat
+
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(
+        store,
+        owner="user-1",
+        repo="example-org/example-repo",
+        variables=[{"name": "TOKEN", "value": "private-example"}],
+    )
+    job, claim, _sandbox = await _reserve_shared_chat(
+        store, environment_selection={"environment_id": env["id"], "environment_id_provided": True}
+    )
+    receipt = {
+        "binding_id": job["environment_binding_id"],
+        "container_id": "exact-container",
+        "boot_id": "boot",
+        "steps": [{"phase": "setup", "state": "succeeded", "output": "private-example"}],
+    }
+    assert await store.environments.record_worker_environment_preparation(
+        job["id"], claim["attempt_id"], claim["lease_generation"], receipt
+    )
+    view = await store.environments.workspace_environment_view("user-1", job["thread_id"])
+    assert "private-example" not in json.dumps(view)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            claim["attempt_id"],
+        )
+    assert not await store.environments.record_worker_environment_preparation(
+        job["id"],
+        claim["attempt_id"],
+        claim["lease_generation"],
+        {**receipt, "boot_id": "late-boot"},
+    )
+    assert not await store.environments.record_worker_environment_preparation(
+        job["id"], claim["attempt_id"], claim["lease_generation"] + 1, receipt
+    )
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT boot_id FROM agent_environment_preparation") == "boot"
+
+
+async def test_environment_binding_indexes_cover_reverse_reference_cleanup(pool):
+    async with pool.acquire() as conn:
+        names = {
+            row["indexname"]
+            for row in await conn.fetch(
+                "SELECT indexname FROM pg_indexes WHERE tablename IN ('agent_environment_bindings','agent_environment_runs','agent_environment_action_runs','agent_environment_preparation','agent_threads')"
+            )
+        }
+    assert {
+        "agent_environment_thread_binding",
+        "agent_environment_run_binding",
+        "agent_environment_action_binding",
+        "agent_environment_preparation_binding",
+    } <= names
+
+
+async def test_downgrade_allows_unused_empty_binding_but_guards_execution(store, pool, monkeypatch):
+    import runpy
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import asyncpg
+
+    migration = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "migrations/versions/0064_environments.py")
+    )
+    statements = []
+    migration["downgrade"].__globals__["op"] = SimpleNamespace(execute=statements.append)
+    migration["downgrade"]()
+    sql = statements[0]
+    empty = await store.conversation_commands.create_job(
+        user_id="alice",
+        repo="org/repo",
+        task_prompt="plain",
+        runtime="codex",
+        model="test",
+        environment_selection={},
+    )
+    assert empty["environment_binding_id"]
+    async with pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await conn.execute(sql)
+            assert not await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='agent_threads' AND column_name='environment_binding_id')"
+            )
+        finally:
+            await transaction.rollback()
+    # Even a verify-only test has a live container obligation and blocks removal.
+    env = await _save(store, script="")
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": env["id"], "environment_id_provided": True},
+        key=None,
+    )
+    async with pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            with pytest.raises(asyncpg.PostgresError, match="drained"):
+                await conn.execute(sql)
+        finally:
+            await transaction.rollback()
+    await store.environments.cancel_environment_run("alice", run["id"])
+    configured = await _save(
+        store, environment_id=env["id"], revision=env["revision"], script="install"
+    )
+    await _job(store, configured)
+    async with pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            with pytest.raises(asyncpg.PostgresError, match="drained"):
+                await conn.execute(sql)
+        finally:
+            await transaction.rollback()

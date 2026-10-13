@@ -13,7 +13,16 @@ export const en = {
   'environment.shortSecret':
     'Secrets must contain at least 8 characters. Mark non-sensitive flags such as DEBUG=1 as Ordinary.',
   'environment.loadFailed':
-    'Environment configuration could not be loaded. Retry or choose another repository; saved variables will not be silently omitted.',
+    'Environment configuration could not be loaded. You can submit using server-side repository defaults and global variables, or retry.',
+  'environment.baseVariables': 'Original variables',
+  'environment.runtimeVariables': 'Current runtime variables',
+  'environment.refreshRuntime': 'Update runtime variables',
+  'environment.runtimeHint':
+    'Applies from the next turn. Installation inputs and scripts stay fixed; running services keep their current values.',
+  'environment.skipStart': 'Skip startup for one turn',
+  'environment.skipHint':
+    'After this turn ends, your next turn can proceed without startup. Required services may be unavailable.',
+  'environment.skipArmed': 'Your next turn will skip startup once.',
   'environment.title': 'Environment',
   'environment.description': 'Configure once, test it, and reuse it in new workspaces.',
   'environment.editor': 'Edit environment',

@@ -341,3 +341,170 @@ async def test_environment_metadata_size_limit_is_enforced_before_json(monkeypat
         await environment_source.resolve_test_commit("owner/public", None, None)
     assert caught.value.status_code == 422
     assert "metadata exceeds size limit" in caught.value.detail
+
+
+def test_wait_reads_foreground_failure_even_inside_poll_throttle():
+    import threading
+    import time
+    from unittest.mock import Mock
+
+    from cloud_agent_host.environment_process import EnvironmentProcess
+
+    process = EnvironmentProcess.__new__(EnvironmentProcess)
+    process._code = None
+    process._next_poll = time.monotonic() + 60
+    process._lock = threading.Lock()
+    process.uid = 30000
+    process.status_path = "/private/status"
+    capture = Mock(return_value=SimpleNamespace(returncode=0, stdout="7"))
+    process.backend = SimpleNamespace(
+        spec=None, manager=SimpleNamespace(exec_capture=capture, backend=SimpleNamespace(gid=10001))
+    )
+    process.process = Mock()
+    process.process.wait.return_value = 0
+    assert process.poll() is None
+    assert process.wait() == 7
+    capture.assert_called_once()
+    process.process.wait.assert_not_called()
+
+
+def test_missing_completion_receipt_never_reports_success():
+    import threading
+    from unittest.mock import Mock
+
+    from cloud_agent_host.environment_process import EnvironmentProcess
+
+    process = EnvironmentProcess.__new__(EnvironmentProcess)
+    process._code = None
+    process._next_poll = 0
+    process._lock = threading.Lock()
+    process.uid = 30000
+    process.status_path = "/private/status"
+    process.backend = SimpleNamespace(
+        spec=None,
+        manager=SimpleNamespace(
+            exec_capture=Mock(return_value=SimpleNamespace(returncode=1, stdout="")),
+            backend=SimpleNamespace(gid=10001),
+        ),
+    )
+    process.process = Mock()
+    process.process.poll.return_value = 0
+    with pytest.raises(SandboxError, match="receipt is missing"):
+        process.wait()
+
+
+def test_runtime_refresh_preserves_setup_and_scans_both_secret_generations():
+    bound = BoundEnvironment(
+        binding_id="fixed",
+        setup_script="original",
+        variables=[EnvironmentVariable(name="TOKEN", value="original-token")],
+        runtime_variables=[
+            EnvironmentVariable(name="TOKEN", value="rotated-token", phase="runtime")
+        ],
+        runtime_revision=1,
+        previous_secrets={"TOKEN@previous": "previous-token"},
+    )
+    assert bound.values("setup") == {"TOKEN": "original-token"}
+    assert bound.values("runtime") == {"TOKEN": "rotated-token"}
+    redactor = SecretRedactor(bound.secrets())
+    assert all(
+        redactor.contains(v.encode()) for v in ("original-token", "rotated-token", "previous-token")
+    )
+
+
+def test_start_skip_does_not_mark_start_success_or_skip_future_turns(tmp_path):
+    backend = _Backend()
+    bound = BoundEnvironment(binding_id="fixed", setup_script="install", start_script="start")
+    prepare = EnvironmentPreparation(tmp_path)
+    prepare.prepare(backend, bound)
+    backend.boot = "new-boot"
+    calls = len(backend.calls)
+    skipped = prepare.prepare(backend, bound.model_copy(update={"skip_start": True}))
+    assert len(backend.calls) == calls
+    assert skipped["steps"][-1]["state"] == "skipped"
+    assert not prepare.status(backend, bound.binding_id)["ready"]
+    backend.fail = True
+    with pytest.raises(SandboxError, match="start failed"):
+        prepare.prepare(backend, bound)
+    assert len(backend.calls) == calls + 1
+    assert prepare.status(backend, bound.binding_id)["steps"][-1]["state"] == "failed"
+
+
+def test_environment_status_uses_bounded_inspection_cache(tmp_path):
+    from unittest.mock import Mock
+
+    backend = _Backend()
+    original = backend.manager.inspect
+    backend.manager.inspect = Mock(side_effect=original)
+    prepare = EnvironmentPreparation(tmp_path)
+    bound = BoundEnvironment(binding_id="b")
+    prepare.prepare(backend, bound)
+    for _ in range(20):
+        assert prepare.status(backend, "b")["ready"]
+    assert backend.manager.inspect.call_count == 1
+
+
+def test_encryption_publication_failure_is_retryable():
+    from cloud_agent.environments import EnvironmentEncryptionError
+    from cloud_agent.publish_worker import _is_retryable_publication_failure
+
+    assert _is_retryable_publication_failure(EnvironmentEncryptionError("temporary key failure"))
+
+
+@pytest.mark.asyncio
+async def test_environment_gc_is_hourly_but_lease_reaping_runs_every_tick():
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
+
+    connection = SimpleNamespace(execute=AsyncMock(), fetch=AsyncMock(return_value=[]))
+
+    @asynccontextmanager
+    async def acquire():
+        yield connection
+
+    repository = PostgresEnvironmentRepository(SimpleNamespace(acquire=acquire))
+    await repository.maintain_environments()
+    await repository.maintain_environments()
+    assert connection.execute.await_count == 2
+    connection.fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_repository_metadata_uses_configured_github_api(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    from cloud_agent import environment_source
+
+    urls = []
+
+    def handle(request):
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"sha": "a" * 40})
+
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    credentials = SimpleNamespace(
+        config=SimpleNamespace(api_base="https://github.example.org/api/v3/"),
+        token_for=AsyncMock(return_value="scoped-example"),
+    )
+    assert await environment_source._get("org/repo", "/commits/dev", credentials) == {
+        "sha": "a" * 40
+    }
+    assert urls == ["https://github.example.org/api/v3/repos/org/repo/commits/dev"]
+
+
+def test_environment_config_is_hidden_until_deployment_flag_is_enabled(monkeypatch):
+    from cloud_agent.schemas import AgentConfigResponse
+
+    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false")
+    assert AgentConfigResponse(github_load_status="ready").environment_limits is None
+    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
+    assert (
+        AgentConfigResponse(github_load_status="ready").environment_limits["capability"]
+        == "environment-v1"
+    )

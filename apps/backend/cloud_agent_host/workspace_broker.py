@@ -243,6 +243,7 @@ def _chat_idle_timeout_from_env() -> float:
 
 from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
+from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -1217,6 +1218,7 @@ class _TerminalManager:
                         **backend.base_env(),
                         "GIT_CONFIG_NOSYSTEM": "1",
                         "TERM": "xterm-256color",
+                        **(tool_environment() if environment else {}),
                         **(environment.values("runtime") if environment else {}),
                         **(
                             {
@@ -1626,6 +1628,8 @@ def _run_terminal(
     default_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
 ) -> dict[str, Any]:
+    from cloud_agent_host.environment_process import tool_environment
+
     marker = secrets.token_hex(16)
     script = (
         "umask 0002; "
@@ -1639,6 +1643,7 @@ def _run_terminal(
         workdir=workdir,
         script=script,
         env={
+            **(tool_environment() if request.environment else {}),
             **(request.environment.values("runtime") if request.environment else {}),
             "WORKSPACE_COMMAND": request.command,
             "WORKSPACE_CWD": request.cwd,
@@ -3212,9 +3217,12 @@ def create_app(
     async def environment_status(
         workspace_id: str, binding_id: str, _: None = Depends(authenticate)
     ) -> dict[str, Any]:
-        return environment_preparation.status(
-            retained_owner(workspace_id).backend(workspace_id), binding_id
-        )
+        def read_status() -> dict[str, Any]:
+            return environment_preparation.status(
+                retained_owner(workspace_id).backend(workspace_id), binding_id
+            )
+
+        return await endpoint_calls.run(read_status)
 
     @app.post("/workspaces/{workspace_id}/environment/cancel")
     async def environment_cancel(

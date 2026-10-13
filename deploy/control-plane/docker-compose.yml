@@ -101,6 +101,7 @@ services:
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
@@ -302,6 +303,7 @@ services:
       # listener. Without this, health stays green but every connected server
       # is reported as unavailable at the first tool call.
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:

@@ -620,7 +620,7 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
         return {**result, "environment_binding_id": "frozen-binding"}
 
     monkeypatch.setattr(store, "claim_job", bound_claim)
-    store.get_environment_binding = AsyncMock(
+    store.environment_for_claim = AsyncMock(
         return_value=BoundEnvironment(
             binding_id="frozen-binding",
             variables=[EnvironmentVariable(name="TOKEN", value="private-example")],

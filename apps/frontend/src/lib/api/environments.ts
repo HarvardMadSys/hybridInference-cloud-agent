@@ -60,6 +60,8 @@ export interface EnvironmentBinding {
   global_revision?: number;
   legacy: boolean;
   has_new_version?: boolean;
+  runtime_revision?: number;
+  runtime_variables?: EnvironmentVariable[] | null;
   variables: EnvironmentVariable[];
   setup_script: string;
   start_script: string;
@@ -228,3 +230,8 @@ export const getEnvironmentActionRun = (id: string) =>
   call<ActionRun>(`environment-action-runs/${id}`);
 export const stopEnvironmentAction = (id: string) =>
   call<ActionRun>(`environment-action-runs/${id}/stop`, 'POST');
+
+export const refreshWorkspaceRuntime = (jobId: string, runtime_revision: number) =>
+  call<unknown>(`jobs/${jobId}/thread/environment/runtime`, 'POST', { runtime_revision });
+export const skipWorkspaceStart = (jobId: string) =>
+  call<unknown>(`jobs/${jobId}/thread/environment/skip-start`, 'POST');

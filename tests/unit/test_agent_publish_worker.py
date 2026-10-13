@@ -1272,3 +1272,20 @@ async def test_a_base_ref_that_is_only_a_commit_id_falls_back(monkeypatch):
     await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert captured["base_branch"] == "dev"
+
+
+async def test_environment_decryption_gap_defers_publication_without_remote_side_effects(
+    monkeypatch,
+):
+    from cloud_agent.environments import EnvironmentEncryptionError
+
+    store = FakeStore(dict(_JOB))
+    store.get_job_environment = AsyncMock(
+        side_effect=EnvironmentEncryptionError("temporary key gap")
+    )
+    push = Mock()
+    monkeypatch.setattr(publish_worker, "publish_patch", push)
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_deferred is not None
+    assert store.snapshot_failed is None
+    push.assert_not_called()

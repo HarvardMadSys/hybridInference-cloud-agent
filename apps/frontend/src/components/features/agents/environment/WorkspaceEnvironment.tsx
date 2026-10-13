@@ -5,6 +5,8 @@ import { useT } from '@/components/providers';
 import {
   getEnvironmentActionRun,
   getWorkspaceEnvironment,
+  refreshWorkspaceRuntime,
+  skipWorkspaceStart,
   retryWorkspaceEnvironment,
   startEnvironmentAction,
   stopEnvironmentAction,
@@ -30,6 +32,7 @@ export function WorkspaceEnvironment({
   const [busy, setBusy] = useState(false);
   const pendingKeys = useRef<Record<string, string>>({});
   const [reload, setReload] = useState(0);
+  const [skipArmed, setSkipArmed] = useState(false);
   useEffect(() => {
     let active = true;
     const refresh = () => {
@@ -99,6 +102,27 @@ export function WorkspaceEnvironment({
               </a>
             </p>
           )}
+          {bound.binding_id && (
+            <button
+              type="button"
+              className="ui-button ui-button-secondary"
+              disabled={busy}
+              onClick={() =>
+                void perform(async () => {
+                  await refreshWorkspaceRuntime(jobId, bound.runtime_revision ?? 0);
+                  setReload((v) => v + 1);
+                })
+              }
+            >
+              {t('environment.refreshRuntime')}
+            </button>
+          )}
+          <p className="text-xs text-muted">
+            {t('environment.runtimeHint')} · v{bound.runtime_revision ?? 0}
+          </p>
+          {bound.runtime_variables && (
+            <h3 className="text-xs font-medium">{t('environment.baseVariables')}</h3>
+          )}
           <ul className="space-y-1 text-xs">
             {bound.variables.map((v) => (
               <li key={v.name}>
@@ -107,6 +131,19 @@ export function WorkspaceEnvironment({
               </li>
             ))}
           </ul>
+          {bound.runtime_variables && (
+            <h3 className="text-xs font-medium">{t('environment.runtimeVariables')}</h3>
+          )}
+          {bound.runtime_variables && (
+            <ul className="space-y-1 text-xs" aria-label={t('environment.refreshRuntime')}>
+              {bound.runtime_variables.map((v) => (
+                <li key={v.name}>
+                  <code>{v.name}</code> · {v.secret ? t('environment.secretSet') : v.value} ·
+                  runtime
+                </li>
+              ))}
+            </ul>
+          )}
           <details className="text-sm">
             <summary>{t('environment.installScript')}</summary>
             <pre className="overflow-auto whitespace-pre-wrap text-xs">{bound.setup_script}</pre>
@@ -130,6 +167,26 @@ export function WorkspaceEnvironment({
             >
               {t('environment.retryPreparation')}
             </button>
+          )}
+          {bound.steps.some((s) => s.phase === 'start' && s.state === 'failed') && (
+            <div>
+              <button
+                type="button"
+                className="ui-button ui-button-secondary"
+                disabled={busy || skipArmed}
+                onClick={() =>
+                  void perform(async () => {
+                    await skipWorkspaceStart(jobId);
+                    setSkipArmed(true);
+                  })
+                }
+              >
+                {t('environment.skipStart')}
+              </button>
+              <p className="text-xs text-muted">
+                {t(skipArmed ? 'environment.skipArmed' : 'environment.skipHint')}
+              </p>
+            </div>
           )}
           <div className="space-y-2">
             <h3 className="text-sm font-semibold">{t('environment.actions')}</h3>

@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +16,6 @@ from cloud_agent_host.setup import run_setup
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
 if TYPE_CHECKING:
-    import threading
     from collections.abc import Callable
     from pathlib import Path
 
@@ -29,6 +29,8 @@ class EnvironmentPreparation:
     def __init__(self, root: Path | None = None) -> None:
         """Keep receipts outside all container mounts and source archives."""
         self.root = root or credential_path().parent / "environment-preparation"
+        self._inspections: dict[str, tuple[float, Any]] = {}
+        self._inspection_lock = threading.Lock()
 
     def prepare(
         self,
@@ -39,9 +41,16 @@ class EnvironmentPreparation:
         cancel: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Run installation once and startup once per actual Docker boot."""
+        if hasattr(backend, "spawn_environment_script"):
+            from cloud_agent_host.environment_process import prepare_tool_home
+
+            # Create shared package directories even when both scripts are empty.
+            prepare_tool_home(backend.manager, backend.spec, 30000)
         inspection = backend.manager.inspect(backend.spec.container_name)
         if inspection is None or not inspection.running:
             raise SandboxError("Environment container is not running")
+        with self._inspection_lock:
+            self._inspections[backend.spec.container_name] = (time.monotonic() + 15, inspection)
         container_id = inspection.container_id
         boot_id = inspection.started_at
         if not boot_id:
@@ -70,6 +79,20 @@ class EnvironmentPreparation:
                     else receipt.get("start_done") and receipt.get("boot_id") == boot_id
                 )
                 if done:
+                    continue
+                if phase == "start" and environment.skip_start:
+                    skipped = {
+                        "phase": "start",
+                        "state": "skipped",
+                        "output": "",
+                        "detail": "Startup explicitly skipped for this turn",
+                    }
+                    receipt["steps"] = [
+                        s for s in receipt["steps"] if s.get("phase") != "start"
+                    ] + [skipped]
+                    self._save(path, receipt)
+                    if callback:
+                        callback(dict(skipped))
                     continue
                 step: dict[str, Any] = {
                     "phase": phase,
@@ -130,7 +153,16 @@ class EnvironmentPreparation:
 
     def status(self, backend: RetainedChatBackend, binding_id: str) -> dict[str, Any]:
         """Read a masked receipt for this exact running container only."""
-        inspection = backend.manager.inspect(backend.spec.container_name)
+        with self._inspection_lock:
+            name = backend.spec.container_name
+            cached = self._inspections.get(name)
+            if cached is not None and cached[0] > time.monotonic():
+                inspection = cached[1]
+            else:
+                inspection = backend.manager.inspect(name)
+                if len(self._inspections) >= 256:
+                    self._inspections.clear()
+                self._inspections[name] = (time.monotonic() + 15, inspection)
         if inspection is None:
             raise SandboxError("Environment container is unavailable")
         key = hashlib.sha256(inspection.container_id.encode()).hexdigest()

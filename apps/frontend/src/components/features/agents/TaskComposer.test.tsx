@@ -256,7 +256,7 @@ describe('TaskComposer source-control onboarding', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
-    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled();
     vi.mocked(listEnvironments).mockResolvedValueOnce({
       environments: [],
       globals: {
@@ -273,6 +273,24 @@ describe('TaskComposer source-control onboarding', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
+  });
+  it('submits without environment fields after an initial load failure so server defaults apply', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ environment_limits: {} }));
+    vi.mocked(listEnvironments).mockRejectedValue(new Error('Environment unavailable'));
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
+    render(<TaskComposer />);
+    await chooseRepository();
+    await screen.findByText(/Environment configuration could not be loaded/);
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix tests' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    const request = vi.mocked(createAgentJob).mock.calls[0][0];
+    expect(request).not.toHaveProperty('environment_id');
+    expect(request).not.toHaveProperty('environment_revision');
+    expect(request).not.toHaveProperty('global_revision');
+    expect(request).not.toHaveProperty('environment_overrides');
   });
   beforeEach(() => {
     sessionStorage.clear();

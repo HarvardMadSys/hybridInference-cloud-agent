@@ -1417,6 +1417,12 @@ def _shared_live_host_capabilities(
     return capabilities
 
 
+def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]) -> list[str]:
+    """Advertise environment execution only beside proven shared-live support."""
+    capabilities = _shared_live_host_capabilities(backend, stamp)
+    return [*capabilities, ENVIRONMENT_CAPABILITY] if capabilities else []
+
+
 def _shared_live_deployment_ready(
     backend: SandboxBackend,
     stamp: dict[str, Any],
@@ -1454,9 +1460,7 @@ def _claim_attestation(
     # polling process has the broker, slots and driver surfaces
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
-    stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
-    if stamp["runner_capabilities"]:
-        stamp["runner_capabilities"].append(ENVIRONMENT_CAPABILITY)
+    stamp["runner_capabilities"] = _environment_host_capabilities(backend, stamp)
     # The disk quota a group created by this claim would get, so the control
     # plane can warn about a new untrusted group with none. Zero, or a value
     # the turn would refuse, is no quota.
@@ -4042,8 +4046,7 @@ def run_forever(
     # page tell a host that will honour a new number from one that needs a
     # redeploy to change.
     host_capabilities = [
-        *capabilities,
-        ENVIRONMENT_CAPABILITY,
+        *_environment_host_capabilities(backend, stamp),
         HOST_CONCURRENCY_CAPABILITY,
         HOST_SETTINGS_CAPABILITY,
     ]
@@ -4161,8 +4164,7 @@ def run_forever(
         slots_total=lambda: limit,
         launch_error=lambda: qualification_error or turns.launch_error,
         capabilities=lambda: [
-            *_shared_live_host_capabilities(backend, stamp),
-            ENVIRONMENT_CAPABILITY,
+            *_environment_host_capabilities(backend, stamp),
             HOST_CONCURRENCY_CAPABILITY,
             # Advertised so an operator can tell a host that will pick up a
             # runtime configuration from one that needs a redeploy, which is

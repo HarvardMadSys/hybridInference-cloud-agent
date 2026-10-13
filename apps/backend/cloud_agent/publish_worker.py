@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import httpx
 
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
+from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
 from cloud_agent.publisher import (
@@ -580,7 +581,7 @@ def _is_retryable_publication_failure(exc: BaseException) -> bool:
     same HTTP statuses from the remote. Patch, content, and other HTTP
     rejections are permanent.
     """
-    if isinstance(exc, TransientPublishError):
+    if isinstance(exc, (TransientPublishError, EnvironmentEncryptionError)):
         return True
     status = _http_status(exc)
     if _retryable_github_status(status):
@@ -977,18 +978,12 @@ async def publish_loop(
 async def _next_look_s(store: PublishStorage) -> float:
     """How long the publisher may sleep before it looks for work again."""
     idle_s = number_setting("publish_idle_seconds", PUBLISH_IDLE_S)
-    deadlines = []
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_base_import_retry_due()
         if due is not None:
-            deadlines.append(due)
+            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_snapshot_publish_retry_due()
         if due is not None:
-            deadlines.append(due)
-    clock = getattr(store.snapshot, "snapshot_database_time", None)
-    now = datetime.now(UTC)
-    if clock is not None:
-        with contextlib.suppress(Exception):
-            now = await clock()
-    return max(min([idle_s, *((due - now).total_seconds() for due in deadlines)]), 0.0)
+            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
+    return max(idle_s, 0.0)

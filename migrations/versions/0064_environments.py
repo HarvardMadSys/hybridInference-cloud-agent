@@ -49,6 +49,10 @@ def upgrade() -> None:
             global_version_id TEXT REFERENCES agent_environment_versions(id),
             overrides JSONB NOT NULL DEFAULT '[]', setup_override TEXT,
             has_setup_override BOOLEAN NOT NULL DEFAULT FALSE,
+            required BOOLEAN NOT NULL DEFAULT FALSE,
+            runtime_revision BIGINT NOT NULL DEFAULT 0,
+            runtime_variables JSONB, runtime_secret_history JSONB NOT NULL DEFAULT '[]',
+            skip_start_after_job_id TEXT, skip_start_job_id TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(id, user_id)
         );
         CREATE FUNCTION agent_environment_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -89,6 +93,20 @@ def upgrade() -> None:
             setup_done BOOLEAN NOT NULL DEFAULT FALSE, start_done BOOLEAN NOT NULL DEFAULT FALSE,
             steps JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        CREATE INDEX agent_environment_thread_binding ON agent_threads(environment_binding_id)
+            WHERE environment_binding_id IS NOT NULL;
+        CREATE INDEX agent_environment_run_binding ON agent_environment_runs(binding_id);
+        CREATE INDEX agent_environment_action_binding ON agent_environment_action_runs(binding_id);
+        CREATE INDEX agent_environment_preparation_binding ON agent_environment_preparation(binding_id);
+        CREATE INDEX agent_environment_binding_version ON agent_environment_bindings(environment_version_id);
+        CREATE INDEX agent_environment_binding_global ON agent_environment_bindings(global_version_id);
+        CREATE INDEX agent_environment_binding_gc ON agent_environment_bindings(user_id,created_at);
+        CREATE INDEX agent_environment_host_cleanup ON agent_environment_runs(host,lease_expires_at)
+            WHERE NOT cleanup_complete;
+        CREATE INDEX agent_environment_lease_expiry ON agent_environment_runs(lease_expires_at)
+            WHERE state='running';
+        CREATE INDEX agent_environment_archived_gc ON agent_environments(archived_at,user_id)
+            WHERE archived_at IS NOT NULL;
     """)
 
 
@@ -96,13 +114,15 @@ def downgrade() -> None:
     """Refuse removal of configuration required by existing workspaces."""
     op.execute("""
         DO $$ BEGIN
-            IF EXISTS (SELECT 1 FROM agent_threads WHERE environment_binding_id IS NOT NULL) THEN
+            IF EXISTS (SELECT 1 FROM agent_threads t JOIN agent_environment_bindings b ON b.id=t.environment_binding_id WHERE b.required)
+               OR EXISTS (SELECT 1 FROM agent_environment_runs WHERE NOT cleanup_complete) THEN
                 RAISE EXCEPTION 'environment bindings must be drained before downgrade';
             END IF;
         END $$;
         DROP TABLE agent_environment_preparation;
         DROP TABLE agent_environment_action_runs;
         DROP TABLE agent_environment_runs;
+        DROP INDEX agent_environment_thread_binding;
         ALTER TABLE agent_threads DROP COLUMN environment_binding_id;
         DROP TABLE agent_environment_bindings;
         DROP TABLE agent_repository_environment_defaults;

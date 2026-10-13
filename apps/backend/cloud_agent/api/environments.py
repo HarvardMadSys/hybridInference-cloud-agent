@@ -516,7 +516,23 @@ async def test_environment(
     credentials: Any = Depends(get_agent_app_credentials),
 ) -> dict[str, Any]:
     """Queue a disposable test without minting any inference credentials."""
+    from cloud_agent.settings import setting_env
+
+    if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true":
+        raise HTTPException(503, "Repository environments are disabled for new tests")
     store = require_store(store)
+    selection = {
+        "environment_id": body.environment_id,
+        "environment_id_provided": True,
+        "environment_revision": body.environment_revision,
+        "global_revision": body.global_revision,
+    }
+    if idempotency_key:
+        existing = await store.environments.find_environment_run(
+            user["user_id"], idempotency_key, selection, body.ref
+        )
+        if existing is not None:
+            return existing
     env = await store.environments.get_environment(user["user_id"], body.environment_id)
     repo = env["repo"]
     if not repo:
@@ -529,13 +545,9 @@ async def test_environment(
         user["user_id"],
         repo=repo,
         base_sha=sha,
-        selection={
-            "environment_id": body.environment_id,
-            "environment_id_provided": True,
-            "environment_revision": body.environment_revision,
-            "global_revision": body.global_revision,
-        },
+        selection=selection,
         key=idempotency_key,
+        ref=body.ref,
     )
 
 
@@ -592,15 +604,8 @@ async def claim_environment_test(
 
         clone_token = await read_repository_token(run["repo"], credentials)
     except Exception:
-        await store.environments.update_environment_run(
-            run["id"],
-            host["host"],
-            run["lease_generation"],
-            {
-                "state": "failed",
-                "detail": "Environment credentials or repository access are unavailable",
-                "cleanup_complete": True,
-            },
+        await store.environments.fail_environment_preflight(
+            run["id"], host["host"], run["lease_generation"]
         )
         raise HTTPException(
             503, "Environment credentials or repository access are unavailable"
@@ -649,24 +654,23 @@ async def workspace_environment(
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
-    if job.get("environment_binding_id"):
+    view = await store.environments.workspace_environment_view(
+        user["user_id"], str(job["thread_id"])
+    )
+    if view.get("binding_id") and view.get("required"):
         from cloud_agent.broker_routing import broker_for_job
-        from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
         broker = await broker_for_job(store.host_pool, job_id)
         if broker is not None:
             try:
-                receipt = await broker.environment_status(
-                    str(job["thread_id"]), job["environment_binding_id"]
-                )
-                await store.environments.record_environment_preparation(
-                    user["user_id"], str(job["thread_id"]), receipt
-                )
+                receipt = await broker.environment_status(str(job["thread_id"]), view["binding_id"])
+                if receipt.get("binding_id") == view["binding_id"]:
+                    view["steps"] = await store.environments.redact_environment_steps(
+                        user["user_id"], view["binding_id"], receipt.get("steps", [])
+                    )
             except WorkspaceBrokerError:
                 pass
-    return await store.environments.workspace_environment_view(
-        user["user_id"], str(job["thread_id"])
-    )
+    return view
 
 
 async def _action_context(
@@ -691,8 +695,9 @@ async def _action_context(
         require_ready=require_ready,
         recheck_entitlement=recheck_entitlement,
     )
-    bound = await store.environments.get_environment_binding(user["user_id"], run["binding_id"])
+    bound = None
     if require_ready:
+        bound = await store.environments.get_environment_binding(user["user_id"], run["binding_id"])
         await broker.prepare_environment(str(job["thread_id"]), bound)
     return job, broker, bound
 
@@ -771,7 +776,9 @@ async def action_status(
     run = await store.environments.get_environment_action_run(user["user_id"], run_id)
     if run["state"] in {"succeeded", "failed", "closed", "cancelled", "stopped", "unknown"}:
         return run
-    job, broker, _bound = await _action_context(user, store, run, credentials, require_ready=False)
+    job, broker, _bound = await _action_context(
+        user, store, run, credentials, require_ready=False, recheck_entitlement=False
+    )
     terminal_id = run["terminal_id"] or "term_" + run["id"]
     try:
         terminal = await broker.terminal_output(str(job["thread_id"]), terminal_id)
@@ -852,3 +859,64 @@ async def retry_preparation(
         user["user_id"], str(job["thread_id"]), receipt
     )
     return receipt
+
+
+class RuntimeRefreshInput(BaseModel):
+    """Compare-and-swap the current runtime selection."""
+
+    model_config = ConfigDict(extra="forbid")
+    runtime_revision: int = Field(ge=0)
+
+
+@router.post("/jobs/{job_id}/thread/environment/runtime")
+async def refresh_runtime_environment(
+    job_id: str,
+    body: RuntimeRefreshInput,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: Any = Depends(get_storage),
+    credentials: Any = Depends(get_agent_app_credentials),
+) -> dict[str, Any]:
+    """Select latest runtime variables explicitly for subsequent turns."""
+    from cloud_agent.api._owner_auth import _owned_job
+
+    store = require_store(store)
+    job = await _owned_job(store.conversation_queries, job_id, user)
+    await _entitled(store, user["user_id"], job["repo"], credentials)
+    if not job.get("environment_binding_id"):
+        raise HTTPException(409, "Workspace has no environment binding")
+    return await store.environments.refresh_runtime_environment(
+        user["user_id"], job["environment_binding_id"], body.runtime_revision
+    )
+
+
+@router.post("/jobs/{job_id}/thread/environment/skip-start")
+async def skip_environment_start(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: Any = Depends(get_storage),
+    credentials: Any = Depends(get_agent_app_credentials),
+) -> dict[str, Any]:
+    """Allow one next turn to proceed after an explicitly acknowledged start failure."""
+    from cloud_agent.api._owner_auth import _owned_job
+    from cloud_agent.broker_routing import broker_for_job
+
+    store = require_store(store)
+    job = await _owned_job(store.conversation_queries, job_id, user)
+    await _entitled(store, user["user_id"], job["repo"], credentials)
+    if not job.get("environment_binding_id"):
+        raise HTTPException(409, "Workspace has no environment binding")
+    broker = await broker_for_job(store.host_pool, job_id)
+    if broker is None:
+        raise HTTPException(503, "Workspace host is unavailable")
+    receipt = await broker.environment_status(str(job["thread_id"]), job["environment_binding_id"])
+    if not receipt.get("setup_done") or not any(
+        step.get("phase") == "start" and step.get("state") == "failed"
+        for step in receipt.get("steps", [])
+    ):
+        raise HTTPException(
+            409, "Only a failed startup after successful installation may be skipped"
+        )
+    await store.environments.request_skip_environment_start(
+        user["user_id"], job["environment_binding_id"], job_id
+    )
+    return {"skip_start_next_turn": True}

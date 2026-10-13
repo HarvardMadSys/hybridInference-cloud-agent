@@ -1843,7 +1843,9 @@ export function JobDetail({
               forking={forking}
               onFork={() => void forkFrom(job.id)}
               onRename={setTitle}
-              onEnvironment={() => openWorkspace('environment')}
+              onEnvironment={
+                config?.environment_limits ? () => openWorkspace('environment') : undefined
+              }
             />
           </div>
           <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pb-1.5">
@@ -2664,6 +2666,7 @@ export function JobDetail({
             <>
               <WorkspaceTabBar
                 key={`${userId}:${job.threadId ?? job.id}`}
+                environmentEnabled={Boolean(config?.environment_limits)}
                 selected={workspaceTab}
                 chats={workspaceTabs.chats}
                 diffCount={job.diffFiles.length}
@@ -2679,7 +2682,7 @@ export function JobDetail({
                 hidden={workspaceTab !== 'environment'}
                 className="min-h-0 flex-1 overflow-y-auto"
               >
-                {workspaceTab === 'environment' && (
+                {config?.environment_limits && workspaceTab === 'environment' && (
                   <WorkspaceEnvironment
                     key={job.threadId ?? job.id}
                     jobId={job.id}

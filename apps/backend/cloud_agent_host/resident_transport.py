@@ -113,9 +113,9 @@ _PRIVATE_MEMBER_HOME_MIGRATE = (
 _PRIVATE_MEMBER_HOME_CLAIM = (
     'mkdir -p -- "$target"; '
     'if test -L "$target" || test ! -d "$target" '
-    '|| test "$(stat -c %u -- "$target" 2>/dev/null || stat -f %u "$target")" != "$(id -u)"; then '
+    '|| test "$(stat -c %u -- "$target")" != "$(id -u)"; then '
     'echo "member provider home is not owned by this member" >&2; exit 1; fi; '
-    'chmod u=rwx,go=,g-s "$target"; '
+    'chmod u=rwx,go=,g-s -- "$target"; '
 )
 # Judged on every start, not only after a move: whether a home is adopted must
 # never depend on an earlier start having managed to set a bad one aside. Every
@@ -746,6 +746,9 @@ class ResidentTransportFactory:
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
         if launch.environment is not None:
+            from cloud_agent_host.environment_process import tool_environment
+
+            base_env.update(tool_environment())
             base_env.update(launch.environment.values("runtime"))
         base_env.update(
             {
@@ -1209,9 +1212,9 @@ print(json.dumps(sorted(children), separators=(",", ":")))
         payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         script = (
             'set -eu; directory="$1"; target="$2"; '
-            'umask 077; mkdir -p -- "$directory"; chmod 0700 "$directory"; '
+            'umask 077; mkdir -p -- "$directory"; chmod 0700 -- "$directory"; '
             'tmp="$target.tmp.$$"; trap \'rm -f -- "$tmp"\' EXIT; '
-            'cat > "$tmp"; chmod 0600 "$tmp"; mv -f -- "$tmp" "$target"; '
+            'cat > "$tmp"; chmod 0600 -- "$tmp"; mv -f -- "$tmp" "$target"; '
             "trap - EXIT"
         )
         result = self._manager.exec_capture(

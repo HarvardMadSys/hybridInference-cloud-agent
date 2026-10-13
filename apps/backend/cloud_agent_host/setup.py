@@ -85,10 +85,9 @@ def run_setup(
                     continue
                 if chunk is None:
                     break
-                consume(chunk)
-            final = redactor.flush()
-            if on_output and final:
-                on_output(final)
+                # Service output belongs to the running service, not the
+                # completed start step. Keep draining its pipe without
+                # mutating or persisting the foreground receipt.
         finally:
             output.close()
 

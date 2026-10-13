@@ -443,7 +443,9 @@ export function EnvironmentEditor({
                 v{version.revision} · {version.variables.length} {t('environment.variables')}
               </summary>
               <pre className="overflow-auto whitespace-pre-wrap text-xs">
-                {version.setup_script}\n{version.start_script}
+                {version.setup_script}
+                {'\n'}
+                {version.start_script}
               </pre>
               <ul>
                 {version.variables.map((v) => (

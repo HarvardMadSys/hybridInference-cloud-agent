@@ -118,3 +118,11 @@ it('leaves loading on failure and recovers through retry without silently droppi
   );
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
+
+it('ignores a blank newly added override row in the submitted selection', async () => {
+  const change = vi.fn();
+  render(<EnvironmentPicker repo="org/repo" onChange={change} />);
+  await screen.findByRole('combobox', { name: 'environment.choose' });
+  fireEvent.click(screen.getByRole('button', { name: 'environment.addVariable' }));
+  await waitFor(() => expect(change.mock.calls.at(-1)?.[0].environment_overrides).toEqual([]));
+});

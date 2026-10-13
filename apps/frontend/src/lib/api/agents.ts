@@ -636,7 +636,7 @@ export interface GoalLimitsApi {
 }
 
 export interface AgentConfigApi {
-  environment_limits?: Record<string, unknown>;
+  environment_limits?: Record<string, unknown> | null;
   skill_limits?: import('@/lib/skillLimits').SkillLimits;
   goal_limits?: GoalLimitsApi;
 

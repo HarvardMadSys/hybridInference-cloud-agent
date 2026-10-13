@@ -173,6 +173,7 @@ RESET_REASONING_EFFORT = "auto"
 PLATFORM_REASONING_EFFORTS = ("low", "medium", "high", "max")
 
 
+from cloud_agent.settings import setting_env
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable, environment_limits
 
 
@@ -2383,7 +2384,13 @@ class AgentConfigResponse(BaseModel):
     described a job nobody was running. These are the real answers.
     """
 
-    environment_limits: dict[str, Any] = Field(default_factory=environment_limits)
+    environment_limits: dict[str, Any] | None = Field(
+        default_factory=lambda: (
+            environment_limits()
+            if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") == "true"
+            else None
+        )
+    )
     skill_limits: SkillLimits = Field(default_factory=SkillLimits)
     attachment_limits: AttachmentLimits = Field(default_factory=AttachmentLimits)
     goal_limits: GoalLimits = Field(default_factory=GoalLimits)

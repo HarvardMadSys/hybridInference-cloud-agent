@@ -396,7 +396,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     config?.github_connected === true &&
     task.trim().length > 0 &&
     !busy &&
-    !(config?.environment_limits && repo && !environmentSelection) &&
+    !(
+      config?.environment_limits &&
+      repo &&
+      !environmentSelection &&
+      environmentStatus !== 'error'
+    ) &&
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&

@@ -895,8 +895,8 @@ async def worker_claim(
     environment = None
     if claim.get("environment_binding_id"):
         try:
-            environment = await job_store.environments.get_environment_binding(
-                claim["user_id"], claim["environment_binding_id"]
+            environment = await job_store.environments.environment_for_claim(
+                claim["user_id"], claim["environment_binding_id"], claim["id"]
             )
             capabilities = body.attestation.runner_capabilities if body.attestation else []
             if environment.required:
@@ -1172,6 +1172,14 @@ async def worker_append_event(
     )
     if event_id is None:
         raise _lease_lost()
+    if (
+        body.event_type == "lifecycle"
+        and body.payload
+        and body.payload.get("phase") == "environment_prepared"
+    ):
+        await job_store.environments.record_worker_environment_preparation(
+            job_id, claims["attempt_id"], claims["lease_generation"], body.payload
+        )
     return WorkerEventResponse(event_id=event_id)
 
 

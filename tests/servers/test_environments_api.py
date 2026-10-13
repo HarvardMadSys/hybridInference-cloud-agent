@@ -103,7 +103,7 @@ async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch
     }
     repository = SimpleNamespace(
         claim_environment_run=AsyncMock(return_value=run),
-        update_environment_run=AsyncMock(return_value=True),
+        fail_environment_preflight=AsyncMock(),
         get_environment_binding=AsyncMock(),
     )
     gateway = SimpleNamespace(
@@ -132,16 +132,7 @@ async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch
     entitlement.assert_not_awaited()
     credentials.token_for.assert_not_awaited()
     repository.get_environment_binding.assert_not_awaited()
-    repository.update_environment_run.assert_awaited_once_with(
-        "test-run",
-        "runner",
-        2,
-        {
-            "state": "failed",
-            "detail": "Environment credentials or repository access are unavailable",
-            "cleanup_complete": True,
-        },
-    )
+    repository.fail_environment_preflight.assert_awaited_once_with("test-run", "runner", 2)
 
 
 async def test_unrelated_job_validation_keeps_field_detail_and_internal_errors_stay_internal():
@@ -349,3 +340,59 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
     assert result.exit_code == 0
     broker.prepare_environment.assert_not_awaited()
     assert "environment" not in broker.terminal.call_args.kwargs
+
+
+async def test_test_retry_returns_original_before_github_or_latest_config(monkeypatch):
+    from cloud_agent.api.deps import get_agent_app_credentials
+
+    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
+    original = {"id": "run", "base_sha": "a" * 40, "state": "queued"}
+    repository = SimpleNamespace(
+        find_environment_run=AsyncMock(return_value=original), get_environment=AsyncMock()
+    )
+    app = FastAPI()
+    app.include_router(environments.router)
+    app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_agent_app_credentials] = lambda: None
+    entitlement = AsyncMock()
+    monkeypatch.setattr(environments, "_entitled", entitlement)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/agent/environment-runs",
+            headers={"Idempotency-Key": "same"},
+            json={
+                "environment_id": "env",
+                "environment_revision": 1,
+                "global_revision": 0,
+                "ref": "dev",
+            },
+        )
+    assert response.status_code == 201 and response.json() == original
+    repository.get_environment.assert_not_awaited()
+    entitlement.assert_not_awaited()
+
+
+async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypatch):
+    repository = SimpleNamespace(
+        workspace_environment_view=AsyncMock(
+            return_value={"binding_id": "bound", "required": True}
+        ),
+        redact_environment_steps=AsyncMock(return_value=[{"output": "masked"}]),
+        record_environment_preparation=AsyncMock(),
+        get_environment_binding=AsyncMock(),
+    )
+    store = SimpleNamespace(environments=repository, conversation_queries=None, host_pool=None)
+    monkeypatch.setattr(
+        "cloud_agent.api._owner_auth._owned_job", AsyncMock(return_value={"thread_id": "thread"})
+    )
+    broker = SimpleNamespace(
+        environment_status=AsyncMock(
+            return_value={"binding_id": "bound", "steps": [{"output": "private"}]}
+        )
+    )
+    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", AsyncMock(return_value=broker))
+    result = await environments.workspace_environment("job", user={"user_id": "alice"}, store=store)
+    assert result["steps"] == [{"output": "masked"}]
+    repository.record_environment_preparation.assert_not_awaited()
+    repository.get_environment_binding.assert_not_awaited()

@@ -206,6 +206,7 @@ vi.mock('@/lib/api/agents', () => ({
 }));
 
 const AGENT_CONFIG = {
+  environment_limits: {},
   repos: ['owner/repository'],
   runtimes: ['claude-code'],
   models: ['qwen-test', 'glm-test'],
@@ -1583,6 +1584,7 @@ describe('JobDetail', () => {
   it('keeps Side Chat in the existing workspace without handling its Escape as a main stop', async () => {
     render(<JobDetail job={makeJob()} />);
     openWorkspace();
+    await screen.findByRole('tab', { name: 'Environment' });
     const workspace = screen.getByRole('region', { name: 'Job workspace' });
     const names = () =>
       within(within(workspace).getByRole('tablist', { name: 'Workspace views' }))
@@ -2102,8 +2104,9 @@ describe('JobDetail', () => {
     expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled();
   });
 
-  it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {
+  it('replaces duplicate header metadata with a keyboard-accessible task menu', async () => {
     render(<JobDetail job={makeJob({ turnNo: 3 })} />);
+    await screen.findByLabelText('Model for this turn');
     const header = screen.getByRole('heading', { level: 1 }).closest('header')!;
     expect(within(header).queryByText(/turn 3/)).not.toBeInTheDocument();
     expect(within(header).queryByText('Run details')).not.toBeInTheDocument();

@@ -76,7 +76,7 @@ export function EnvironmentPicker({
       environment_revision: env?.revision ?? 0,
       global_revision: globals.revision,
       environment_overrides: overrides
-        .filter((v) => v.operation !== 'remove')
+        .filter((v) => v.operation !== 'remove' && v.name.trim())
         .map((v) => ({ name: v.name, value: v.value ?? '', phase: v.phase, secret: v.secret })),
     });
   }, [globals, items, selected, overrides, onChange]);

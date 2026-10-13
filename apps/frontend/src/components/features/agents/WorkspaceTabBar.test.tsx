@@ -15,6 +15,7 @@ function WorkspaceTabs({ initialChats = [] }: { initialChats?: SideChatTab[] }) 
   return (
     <>
       <WorkspaceTabBar
+        environmentEnabled
         selected={selected}
         chats={chats}
         diffCount={3}
@@ -66,4 +67,19 @@ it('focuses a newly opened chat and returns focus to a surviving tab when closed
   fireEvent.click(screen.getByRole('button', { name: /Close Side chat/i }));
   expect(screen.queryByRole('tab', { name: /Side chat/i })).not.toBeInTheDocument();
   expect(screen.getByRole('tab', { name: /Git/ })).toHaveFocus();
+});
+
+it('hides the environment entry when its deployment flag is off', () => {
+  render(
+    <WorkspaceTabBar
+      selected="git"
+      chats={[]}
+      diffCount={0}
+      onSelect={() => {}}
+      onAdd={() => 'git'}
+      onClose={() => 'git'}
+    />,
+  );
+  expect(screen.queryByRole('tab', { name: 'Environment' })).not.toBeInTheDocument();
+  expect(screen.getAllByRole('tab')).toHaveLength(3);
 });

@@ -1127,7 +1127,14 @@ class PostgresHostPoolRepository:
             active_tests = {
                 row["host"]: int(row["count"])
                 for row in await conn.fetch(
-                    "SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete GROUP BY host"
+                    "SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes' GROUP BY host"
+                )
+            }
+            cleanup_blocked_hosts = {
+                row["host"]
+                for row in await conn.fetch(
+                    "SELECT DISTINCT host FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete "
+                    "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes')"
                 )
             }
             for raw in rows:
@@ -1157,9 +1164,12 @@ class PostgresHostPoolRepository:
                         )
                     )
                 )
-                fresh = bool(
-                    heartbeat is not None
-                    and (observed_at - heartbeat).total_seconds() <= FRESH_AFTER_SECONDS
+                fresh = (
+                    bool(
+                        heartbeat is not None
+                        and (observed_at - heartbeat).total_seconds() <= FRESH_AFTER_SECONDS
+                    )
+                    and host["host"] not in cleanup_blocked_hosts
                 )
                 if not (
                     host.get("status") == HOST_ONLINE

@@ -3478,6 +3478,12 @@ Control plane values use `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` with a separate
 existing credential store; changing it without re-encryption makes old bindings
 unreadable. Secrets are not available through owner read/history APIs.
 
+The admin setting `repository_environments_enabled` defaults to false.
+`AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true` imports its initial value; saved
+settings are authoritative afterward. Enable only after all replicas are upgraded
+and deployment acceptance completes. Disable to hide UI and stop new nonempty
+bindings/tests; existing configured workspaces retain execution and recovery.
+
 Upgrade every control-plane replica before creating any new environment-bound
 workspace; mixed old/new admission, Fork and terminal handlers may silently lose
 binding information. After the first binding, do not roll back to binaries that
@@ -3514,8 +3520,9 @@ on a background worker so other free slots continue claiming coding tasks. Host
 orphan queries are read-only and throttled; the control-plane reaper owns lease
 expiry and history maintenance.
 
-Cancellation fences the result immediately but keeps the test's host slot until
-cleanup is confirmed. The reaper expires leases/30-minute executions. On reconnect
+Cancellation fences the result immediately but keeps the leased slot until
+cleanup is confirmed or the lease expires. An expired orphan no longer reserves
+capacity; its returning host cannot claim new work until cleanup is acknowledged. The reaper expires leases/30-minute executions. On reconnect
 the enrolled host receives only its own expired test IDs and removes the exact
 labelled containers before acknowledging cleanup. Do not delete unrelated groups
 or bypass lease/container identity checks to clear capacity. Archived, unreferenced
@@ -3526,3 +3533,10 @@ Owner-provided credentials can be read and sent outside by user code through the
 existing network. Known-value masking and trusted publish scans do not cover
 encoded secrets, raw owner terminals/files, or direct Git pushes. Platform-held
 long-lived credentials, reserved variable names and fixed egress remain protected.
+
+Environment setup, startup and actions share executable package data in
+`/workspace/.cloud-agent-tools`, excluded through Git's local exclude file. Member
+credential HOME directories remain private. Explicit runtime refresh retains
+installation inputs and applies from the next turn; already-running services keep
+their old values. Startup recovery is an explicit allowance for one subsequent
+human turn, never a permanent success receipt.

@@ -1939,3 +1939,12 @@ def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monk
     # What the broker did manage to measure is still reported.
     acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
     assert [child["stage"] for child in acquire["children"]] == ["phase_network"]
+
+
+def test_environment_capability_disappears_when_broker_or_container_support_is_lost(monkeypatch):
+    _configure_host(monkeypatch)
+    backend = ContainerBackend(image="img")
+    assert "environment-v1" in runner_mod._environment_host_capabilities(backend, _stamp())
+    monkeypatch.delenv("AGENT_WORKSPACE_BROKER_TOKEN")
+    assert runner_mod._environment_host_capabilities(backend, _stamp()) == []
+    assert runner_mod._environment_host_capabilities(SimpleNamespace(), _stamp()) == []

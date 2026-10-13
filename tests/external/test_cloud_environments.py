@@ -252,3 +252,136 @@ def test_real_manual_action_keeps_one_execution_after_terminal_eviction_and_rest
         assert count.returncode == 0 and count.stdout == b"x"
     finally:
         manager.delete("workspace", result["id"])
+
+
+def test_fast_script_failures_are_never_success_in_real_container(
+    retained_command_container, tmp_path
+):
+    from cloud_agent_host.sandbox import SandboxError
+    from cloud_agent_host.setup import run_setup
+
+    backend = retained_command_container
+    backend.manager.exec_capture(
+        backend.spec, ["/bin/sh", "-c", "chmod 2770 /workspace"], timeout_s=10
+    )
+    prepare = EnvironmentPreparation(tmp_path)
+    bound = BoundEnvironment(binding_id="failing", setup_script="sleep 0.1; exit 7")
+    for _ in range(2):
+        with pytest.raises(SandboxError, match="setup failed \\(7\\)"):
+            prepare.prepare(backend, bound)
+        assert prepare.status(backend, bound.binding_id)["setup_done"] is False
+    verify = run_setup(
+        script="sleep 0.1; exit 9",
+        workdir="/workspace",
+        backend=backend,
+        phase="verify",
+        timeout_s=10,
+    )
+    assert verify.exit_code == 9
+
+
+def test_uv_python312_tools_are_executable_by_members_and_survive_restart(
+    retained_command_container, tmp_path
+):
+    backend = retained_command_container
+    available = backend.manager.exec_capture(
+        backend.spec,
+        ["/bin/sh", "-c", "command -v uv && test -d /opt/uv-python-seed"],
+        timeout_s=10,
+    )
+    if available.returncode:
+        pytest.skip("use the documented Python 3.12 seeded uv acceptance image")
+    backend.manager.exec_capture(
+        backend.spec, ["/bin/sh", "-c", "chmod 2770 /workspace"], timeout_s=10
+    )
+    bound = BoundEnvironment(
+        binding_id="python312",
+        setup_script="""set -eu
+mkdir -p "$UV_PYTHON_INSTALL_DIR"
+cp -a /opt/uv-python-seed/. "$UV_PYTHON_INSTALL_DIR/"
+printf '3.12\\n' > .python-version
+printf '[project]\\nname = "env-acceptance"\\nversion = "0.1.0"\\nrequires-python = ">=3.12,<3.13"\\n' > pyproject.toml
+uv sync --offline
+.venv/bin/python -c 'import sys; assert sys.version_info[:2] == (3,12)'
+printf installed >> setup-count
+""",
+    )
+    prepare = EnvironmentPreparation(tmp_path)
+    prepare.prepare(backend, bound)
+    for restart in (False, True):
+        if restart:
+            backend.manager.stop(backend.spec)
+            _docker("start", backend.spec.container_name)
+            prepare.prepare(backend, bound)
+        result = backend.manager.exec_capture(
+            backend.spec,
+            [
+                "/bin/sh",
+                "-c",
+                "test \"$(cat setup-count)\" = installed; .venv/bin/python -c 'import sys; assert sys.version_info[:2] == (3,12)'",
+            ],
+            user_uid=10011,
+            user_gid=backend.manager.backend.gid,
+            workdir="/workspace",
+            timeout_s=10,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+def test_service_output_stops_mutating_start_receipt(retained_command_container, tmp_path):
+    backend = retained_command_container
+    backend.manager.exec_capture(
+        backend.spec, ["/bin/sh", "-c", "chmod 2770 /workspace"], timeout_s=10
+    )
+    bound = BoundEnvironment(
+        binding_id="service-output",
+        start_script="(while true; do echo service-output; sleep 0.1; done) &",
+    )
+    prepare = EnvironmentPreparation(tmp_path)
+    prepare.prepare(backend, bound)
+    path = next(tmp_path.glob("*.json"))
+    receipt = path.read_bytes()
+    modified = path.stat().st_mtime_ns
+    time.sleep(1.5)
+    assert path.read_bytes() == receipt
+    assert path.stat().st_mtime_ns == modified
+
+
+def test_action_reuses_tools_created_by_another_operation_uid(retained_command_container, tmp_path):
+    from cloud_agent_host.environment_process import prepare_tool_home
+
+    backend = retained_command_container
+    backend.manager.exec_capture(
+        backend.spec,
+        [
+            "/bin/sh",
+            "-c",
+            "chmod 2770 /workspace; cd /workspace; umask 002; git init; chmod -R g+rwX .git",
+        ],
+        timeout_s=10,
+    )
+    EnvironmentPreparation(tmp_path).prepare(backend, BoundEnvironment(binding_id="empty-scripts"))
+    home = prepare_tool_home(backend.manager, backend.spec, 31000)
+    result = backend.manager.exec_capture(
+        backend.spec,
+        ["/bin/sh", "-c", 'test -x "$HOME" && printf ready > "$HOME/action-result"'],
+        env={"HOME": home},
+        workdir="/workspace",
+        user_uid=31000,
+        user_gid=backend.manager.backend.gid,
+        timeout_s=10,
+    )
+    assert result.returncode == 0, result.stderr
+    ignored = backend.manager.exec_capture(
+        backend.spec,
+        [
+            "git",
+            "-c",
+            "safe.directory=/workspace",
+            "check-ignore",
+            ".cloud-agent-tools/home/action-result",
+        ],
+        workdir="/workspace",
+        timeout_s=10,
+    )
+    assert ignored.returncode == 0, ignored.stderr

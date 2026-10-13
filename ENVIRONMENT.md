@@ -775,3 +775,7 @@ Recorded here as *what has to be decided*, not as anyone's actual answer.
 2. Note who provisions it and whether it differs per environment.
 3. If it is a secret, say where it is stored — never the value itself.
 4. The PR checklist enforces this; a new variable without a row is a review stop.
+
+### Repository environments rollout
+
+Admin → Settings → Repository environments (`repository_environments_enabled`) defaults to false. `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true` imports the initial value; saved settings take precedence. Enable only after every control-plane and host/broker replica is upgraded and deployment acceptance is complete. Disabling hides the UI and blocks new nonempty bindings and test runs; existing workspace bindings keep executing with their configuration.

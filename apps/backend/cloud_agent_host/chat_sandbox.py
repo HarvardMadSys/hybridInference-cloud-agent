@@ -3476,11 +3476,19 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             raise SandboxError("chat sandbox must be started before terminal exec")
         token = secrets.token_hex(16)
         if user_uid is not None:
-            from cloud_agent_host.environment_process import prepare_home
+            from cloud_agent_host.environment_process import (
+                prepare_home,
+                prepare_tool_home,
+                tool_environment,
+            )
 
             directory = prepare_home(self, spec, user_uid)
             pidfile = f"{directory}/terminal-{token}.pid"
-            env = {**(env or {}), "HOME": directory + "/home"}
+            env = {
+                **tool_environment(),
+                **(env or {}),
+                "HOME": prepare_tool_home(self, spec, user_uid),
+            }
         else:
             pidfile = f"{ACTIVATION_TMPFS}/terminal-{token}.pid"
         rcfile = _terminal_rcfile(pidfile)

@@ -212,24 +212,51 @@ class BoundEnvironment(EnvironmentScripts):
     global_revision: int = 0
     variables: list[EnvironmentVariable] = Field(default_factory=list, repr=False, max_length=150)
 
+    runtime_revision: int = 0
+    runtime_variables: list[EnvironmentVariable] | None = Field(
+        default=None, repr=False, max_length=150
+    )
+    previous_secrets: dict[str, str] = Field(default_factory=dict, repr=False, max_length=512)
+    skip_start: bool = False
+
     @model_validator(mode="after")
     def bound_variables(self) -> BoundEnvironment:
         """Validate the complete payload at the receiving host boundary."""
         validate_effective(self.variables)
+        if sum(len(value.encode()) for value in self.previous_secrets.values()) > 262144:
+            raise EnvironmentInputError("Runtime Secret history exceeds 256 KiB")
+        if self.runtime_variables is not None:
+            validate_effective(self.runtime_variables)
         return self
 
     def values(self, phase: Literal["setup", "runtime"]) -> dict[str, str]:
         """Select only variables available in this execution phase."""
-        return {v.name: v.value for v in self.variables if v.phase in (phase, "both")}
+        variables = (
+            self.runtime_variables
+            if phase == "runtime" and self.runtime_variables is not None
+            else self.variables
+        )
+        return {v.name: v.value for v in variables if v.phase in (phase, "both")}
 
     def secrets(self) -> dict[str, str]:
         """Include all injected stages when constructing an output redactor."""
-        return {v.name: v.value for v in self.variables if v.secret and v.value}
+        result = {v.name: v.value for v in self.variables if v.secret and v.value}
+        result.update(self.previous_secrets)
+        for v in self.runtime_variables or []:
+            if v.secret and v.value:
+                result[v.name + "@runtime"] = v.value
+        return result
 
     @property
     def required(self) -> bool:
         """Whether dropping this configuration would change execution."""
-        return bool(self.variables or self.setup_script or self.start_script or self.actions)
+        return bool(
+            self.variables
+            or self.runtime_variables
+            or self.setup_script
+            or self.start_script
+            or self.actions
+        )
 
 
 def validate_effective(variables: list[EnvironmentVariable]) -> None:
