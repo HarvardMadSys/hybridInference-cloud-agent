@@ -687,6 +687,19 @@ async def _publish_claimed(
             base_branch=base_branch,
             allow_workflow_changes=allow_workflow_changes,
         )
+    except asyncio.CancelledError:
+        # A control-plane stop must not leave this claim `publishing` until the
+        # stalled-publish reaper reclaims it fifteen minutes later. Replaying a
+        # publication is safe however far it got -- an already pushed commit is
+        # reused rather than force-pushed, and the draft is found by its head
+        # -- so the claim goes back to the queue now, under its own fence.
+        with contextlib.suppress(Exception):
+            await store.snapshot.defer_snapshot_publish(
+                snapshot_id=snapshot_id,
+                expected_publish_attempt_count=expected_publish_attempt_count,
+                detail="the publisher stopped during publication; publication will retry",
+            )
+        raise
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
