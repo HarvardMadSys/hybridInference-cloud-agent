@@ -2204,10 +2204,13 @@ async def worker_finish(
     # While the GitHub App is unavailable this drains nothing: the wakeup stays
     # pending, unclaimed, for the reaper to consume once the App is back. The
     # page keeps polling an active goal, so the round still appears there.
+    # Only this turn's conversation is drained; other conversations' wakeups
+    # are the reaper's, and must not hold this runner's request.
     try:
         await continue_after_finish(
             store=job_store,
             job_id=job_id,
+            thread_id=job.get("thread_id"),
             github_app=github_app,
             gateway=gateway,
         )

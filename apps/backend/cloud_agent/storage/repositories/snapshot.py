@@ -31,7 +31,7 @@ BASE_IMPORT_RETRY_S = 15.0
 #: A publication whose entitlement preflight failed waits before retrying.
 PUBLISH_RETRY_S = 30.0
 #: How many transient failures may return a publication to the durable queue.
-#: The next failure exhausts it and preserves the lineage block for review.
+#: The next failure fails the snapshot, and the group's next capture supersedes it.
 PUBLISH_MAX_ATTEMPTS = 5
 
 
@@ -102,6 +102,12 @@ class PostgresSnapshotRepository:
         The host revalidates quiescence against its live operation ledger; a
         turn that entered between this transaction and the sandbox manager call simply
         makes the capture retry later.
+
+        An earlier snapshot still on its way to publication holds this one
+        back. One that failed does not, and neither does the ``dirty`` state
+        it left on the group: a capture is the whole diff from the group's
+        published base, which a failure never advances, so this later one
+        carries the failed one's changes, or their reversal, and supersedes it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -137,7 +143,10 @@ class PostgresSnapshotRepository:
                   AND g.state IN ('running', 'stopped')
                   AND g.stop_requested_at IS NULL
                   AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
-                  AND g.snapshot_state = 'pending'
+                  -- A group's one pending snapshot is its newest epoch, so in a
+                  -- dirty group it is the later capture that supersedes the
+                  -- failure that dirtied it.
+                  AND g.snapshot_state IN ('pending', 'dirty')
                   AND g.active_operation_count = 0
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_thread_sandbox_memberships active
@@ -155,7 +164,7 @@ class PostgresSnapshotRepository:
                       SELECT 1 FROM agent_sandbox_snapshots prior
                       WHERE prior.sandbox_id = s.sandbox_id
                         AND prior.workspace_epoch < s.workspace_epoch
-                        AND prior.state <> 'published'
+                        AND prior.state NOT IN ('published', 'failed')
                   )
                 ORDER BY s.created_at, s.id
                 LIMIT 1
@@ -180,7 +189,7 @@ class PostgresSnapshotRepository:
                 UPDATE agent_sandboxes
                 SET snapshot_state = 'snapshotting', idle_deadline = NULL,
                     updated_at = NOW()
-                WHERE id = $1 AND snapshot_state = 'pending'
+                WHERE id = $1 AND snapshot_state IN ('pending', 'dirty')
                 """,
                 row["sandbox_id"],
             )
@@ -306,7 +315,8 @@ class PostgresSnapshotRepository:
         A capture handed back for a retry is not claimed again before its
         ``retry_at``, so a busy host is asked on that clock, not in a loop. A
         turn that settled meanwhile left a pending snapshot, and the capture is
-        folded into it, which then waits for that retry instead.
+        folded into it, which then waits for that retry instead. A dirtied
+        capture fails for good; the group's next capture supersedes it.
         """
         next_state = "failed" if dirty else "pending"
         group_state = "dirty" if dirty else "pending"
@@ -503,6 +513,11 @@ class PostgresSnapshotRepository:
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
         Deferred publications are eligible only after their ``retry_at``.
+
+        Epochs publish in order: an earlier snapshot not yet published holds
+        this one back. A failed one does not. It is never claimed again, and
+        this later one was cut from the same published base, so it carries
+        the failed one's changes and supersedes it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             snapshot = await conn.fetchrow(
@@ -612,7 +627,7 @@ class PostgresSnapshotRepository:
                       SELECT 1 FROM agent_sandbox_snapshots earlier
                       WHERE earlier.sandbox_id = s.sandbox_id
                         AND earlier.workspace_epoch < s.workspace_epoch
-                        AND earlier.state <> 'published'
+                        AND earlier.state NOT IN ('published', 'failed')
                   )
                 ORDER BY s.created_at, s.id
                 LIMIT 1
@@ -726,8 +741,9 @@ class PostgresSnapshotRepository:
 
         Deterministic branch and PR reconciliation makes replay safe even when
         the process died after a remote effect. The counter survives restarts;
-        exhaustion marks the artifact and group dirty for manual review rather
-        than skipping it and publishing a later workspace epoch out of order.
+        exhaustion fails the artifact, keeping why, and marks its group dirty.
+        A later epoch never publishes while this one may still be retried;
+        once it has failed, the group's next capture supersedes it.
         The expected counter rejects a publisher whose stalled claim was
         reclaimed. Returns ``False`` unless this exact claim is still
         ``publishing``.
@@ -735,7 +751,7 @@ class PostgresSnapshotRepository:
         retry_detail = detail[:2000]
         exhausted_detail = (
             f"{detail[:1800]} Publication retry limit ({PUBLISH_MAX_ATTEMPTS}) exhausted; "
-            "manual review is required."
+            "the workspace's next snapshot supersedes this one."
         )[:2000]
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -914,7 +930,13 @@ class PostgresSnapshotRepository:
     async def fail_snapshot_publish(
         self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
     ) -> None:
-        """Retain a rejected group artifact without failing included turns."""
+        """Retain a rejected group artifact without failing included turns.
+
+        The snapshot stays ``failed`` with the reason, and its group ``dirty``
+        until a later turn settles or a later snapshot is captured. That
+        capture, cut from the same published base, supersedes this one and is
+        refused in turn if it still carries what was rejected.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """

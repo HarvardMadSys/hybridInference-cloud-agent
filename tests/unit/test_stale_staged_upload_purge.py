@@ -36,7 +36,7 @@ class _Store(AllCapabilities):
     async def sweep_queued_follow_ups(self) -> None:
         return None
 
-    async def claim_wakeups(self, *, limit: int) -> list[object]:
+    async def claim_wakeups(self, *, limit: int, thread_id: str | None = None) -> list[object]:
         return []
 
     async def sweep_goal_scheduling(self) -> dict[str, list[object]]:

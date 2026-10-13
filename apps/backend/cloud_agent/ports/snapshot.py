@@ -29,6 +29,11 @@ class SnapshotRepository(Protocol):
         The host revalidates quiescence against its live operation ledger; a
         turn that entered between this transaction and the sandbox manager call simply
         makes the capture retry later.
+
+        An earlier snapshot still on its way to publication holds the capture
+        back; one that failed, and the ``dirty`` group it left, do not. Every
+        capture is the whole diff from the published base, so a later one
+        supersedes the failure.
         """
         ...
 
@@ -83,6 +88,8 @@ class SnapshotRepository(Protocol):
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
         Deferred publications are eligible only after their ``retry_at``.
+        Epochs publish in order, past a failed one, which is never claimed
+        again and which the later snapshot supersedes.
         """
         ...
 
@@ -103,9 +110,9 @@ class SnapshotRepository(Protocol):
 
         The deterministic branch and PR are reconciled on replay, including
         after uncertain remote effects. Retains the immutable artifact and its
-        included turns. Exhaustion makes the snapshot terminal and deliberately
-        preserves the lineage block for manual review rather than publishing a
-        later workspace epoch out of order. The expected attempt count fences a
+        included turns. No later workspace epoch publishes while this one may
+        still be retried. Exhaustion fails it and dirties its group, and the
+        group's next capture supersedes it. The expected attempt count fences a
         publisher whose stalled claim was already reclaimed. Returns ``False``
         unless this exact claim is still ``publishing``.
         """
@@ -130,7 +137,11 @@ class SnapshotRepository(Protocol):
     async def fail_snapshot_publish(
         self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
     ) -> None:
-        """Retain a rejected group artifact if this publisher still owns its claim."""
+        """Retain a rejected group artifact if this publisher still owns its claim.
+
+        It stays ``failed`` with the reason, and the group's next capture
+        supersedes it.
+        """
         ...
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:

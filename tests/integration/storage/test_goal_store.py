@@ -819,6 +819,22 @@ async def test_finishing_a_wakeup_records_what_was_decided(store):
     assert await store.goal_wakeups.pending_wakeup(thread_id=job["thread_id"]) is None
 
 
+async def test_a_claim_for_one_conversation_leaves_the_others_due(store):
+    """A finish claims its own conversation's wakeups; the reaper's claim takes any."""
+    elsewhere = await _create_job(store)
+    older = await _arm_test_wakeup(store, job=elsewhere)
+    here = await _create_job(store)
+    own = await _arm_test_wakeup(store, job=here)
+
+    claimed = await store.goal_wakeups.claim_wakeups(limit=8, thread_id=here["thread_id"])
+
+    assert [row["id"] for row in claimed] == [own]
+    untouched = await store.goal_wakeups.pending_wakeup(thread_id=elsewhere["thread_id"])
+    assert (untouched["id"], untouched["attempts"], untouched["lease_owner"]) == (older, 0, None)
+    # Named for no conversation, the claim takes the oldest due wherever it is.
+    assert [row["id"] for row in await store.goal_wakeups.claim_wakeups(limit=8)] == [older]
+
+
 async def test_the_backoff_and_the_attempt_cap_are_bounded():
     """A broken deployment retries for minutes, never hot and never forever."""
     assert wakeup_backoff(1) == WAKEUP_BACKOFF_S
@@ -1165,7 +1181,12 @@ async def test_a_goal_created_with_the_first_message_queues_its_first_round(
         from_states=("running",),
         to_state="cancelled",
     )
-    assert await continue_after_finish(store=store, gateway=_GATEWAY, job_id=str(job["id"])) >= 1
+    assert (
+        await continue_after_finish(
+            store=store, gateway=_GATEWAY, job_id=str(job["id"]), thread_id=thread_id
+        )
+        >= 1
+    )
 
     turns = await _thread_turns(store, pool, thread_id)
     rounds = [row for row in turns if row["turn_source"] == "goal"]
@@ -1176,6 +1197,56 @@ async def test_a_goal_created_with_the_first_message_queues_its_first_round(
     assert rounds[0]["input_seq_at_create"] == 1
     # And it asks for a host that can deliver that report.
     assert GOAL_REPORT_PROTOCOL in (rounds[0]["metadata"] or {}).get("requires", [])
+
+
+async def test_a_finish_drains_its_own_conversation_and_leaves_the_others(
+    store, pool, monkeypatch: pytest.MonkeyPatch
+):
+    """Real rows: the finish decides its own goal; an older due wakeup elsewhere waits.
+
+    The drain used to claim the deployment's oldest due wakeups, so this finish
+    decided the other conversation's first, inside its runner's request. That
+    one is the reaper's.
+    """
+    from cloud_agent.goals.controller import consume_wakeup, continue_after_finish
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    elsewhere = await _create_job(
+        store, user_id="user-2", task_prompt="another owner's conversation"
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", elsewhere["id"]
+        )
+    waiting = await _arm_test_wakeup(store, job=elsewhere)
+    job = await _create_job_with_goal(store, objective="ship it")
+    thread_id = str(job["thread_id"])
+    claim = await _claim_round(store)
+    assert claim["id"] == job["id"]
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1, thread_id=thread_id)
+    assert await consume_wakeup(store=store, gateway=_GATEWAY, wakeup=claimed[0]) == "wait"
+    assert await store.attempt_commands.transition(
+        job_id=str(job["id"]),
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="cancelled",
+    )
+
+    assert (
+        await continue_after_finish(
+            store=store, gateway=_GATEWAY, job_id=str(job["id"]), thread_id=thread_id
+        )
+        == 1
+    )
+
+    rounds = [
+        row for row in await _thread_turns(store, pool, thread_id) if row["turn_source"] == "goal"
+    ]
+    assert len(rounds) == 1, "the finished conversation's own round was queued"
+    untouched = await store.goal_wakeups.pending_wakeup(thread_id=str(elsewhere["thread_id"]))
+    assert untouched is not None
+    assert (untouched["id"], untouched["attempts"], untouched["lease_owner"]) == (waiting, 0, None)
 
 
 async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
@@ -1223,7 +1294,11 @@ async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
     app = RecoveringApp()
     assert (
         await continue_after_finish(
-            store=store, gateway=_GATEWAY, job_id=str(job["id"]), github_app=app
+            store=store,
+            gateway=_GATEWAY,
+            job_id=str(job["id"]),
+            thread_id=thread_id,
+            github_app=app,
         )
         == 0
     )

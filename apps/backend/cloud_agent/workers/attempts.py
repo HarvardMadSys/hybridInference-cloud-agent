@@ -674,10 +674,11 @@ async def _run_attempt_reaper(
             await store.attempt_commands.sweep_queued_follow_ups()
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
-        # Goal wakeups before the attempt pass. The obligation is written in the
-        # same transaction as the terminal transition, and it is normally
-        # drained synchronously by the finish that armed it — this pass exists
-        # for a process that died between the two. The sweep after it is the
+        # Goal wakeups before the attempt pass, every conversation's. A finish
+        # writes its obligation in the same transaction as the terminal
+        # transition and drains its own conversation's synchronously; this pass
+        # takes what an owner's write armed, and what a process that died
+        # between a finish and its drain left behind. The sweep after it is the
         # backstop for a *missing* obligation, and the only thing that pauses a
         # goal: every ordinary way an active goal stops being able to continue
         # says so where and when it happens.

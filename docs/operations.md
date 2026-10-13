@@ -72,11 +72,16 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0066_admin_job_listing_index`. Existing hosts begin without a deployment drain
+`0067_failed_snapshot_wake`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0060 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
-simply be repeated. Rebuild the sandbox image for explicit plugin loading.
+simply be repeated. 0067 only replaces a trigger function. Once this release
+runs, a shared workspace that a failed snapshot left `dirty` publishes again:
+a snapshot already pending behind the failure is captured, otherwise the
+group's next settled turn is (see
+[Resume, Fork, and publication](#resume-fork-and-publication)). Rebuild the
+sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
@@ -1978,6 +1983,17 @@ asynchronously. The detail view and recent-task list poll only while that
 publication state is pending/capturing/captured/publishing, and stop at
 published/failed; other terminal jobs do not acquire a background
 polling loop.
+
+A snapshot whose patch the publisher refuses, whose capture the host refuses,
+or whose five publication retries run out stays `failed` with its reason, and
+its group is marked `dirty`. It is not retried. The group's next snapshot,
+captured when a later turn settles, supersedes it: every snapshot is the whole
+diff from the last published commit, so it carries the failed changes too, and
+is refused in turn if it still holds what was refused. Snapshots still publish
+in epoch order; only a failed one stops holding the later ones back. If the
+failed attempt had already pushed its commit to the `agent/<thread>` branch, a
+later snapshot with different changes is refused as a moved branch until that
+branch is deleted; the platform never force-pushes.
 
 Disk-pressure admission and alerting and a non-mutating pre-prompt context
 fingerprint remain deferred. Local functional checks do not establish production
