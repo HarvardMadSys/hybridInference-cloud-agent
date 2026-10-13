@@ -902,6 +902,7 @@ export async function listAgentConversations(
     cursor?: string;
     limit?: number;
   } = {},
+  signal?: AbortSignal,
 ): Promise<{ conversations: AgentConversationApi[]; next_cursor: string | null }> {
   const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
   if (options.q) query.set('q', options.q);
@@ -909,7 +910,7 @@ export async function listAgentConversations(
   if (options.includeArchived) query.set('include_archived', 'true');
   if (options.pinned !== undefined) query.set('pinned', String(options.pinned));
   if (options.cursor) query.set('cursor', options.cursor);
-  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/conversations?${query}`));
+  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/conversations?${query}`, { signal }));
 }
 
 export interface AgentProjectApi {

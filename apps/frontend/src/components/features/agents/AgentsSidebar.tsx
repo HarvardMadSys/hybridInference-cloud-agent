@@ -71,6 +71,25 @@ export function AgentsSidebar({
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects();
+  const backgroundRefreshPending = useRef(false);
+  const refreshInBackground = useCallback(() => {
+    if (document.visibilityState === 'hidden') {
+      backgroundRefreshPending.current = true;
+      return;
+    }
+    backgroundRefreshPending.current = false;
+    reload();
+    reloadProjects();
+  }, [reload, reloadProjects]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
+        refreshInBackground();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refreshInBackground]);
 
   const [selected, setSelected] = useState<{
     path: string;
@@ -228,23 +247,17 @@ export function AgentsSidebar({
         // Tool approvals, usage, queues and publication hints belong to detail
         // panes. Only changed records or a stream gap can affect these lists.
         if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
-        reload();
-        reloadProjects();
+        refreshInBackground();
       }),
-    [reload, reloadProjects],
+    [refreshInBackground],
   );
   const pushLive = useAgentPushLive();
+  const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
-    if (!projects.some((project) => project.active_count > 0)) return;
-    const timer = setInterval(
-      () => {
-        reload();
-        reloadProjects();
-      },
-      pushLive ? PUSH_FALLBACK_POLL_MS : 10000,
-    );
+    if (!hasActiveProjects) return;
+    const timer = setInterval(refreshInBackground, pushLive ? PUSH_FALLBACK_POLL_MS : 10000);
     return () => clearInterval(timer);
-  }, [projects, pushLive, reload, reloadProjects]);
+  }, [hasActiveProjects, pushLive, refreshInBackground]);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setQuery('');

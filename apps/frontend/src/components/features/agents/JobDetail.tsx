@@ -1,6 +1,8 @@
 'use client';
 
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useId,
@@ -46,13 +48,13 @@ import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
 import { GoalBar } from './goal/GoalBar';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { hasLiveWork } from './goal/liveWork';
-import { SkillSelectionDialog } from './skills/SkillPicker';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
@@ -150,6 +152,9 @@ const RecordedDiffPanel = dynamic(
 const SideChat = dynamic(() => import('./SideChat').then((module) => module.SideChat), {
   loading: () => <PanelLoading>Loading side chat…</PanelLoading>,
 });
+const SkillSelectionDialog = lazy(() =>
+  import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
+);
 
 const EMPTY_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
 const EMPTY_THREAD_JOBS: AgentJobApi[] = [];
@@ -1092,18 +1097,21 @@ export function JobDetail({
         latestQuestionTurn.native_state !== 'lost',
     };
   }
-  const latestTerminalEvent = [...job.events]
-    .reverse()
-    .find(
-      (event) =>
+  const latestTerminalPhase = useMemo(() => {
+    for (let index = job.events.length - 1; index >= 0; index -= 1) {
+      const event = job.events[index];
+      if (
         event.kind === 'lifecycle' &&
         event.attemptNo === job.currentAttemptNo &&
         (event.text === 'workspace_preparing' ||
           event.text === 'workspace_ready' ||
-          event.text === 'workspace_finalizing'),
-    );
-  const latestTerminalPhase =
-    latestTerminalEvent?.kind === 'lifecycle' ? latestTerminalEvent.text : undefined;
+          event.text === 'workspace_finalizing')
+      ) {
+        return event.text;
+      }
+    }
+    return undefined;
+  }, [job.events, job.currentAttemptNo]);
   const terminalWorkspaceReady =
     !isActive ||
     (job.state === 'running' &&
@@ -1548,6 +1556,15 @@ export function JobDetail({
     () => describeHistoryTurns({ historyTurns: historicalRows }),
     [historicalRows],
   );
+  const { rewindAnchors, currentRewindAnchor } = useMemo(() => {
+    let previous: string | undefined;
+    const rewindAnchors = historyTurns.map((turn) => {
+      const anchor = previous;
+      if (turn.forkable) previous = turn.jobId;
+      return anchor;
+    });
+    return { rewindAnchors, currentRewindAnchor: previous };
+  }, [historyTurns]);
   const currentTurn = useMemo(
     () => describeCurrentTurn(job, { attemptNo, currentAttemptNo }),
     [job, attemptNo, currentAttemptNo],
@@ -1619,10 +1636,6 @@ export function JobDetail({
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [activityVisible, closeActivity, setWorkspaceOpen]);
-  const currentRewindAnchor = job.historyTurns
-    ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
-    : undefined;
-
   // The rail renders two host elements per turn while `toDisplayJob()` hands
   // the page a rebuilt job per streamed event. Handing it the entries it was
   // already showing keeps those marks from being rebuilt for a delta that only
@@ -1995,9 +2008,7 @@ export function JobDetail({
               ) : (
                 <div className="flex-1">
                   {historyTurns.map((turn, index) => {
-                    const rewindAnchorJobId = [...historyTurns.slice(0, index)]
-                      .reverse()
-                      .find((candidate) => candidate.forkable)?.jobId;
+                    const rewindAnchorJobId = rewindAnchors[index];
                     return (
                       <HistoryTurn
                         key={turn.key}
@@ -2502,21 +2513,30 @@ export function JobDetail({
                   )}
                 </div>
                 {skillsOpen ? (
-                  <SkillSelectionDialog
-                    limits={config?.skill_limits}
-                    selected={selectedSkills}
-                    onClose={() => setSkillsOpen(false)}
-                    onApply={(skills) => {
-                      const originalIds = new Set(selectedSkills.map((skill) => skill.id));
-                      if (
-                        skills.length !== originalIds.size ||
-                        skills.some((skill) => !originalIds.has(skill.id))
-                      ) {
-                        setChosenSkills(skills);
-                      }
-                      setSkillsOpen(false);
-                    }}
-                  />
+                  <Suspense
+                    fallback={
+                      <ComposerDialogLoading
+                        title={t('skills.title')}
+                        onClose={() => setSkillsOpen(false)}
+                      />
+                    }
+                  >
+                    <SkillSelectionDialog
+                      limits={config?.skill_limits}
+                      selected={selectedSkills}
+                      onClose={() => setSkillsOpen(false)}
+                      onApply={(skills) => {
+                        const originalIds = new Set(selectedSkills.map((skill) => skill.id));
+                        if (
+                          skills.length !== originalIds.size ||
+                          skills.some((skill) => !originalIds.has(skill.id))
+                        ) {
+                          setChosenSkills(skills);
+                        }
+                        setSkillsOpen(false);
+                      }}
+                    />
+                  </Suspense>
                 ) : null}
                 <ThreadStatsBar job={job} />
                 {/* A goal write's refusal is drawn inside the editor that made

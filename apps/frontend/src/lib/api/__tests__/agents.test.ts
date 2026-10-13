@@ -114,9 +114,34 @@ describe('agents api', () => {
       expect(fetchWithAuth).toHaveBeenCalledWith(
         expect.any(String),
         `/v1/agent/conversations?limit=50${pinned === undefined ? '' : `&pinned=${pinned}`}`,
+        { signal: undefined },
       );
     },
   );
+
+  it('forwards cancellation for conversation reads without changing query filters', async () => {
+    const controller = new AbortController();
+    fetchWithAuth.mockImplementation(
+      (_base: string, _path: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(controller.signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const request = listAgentConversations(
+      { q: 'fix bugs', repo: 'owner/repo', includeArchived: true, cursor: 'next', limit: 200 },
+      controller.signal,
+    );
+    const cancellation = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await cancellation;
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/conversations?limit=200&q=fix+bugs&repo=owner%2Frepo&include_archived=true&cursor=next',
+      { signal: controller.signal },
+    );
+  });
 
   it('pins legacy telemetry identity when fetching a snapshot', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ current_attempt_id: 10 }));

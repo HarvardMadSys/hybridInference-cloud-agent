@@ -4900,7 +4900,10 @@ describe('JobDetail', () => {
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
   });
 
-  it('skips a failed turn and rewinds its prompt from the nearest successful boundary', async () => {
+  it.each([
+    ['failed', 'Turn 2', 'Retry this failed prompt'],
+    ['current', 'Turn 3', 'Current task\nwith all of its detail.'],
+  ])('rewinds the %s turn from the nearest successful boundary', async (_turn, label, prompt) => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind_failed' } as never);
     vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     render(
@@ -4948,12 +4951,12 @@ describe('JobDetail', () => {
 
     const failedTurn = within(screen.getByLabelText('Turn 2'));
     expect(failedTurn.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
-    fireEvent.click(failedTurn.getByRole('button', { name: 'Edit & rewind' }));
+    fireEvent.click(
+      within(screen.getByLabelText(label)).getByRole('button', { name: 'Edit & rewind' }),
+    );
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_success'));
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(
-      'Retry this failed prompt',
-    );
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(prompt);
   });
 
   it('forks before a user prompt and carries it to the child as a one-shot edit draft', async () => {

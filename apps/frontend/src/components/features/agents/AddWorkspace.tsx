@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
 import { getAgentConfig, type AgentConfigApi } from '@/lib/api/agents';
-import { CreateRepositoryDialog } from './CreateRepositoryDialog';
+import { DeferredCreateRepositoryDialog } from './DeferredCreateRepositoryDialog';
 
 /** Add an accessible repository to this account's sidebar without creating a task. */
 export function AddWorkspace({
@@ -228,7 +228,7 @@ export function AddWorkspace({
           </div>,
           document.body,
         )}
-      <CreateRepositoryDialog
+      <DeferredCreateRepositoryDialog
         key={userId}
         open={Boolean(userId && creatingFor === userId)}
         onClose={() => {

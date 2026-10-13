@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
 import type {
   AgentConfigApi,
@@ -26,7 +26,8 @@ import { useAuth } from '@/components/providers/AuthProvider';
 import { useComposerDraft } from './useComposerDraft';
 import { Picker } from './Picker';
 import { RepositoryPicker } from './RepositoryPicker';
-import { CreateRepositoryDialog } from './CreateRepositoryDialog';
+import { DeferredCreateRepositoryDialog } from './DeferredCreateRepositoryDialog';
+import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { PromptRewrite } from './PromptRewrite';
@@ -36,14 +37,21 @@ import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { useComposerMcp } from './mcp/useComposerMcp';
-import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
-import { PluginSelectionDialog } from './plugins/PluginSelectionDialog';
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
 import { useUserHomeProfile } from './useUserHomeProfile';
+
+const SkillSelectionDialog = lazy(() =>
+  import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
+);
+const PluginSelectionDialog = lazy(() =>
+  import('./plugins/PluginSelectionDialog').then((module) => ({
+    default: module.PluginSelectionDialog,
+  })),
+);
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -867,35 +875,50 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       ) : null}
 
       {pluginsOpen ? (
-        <PluginSelectionDialog
-          runtime={runtime}
-          selected={plugins}
-          onChange={setPlugins}
-          onClose={() => setPluginsOpen(false)}
-          blockedReason={pluginBlockedReason}
-        />
+        <Suspense
+          fallback={
+            <ComposerDialogLoading
+              title={t('plugins.title')}
+              onClose={() => setPluginsOpen(false)}
+            />
+          }
+        >
+          <PluginSelectionDialog
+            runtime={runtime}
+            selected={plugins}
+            onChange={setPlugins}
+            onClose={() => setPluginsOpen(false)}
+            blockedReason={pluginBlockedReason}
+          />
+        </Suspense>
       ) : null}
       {skillsOpen ? (
-        <SkillSelectionDialog
-          limits={config?.skill_limits}
-          selected={selectedSkills}
-          onClose={() => setSkillsOpen(false)}
-          onApply={(skills) => {
-            // Only a real change is recorded. Leaving the selection alone keeps
-            // `chosenSkills` null, which is what makes the request omit
-            // `skill_ids` and let the server resolve account defaults.
-            const originalIds = new Set(selectedSkills.map((skill) => skill.id));
-            if (
-              skills.length !== originalIds.size ||
-              skills.some((skill) => !originalIds.has(skill.id))
-            ) {
-              setChosenSkills(skills);
-            }
-            setSkillsOpen(false);
-          }}
-        />
+        <Suspense
+          fallback={
+            <ComposerDialogLoading title={t('skills.title')} onClose={() => setSkillsOpen(false)} />
+          }
+        >
+          <SkillSelectionDialog
+            limits={config?.skill_limits}
+            selected={selectedSkills}
+            onClose={() => setSkillsOpen(false)}
+            onApply={(skills) => {
+              // Only a real change is recorded. Leaving the selection alone keeps
+              // `chosenSkills` null, which is what makes the request omit
+              // `skill_ids` and let the server resolve account defaults.
+              const originalIds = new Set(selectedSkills.map((skill) => skill.id));
+              if (
+                skills.length !== originalIds.size ||
+                skills.some((skill) => !originalIds.has(skill.id))
+              ) {
+                setChosenSkills(skills);
+              }
+              setSkillsOpen(false);
+            }}
+          />
+        </Suspense>
       ) : null}
-      <CreateRepositoryDialog
+      <DeferredCreateRepositoryDialog
         open={createRepositoryOpen}
         onClose={() => setCreateRepositoryOpen(false)}
         onAvailable={(repo, config) => {
