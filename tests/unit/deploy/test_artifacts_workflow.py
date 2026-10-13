@@ -423,8 +423,20 @@ def _copied_paths(dockerfile: Path) -> set[str]:
 
 
 def _packages_both_images_ship() -> set[str]:
-    """What the console and the runner images both COPY, read from the files."""
-    return _copied_paths(CONSOLE_DOCKERFILE) & _copied_paths(RUNNER_DOCKERFILE)
+    """What the console and the runner images both COPY, read from the files.
+
+    A path one image copies counts when the other copies it or a directory
+    holding it. The console copies two files of the host package that the
+    runner copies whole, and an exact match would miss them.
+    """
+    console, runner = _copied_paths(CONSOLE_DOCKERFILE), _copied_paths(RUNNER_DOCKERFILE)
+
+    def inside(path: str, roots: set[str]) -> bool:
+        return any(path == root or path.startswith(f"{root}/") for root in roots)
+
+    return {path for path in console if inside(path, runner)} | {
+        path for path in runner if inside(path, console)
+    }
 
 
 def _all_image_inputs() -> set[str]:

@@ -95,7 +95,10 @@ checkout can still fail in production. Follow these boundaries:
   `store.host_pool`. Repository methods belong to those capabilities.
 - The host must not import the control plane, and the shared package must
   import neither implementation package. Shared Git subprocess and archive I/O
-  belongs in `cloud_agent_shared/git/`.
+  belongs in `cloud_agent_shared/git/`. The only other shared module that may
+  import a process, network or background-thread module is the
+  operation-profiling collector. The import-boundary tests list each
+  exemption and the modules it covers.
 - The control plane has three remaining host runtime-registry imports, pinned
   by [the import-boundary tests](../tests/unit/test_import_boundary.py). This
   transition allowlist may only shrink. Put new shared facts in
