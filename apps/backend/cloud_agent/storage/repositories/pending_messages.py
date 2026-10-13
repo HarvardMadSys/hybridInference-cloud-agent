@@ -1152,47 +1152,71 @@ class PostgresPendingMessageRepository:
             await conn.execute("DELETE FROM agent_pending_messages WHERE id = $1", head["id"])
         return SettleOutcome(job=job, message_id=str(head["id"]))
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(
+        self, *, limit: int = 50, scan_interval_seconds: float = 30.0
+    ) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
-        gets its queue acted on.
+        gets its queue acted on. The bounded page advances with the database
+        clock rather than process-local state, so restart or concurrent
+        sweepers cannot pin recovery to the same first page.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT t.id
-                FROM (SELECT DISTINCT thread_id FROM agent_pending_messages) waiting
-                JOIN agent_threads t ON t.id = waiting.thread_id
-                WHERE t.deleted_at IS NULL
-                  AND NOT EXISTS (
-                        SELECT 1 FROM agent_jobs j
-                        WHERE j.thread_id = t.id AND j.{LIVE_TURN_SQL}
-                  )
-                  AND (
-                        t.queue_settled_job_id IS DISTINCT FROM (
-                            SELECT latest.id FROM agent_jobs latest
-                            WHERE latest.thread_id = t.id
-                            ORDER BY latest.turn_no DESC LIMIT 1
-                        )
-                        OR EXISTS (
-                            SELECT 1 FROM agent_pending_messages stranded
-                            WHERE stranded.thread_id = t.id AND stranded.state = 'sending'
-                        )
-                        OR (
-                            t.queue_paused_reason IS NULL AND t.archived_at IS NULL
-                            AND (
-                                SELECT head.state FROM agent_pending_messages head
-                                WHERE head.thread_id = t.id
-                                ORDER BY head.position LIMIT 1
-                            ) = 'queued'
-                        )
-                  )
-                ORDER BY t.id
-                LIMIT $1
+                WITH eligible AS MATERIALIZED (
+                    SELECT t.id
+                    FROM (SELECT DISTINCT thread_id FROM agent_pending_messages) waiting
+                    JOIN agent_threads t ON t.id = waiting.thread_id
+                    WHERE t.deleted_at IS NULL
+                      AND NOT EXISTS (
+                            SELECT 1 FROM agent_jobs j
+                            WHERE j.thread_id = t.id AND j.{LIVE_TURN_SQL}
+                      )
+                      AND (
+                            t.queue_settled_job_id IS DISTINCT FROM (
+                                SELECT latest.id FROM agent_jobs latest
+                                WHERE latest.thread_id = t.id
+                                ORDER BY latest.turn_no DESC LIMIT 1
+                            )
+                            OR EXISTS (
+                                SELECT 1 FROM agent_pending_messages stranded
+                                WHERE stranded.thread_id = t.id AND stranded.state = 'sending'
+                            )
+                            OR (
+                                t.queue_paused_reason IS NULL AND t.archived_at IS NULL
+                                AND (
+                                    SELECT head.state FROM agent_pending_messages head
+                                    WHERE head.thread_id = t.id
+                                    ORDER BY head.position LIMIT 1
+                                ) = 'queued'
+                            )
+                      )
+                ), ranked AS (
+                    SELECT id,
+                           row_number() OVER (ORDER BY id) - 1 AS ordinal,
+                           count(*) OVER () AS total
+                    FROM eligible
+                ), cursor AS MATERIALIZED (
+                    SELECT FLOOR(
+                        EXTRACT(EPOCH FROM clock_timestamp())
+                        / GREATEST($2::double precision, 0.001)
+                    )::bigint AS page
+                ), positioned AS (
+                    SELECT id,
+                           (ordinal - ((cursor.page * $1::bigint) % ranked.total)
+                            + ranked.total) % ranked.total AS distance
+                    FROM ranked
+                    CROSS JOIN cursor
+                )
+                SELECT id FROM positioned
+                WHERE distance < $1
+                ORDER BY distance
                 """,
                 limit,
+                scan_interval_seconds,
             )
         return [str(row["id"]) for row in rows]
 

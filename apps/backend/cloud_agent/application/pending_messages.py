@@ -279,6 +279,7 @@ async def settle_waiting_queues(
     gateway: Any,
     github_app: GitHubAppSource | None,
     limit: int = 50,
+    scan_interval_seconds: float = 30.0,
 ) -> int:
     """Settle every queue a settlement could move or pause; the periodic sweep.
 
@@ -288,11 +289,15 @@ async def settle_waiting_queues(
     between a turn's end and its settlement, and a message that waited while
     the GitHub App could not be loaded. The App is asked for once per pass.
     Each thread is settled on its own, so one bad thread cannot stop the rest.
-    Returns how many were settled.
+    The storage page rotates on the sweep cadence, so persistently unavailable
+    threads cannot hold later queues behind the same first page. Returns how
+    many were settled.
     """
     app_credentials = _app_credentials(github_app)
     settled = 0
-    for thread_id in await store.pending_messages.threads_to_settle(limit=limit):
+    for thread_id in await store.pending_messages.threads_to_settle(
+        limit=limit, scan_interval_seconds=scan_interval_seconds
+    ):
         try:
             await _settle_with(
                 store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials

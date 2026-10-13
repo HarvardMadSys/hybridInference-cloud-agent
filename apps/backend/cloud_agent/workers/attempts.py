@@ -856,7 +856,12 @@ async def _run_attempt_reaper(
         # its settlement included. The backstop, not the mechanism; in its own
         # try so a queue cannot stop attempts being recovered.
         try:
-            await settle_waiting_queues(store, gateway=gateway, github_app=github_app)
+            await settle_waiting_queues(
+                store,
+                gateway=gateway,
+                github_app=github_app,
+                scan_interval_seconds=interval_seconds,
+            )
         except Exception:
             logger.warning("Pending message queue sweep failed", exc_info=True)
         # After the reaper, so an attempt superseded in this very pass has its

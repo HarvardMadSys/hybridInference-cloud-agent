@@ -64,7 +64,9 @@ class _Store(AllCapabilities):
             raise self.purge_error
         return 0
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(
+        self, *, limit: int = 50, scan_interval_seconds: float = 30.0
+    ) -> list[str]:
         self.events.append("settle_queues")
         return []
 

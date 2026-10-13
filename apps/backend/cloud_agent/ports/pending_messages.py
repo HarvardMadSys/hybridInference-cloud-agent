@@ -197,7 +197,9 @@ class PendingMessageRepository(Protocol):
         """
         ...
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(
+        self, *, limit: int = 50, scan_interval_seconds: float = 30.0
+    ) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
