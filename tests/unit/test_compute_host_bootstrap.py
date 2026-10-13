@@ -247,6 +247,31 @@ async def test_storage_preflight_uses_effective_disk_and_preserves_failure_codes
 
 
 @pytest.mark.asyncio
+async def test_remote_blocked_reasons_are_limited_to_our_vocabulary(tmp_path):
+    """A node reports why it is not ready only in codes this control plane defines."""
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    remote = [
+        "kata_install_failed",
+        "<img src=x onerror=alert(1)>",
+        "y" * 10_000,
+        "kata_install_failed",
+    ]
+    transport.run.side_effect = [
+        json.dumps(PREFLIGHT),
+        json.dumps({"ready": False, "blocked_reasons": remote}),
+    ]
+    deployed = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("token"))
+    assert deployed.blocked_reasons == ("kata_install_failed", "host_deployment_failed")
+    transport.run.side_effect = [json.dumps({"ready": False, "blocked_reasons": remote})]
+    checked = await bootstrap.readiness(NODE, profile, INTENT)
+    assert checked.blocked_reasons == ("kata_install_failed", "host_readiness_failed")
+    transport.run.side_effect = [
+        json.dumps({"ready": False, "blocked_reasons": "host_deployment_failed"})
+    ]
+    assert (await bootstrap.readiness(NODE, profile, INTENT)).blocked_reasons == ()
+
+
+@pytest.mark.asyncio
 async def test_machine_replacement_stops_bootstrap_even_when_address_unchanged(tmp_path):
     bootstrap, profile, transport, _ = setup(tmp_path)
     transport.run.side_effect = [json.dumps({**PREFLIGHT, "machine_identity": "replacement"})]

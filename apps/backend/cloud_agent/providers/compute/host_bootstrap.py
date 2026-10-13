@@ -595,6 +595,40 @@ _FORBIDDEN_ENV = {
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
+# The reason codes the remote scripts report. A node does not get to name its
+# own failure: anything else it prints becomes the caller's generic code, so
+# remote text never reaches operation records, public diagnostics or alerts.
+_REMOTE_REASONS = frozenset(
+    {
+        "data_mount_conflict",
+        "data_mount_failed",
+        "data_mount_unavailable",
+        "deployment_identity_conflict",
+        "docker_start_failed",
+        "host_deployment_failed",
+        "host_readiness_failed",
+        "host_stop_failed",
+        "invalid_deployment_archive",
+        "kata_install_failed",
+        "prerequisites_install_failed",
+        "prerequisites_update_failed",
+        "transfer_failed",
+        "unsafe_deployment_path",
+    }
+)
+
+
+def _remote_reason(value: object, default: str) -> str:
+    """Return a reason a remote script may report, or ``default`` for anything else."""
+    return value if isinstance(value, str) and value in _REMOTE_REASONS else default
+
+
+def _remote_reasons(result: dict[str, Any], default: str) -> tuple[str, ...]:
+    """Map a remote result's reasons into our vocabulary, each at most once."""
+    reasons = result.get("blocked_reasons")
+    if not isinstance(reasons, list):
+        return ()
+    return tuple(dict.fromkeys(_remote_reason(reason, default) for reason in reasons))
 
 
 class SshHostBootstrap:
@@ -935,7 +969,7 @@ class SshHostBootstrap:
             ready=result.get("ready") is True,
             host=intent.host,
             deployment_sha=profile.deployment_sha,
-            blocked_reasons=tuple(result.get("blocked_reasons", ())),
+            blocked_reasons=_remote_reasons(result, "host_deployment_failed"),
         )
 
     async def readiness(
@@ -957,7 +991,7 @@ class SshHostBootstrap:
             ready=result.get("ready") is True,
             host=intent.host,
             deployment_sha=profile.deployment_sha,
-            blocked_reasons=tuple(result.get("blocked_reasons", ())),
+            blocked_reasons=_remote_reasons(result, "host_readiness_failed"),
         )
 
     async def inventory(
@@ -980,7 +1014,7 @@ class SshHostBootstrap:
         result = self._json(await self._transport.run(self._connection(node), script, timeout=900))
         if result.get("stopped") is not True:
             raise ProviderError(
-                str(result.get("reason") or "host_stop_failed"),
+                _remote_reason(result.get("reason"), "host_stop_failed"),
                 "The Host could not be stopped",
                 retryable=result.get("reason") == "host_stop_failed",
             )
@@ -1038,7 +1072,7 @@ class SshHostBootstrap:
         )
         if authorized.get("authorized") is not True:
             raise ProviderError(
-                str(authorized.get("reason") or "transfer_failed"),
+                _remote_reason(authorized.get("reason"), "transfer_failed"),
                 "The target node cannot receive the Host's state",
             )
         push = {
@@ -1084,7 +1118,7 @@ class SshHostBootstrap:
         if result.get("wiped") is not True:
             reason = result.get("reason")
             raise ProviderError(
-                str(reason or "wipe_failed"),
+                _remote_reason(reason, "wipe_failed"),
                 "The node's container state could not be removed",
                 retryable=reason is None,
             )
