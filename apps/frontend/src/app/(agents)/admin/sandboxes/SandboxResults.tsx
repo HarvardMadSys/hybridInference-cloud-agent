@@ -644,13 +644,16 @@ function SandboxRow({
           />
         </td>
         <th scope="row" className="max-w-xs px-3 py-3 font-normal">
-          <Link
-            href={conversationHref(sandbox.origin_thread_id)}
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={detailId}
+            onClick={() => setExpanded((value) => !value)}
             title={sandbox.origin_thread_id}
-            className="block truncate font-medium text-gray-900 hover:underline dark:text-gray-100"
+            className="ui-focus-ring block max-w-full truncate rounded text-left font-medium text-gray-900 hover:underline dark:text-gray-100"
           >
-            {sandbox.title ?? sandbox.origin_thread_id}
-          </Link>
+            {name}
+          </button>
           <span
             className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
             title={sandbox.repo}
@@ -783,6 +786,13 @@ function SandboxRow({
         <tr>
           <td colSpan={10} className="bg-gray-50 px-4 py-4 dark:bg-gray-900/60">
             <div id={detailId}>
+              <Link
+                href={conversationHref(sandbox.origin_thread_id)}
+                className={`${BUTTON} mb-4 inline-block`}
+                aria-label={`View origin session for ${name}`}
+              >
+                View origin session
+              </Link>
               <SandboxDetails
                 id={`${detailId}-resources`}
                 observation={observation}

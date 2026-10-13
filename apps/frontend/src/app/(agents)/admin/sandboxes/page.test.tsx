@@ -120,9 +120,8 @@ function deferred<T>() {
 
 function inventoryTitles(): (string | null)[] {
   return within(screen.getByRole('table'))
-    .getAllByRole('link')
-    .filter((link) => link.getAttribute('href')?.startsWith('/admin/sessions/'))
-    .map((link) => link.textContent);
+    .getAllByRole('rowheader')
+    .map((header) => within(header).getByRole('button').textContent);
 }
 
 beforeEach(() => {
@@ -398,7 +397,7 @@ describe('running sandbox inventory', () => {
     await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(3));
     expect(oldSignal?.aborted).toBe(true);
     await act(async () => oldRead.resolve(page([idle])));
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('stopping');
     expect(row).not.toHaveTextContent('Retained');
   });
@@ -474,7 +473,7 @@ describe('running sandbox inventory', () => {
     ).toHaveAttribute('href', '/admin/sandboxes/sandbox%2Fone');
   });
 
-  it('keeps sandbox groups separate and links the origin session and host', async () => {
+  it('opens each sandbox’s details from its title and keeps session and host links explicit', async () => {
     vi.mocked(getAdminSandboxes).mockResolvedValue(
       page([
         sandbox(),
@@ -482,15 +481,31 @@ describe('running sandbox inventory', () => {
       ]),
     );
     render(<AdminSandboxesPage />);
-    const sessions = await screen.findAllByRole('link', { name: 'Fix login' });
-    expect(sessions.map((link) => link.getAttribute('href'))).toEqual([
-      '/admin/sessions/thread%2Fone',
-      '/admin/sessions/thread-two',
-    ]);
+    const titles = await screen.findAllByRole('button', { name: 'Fix login' });
+    expect(screen.queryByRole('region', { name: 'Stats for Fix login' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Fix login' })).not.toBeInTheDocument();
+    for (const title of titles) {
+      expect(title).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(title);
+      expect(title).toHaveAttribute('aria-expanded', 'true');
+      const detailId = title.getAttribute('aria-controls')!;
+      expect(document.getElementById(detailId)).toBeInTheDocument();
+      expect(
+        within(document.getElementById(detailId)!).getByRole('region', {
+          name: 'Stats for Fix login',
+        }),
+      ).toBeInTheDocument();
+    }
+    expect(
+      screen
+        .getAllByRole('link', { name: 'View origin session for Fix login' })
+        .map((link) => link.getAttribute('href')),
+    ).toEqual(['/admin/sessions/thread%2Fone', '/admin/sessions/thread-two']);
+    await waitFor(() => expect(getAdminSandbox).toHaveBeenCalledTimes(2));
     const table = screen.getByRole('table');
     expect(within(table).getByText('sandbox-one')).toBeInTheDocument();
     expect(within(table).getByText('sandbox-two')).toBeInTheDocument();
-    const firstRow = sessions[0].closest('tr')!;
+    const firstRow = titles[0].closest('tr')!;
     expect(within(firstRow).getByRole('link', { name: 'host-one' })).toHaveAttribute(
       'href',
       '/admin/hosts',
@@ -535,7 +550,7 @@ describe('running sandbox inventory', () => {
     render(<AdminSandboxesPage />);
     await screen.findByText('sandbox-one');
     expect(screen.queryByText('Stale')).not.toBeInTheDocument();
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('just now');
     vi.setSystemTime(new Date('2056-10-10T10:00:00Z'));
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
@@ -568,8 +583,8 @@ describe('running sandbox inventory', () => {
         observed_at: laterObservation,
       }),
     );
-    const firstRow = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
-    const secondRow = screen.getByRole('link', { name: 'Second session' }).closest('tr')!;
+    const firstRow = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
+    const secondRow = screen.getByRole('button', { name: 'Second session' }).closest('tr')!;
     expect(within(firstRow).getByText('Stale')).toBeInTheDocument();
     expect(within(secondRow).queryByText('Stale')).not.toBeInTheDocument();
   });
@@ -726,7 +741,7 @@ describe('running sandbox inventory', () => {
     const button = await screen.findByRole('button', { name: 'Show details for Fix login' });
     expect(button).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('0.00 cores');
     expect(row).toHaveTextContent('0 B');
     expect(within(row).getByRole('meter', { name: 'CPU quota for Fix login' })).toHaveAttribute(
@@ -796,7 +811,7 @@ describe('running sandbox inventory', () => {
     expect(statValue('Active turns')).toHaveTextContent('3');
     expect(statValue('Sessions')).toHaveTextContent('9');
     expect(statValue('Hosts')).toHaveTextContent('2');
-    const oldRow = screen.getByRole('link', { name: 'Old sample' }).closest('tr')!;
+    const oldRow = screen.getByRole('button', { name: 'Old sample' }).closest('tr')!;
     expect(oldRow).toHaveTextContent('Stale sample');
   });
 
@@ -830,8 +845,8 @@ describe('running sandbox inventory', () => {
     expect(statValue('Measured CPU')).toHaveTextContent('0.00 cores');
     expect(statValue('Measured memory')).toHaveTextContent('0 B');
     expect(screen.getAllByText('1 / 2 sandboxes · fresh samples only')).toHaveLength(2);
-    const firstRow = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
-    const secondRow = screen.getByRole('link', { name: 'Second session' }).closest('tr')!;
+    const firstRow = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
+    const secondRow = screen.getByRole('button', { name: 'Second session' }).closest('tr')!;
     expect(firstRow).toHaveTextContent('Stale sample');
     expect(secondRow).not.toHaveTextContent('Stale sample');
   });
@@ -894,7 +909,7 @@ describe('running sandbox inventory', () => {
     expect(statValue('Measured CPU')).toHaveTextContent('Unavailable');
     expect(statValue('Measured memory')).toHaveTextContent('Unavailable');
     expect(screen.getAllByText('0 / 1 sandboxes · fresh samples only')).toHaveLength(2);
-    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const row = screen.getByRole('button', { name: 'Fix login' }).closest('tr')!;
     expect(row).toHaveTextContent('Stale sample');
     expect(row).toHaveTextContent('0.25 cores');
   });
