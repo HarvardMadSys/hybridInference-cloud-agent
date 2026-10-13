@@ -57,7 +57,8 @@ describe('deferred repository creation', () => {
     rerender(<DeferredCreateRepositoryDialog open {...props} />);
     const input = await screen.findByRole('textbox', { name: 'Repository name' });
     expect(screen.getByRole('dialog', { name: 'Create repository' })).toBeInTheDocument();
-    expect(input).toHaveFocus();
+    // Lazy content can mount before the modal's passive focus effect runs.
+    await waitFor(() => expect(input).toHaveFocus());
     expect(screen.getByRole('radio', { name: /^Private/ })).toBeChecked();
     expect(createGitHubRepository).not.toHaveBeenCalled();
   });
