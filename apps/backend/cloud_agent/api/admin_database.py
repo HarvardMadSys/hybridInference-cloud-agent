@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -314,7 +314,9 @@ async def database_tools(
         available=available,
         url=f"{config.public_url}/" if available else None,
         setup_required=bool(
-            not available and bootstrap is not None and bootstrap.upstream == config.upstream
+            not available
+            and bootstrap is not None
+            and _service(bootstrap.upstream) == _service(config.upstream)
         ),
     )
 
@@ -333,7 +335,9 @@ async def setup_pgadmin(
     if bootstrap is None or root is None:
         raise HTTPException(status_code=503, detail="pgAdmin setup is not configured.")
     config = pgadmin_config()
-    if config is not None and config.upstream != bootstrap.upstream:
+    # Compared as services: the setting saved below drops a trailing slash
+    # the bootstrap address may carry, and is still the same pgAdmin.
+    if config is not None and _service(config.upstream) != _service(bootstrap.upstream):
         raise HTTPException(
             status_code=409, detail="A different pgAdmin service is configured in Admin Settings."
         )
@@ -344,6 +348,11 @@ async def setup_pgadmin(
         raise HTTPException(status_code=403, detail="Open pgAdmin setup from the admin dashboard.")
     if await pgadmin_available(bootstrap):
         raise HTTPException(status_code=409, detail="pgAdmin has already been set up.")
+    # The connection is checked before the volume is written and saved only
+    # after it holds the account: a setup that fails leaves no saved setting
+    # that would refuse or misdescribe the retry.
+    storage: Storage | None = None
+    changes: dict[str, Any] = {}
     if config is None:
         storage = require_store(store)
         changes = settings.encode_changes(
@@ -352,6 +361,24 @@ async def setup_pgadmin(
                 "pgadmin_public_url": bootstrap.public_url,
             }
         )
+    try:
+        await run_in_threadpool(
+            initialize_pgadmin, root, str(body.email), body.password.get_secret_value()
+        )
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="pgAdmin has already been set up.") from None
+    except OSError:
+        await log_admin_action(
+            store,
+            get_client_ip(request),
+            "agent.database.pgadmin.setup",
+            actor_id=admin,
+            success=False,
+        )
+        raise HTTPException(
+            status_code=503, detail="pgAdmin setup storage is unavailable."
+        ) from None
+    if storage is not None:
         revision, encoded, _ = await storage.settings.update_settings(changes)
         settings.apply_settings(revision, encoded)
         await log_admin_action(
@@ -362,16 +389,6 @@ async def setup_pgadmin(
             actor_id=admin,
             success=True,
         )
-    try:
-        await run_in_threadpool(
-            initialize_pgadmin, root, str(body.email), body.password.get_secret_value()
-        )
-    except FileExistsError:
-        raise HTTPException(status_code=409, detail="pgAdmin has already been set up.") from None
-    except OSError:
-        raise HTTPException(
-            status_code=503, detail="pgAdmin setup storage is unavailable."
-        ) from None
     await log_admin_action(
         store, get_client_ip(request), "agent.database.pgadmin.setup", actor_id=admin, success=True
     )

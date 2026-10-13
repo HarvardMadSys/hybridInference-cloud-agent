@@ -466,3 +466,64 @@ async def test_first_setup_does_not_replace_a_different_saved_pgadmin_service(
     assert status.json()["setup_required"] is False
     assert (await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)).status_code == 409
     assert list(setup_volume.iterdir()) == []
+
+
+def setup_actions(audit: AsyncMock) -> list[tuple[str, bool]]:
+    return [
+        (call.kwargs["action"], call.kwargs["success"])
+        for call in audit.record_admin_action.call_args_list
+    ]
+
+
+async def test_a_failed_first_setup_saves_nothing_and_can_be_retried(
+    database_api, monkeypatch, tmp_path
+):
+    """The operator's case: a slash on the bootstrap URL and a volume not yet writable."""
+    client, _, result, audit, _, app = database_api
+    monkeypatch.delenv("AGENT_PGADMIN_URL")
+    volume = tmp_path / "pgadmin-bootstrap"
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_DIR", str(volume))
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_URL", "http://pgadmin:5050/")
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL", PUBLIC)
+    result["error"] = httpx.ConnectError("pgAdmin is waiting for setup")
+    initial = {
+        "pgadmin_url": "",
+        "pgadmin_public_url": "",
+        "web_base_url": "https://agents.example.org/agents",
+    }
+    settings.apply_settings(1, initial)
+    saved = {**initial, "pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC}
+    repository = SimpleNamespace(update_settings=AsyncMock(return_value=(2, saved, initial)))
+    app.state.storage.settings = repository
+
+    failed = await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)
+    assert failed.status_code == 503
+    repository.update_settings.assert_not_awaited()
+    assert setup_actions(audit) == [("agent.database.pgadmin.setup", False)]
+    status = await client.get("/admin/agent/database-tools", headers=ADMIN)
+    assert status.json()["setup_required"] is True
+
+    volume.mkdir()
+    retried = await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)
+    assert retried.status_code == 202
+    repository.update_settings.assert_awaited_once_with(
+        {"pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC}
+    )
+    assert (volume / "email").read_text() == CREDENTIALS["email"]
+    assert setup_actions(audit)[1:] == [
+        ("agent.settings.update", True),
+        ("agent.database.pgadmin.setup", True),
+    ]
+
+
+async def test_a_saved_url_without_the_bootstrap_slash_is_the_same_service(
+    database_api, setup_volume, monkeypatch
+):
+    """A connection saved without the slash must not refuse setup as another service."""
+    client, _, _, _, _, _ = database_api
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_URL", "http://pgadmin:5050/")
+    settings.apply_settings(1, {"pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC})
+    status = await client.get("/admin/agent/database-tools", headers=ADMIN)
+    assert status.json()["setup_required"] is True
+    assert (await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)).status_code == 202
+    assert (setup_volume / "email").read_text() == CREDENTIALS["email"]
