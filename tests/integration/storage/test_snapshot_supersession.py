@@ -255,6 +255,33 @@ async def test_the_next_settled_turn_supersedes_a_failed_snapshot(store, pool, m
     assert await store.snapshot.claim_for_publish() is None, "a failed snapshot is never retried"
 
 
+async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_superseded_too(store, pool):
+    """Refused again while the change is there; published once a turn removes it."""
+    first, sandbox = await _first_turn(store)
+    rejected = []
+    parent = first
+    for prompt in (None, "rename the variable"):
+        if prompt is not None:
+            parent = await _next_turn(store, parent=parent, sandbox=sandbox, prompt=prompt)
+        capture = await store.snapshot.claim_due_sandbox_snapshot()
+        assert capture is not None and capture["anchor_job_id"] == parent["id"]
+        await _fail(store, pool, "publish_rejected", capture)
+        assert await _group_state(pool, sandbox["sandbox_id"]) == "dirty"
+        rejected.append(capture)
+
+    third = await _next_turn(store, parent=parent, sandbox=sandbox, prompt="drop the workflow")
+    superseding = await store.snapshot.claim_due_sandbox_snapshot()
+    assert superseding is not None and superseding["anchor_job_id"] == third["id"]
+    assert await _record(store, superseding, _FIXED_PATCH) == "captured"
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None and publication["snapshot_id"] == superseding["snapshot_id"]
+    await _publish(store, publication, commit_sha="b" * 40)
+
+    states = [(await _snapshot(pool, capture["snapshot_id"]))["state"] for capture in rejected]
+    assert states == ["failed", "failed"]
+    assert (await _snapshot(pool, superseding["snapshot_id"]))["state"] == "published"
+
+
 async def test_a_turn_that_settled_before_the_failure_is_captured_next(store, pool):
     """A pending later epoch is captured as soon as the earlier one fails.
 
