@@ -1,9 +1,11 @@
 """Serve the operator's pgAdmin behind the current Agent admin permission.
 
-The upstream is a private service, never a caller-selected URL. pgAdmin keeps
-its own login and CSRF protection; neither an Agent credential nor an asserted
-user header crosses the proxy. Each request uses a separate upstream cookie
-jar so administrators cannot inherit one another's pgAdmin sessions.
+The upstream is the deployment's own pgAdmin service, never a caller-selected
+URL: Admin Settings choose among the services the deployment names and can
+disable access, but cannot aim the proxy anywhere else. pgAdmin keeps its own
+login and CSRF protection; neither an Agent credential nor an asserted user
+header crosses the proxy. Each request uses a separate upstream cookie jar so
+administrators cannot inherit one another's pgAdmin sessions.
 """
 
 from __future__ import annotations
@@ -41,6 +43,12 @@ router = APIRouter(
 )
 
 PGADMIN_PATH = "/admin/agent/pgadmin"
+#: The service the ``pgadmin`` Compose profile runs; it needs no declaration.
+BUNDLED_PGADMIN_URL = "http://pgadmin:5050"
+#: Deployment variables that name another pgAdmin service. Saved settings never
+#: reach the process environment, so only the operator can add one.
+_DEPLOYMENT_PGADMIN_ENV = ("AGENT_PGADMIN_URL", "AGENT_PGADMIN_BOOTSTRAP_URL")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 _COOKIES = {"pga4_session", "remember_token"}
 _REQUEST_HEADERS = {
     "accept",
@@ -118,8 +126,42 @@ def setup_root() -> Path | None:
     return root
 
 
+def _service(url: httpx.URL) -> tuple[str, str, int | None]:
+    """Name the service a URL reaches by scheme, host and effective port.
+
+    A trailing slash, letter case or a spelled-out default port does not make
+    an address another service.
+    """
+    return url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme)
+
+
+def deployment_pgadmin_services() -> set[tuple[str, str, int | None]]:
+    """Return the pgAdmin services the deployment itself names.
+
+    The Private pgAdmin URL is an admin-editable setting, and the proxy sends
+    any method, path and body to it and returns the answer. Unbounded, that is
+    a forward proxy from the control plane's network to a cloud metadata
+    endpoint or any other private service it can reach. The environment is
+    read directly, never through saved settings, because only the operator
+    sets it.
+    """
+    services = set()
+    for value in (BUNDLED_PGADMIN_URL, *map(os.environ.get, _DEPLOYMENT_PGADMIN_ENV)):
+        try:
+            if value and value.strip():
+                services.add(_service(httpx.URL(value.strip())))
+        except httpx.InvalidURL:
+            continue
+    return services
+
+
 def pgadmin_config(*, bootstrap: bool = False) -> PgAdminConfig | None:
-    """Refuse malformed configuration without returning its contents."""
+    """Refuse malformed configuration without returning its contents.
+
+    Raises:
+        HTTPException: 503 when an address is malformed, or when the saved
+            upstream is not a pgAdmin service the deployment names.
+    """
     upstream = (
         (
             os.environ.get("AGENT_PGADMIN_BOOTSTRAP_URL")
@@ -157,7 +199,7 @@ def pgadmin_config(*, bootstrap: bool = False) -> PgAdminConfig | None:
         ):
             raise ValueError("invalid pgAdmin addresses")
         _ = origin.port, target.port
-        return PgAdminConfig(
+        config = PgAdminConfig(
             upstream=httpx.URL(upstream),
             public_url=public,
             public_path=target.path,
@@ -169,6 +211,16 @@ def pgadmin_config(*, bootstrap: bool = False) -> PgAdminConfig | None:
             status_code=503,
             detail="Check AGENT_PGADMIN_URL and the public pgAdmin URL configuration.",
         ) from None
+    # Compared as httpx parsed it, since that parse is the one the proxy dials.
+    if _service(config.upstream) not in deployment_pgadmin_services():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Set Private pgAdmin URL to {BUNDLED_PGADMIN_URL}, or to a pgAdmin address "
+                "set in AGENT_PGADMIN_URL or AGENT_PGADMIN_BOOTSTRAP_URL for this deployment."
+            ),
+        )
+    return config
 
 
 def pgadmin_client() -> httpx.AsyncClient:

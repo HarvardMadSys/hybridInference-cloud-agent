@@ -245,6 +245,17 @@ before setup if the API has a different public prefix. Later changes use
 Existing `AGENT_PGADMIN_URL` and
 `AGENT_PGADMIN_PUBLIC_URL` values are imported once along with other runtime settings.
 
+**Private pgAdmin URL** selects a pgAdmin service the deployment names; it
+cannot name any other address. The bundled `http://pgadmin:5050` is always
+allowed, and so are the scheme, host and port of `AGENT_PGADMIN_URL` and
+`AGENT_PGADMIN_BOOTSTRAP_URL` in the control plane's environment. Any other
+saved URL makes the dashboard, the launch link and the proxy answer 503 without
+contacting it: the proxy forwards every method, path and body and returns the
+reply, so an address an administrator could choose freely would reach a cloud
+metadata endpoint or any other private service the control plane can reach.
+To run pgAdmin elsewhere, keep its address in `AGENT_PGADMIN_URL` after the
+import and restart the control plane.
+
 Open **Admin → Database** and choose an administrator email and a password of
 at least 12 characters. Only a current Agent administrator can complete setup.
 The service waits for that first setup; the page then checks readiness and

@@ -228,6 +228,75 @@ async def test_path_cannot_change_the_private_upstream_host(database_api):
     assert seen[0].url.host == "pgadmin"
 
 
+def save_pgadmin_url(url: str) -> None:
+    """Save the URL the way Admin Settings does, after its own validation."""
+    settings.apply_settings(
+        1,
+        settings.encode_changes(
+            {"pgadmin_url": url, "web_base_url": "https://agents.example.org/agents"}
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        "http://169.254.169.254",
+        "http://gateway:8000",
+        "http://pgadmin:5051",
+        "https://pgadmin:5050",
+    ],
+)
+async def test_a_saved_url_the_deployment_does_not_name_is_never_contacted(database_api, saved):
+    """Admin Settings choose the pgAdmin service; they cannot aim the proxy elsewhere."""
+    client, seen, _, audit, _, _ = database_api
+    save_pgadmin_url(saved)
+    for path in (
+        "/admin/agent/database-tools",
+        ROOT,
+        f"{ROOT}/",
+        f"{ROOT}/latest/meta-data/iam/security-credentials/",
+    ):
+        response = await client.get(path, headers=ADMIN)
+        assert response.status_code == 503, path
+        assert saved not in response.text
+    response = await client.put(f"{ROOT}/latest/api/token", headers=ADMIN, content=b"token")
+    assert response.status_code == 503
+    assert seen == []
+    audit.record_admin_action.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("environment", "saved"),
+    [
+        # The bundled service, saved in Admin Settings as #413 documented.
+        ({}, "http://pgadmin:5050"),
+        ({}, "HTTP://PGADMIN:5050/"),
+        (
+            {"AGENT_PGADMIN_URL": "http://database-tools.internal:8080"},
+            "http://database-tools.internal:8080",
+        ),
+        (
+            {"AGENT_PGADMIN_BOOTSTRAP_URL": "https://pgadmin.internal/"},
+            "https://pgadmin.internal:443",
+        ),
+    ],
+)
+async def test_a_saved_url_may_name_any_pgadmin_service_the_deployment_names(
+    database_api, monkeypatch, environment, saved
+):
+    client, seen, _, _, _, _ = database_api
+    monkeypatch.delenv("AGENT_PGADMIN_URL")
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    save_pgadmin_url(saved)
+    status = await client.get("/admin/agent/database-tools", headers=ADMIN)
+    assert status.json()["available"] is True
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    assert response.status_code == 200
+    assert {request.url.host for request in seen} == {httpx.URL(saved).host}
+
+
 SETUP = "/admin/agent/database-tools/setup"
 CREDENTIALS = {"email": "first-admin@example.org", "password": "test-initial-password-42"}
 
@@ -381,9 +450,11 @@ async def test_first_setup_enables_saved_settings_but_later_resets_remain_author
 
 
 async def test_first_setup_does_not_replace_a_different_saved_pgadmin_service(
-    database_api, setup_volume
+    database_api, setup_volume, monkeypatch
 ):
     client, _, _, _, _, _ = database_api
+    # The deployment names the other service; only then may settings select it.
+    monkeypatch.setenv("AGENT_PGADMIN_URL", "http://other-private-pgadmin:5050")
     settings.apply_settings(
         1,
         {

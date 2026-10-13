@@ -813,7 +813,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_PGADMIN_URL",
         url=True,
-        description="Optional private pgAdmin origin. Use http://pgadmin:5050 for the bundled service after enabling its deployment profile. Empty disables access.",
+        description="Optional private pgAdmin origin. Use http://pgadmin:5050 for the bundled service after enabling its deployment profile. Any other service must also be named by AGENT_PGADMIN_URL or AGENT_PGADMIN_BOOTSTRAP_URL in the deployment environment. Empty disables access.",
     ),
     Setting(
         "pgadmin_public_url",
